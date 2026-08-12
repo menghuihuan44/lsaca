@@ -28,24 +28,27 @@ void ls_chunk_append(ls_chunk_t *chunk, ls_inst_t code, size_t line) {
     if (chunk->capacity < chunk->count + 1) {
         ls_inst_t *old_codes = chunk->codes;
         size_t *old_lines = chunk->lines;
-        size_t old_capa = chunk->capacity == 0 ? 1 : chunk->capacity;
+        size_t new_capa = chunk->capacity == 0 ? 1 : (chunk->capacity << 1);
 
-        chunk->codes = (ls_inst_t *)ls_gc_realloc(&ls_gc, chunk->codes, old_capa << 1);
+        chunk->codes = (ls_inst_t *)ls_gc_realloc(&ls_gc, chunk->codes, new_capa * sizeof(ls_inst_t));
         if (!chunk->codes) {
             chunk->codes = old_codes;
             return;
         }
-        chunk->lines = (size_t *)ls_gc_realloc(&ls_gc, chunk->lines, old_capa << 1);
+        if (chunk->capacity == 0) {
+            ls_gc_add_root(&ls_gc, (void **)&chunk->codes);
+        }
+
+        chunk->lines = (size_t *)ls_gc_realloc(&ls_gc, chunk->lines, new_capa * sizeof(size_t));
         if (!chunk->lines) {
             chunk->lines = old_lines;
             return;
         }
-
         if (chunk->capacity == 0) {
-            ls_gc_add_root(&ls_gc, (void **)&chunk->codes);
             ls_gc_add_root(&ls_gc, (void **)&chunk->lines);
         }
-        chunk->capacity = old_capa << 1;
+
+        chunk->capacity = new_capa;
     }
 
     chunk->codes[chunk->count] = code;

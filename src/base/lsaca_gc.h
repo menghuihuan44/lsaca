@@ -29,6 +29,7 @@ typedef struct {
     void *from_space;
     void *to_space;
     size_t space_size;
+    size_t next_gc;
 
     void *alloc_ptr;
     void *alloc_end;
@@ -39,8 +40,8 @@ typedef struct {
 
 extern ls_gc_t ls_gc;
 
-void ls_gc_init();
-void ls_gc_deinit();
+void ls_gc_init(ls_gc_t *gc);
+void ls_gc_deinit(ls_gc_t *gc);
 
 void *ls_gc_alloc(ls_gc_t *gc, size_t size, ls_gc_type_t *type);
 void *ls_gc_realloc(ls_gc_t *gc, void *ptr, size_t new_size);
@@ -59,7 +60,7 @@ void ls_gc_collect(ls_gc_t *gc);
 
 /*
  * Example usage:
- * typedef struct node_t{
+ * typedef struct node_t {
  *    int value;
  *    struct node_t *left;
  *    struct node_t *right;

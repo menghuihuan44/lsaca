@@ -22,18 +22,18 @@ void ls_array_append(ls_array_t *array, ls_any_t value) {
 
     if (array->capacity < array->count + 1) {
         ls_any_t *old_values = array->values;
-        size_t old_capa = array->capacity == 0 ? 1 : array->capacity;
+        size_t new_capa = array->capacity == 0 ? 1 : (array->capacity << 1);
 
-        array->values = (ls_any_t *)ls_gc_realloc(&ls_gc, array->values, old_capa << 1);
+        array->values = (ls_any_t *)ls_gc_realloc(&ls_gc, array->values, new_capa * sizeof(ls_any_t));
         if (!array->values) {
             array->values = old_values;
             return;
         }
-
         if (array->capacity == 0) {
             ls_gc_add_root(&ls_gc, (void **)&array->values);
         }
-        array->capacity = old_capa << 1;
+
+        array->capacity = new_capa;
     }
 
     array->values[array->count] = value;

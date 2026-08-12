@@ -5,6 +5,11 @@
 static const char *opcode_names[] = {
     "MOVE",
     "LOADK",
+    "NEG",
+    "ADD",
+    "SUB",
+    "MUL",
+    "DIV",
     "RETURN",
 };
 
@@ -60,6 +65,16 @@ size_t ls_disasm_inst(ls_chunk_t *chunk, size_t offset) {
             return disasm_ABC(chunk, offset);
         case LS_OP_LOADK:
             return disasm_ABx(chunk, offset);
+        case LS_OP_NEG:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_ADD:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_SUB:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_MUL:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_DIV:
+            return disasm_ABC(chunk, offset);
         case LS_OP_RETURN:
             return disasm_ABC(chunk, offset);
         default:

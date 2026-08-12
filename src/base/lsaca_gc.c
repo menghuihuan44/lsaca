@@ -87,36 +87,37 @@ static bool resize_spaces(ls_gc_t *gc, size_t new_space_size) {
     return true;
 }
 
-void ls_gc_init() {
-    ls_gc.space_size = MIN_SPACE_SIZE;
-    ls_gc.from_space = malloc(ls_gc.space_size);
-    ls_gc.to_space = malloc(ls_gc.space_size);
-    if (!ls_gc.from_space || !ls_gc.to_space) {
-        free(ls_gc.from_space);
-        free(ls_gc.to_space);
+void ls_gc_init(ls_gc_t *gc) {
+    gc->space_size = MIN_SPACE_SIZE;
+    gc->next_gc = MIN_SPACE_SIZE << 1;
+    gc->from_space = malloc(gc->space_size);
+    gc->to_space = malloc(gc->space_size);
+    if (!gc->from_space || !gc->to_space) {
+        free(gc->from_space);
+        free(gc->to_space);
     }
 
-    ls_gc.alloc_ptr = ls_gc.from_space;
-    ls_gc.alloc_end = (char *)ls_gc.from_space + ls_gc.space_size;
-    ls_gc.scan_ptr = NULL;
-    ls_gc.roots = NULL;
+    gc->alloc_ptr = gc->from_space;
+    gc->alloc_end = (char *)gc->from_space + gc->space_size;
+    gc->scan_ptr = NULL;
+    gc->roots = NULL;
 }
 
-void ls_gc_deinit() {
-    ls_gc_root_t *root = ls_gc.roots;
+void ls_gc_deinit(ls_gc_t *gc) {
+    ls_gc_root_t *root = gc->roots;
     while (root) {
         ls_gc_root_t *next = root->next;
         free(root);
         root = next;
     }
 
-    free(ls_gc.from_space);
-    free(ls_gc.to_space);
+    free(gc->from_space);
+    free(gc->to_space);
 }
 
 void *ls_gc_alloc(ls_gc_t *gc, size_t size, ls_gc_type_t *type) {
     if (!gc || size == 0) return NULL;
-
+    
     size_t total_size = sizeof(ls_gc_header_t) + size;
     total_size = ALIGN(total_size);
 
@@ -126,8 +127,10 @@ void *ls_gc_alloc(ls_gc_t *gc, size_t size, ls_gc_type_t *type) {
             return NULL;
         }
     }
-    
-    ls_gc_collect(gc);
+
+    if (gc->space_size > gc->next_gc) {
+        ls_gc_collect(gc);
+    }
 
     ls_gc_header_t *h = (ls_gc_header_t *)gc->alloc_ptr;
     h->size = size;
