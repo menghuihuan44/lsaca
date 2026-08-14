@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "src/lsaca_vm.h"
 #include "src/lsaca_disasm.h"
+#include "src/lsaca_compiler.h"
 
 ls_vm_t ls_vm;
 
@@ -28,7 +29,7 @@ static ls_vm_status run(ls_vm_t *vm) {
     } while(0) \
 
     for (;;) {
-#ifdef LS_DISASM_TRACE_EXECUTION
+#if LS_DISASM_TRACE_EXECUTION != 0
         printf("== REGISTERS ==\n");
         for (size_t i = 0; i < LS_MAX_REGS; ++i) {
             printf("[R%zu: ", i);
@@ -85,8 +86,7 @@ static ls_vm_status run(ls_vm_t *vm) {
 #undef BINARY_OP
 }
 
-ls_vm_status ls_vm_interpret(ls_vm_t *vm, ls_chunk_t *chunk) {
-    vm->chunk = chunk;
-    vm->ip = vm->chunk->codes;
-    return run(vm);
+ls_vm_status ls_vm_interpret(ls_vm_t *vm, const char *source) {
+    ls_compile(source);
+    return LS_VM_OK;
 }

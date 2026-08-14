@@ -6,6 +6,6 @@
 #include <stdbool.h>
 #include <inttypes.h>
 
-#define LS_DISASM_TRACE_EXECUTION
+#define LS_DISASM_TRACE_EXECUTION 1
 
 #endif /* LSACA_COMMON_H */

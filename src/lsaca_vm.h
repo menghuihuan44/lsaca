@@ -28,7 +28,7 @@ extern ls_vm_t ls_vm;
 void ls_vm_init(ls_vm_t *vm);
 void ls_vm_deinit(ls_vm_t *vm);
 
-ls_vm_status ls_vm_interpret(ls_vm_t *vm, ls_chunk_t *chunk);
+ls_vm_status ls_vm_interpret(ls_vm_t *vm, const char *source);
 
 #ifdef __cplusplus
 }
