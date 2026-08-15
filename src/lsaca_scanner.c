@@ -79,14 +79,18 @@ static void skip_whitespace(void) {
                 break;
             case '/':
                 if (peek_next() == '/') {
-                    while (!is_at_end() && peek() != '\n') advance();
+                    while (!is_at_end() && peek() != '\n') {
+                        advance();
+                    }
                 } else if (peek_next() == '*') {
-                    while (!is_at_end() && !is_next_at_end() && peek() != '*' && peek_next() != '/') {
+                    while (!is_at_end() && !is_next_at_end() && (peek() != '*' || peek_next() != '/')) {
                         if (peek() == '\n') {
                             ++ls_scanner.line;
                         }
                         advance();
                     }
+                    advance();
+                    advance();
                 } else {
                     return;
                 }

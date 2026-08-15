@@ -57,7 +57,7 @@ void ls_chunk_append(ls_chunk_t *chunk, ls_inst_t code, size_t line) {
 }
 
 size_t ls_chunk_add_constant(ls_chunk_t *chunk, ls_any_t value) {
-    if (!chunk) return (size_t)-1;
+    if (!chunk) return (size_t)-1; /* I don't know if this makes sense. */
 
     size_t index = chunk->constants.count;
     ls_array_append(&chunk->constants, value);

@@ -30,11 +30,11 @@ static ls_vm_status run(ls_vm_t *vm) {
 
     for (;;) {
 #if LS_DISASM_TRACE_EXECUTION != 0
-        printf("== REGISTERS ==\n");
-        for (size_t i = 0; i < LS_MAX_REGS; ++i) {
-            printf("[R%zu: ", i);
-            ls_any_print(vm->regs[i]);
-            printf("] ");
+        printf("          ");
+        for (ls_any_t *reg = vm->regs; reg < vm->regs_end; ++reg) {
+            printf("[ ");
+            ls_any_print(*reg);
+            printf(" ]");
         }
         printf("\n");
         ls_disasm_inst(vm->chunk, (size_t)(vm->ip - vm->chunk->codes));
@@ -87,6 +87,19 @@ static ls_vm_status run(ls_vm_t *vm) {
 }
 
 ls_vm_status ls_vm_interpret(ls_vm_t *vm, const char *source) {
-    ls_compile(source);
-    return LS_VM_OK;
+    ls_chunk_t chunk;
+    ls_chunk_init(&chunk);
+
+    if (!ls_compile(source, &chunk)) {
+        ls_chunk_deinit(&chunk);
+        return LS_VM_COMPILE_ERROR;
+    }
+
+    vm->chunk = &chunk;
+    vm->ip = vm->chunk->codes;
+
+    ls_vm_status result = run(vm);
+
+    ls_chunk_deinit(&chunk);
+    return result;
 }
