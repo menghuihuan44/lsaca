@@ -5,7 +5,17 @@
 static const char *opcode_names[] = {
     "MOVE",
     "LOADK",
+    "LOADNULL",
+    "LOADFALSE",
+    "LOADTRUE",
     "NEG",
+    "NOT",
+    "BANG_EQUAL",
+    "EQUAL_EQUAL",
+    "GREATER",
+    "GREATER_EQUAL",
+    "LESS",
+    "LESS_EQUAL",
     "ADD",
     "SUB",
     "MUL",
@@ -45,7 +55,7 @@ static size_t disasm_Ax(ls_chunk_t *chunk, size_t offset) {
 }
 
 void ls_disasm_chunk(ls_chunk_t *chunk, const char *name) {
-    printf("== %-8s ==\n", name);
+    printf("== %s ==\n", name);
 
     for (size_t offset = 0; offset < chunk->count;) {
         offset = ls_disasm_inst(chunk, offset);
@@ -65,7 +75,27 @@ size_t ls_disasm_inst(ls_chunk_t *chunk, size_t offset) {
             return disasm_ABC(chunk, offset);
         case LS_OP_LOADK:
             return disasm_ABx(chunk, offset);
+        case LS_OP_LOADNULL:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_LOADFALSE:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_LOADTRUE:
+            return disasm_ABC(chunk, offset);
         case LS_OP_NEG:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_NOT:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_BANG_EQUAL:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_EQUAL_EQUAL:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_GREATER:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_GREATER_EQUAL:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_LESS:
+            return disasm_ABC(chunk, offset);
+        case LS_OP_LESS_EQUAL:
             return disasm_ABC(chunk, offset);
         case LS_OP_ADD:
             return disasm_ABC(chunk, offset);

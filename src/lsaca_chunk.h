@@ -52,8 +52,19 @@ typedef uint32_t ls_inst_t;
 typedef enum {
     LS_OP_MOVE, /* R(A) := R(B) */
     LS_OP_LOADK, /* R(A) := K(Bx) */
+    LS_OP_LOADNULL, /* R(A) := null */
+    LS_OP_LOADFALSE, /* R(A) := false */
+    LS_OP_LOADTRUE, /* R(A) := true */
 
     LS_OP_NEG, /* R(A) := -R(A) */
+    LS_OP_NOT, /* R(A) := !R(A) */
+
+    LS_OP_BANG_EQUAL, /* R(A) := R(B) != R(C) */
+    LS_OP_EQUAL_EQUAL, /* R(A) := R(B) == R(C) */
+    LS_OP_GREATER, /* R(A) := R(B) > R(C) */
+    LS_OP_GREATER_EQUAL, /* R(A) := R(B) >= R(C) */
+    LS_OP_LESS, /* R(A) := R(B) < R(C) */
+    LS_OP_LESS_EQUAL, /* R(A) := R(B) <= R(C) */
 
     LS_OP_ADD, /* R(A) := R(B) + R(C) */
     LS_OP_SUB, /* R(A) := R(B) - R(C) */

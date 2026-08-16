@@ -187,7 +187,7 @@ static ls_token_t string(void) {
         advance();
     }
 
-    if (is_at_end()) return error_token("Unterminated string.");
+    if (is_at_end()) return error_token("Unterminated string literal.");
 
     advance();
     return make_token(LS_TOKEN_STRING);

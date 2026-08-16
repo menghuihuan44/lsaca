@@ -57,7 +57,7 @@ static void error_at(ls_token_t *token, const char *message) {
     fprintf(stderr, "[line %zu] Error", token->line);
 
     if (token->type == LS_TOKEN_EOF) {
-        fprintf(stderr,  " at end");
+        fprintf(stderr,  " at end of input");
     } else if (token->type == LS_TOKEN_ERROR) {
         /* Nothing. */
     } else {
@@ -100,7 +100,7 @@ static void consume(ls_token_type type, const char *message) {
 
 static uint8_t alloc_reg(void) {
     if (ls_parser.reg_count >= LS_MAX_REGS) {
-        error("Too many registers in use.");
+        error("Too many registers are in use.");
         return 0; /* I don't know if this makes sense. */
     }
     return ls_parser.reg_count++;
@@ -124,7 +124,7 @@ static void emit_return(uint8_t reg) {
 static uint16_t make_constant(ls_any_t value) {
     size_t constant = ls_chunk_add_constant(current_chunk(), value);
     if (constant > UINT16_MAX) {
-        error("Too many constants in one chunk.");
+        error("Too many constants in this chunk.");
         return 0; /* I don't know if this makes sense. */
     }
 
@@ -161,6 +161,36 @@ static void binary(ls_context_t *ctx) {
     uint8_t result_reg = alloc_reg();
 
     switch (operator_type) {
+        case LS_TOKEN_BANG_EQUAL: {
+            ls_inst_t inst = LS_ABC(LS_OP_BANG_EQUAL, result_reg, left_reg, right_reg);
+            emit_inst(inst);
+            break;
+        }
+        case LS_TOKEN_EQUAL_EQUAL: {
+            ls_inst_t inst = LS_ABC(LS_OP_EQUAL_EQUAL, result_reg, left_reg, right_reg);
+            emit_inst(inst);
+            break;
+        }
+        case LS_TOKEN_GREATER: {
+            ls_inst_t inst = LS_ABC(LS_OP_GREATER, result_reg, left_reg, right_reg);
+            emit_inst(inst);
+            break;
+        }
+        case LS_TOKEN_GREATER_EQUAL: {
+            ls_inst_t inst = LS_ABC(LS_OP_GREATER_EQUAL, result_reg, left_reg, right_reg);
+            emit_inst(inst);
+            break;
+        }
+        case LS_TOKEN_LESS: {
+            ls_inst_t inst = LS_ABC(LS_OP_LESS, result_reg, left_reg, right_reg);
+            emit_inst(inst);
+            break;
+        }
+        case LS_TOKEN_LESS_EQUAL: {
+            ls_inst_t inst = LS_ABC(LS_OP_LESS_EQUAL, result_reg, left_reg, right_reg);
+            emit_inst(inst);
+            break;
+        }
         case LS_TOKEN_PLUS: {
             ls_inst_t inst = LS_ABC(LS_OP_ADD, result_reg, left_reg, right_reg);
             emit_inst(inst);
@@ -187,21 +217,48 @@ static void binary(ls_context_t *ctx) {
     ctx->reg = result_reg;
 }
 
+static void literal(ls_context_t *ctx) {
+    ctx->reg = alloc_reg();
+    switch (ls_parser.previous.type) {
+        case LS_TOKEN_NULL: {
+            ls_inst_t inst = LS_ABC(LS_OP_LOADNULL, ctx->reg, 0, 0);
+            emit_inst(inst);
+            break;
+        }
+        case LS_TOKEN_FALSE: {
+            ls_inst_t inst = LS_ABC(LS_OP_LOADFALSE, ctx->reg, 0, 0);
+            emit_inst(inst);
+            break;
+        }
+        case LS_TOKEN_TRUE: {
+            ls_inst_t inst = LS_ABC(LS_OP_LOADTRUE, ctx->reg, 0, 0);
+            emit_inst(inst);
+            break;
+        }
+        default: return;
+    }
+}
+
 static void grouping(ls_context_t *ctx) {
     (void)ctx;
     expression(ctx);
-    consume(LS_TOKEN_RIGHT_PAREN, "Expect ')' after expression.");
+    consume(LS_TOKEN_RIGHT_PAREN, "Expected ')' after the expression.");
 }
 
 static void number(ls_context_t *ctx) {
     ctx->reg = alloc_reg();
-    const char *dot = strchr(ls_parser.previous.start, '.');
-    if (dot) {
-        double value = strtod(ls_parser.previous.start, NULL);
-        emit_constant(value, ctx->reg);
-    } else {
-        int64_t value = (int64_t)strtoll(ls_parser.previous.start, NULL, 0);
-        emit_constant(value, ctx->reg);
+    switch (ls_parser.previous.type) {
+        case LS_TOKEN_INT64: {
+            int64_t value = (int64_t)strtoll(ls_parser.previous.start, NULL, 0);
+            emit_constant(LS_I64_ANY(value), ctx->reg);
+            break;
+        }
+        case LS_TOKEN_FLOAT64: {
+            double value = strtod(ls_parser.previous.start, NULL);
+            emit_constant(LS_F64_ANY(value), ctx->reg);
+            break;
+        }
+        default: return;
     }
 }
 
@@ -213,6 +270,11 @@ static void unary(ls_context_t *ctx) {
     switch (operator_type) {
         case LS_TOKEN_MINUS: {
             ls_inst_t inst = LS_ABC(LS_OP_NEG, ctx->reg, 0, 0);
+            emit_inst(inst);
+            break;
+        }
+        case LS_TOKEN_BANG: {
+            ls_inst_t inst = LS_ABC(LS_OP_NOT, ctx->reg, 0, 0);
             emit_inst(inst);
             break;
         }
@@ -234,24 +296,24 @@ parse_rule_t rules[] = {
     [LS_TOKEN_SLASH]         = {NULL,     binary, LS_PREC_FACTOR},
     [LS_TOKEN_STAR]          = {NULL,     binary, LS_PREC_FACTOR},  
 
-    [LS_TOKEN_BANG]          = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_BANG_EQUAL]    = {NULL,     NULL,   LS_PREC_NONE},
+    [LS_TOKEN_BANG]          = {unary,    NULL,   LS_PREC_NONE},
+    [LS_TOKEN_BANG_EQUAL]    = {NULL,     binary, LS_PREC_EQUALITY},
     [LS_TOKEN_EQUAL]         = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_EQUAL_EQUAL]   = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_GREATER]       = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_GREATER_EQUAL] = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_LESS]          = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_LESS_EQUAL]    = {NULL,     NULL,   LS_PREC_NONE},    
+    [LS_TOKEN_EQUAL_EQUAL]   = {NULL,     binary, LS_PREC_EQUALITY},
+    [LS_TOKEN_GREATER]       = {NULL,     binary, LS_PREC_COMPARISON},
+    [LS_TOKEN_GREATER_EQUAL] = {NULL,     binary, LS_PREC_COMPARISON},
+    [LS_TOKEN_LESS]          = {NULL,     binary, LS_PREC_COMPARISON},
+    [LS_TOKEN_LESS_EQUAL]    = {NULL,     binary, LS_PREC_COMPARISON},    
 
     [LS_TOKEN_IDENTIFIER]    = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_STRING]        = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_INT64]         = {number,   NULL,   LS_PREC_NONE},
     [LS_TOKEN_FLOAT64]       = {number,   NULL,   LS_PREC_NONE},    
 
-    [LS_TOKEN_NULL]          = {NULL,     NULL,   LS_PREC_NONE},
+    [LS_TOKEN_NULL]          = {literal,  NULL,   LS_PREC_NONE},
     [LS_TOKEN_ANY]           = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_FALSE]         = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_TRUE]          = {NULL,     NULL,   LS_PREC_NONE},
+    [LS_TOKEN_FALSE]         = {literal,  NULL,   LS_PREC_NONE},
+    [LS_TOKEN_TRUE]          = {literal,  NULL,   LS_PREC_NONE},
     [LS_TOKEN_AND]           = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_OR]            = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_IF]            = {NULL,     NULL,   LS_PREC_NONE},
@@ -273,7 +335,7 @@ static void parse_precedence(ls_precedence precedence, ls_context_t *ctx) {
     advance();
     ls_parse_fn prefix_rule = get_rule(ls_parser.previous.type)->prefix;
     if (!prefix_rule) {
-        error("Expect expression.");
+        error("Expected expression.");
         ctx->reg = 0;
         return;
     }
@@ -307,7 +369,7 @@ bool ls_compile(const char *source, ls_chunk_t *chunk) {
 
     ls_context_t ctx;
     expression(&ctx);
-    consume(LS_TOKEN_EOF, "Expect end of expression.");
+    consume(LS_TOKEN_EOF, "Expected end of expression.");
 
     emit_return(ctx.reg);
     end_compiler();

@@ -14,7 +14,7 @@ typedef struct {
     ls_inst_t *ip;
 
     ls_any_t regs[LS_MAX_REGS];
-    ls_any_t *regs_end;
+    size_t regs_count;
 } ls_vm_t;
 
 typedef enum {
