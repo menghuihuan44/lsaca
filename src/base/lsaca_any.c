@@ -6,6 +6,7 @@ static const char *any_type_names[] = {
     "boolean",
     "i64",
     "f64",
+    "str",
 };
 
 const char *ls_any_type_name(ls_any_t value) {
@@ -26,8 +27,13 @@ void ls_any_print(ls_any_t value) {
             printf("%"PRId64, LS_AS_I64(value));
             break;
         }
-        case LS_ANT_F64: {
+        case LS_ANY_F64: {
             printf("%f", LS_AS_F64(value));
+            break;
+        }
+        case LS_ANY_STR: {
+            ls_string_t *str = LS_AS_STR(value);
+            fwrite(str->c_str, sizeof(char), str->size, stdout);
             break;
         }
     }

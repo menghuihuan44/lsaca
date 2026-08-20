@@ -7,7 +7,6 @@
 ls_vm_t ls_vm;
 
 static void reset_vm(ls_vm_t *vm) {
-    vm->regs_count = 0;
 }
 
 static void runtime_error(ls_vm_t *vm, const char *format, ...) {
@@ -35,10 +34,10 @@ static ls_vm_status run(ls_vm_t *vm) {
 
     for (;;) {
 #if LS_DISASM_TRACE_EXECUTION != 0
-        printf("== Registers ==");
-        for (size_t i = 0; i <= vm->regs_count; ++i) {
+        printf("          ");
+        for (size_t i = 0; i < vm->chunk->constants.size; ++i) {
             printf("[ ");
-            ls_any_print(vm->regs[i]);
+            ls_any_print(vm->chunk->constants.values[i]);
             printf(" ]");
         }
         printf("\n");
@@ -46,7 +45,6 @@ static ls_vm_status run(ls_vm_t *vm) {
 #endif
 
         ls_inst_t inst = READ_BYTE();
-        vm->regs_count = LS_RA(inst);
         switch (LS_OP(inst)) {
             case LS_OP_MOVE: {
                 uint32_t a = LS_RA(inst);
@@ -85,7 +83,7 @@ static ls_vm_status run(ls_vm_t *vm) {
 
                 switch (LS_GET_TYPE(vm->regs[a])) {
                     case LS_ANY_I64: vm->regs[a] = LS_I64_ANY(-LS_AS_I64(vm->regs[a])); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_F64_ANY(-LS_AS_F64(vm->regs[a])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_F64_ANY(-LS_AS_F64(vm->regs[a])); break;
                     default: break;
                 }
                 break;
@@ -105,14 +103,21 @@ static ls_vm_status run(ls_vm_t *vm) {
                 uint32_t a = LS_RA(inst);
                 uint32_t b = LS_RB(inst);
                 uint32_t c = LS_RC(inst);
-                if (LS_GET_TYPE(vm->regs[b]) != LS_GET_TYPE(vm->regs[c])) {
-                    runtime_error(vm, "Both operands must be of the same type.");
+                if (LS_GET_TYPE(vm->regs[b]) != LS_GET_TYPE(vm->regs[c]) &&
+                (!LS_IS_NULL(vm->regs[b]) && !LS_IS_NULL(vm->regs[c]))) {
+                    runtime_error(vm, "Both operands must be of the same type"
+                        "(except for null, and if one of the operands is null, the other can be any type).");
                     runtime_error(vm, "Left value's type is %s and right value's type is %s.",
                         ls_any_type_name(vm->regs[b]), ls_any_type_name(vm->regs[c]));
                     return LS_VM_RUNTIME_ERROR;
                 }
-                if (!LS_IS_BOOL(vm->regs[b]) && !LS_IS_I64(vm->regs[b]) && !LS_IS_F64(vm->regs[b])) {
-                    runtime_error(vm, "Equality comparison requires boolean, i64, or f64 operands.");
+                if (LS_IS_NULL(vm->regs[b]) || LS_IS_NULL(vm->regs[c])) {
+                    vm->regs[a] = LS_BOOL_ANY(LS_GET_TYPE(vm->regs[b]) != LS_GET_TYPE(vm->regs[c]));
+                    break;
+                }
+                if (!LS_IS_BOOL(vm->regs[b]) && !LS_IS_I64(vm->regs[b]) && !LS_IS_F64(vm->regs[b]) && !LS_IS_STR(vm->regs[b])) {
+                    runtime_error(vm, "Equality comparison requires boolean, i64, f64 or str operands."
+                        "(except for null, and if one of the operands is null, the other can be any type).");
                     runtime_error(vm, "Left value's type is %s and right value's type is %s.",
                         ls_any_type_name(vm->regs[b]), ls_any_type_name(vm->regs[c]));
                     return LS_VM_RUNTIME_ERROR;
@@ -121,7 +126,8 @@ static ls_vm_status run(ls_vm_t *vm) {
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_BOOL: vm->regs[a] = LS_BOOL_ANY(LS_AS_BOOL(vm->regs[b]) != LS_AS_BOOL(vm->regs[c])); break;
                     case LS_ANY_I64: vm->regs[a] = LS_BOOL_ANY(LS_AS_I64(vm->regs[b]) != LS_AS_I64(vm->regs[c])); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) != LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) != LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_STR: vm->regs[a] = LS_BOOL_ANY(!ls_string_is_equal(LS_AS_STR(vm->regs[b]), LS_AS_STR(vm->regs[c]))); break;
                     default: break;
                 }
                 break;
@@ -130,14 +136,21 @@ static ls_vm_status run(ls_vm_t *vm) {
                 uint32_t a = LS_RA(inst);
                 uint32_t b = LS_RB(inst);
                 uint32_t c = LS_RC(inst);
-                if (LS_GET_TYPE(vm->regs[b]) != LS_GET_TYPE(vm->regs[c])) {
-                    runtime_error(vm, "Both operands must be of the same type.");
+                if (LS_GET_TYPE(vm->regs[b]) != LS_GET_TYPE(vm->regs[c]) &&
+                (!LS_IS_NULL(vm->regs[b]) && !LS_IS_NULL(vm->regs[c]))) {
+                    runtime_error(vm, "Both operands must be of the same type"
+                        "(except for null, and if one of the operands is null, the other can be any type).");
                     runtime_error(vm, "Left value's type is %s and right value's type is %s.",
                         ls_any_type_name(vm->regs[b]), ls_any_type_name(vm->regs[c]));
                     return LS_VM_RUNTIME_ERROR;
                 }
-                if (!LS_IS_BOOL(vm->regs[b]) && !LS_IS_I64(vm->regs[b]) && !LS_IS_F64(vm->regs[b])) {
-                    runtime_error(vm, "Equality comparison requires boolean, i64, or f64 operands.");
+                if (LS_IS_NULL(vm->regs[b]) || LS_IS_NULL(vm->regs[c])) {
+                    vm->regs[a] = LS_BOOL_ANY(LS_GET_TYPE(vm->regs[b]) == LS_GET_TYPE(vm->regs[c]));
+                    break;
+                }
+                if (!LS_IS_BOOL(vm->regs[b]) && !LS_IS_I64(vm->regs[b]) && !LS_IS_F64(vm->regs[b]) && !LS_IS_STR(vm->regs[b])) {
+                    runtime_error(vm, "Equality comparison requires boolean, i64, f64 or str operands."
+                        "(except for null, and if one of the operands is null, the other can be any type).");
                     runtime_error(vm, "Left value's type is %s and right value's type is %s.",
                         ls_any_type_name(vm->regs[b]), ls_any_type_name(vm->regs[c]));
                     return LS_VM_RUNTIME_ERROR;
@@ -146,7 +159,8 @@ static ls_vm_status run(ls_vm_t *vm) {
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_BOOL: vm->regs[a] = LS_BOOL_ANY(LS_AS_BOOL(vm->regs[b]) == LS_AS_BOOL(vm->regs[c])); break;
                     case LS_ANY_I64: vm->regs[a] = LS_BOOL_ANY(LS_AS_I64(vm->regs[b]) == LS_AS_I64(vm->regs[c])); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) == LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) == LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_STR: vm->regs[a] = LS_BOOL_ANY(ls_string_is_equal(LS_AS_STR(vm->regs[b]), LS_AS_STR(vm->regs[c]))); break;
                     default: break;
                 }
                 break;
@@ -170,7 +184,7 @@ static ls_vm_status run(ls_vm_t *vm) {
                 
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_I64: vm->regs[a] = LS_BOOL_ANY(LS_AS_I64(vm->regs[b]) > LS_AS_I64(vm->regs[c])); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) > LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) > LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
                 break;
@@ -194,7 +208,7 @@ static ls_vm_status run(ls_vm_t *vm) {
                 
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_I64: vm->regs[a] = LS_BOOL_ANY(LS_AS_I64(vm->regs[b]) >= LS_AS_I64(vm->regs[c])); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) >= LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) >= LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
                 break;
@@ -218,7 +232,7 @@ static ls_vm_status run(ls_vm_t *vm) {
                 
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_I64: vm->regs[a] = LS_BOOL_ANY(LS_AS_I64(vm->regs[b]) < LS_AS_I64(vm->regs[c])); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) < LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) < LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
                 break;
@@ -242,7 +256,7 @@ static ls_vm_status run(ls_vm_t *vm) {
                 
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_I64: vm->regs[a] = LS_BOOL_ANY(LS_AS_I64(vm->regs[b]) <= LS_AS_I64(vm->regs[c])); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) <= LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_BOOL_ANY(LS_AS_F64(vm->regs[b]) <= LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
                 break;
@@ -266,7 +280,7 @@ static ls_vm_status run(ls_vm_t *vm) {
 
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_I64: vm->regs[a] = LS_I64_ANY((int64_t)((uint64_t)LS_AS_I64(vm->regs[b]) + (uint64_t)LS_AS_I64(vm->regs[c]))); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) + LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) + LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
                 break;
@@ -290,7 +304,7 @@ static ls_vm_status run(ls_vm_t *vm) {
 
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_I64: vm->regs[a] = LS_I64_ANY((int64_t)((uint64_t)LS_AS_I64(vm->regs[b]) - (uint64_t)LS_AS_I64(vm->regs[c]))); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) - LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) - LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
                 break;
@@ -314,7 +328,7 @@ static ls_vm_status run(ls_vm_t *vm) {
 
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_I64: vm->regs[a] = LS_I64_ANY((int64_t)((uint64_t)LS_AS_I64(vm->regs[b]) * (uint64_t)LS_AS_I64(vm->regs[c]))); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) * LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) * LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
                 break;
@@ -342,7 +356,7 @@ static ls_vm_status run(ls_vm_t *vm) {
 
                 switch (LS_GET_TYPE(vm->regs[b])) {
                     case LS_ANY_I64: vm->regs[a] = LS_I64_ANY(LS_AS_I64(vm->regs[b]) / LS_AS_I64(vm->regs[c])); break;
-                    case LS_ANT_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) / LS_AS_F64(vm->regs[c])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) / LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
                 break;

@@ -57,7 +57,7 @@ static size_t disasm_Ax(ls_chunk_t *chunk, size_t offset) {
 void ls_disasm_chunk(ls_chunk_t *chunk, const char *name) {
     printf("== %s ==\n", name);
 
-    for (size_t offset = 0; offset < chunk->count;) {
+    for (size_t offset = 0; offset < chunk->size;) {
         offset = ls_disasm_inst(chunk, offset);
     }
 }

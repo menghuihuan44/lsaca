@@ -6,9 +6,9 @@ void ls_chunk_init(ls_chunk_t *chunk) {
     if (!chunk) return;
 
     chunk->codes = NULL;
-    chunk->count = 0;
-    chunk->capacity = 0;
     chunk->lines = NULL;
+    chunk->size = 0;
+    chunk->capacity = 0;
     ls_array_init(&chunk->constants);
 }
 
@@ -17,15 +17,15 @@ void ls_chunk_deinit(ls_chunk_t *chunk) {
 
     ls_array_deinit(&chunk->constants);
     ls_gc_remove_root(&ls_gc, (void **)&chunk->codes);
-    chunk->count = 0;
-    chunk->capacity = 0;
     ls_gc_remove_root(&ls_gc, (void **)&chunk->lines);
+    chunk->size = 0;
+    chunk->capacity = 0;
 }
 
 void ls_chunk_append(ls_chunk_t *chunk, ls_inst_t code, size_t line) {
     if (!chunk) return;
     
-    if (chunk->capacity < chunk->count + 1) {
+    if (chunk->capacity < chunk->size + 1) {
         ls_inst_t *old_codes = chunk->codes;
         size_t *old_lines = chunk->lines;
         size_t new_capa = chunk->capacity == 0 ? 1 : (chunk->capacity << 1);
@@ -33,6 +33,7 @@ void ls_chunk_append(ls_chunk_t *chunk, ls_inst_t code, size_t line) {
         chunk->codes = (ls_inst_t *)ls_gc_realloc(&ls_gc, chunk->codes, new_capa * sizeof(ls_inst_t));
         if (!chunk->codes) {
             chunk->codes = old_codes;
+            ls_gc_remove_root(&ls_gc, (void **)&chunk->codes);
             return;
         }
         if (chunk->capacity == 0) {
@@ -42,6 +43,7 @@ void ls_chunk_append(ls_chunk_t *chunk, ls_inst_t code, size_t line) {
         chunk->lines = (size_t *)ls_gc_realloc(&ls_gc, chunk->lines, new_capa * sizeof(size_t));
         if (!chunk->lines) {
             chunk->lines = old_lines;
+            ls_gc_remove_root(&ls_gc, (void **)&chunk->lines);
             return;
         }
         if (chunk->capacity == 0) {
@@ -51,15 +53,15 @@ void ls_chunk_append(ls_chunk_t *chunk, ls_inst_t code, size_t line) {
         chunk->capacity = new_capa;
     }
 
-    chunk->codes[chunk->count] = code;
-    chunk->lines[chunk->count] = line;
-    ++chunk->count;
+    chunk->codes[chunk->size] = code;
+    chunk->lines[chunk->size] = line;
+    ++chunk->size;
 }
 
 size_t ls_chunk_add_constant(ls_chunk_t *chunk, ls_any_t value) {
     if (!chunk) return (size_t)-1; /* I don't know if this makes sense. */
 
-    size_t index = chunk->constants.count;
+    size_t index = chunk->constants.size;
     ls_array_append(&chunk->constants, value);
     return index;
 }

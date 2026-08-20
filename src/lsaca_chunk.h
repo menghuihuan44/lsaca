@@ -76,7 +76,7 @@ typedef enum {
 
 typedef struct {
     ls_inst_t *codes;
-    size_t count;
+    size_t size;
     size_t capacity;
     size_t *lines;
     ls_array_t constants;

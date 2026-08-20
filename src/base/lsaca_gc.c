@@ -3,6 +3,10 @@
 #include <stdalign.h>
 #include "src/base/lsaca_gc.h"
 
+#if LS_DEBUG_GC != 0
+#include <stdio.h>
+#endif
+
 ls_gc_t ls_gc;
 
 #define HEADER_FROM_PTR(ptr) ((ls_gc_header_t *)(ptr) - 1)
@@ -12,7 +16,63 @@ ls_gc_t ls_gc;
 
 #define MIN_SPACE_SIZE (1024) 
 
+typedef struct {
+    ls_gc_t *gc;
+    void *old_from;
+    void *old_from_end;
+    intptr_t delta;
+} ls_gc_trace_ctx_t;
+
+static ls_gc_trace_ctx_t g_trace_ctx;
+
+static void *copy_object(ls_gc_t *gc, void *old_ptr);
+
+static void gc_collect_visit(void **ref_ptr) {
+    if (*ref_ptr) {
+        if (*ref_ptr >= g_trace_ctx.old_from && *ref_ptr < g_trace_ctx.old_from_end) {
+            *ref_ptr = copy_object(g_trace_ctx.gc, *ref_ptr);
+        }
+#if LS_DEBUG_GC != 0
+        else {
+            fprintf(stderr, "\n=== GC Warning ===\n");
+            fprintf(stderr, "Found invalid pointer value: %p\n", *ref_ptr);
+            fprintf(stderr, "Stored at address: %p\n", ref_ptr);
+            
+            if (ref_ptr >= (void **)g_trace_ctx.gc->from_space && 
+                ref_ptr < (void **)g_trace_ctx.gc->alloc_end) {
+                fprintf(stderr, "Location: Inside a GC heap object.\n");
+            } else {
+                fprintf(stderr, "Location: In a Root (stack or global variable).\n");
+            }
+        }
+#endif
+    }
+}
+
+static void gc_resize_visit(void **ref_ptr) {
+    if (*ref_ptr) {
+        if (*ref_ptr >= g_trace_ctx.old_from && *ref_ptr < g_trace_ctx.old_from_end) {
+            *ref_ptr = (char *)(*ref_ptr) + g_trace_ctx.delta;
+        }
+    }
+}
+
 static void *copy_object(ls_gc_t *gc, void *old_ptr) {
+    if (!g_trace_ctx.old_from || !(old_ptr >= g_trace_ctx.old_from && old_ptr < g_trace_ctx.old_from_end)) {
+#if LS_DEBUG_GC != 0
+        fprintf(stderr, "\n=== GC FATAL ERROR ===\n");
+        fprintf(stderr, "copy_object received an invalid pointer: %p\n", old_ptr);
+        fprintf(stderr, "Valid range was: [%p, %p)\n", g_trace_ctx.old_from, g_trace_ctx.old_from_end);
+        for (ls_gc_root_t *root = gc->roots; root != NULL; root = root->next) {
+            if (*root->ptr == old_ptr) {
+                fprintf(stderr, "CULPRIT FOUND: Root at address %p holds this invalid pointer!\n", root->ptr);
+                break;
+            }
+        }
+#endif
+        abort();
+    }
+
     ls_gc_header_t *old_h = HEADER_FROM_PTR(old_ptr);
     if (old_h->forwarded) {
         return old_h->forward_addr;
@@ -21,18 +81,24 @@ static void *copy_object(ls_gc_t *gc, void *old_ptr) {
     size_t total_size = sizeof(ls_gc_header_t) + old_h->size;
     total_size = ALIGN(total_size);
 
-    void *new_ptr = gc->alloc_ptr;
-    memcpy(new_ptr, old_h, total_size);
+    ls_gc_header_t *new_h = (ls_gc_header_t *)gc->alloc_ptr;
+    memcpy(new_h, old_h, total_size);
+
+    new_h->forwarded = false;
+    new_h->forward_addr = NULL;
 
     gc->alloc_ptr = (char *)gc->alloc_ptr + total_size;
 
     old_h->forwarded = true;
-    old_h->forward_addr = PTR_FROM_HEADER(new_ptr);
+    old_h->forward_addr = PTR_FROM_HEADER(new_h);
     
-    return PTR_FROM_HEADER(new_ptr);
+    return PTR_FROM_HEADER(new_h);
 }
 
 static bool resize_spaces(ls_gc_t *gc, size_t new_space_size) {
+#if LS_DEBUG_GC != 0
+    printf("GC start resize spaces to %zu.\n", new_space_size);
+#endif
     new_space_size = ALIGN(new_space_size);
 
     void *old_from = gc->from_space;
@@ -50,9 +116,15 @@ static bool resize_spaces(ls_gc_t *gc, size_t new_space_size) {
     memcpy(new_from, old_from, live_bytes);
 
     intptr_t delta = (char *)new_from - (char *)old_from;
+
+    g_trace_ctx.gc = gc;
+    g_trace_ctx.old_from = old_from;
+    g_trace_ctx.old_from_end = (char *)old_from + live_bytes;
+    g_trace_ctx.delta = delta;
+
     for (ls_gc_root_t *root = gc->roots; root != NULL; root = root->next) {
         if (*root->ptr) {
-            *root->ptr = (char *)(*root->ptr) + delta;
+            gc_resize_visit(root->ptr);
         }
     }
 
@@ -61,14 +133,24 @@ static bool resize_spaces(ls_gc_t *gc, size_t new_space_size) {
         ls_gc_header_t *h = (ls_gc_header_t *)p;
         if (h->type) {
             void *obj_ptr = PTR_FROM_HEADER(h);
-            for (size_t i = 0; i < h->type->ref_count; ++i) {
-                size_t offset = h->type->ref_offsets[i];
-                void **ref_ptr = (void **)((char *)obj_ptr + offset);
-                if (*ref_ptr) {
-                    *ref_ptr = (char *)(*ref_ptr) + delta;
+            for (size_t c = 0; c < h->count; ++c) {
+                if (h->type->trace) {
+                    h->type->trace(obj_ptr, gc_resize_visit);
+                } else {
+                    for (size_t i = 0; i < h->type->ref_count; ++i) {
+                        size_t offset = h->type->ref_offsets[i];
+                        if (offset + sizeof(void *) <= h->size) {
+                            void **ref_ptr = (void **)((char *)obj_ptr + offset);
+                            gc_resize_visit(ref_ptr);
+                        }
+                    }
                 }
+                obj_ptr = (void *)((char *)obj_ptr + h->type->obj_size);
             }
         }
+        h->forwarded = false;
+        h->forward_addr = NULL;
+
         size_t total_size = sizeof(ls_gc_header_t) + h->size;
         total_size = ALIGN(total_size);
         p = (char *)p + total_size;
@@ -84,23 +166,29 @@ static bool resize_spaces(ls_gc_t *gc, size_t new_space_size) {
     free(old_from);
     free(old_to);
 
+#if LS_DEBUG_GC != 0
+    printf("GC end resize spaces.\n");
+#endif
+
     return true;
 }
 
 void ls_gc_init(ls_gc_t *gc) {
     gc->space_size = MIN_SPACE_SIZE;
-    gc->next_gc = MIN_SPACE_SIZE << 1;
     gc->from_space = malloc(gc->space_size);
     gc->to_space = malloc(gc->space_size);
     if (!gc->from_space || !gc->to_space) {
         free(gc->from_space);
         free(gc->to_space);
+        return;
     }
 
     gc->alloc_ptr = gc->from_space;
     gc->alloc_end = (char *)gc->from_space + gc->space_size;
     gc->scan_ptr = NULL;
     gc->roots = NULL;
+
+    memset(&g_trace_ctx, 0, sizeof(g_trace_ctx));
 }
 
 void ls_gc_deinit(ls_gc_t *gc) {
@@ -115,21 +203,24 @@ void ls_gc_deinit(ls_gc_t *gc) {
     free(gc->to_space);
 }
 
-void *ls_gc_alloc(ls_gc_t *gc, size_t size, ls_gc_type_t *type) {
+void *ls_gc_alloc(ls_gc_t *gc, size_t size, const ls_gc_type_t *type) {
     if (!gc || size == 0) return NULL;
     
     size_t total_size = sizeof(ls_gc_header_t) + size;
     total_size = ALIGN(total_size);
+    
+    if ((char *)gc->alloc_ptr + total_size > (char *)gc->alloc_end) {
+        ls_gc_collect(gc);
+    }
 
     while ((char *)gc->alloc_ptr + total_size > (char *)gc->alloc_end) {
         size_t new_space_size = gc->space_size << 1;
+        if (new_space_size < total_size) {
+            new_space_size = total_size << 1;
+        }
         if (!resize_spaces(gc, new_space_size)) {
             return NULL;
         }
-    }
-
-    if (gc->space_size > gc->next_gc) {
-        ls_gc_collect(gc);
     }
 
     ls_gc_header_t *h = (ls_gc_header_t *)gc->alloc_ptr;
@@ -137,6 +228,13 @@ void *ls_gc_alloc(ls_gc_t *gc, size_t size, ls_gc_type_t *type) {
     h->type = type;
     h->forwarded = false;
     h->forward_addr = NULL;
+
+    if (type && type->obj_size > 0) {
+        h->count = size / type->obj_size;
+        if (h->count == 0) h->count = 1;
+    } else {
+        h->count = 1;
+    }
 
     memset((PTR_FROM_HEADER(h)), 0, size);
 
@@ -153,12 +251,12 @@ void *ls_gc_realloc(ls_gc_t *gc, void *ptr, size_t new_size) {
     ls_gc_header_t *old_h = HEADER_FROM_PTR(ptr);
     size_t copy_size = old_h->size < new_size ? old_h->size : new_size;
 
-    void *new_ptr;
-    if (old_h->type) {
-        new_ptr = ls_gc_alloc(gc, new_size, old_h->type);
-    } else {
-        new_ptr = ls_gc_alloc(gc, new_size, NULL);
+    size_t alloc_size = new_size;
+    if (old_h->type && old_h->type->obj_size > alloc_size) {
+        alloc_size = old_h->type->obj_size;
     }
+
+    void *new_ptr = ls_gc_alloc(gc, alloc_size, old_h->type);
     if (!new_ptr) return NULL;
 
     memcpy(new_ptr, ptr, copy_size);
@@ -200,6 +298,17 @@ void ls_gc_remove_root(ls_gc_t *gc, void **ptr) {
 
 void ls_gc_collect(ls_gc_t *gc) {
     if (!gc) return;
+#if LS_DEBUG_GC != 0
+    printf("GC begin.\n");
+#endif
+    
+    void *old_from = gc->from_space;
+    void *old_from_end = gc->alloc_ptr; 
+
+    g_trace_ctx.gc = gc;
+    g_trace_ctx.old_from = old_from;
+    g_trace_ctx.old_from_end = old_from_end;
+    g_trace_ctx.delta = 0;
 
     void *tmp = gc->from_space;
     gc->from_space = gc->to_space;
@@ -211,7 +320,7 @@ void ls_gc_collect(ls_gc_t *gc) {
 
     for (ls_gc_root_t *root = gc->roots; root != NULL; root = root->next) {
         if (*root->ptr) {
-            *root->ptr = copy_object(gc, *root->ptr);
+            gc_collect_visit(root->ptr);
         }
     }
 
@@ -219,12 +328,19 @@ void ls_gc_collect(ls_gc_t *gc) {
         ls_gc_header_t *h = (ls_gc_header_t *)gc->scan_ptr;
         if (h->type) {
             void *obj_ptr = PTR_FROM_HEADER(h);
-            for (size_t i = 0; i < h->type->ref_count; ++i) {
-                size_t offset = h->type->ref_offsets[i];
-                void **ref_ptr = (void **)((char *)obj_ptr + offset);
-                if (*ref_ptr) {
-                    *ref_ptr = copy_object(gc, *ref_ptr);
+            for (size_t c = 0; c < h->count; ++c) {
+                if (h->type->trace) {
+                    h->type->trace(obj_ptr, gc_collect_visit);
+                } else {
+                    for (size_t i = 0; i < h->type->ref_count; ++i) {
+                        size_t offset = h->type->ref_offsets[i];
+                        if (offset + sizeof(void *) <= h->size) {
+                            void **ref_ptr = (void **)((char *)obj_ptr + offset);
+                            gc_collect_visit(ref_ptr);
+                        }
+                    }
                 }
+                obj_ptr = (void *)((char *)obj_ptr + h->type->obj_size);
             }
         }
         size_t total_size = sizeof(ls_gc_header_t) + h->size;
@@ -241,4 +357,9 @@ void ls_gc_collect(ls_gc_t *gc) {
     } else if (live_bytes < threshold_low && (gc->space_size >> 1) > MIN_SPACE_SIZE) {
         resize_spaces(gc, gc->space_size >> 1);
     }
+
+#if LS_DEBUG_GC != 0
+    printf("GC end.\n");
+    printf("GC's space_size: %zu\n", gc->space_size);
+#endif
 }

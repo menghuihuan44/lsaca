@@ -7,11 +7,11 @@
 extern "C" {
 #endif
 
-struct ls_array_t {
+typedef struct ls_array_t {
     ls_any_t *values;
-    size_t count;
+    size_t size;
     size_t capacity;
-};
+} ls_array_t;
 
 void ls_array_init(ls_array_t *array);
 void ls_array_deinit(ls_array_t *array);

@@ -4,6 +4,7 @@
 #include "src/lsaca_common.h"
 #include "src/lsaca_compiler.h"
 #include "src/lsaca_scanner.h"
+#include "src/base/lsaca_gc.h"
 
 #if LS_DISASM_PRINT_CODE != 0
 #include "src/lsaca_disasm.h"
@@ -240,7 +241,6 @@ static void literal(ls_context_t *ctx) {
 }
 
 static void grouping(ls_context_t *ctx) {
-    (void)ctx;
     expression(ctx);
     consume(LS_TOKEN_RIGHT_PAREN, "Expected ')' after the expression.");
 }
@@ -260,6 +260,12 @@ static void number(ls_context_t *ctx) {
         }
         default: return;
     }
+}
+
+static void string(ls_context_t *ctx) {
+    ctx->reg = alloc_reg();
+    ls_string_t *str = ls_string_create_with_len(ls_parser.previous.start + 1, ls_parser.previous.length - 2);
+    emit_constant(LS_STR_ANY(str), ctx->reg);
 }
 
 static void unary(ls_context_t *ctx) {
@@ -306,7 +312,7 @@ parse_rule_t rules[] = {
     [LS_TOKEN_LESS_EQUAL]    = {NULL,     binary, LS_PREC_COMPARISON},    
 
     [LS_TOKEN_IDENTIFIER]    = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_STRING]        = {NULL,     NULL,   LS_PREC_NONE},
+    [LS_TOKEN_STRING]        = {string,   NULL,   LS_PREC_NONE},
     [LS_TOKEN_INT64]         = {number,   NULL,   LS_PREC_NONE},
     [LS_TOKEN_FLOAT64]       = {number,   NULL,   LS_PREC_NONE},    
 

@@ -7,15 +7,21 @@
 extern "C" {
 #endif
 
+typedef struct ls_gc_t ls_gc_t;
+typedef void (*ls_gc_ref_visitor)(void **ref_ptr);
+typedef void (*ls_gc_trace_func)(void *obj_ptr, ls_gc_ref_visitor visitor);
+
 typedef struct {
     size_t obj_size;
     size_t ref_count;
-    size_t *ref_offsets;
+    const size_t *ref_offsets;
+    ls_gc_trace_func trace;
 } ls_gc_type_t;
 
 typedef struct {
     size_t size;
-    ls_gc_type_t *type;
+    size_t count;
+    const ls_gc_type_t *type;
     void *forward_addr;
     bool forwarded;
 } ls_gc_header_t;
@@ -25,11 +31,10 @@ typedef struct ls_gc_root_t {
     struct ls_gc_root_t *next;
 } ls_gc_root_t;
 
-typedef struct {
+typedef struct ls_gc_t {
     void *from_space;
     void *to_space;
     size_t space_size;
-    size_t next_gc;
 
     void *alloc_ptr;
     void *alloc_end;
@@ -43,19 +48,20 @@ extern ls_gc_t ls_gc;
 void ls_gc_init(ls_gc_t *gc);
 void ls_gc_deinit(ls_gc_t *gc);
 
-void *ls_gc_alloc(ls_gc_t *gc, size_t size, ls_gc_type_t *type);
+void *ls_gc_alloc(ls_gc_t *gc, size_t size, const ls_gc_type_t *type);
 void *ls_gc_realloc(ls_gc_t *gc, void *ptr, size_t new_size);
 
 void ls_gc_add_root(ls_gc_t *gc, void **ptr);
 void ls_gc_remove_root(ls_gc_t *gc, void **ptr);
 void ls_gc_collect(ls_gc_t *gc);
 
-#define LS_GC_TYPE(name, struct_type, ...) \
-    static size_t name##_offsets[] = { __VA_ARGS__ }; \
-    static ls_gc_type_t name = { \
+#define LS_GC_TYPE(name, struct_type, trace_fn, ...) \
+    static const size_t name##_offsets[] = { 0, ##__VA_ARGS__ }; \
+    static const ls_gc_type_t name = { \
         .obj_size = sizeof(struct_type), \
-        .ref_count = sizeof(name##_offsets) / sizeof(size_t), \
-        .ref_offsets = name##_offsets \
+        .ref_count = (sizeof(name##_offsets) / sizeof(name##_offsets[0])) - 1, \
+        .ref_offsets = &name##_offsets[1], \
+        .trace = trace_fn \
     };
 
 /*
@@ -66,7 +72,7 @@ void ls_gc_collect(ls_gc_t *gc);
  *    struct node_t *right;
  * } node_t;  
  *
- * LS_GC_TYPE(node_type, node_t, offsetof(node_t, left), offsetof(node_t, right));
+ * LS_GC_TYPE(node_type, node_t, NULL, offsetof(node_t, left), offsetof(node_t, right));
  */
 
 #ifdef __cplusplus
