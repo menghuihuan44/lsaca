@@ -13,13 +13,14 @@
 typedef struct {
     ls_token_t current;
     ls_token_t previous;
-    uint16_t reg_count;
     bool had_error;
     bool panic_mode;
 } ls_parser_t;
 
 typedef struct {
     uint8_t reg;
+    bool is_assign;
+    bool is_temp;
 } ls_context_t;
 
 /* Precedence levels in order from lowest to highest. */
@@ -45,7 +46,22 @@ typedef struct {
     ls_precedence precedence;
 } parse_rule_t;
 
+typedef struct {
+    ls_token_t name;
+    size_t depth;
+    uint8_t reg;
+    bool ready;
+} ls_scope_t;
+
+typedef struct {
+    ls_scope_t scopes[LS_UINT8_COUNT];
+    size_t scope_count;
+    size_t scope_depth;
+    uint16_t reg_top;
+} ls_compiler_t;
+
 ls_parser_t ls_parser;
+ls_compiler_t *current = NULL;
 ls_chunk_t *compiling_chunk;
 
 static ls_chunk_t *current_chunk(void) {
@@ -99,26 +115,40 @@ static void consume(ls_token_type type, const char *message) {
     error_at_current(message);
 }
 
+static bool check(ls_token_type type) {
+    return ls_parser.current.type == type;
+}
+
+static bool match(ls_token_type type) {
+    if (!check(type)) return false;
+    advance();
+    return true;
+}
+
 static uint8_t alloc_reg(void) {
-    if (ls_parser.reg_count >= LS_MAX_REGS) {
+    if (current->reg_top >= LS_MAX_REGS) {
         error("Too many registers are in use.");
         return 0; /* I don't know if this makes sense. */
     }
-    return ls_parser.reg_count++;
+    return current->reg_top++;
 }
 
 static void free_reg(void) {
-    if (ls_parser.reg_count > 0) {
-        --ls_parser.reg_count;
+    if (current->reg_top > 0) {
+        --current->reg_top;
     }
+}
+
+static void free_regs_to(uint8_t target) {
+    current->reg_top = target;
 }
 
 static void emit_inst(ls_inst_t inst) {
     ls_chunk_append(current_chunk(), inst, ls_parser.previous.line);
 }
 
-static void emit_return(uint8_t reg) {
-    ls_inst_t inst = LS_ABC(LS_OP_RETURN, reg, 0, 0);
+static void emit_return(uint8_t reg1, uint8_t reg2) {
+    ls_inst_t inst = LS_ABC(LS_OP_RETURN, reg1, reg2, 0);
     emit_inst(inst);
 }
 
@@ -138,7 +168,16 @@ static void emit_constant(ls_any_t value, uint8_t dest_reg) {
     emit_inst(inst);
 }
 
+static void compiler_init(ls_compiler_t *compiler) {
+    compiler->scope_count = 0;
+    compiler->scope_depth = 0;
+    compiler->reg_top = 0;
+    current = compiler;
+}
+
 static void end_compiler(void) {
+    emit_return(1, 0); /* temp */
+
 #if LS_DISASM_PRINT_CODE != 0
     if (!ls_parser.had_error) {
         ls_disasm_chunk(current_chunk(), "code");
@@ -146,97 +185,121 @@ static void end_compiler(void) {
 #endif
 }
 
+static void begin_scope(void) {
+    ++current->scope_depth;
+}
+
+static void end_scope(void) {
+    --current->scope_depth;
+
+    uint8_t restore_to = current->reg_top;
+    while (current->scope_count > 0 && current->scopes[current->scope_count - 1].depth > current->scope_depth) {
+        restore_to = current->scopes[current->scope_count - 1].reg;
+        --current->scope_count;
+    }
+    current->reg_top = restore_to;
+}
+
 static void expression(ls_context_t *ctx);
+static void statement(ls_context_t *ctx);
+static void declaration(ls_context_t *ctx);
 static parse_rule_t *get_rule(ls_token_type type);
 static void parse_precedence(ls_precedence precedence, ls_context_t *ctx);
 
 static void binary(ls_context_t *ctx) {
     ls_token_type operator_type = ls_parser.previous.type;
     parse_rule_t *rule = get_rule(operator_type);
-    uint8_t left_reg = ctx->reg;
 
-    ls_context_t right_ctx;
+    uint8_t left_reg = ctx->reg;
+    bool left_is_temp = ctx->is_temp;
+
+    ls_context_t right_ctx = {0};
     parse_precedence(rule->precedence + 1, &right_ctx);
     uint8_t right_reg = right_ctx.reg;
+    bool right_is_temp = right_ctx.is_temp;
 
-    uint8_t result_reg = alloc_reg();
+    uint8_t result_reg;
+    if (left_is_temp) {
+        result_reg = left_reg;
+    } else if (right_is_temp) {
+        result_reg = right_reg;
+    } else {
+        result_reg = alloc_reg();
+    }
 
     switch (operator_type) {
         case LS_TOKEN_BANG_EQUAL: {
-            ls_inst_t inst = LS_ABC(LS_OP_BANG_EQUAL, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_BANG_EQUAL, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_EQUAL_EQUAL: {
-            ls_inst_t inst = LS_ABC(LS_OP_EQUAL_EQUAL, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_EQUAL_EQUAL, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_GREATER: {
-            ls_inst_t inst = LS_ABC(LS_OP_GREATER, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_GREATER, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_GREATER_EQUAL: {
-            ls_inst_t inst = LS_ABC(LS_OP_GREATER_EQUAL, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_GREATER_EQUAL, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_LESS: {
-            ls_inst_t inst = LS_ABC(LS_OP_LESS, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_LESS, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_LESS_EQUAL: {
-            ls_inst_t inst = LS_ABC(LS_OP_LESS_EQUAL, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_LESS_EQUAL, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_PLUS: {
-            ls_inst_t inst = LS_ABC(LS_OP_ADD, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_ADD, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_MINUS: {
-            ls_inst_t inst = LS_ABC(LS_OP_SUB, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_SUB, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_STAR: {
-            ls_inst_t inst = LS_ABC(LS_OP_MUL, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_MUL, result_reg, left_reg, right_reg));
             break;
         }
         case LS_TOKEN_SLASH: {
-            ls_inst_t inst = LS_ABC(LS_OP_DIV, result_reg, left_reg, right_reg);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_DIV, result_reg, left_reg, right_reg));
             break;
         }
-        default: return;
+        default: {
+            error("Unknown binary operator.");
+            return;
+        }
     }
 
+    free_regs_to(result_reg + 1);
+
     ctx->reg = result_reg;
+    ctx->is_temp = true;
 }
 
 static void literal(ls_context_t *ctx) {
     ctx->reg = alloc_reg();
+    ctx->is_temp = true;
     switch (ls_parser.previous.type) {
         case LS_TOKEN_NULL: {
-            ls_inst_t inst = LS_ABC(LS_OP_LOADNULL, ctx->reg, 0, 0);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_LOADNULL, ctx->reg, 0, 0));
             break;
         }
         case LS_TOKEN_FALSE: {
-            ls_inst_t inst = LS_ABC(LS_OP_LOADFALSE, ctx->reg, 0, 0);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_LOADFALSE, ctx->reg, 0, 0));
             break;
         }
         case LS_TOKEN_TRUE: {
-            ls_inst_t inst = LS_ABC(LS_OP_LOADTRUE, ctx->reg, 0, 0);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_LOADTRUE, ctx->reg, 0, 0));
             break;
         }
-        default: return;
+        default: {
+            error("Unknown literal operator.");
+            return;
+        }
     }
 }
 
@@ -247,6 +310,7 @@ static void grouping(ls_context_t *ctx) {
 
 static void number(ls_context_t *ctx) {
     ctx->reg = alloc_reg();
+    ctx->is_temp = true;
     switch (ls_parser.previous.type) {
         case LS_TOKEN_INT64: {
             int64_t value = (int64_t)strtoll(ls_parser.previous.start, NULL, 0);
@@ -258,14 +322,63 @@ static void number(ls_context_t *ctx) {
             emit_constant(LS_F64_ANY(value), ctx->reg);
             break;
         }
-        default: return;
+        default: {
+            error("Unknown number operator.");
+            return;
+        }
     }
 }
 
 static void string(ls_context_t *ctx) {
     ctx->reg = alloc_reg();
+    ctx->is_temp = true;
     ls_string_t *str = ls_string_create_with_len(ls_parser.previous.start + 1, ls_parser.previous.length - 2);
     emit_constant(LS_STR_ANY(str), ctx->reg);
+}
+
+static bool identifiers_equal(ls_token_t *a, ls_token_t *b) {
+    if (a->length != b->length) return false;
+    return memcmp(a->start, b->start, a->length) == 0;
+}
+
+static size_t resolve_scope(ls_compiler_t *compiler, ls_token_t *name) {
+    for (int64_t i = (int64_t)compiler->scope_count - 1; i >= 0; --i) {
+        ls_scope_t *scope = &compiler->scopes[i];
+        if (identifiers_equal(name, &scope->name)) {
+            if (!scope->ready) {
+                error_at(name, "Cannot read local variable in its own initializer.");
+                return (size_t)-1;
+            }
+            return i;
+        }
+    }
+
+    error_at(name, "Undefined variable.");
+    return (size_t)-1;
+}
+
+static void variable(ls_context_t *ctx) {
+    size_t idx = resolve_scope(current, &ls_parser.previous);
+    if (idx == (size_t)-1) return;
+    uint8_t var_reg = current->scopes[idx].reg;
+
+    if (ctx->is_assign && match(LS_TOKEN_EQUAL)) {
+        uint8_t saved_top = current->reg_top;
+        ls_context_t rhs_ctx = {0};
+        expression(&rhs_ctx);
+
+        if (rhs_ctx.reg != var_reg) {
+            emit_inst(LS_ABC(LS_OP_MOVE, var_reg, rhs_ctx.reg, 0));
+        }
+        free_regs_to(saved_top);
+
+        ctx->reg = var_reg;
+        ctx->is_temp = false;
+        ctx->is_assign = false;
+    } else {
+        ctx->reg = var_reg;
+        ctx->is_temp = false;
+    }
 }
 
 static void unary(ls_context_t *ctx) {
@@ -273,25 +386,37 @@ static void unary(ls_context_t *ctx) {
 
     parse_precedence(LS_PREC_UNARY, ctx);
 
+    uint8_t result_reg;
+    if (ctx->is_temp) {
+        result_reg = ctx->reg;
+    } else {
+        result_reg = alloc_reg();
+    }
+    
     switch (operator_type) {
         case LS_TOKEN_MINUS: {
-            ls_inst_t inst = LS_ABC(LS_OP_NEG, ctx->reg, 0, 0);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_NEG, result_reg, ctx->reg, 0));
             break;
         }
         case LS_TOKEN_BANG: {
-            ls_inst_t inst = LS_ABC(LS_OP_NOT, ctx->reg, 0, 0);
-            emit_inst(inst);
+            emit_inst(LS_ABC(LS_OP_NOT, result_reg, ctx->reg, 0));
             break;
         }
-        default: return;
+        default: {
+            error("Unknown unary operator.");
+            return;
+        }
     }
+
+    free_regs_to(result_reg + 1);
+    ctx->reg = result_reg;
+    ctx->is_temp = true;
 }
 
 parse_rule_t rules[] = {
     [LS_TOKEN_LEFT_PAREN]    = {grouping, NULL,   LS_PREC_NONE},
     [LS_TOKEN_RIGHT_PAREN]   = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_LEFT_BRACE]    = {NULL,     NULL,   LS_PREC_NONE}, 
+    [LS_TOKEN_LEFT_BRACE]    = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_RIGHT_BRACE]   = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_COMMA]         = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_DOT]           = {NULL,     NULL,   LS_PREC_NONE},
@@ -300,7 +425,7 @@ parse_rule_t rules[] = {
     [LS_TOKEN_COLON]         = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_SEMICOLON]     = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_SLASH]         = {NULL,     binary, LS_PREC_FACTOR},
-    [LS_TOKEN_STAR]          = {NULL,     binary, LS_PREC_FACTOR},  
+    [LS_TOKEN_STAR]          = {NULL,     binary, LS_PREC_FACTOR},
 
     [LS_TOKEN_BANG]          = {unary,    NULL,   LS_PREC_NONE},
     [LS_TOKEN_BANG_EQUAL]    = {NULL,     binary, LS_PREC_EQUALITY},
@@ -309,12 +434,12 @@ parse_rule_t rules[] = {
     [LS_TOKEN_GREATER]       = {NULL,     binary, LS_PREC_COMPARISON},
     [LS_TOKEN_GREATER_EQUAL] = {NULL,     binary, LS_PREC_COMPARISON},
     [LS_TOKEN_LESS]          = {NULL,     binary, LS_PREC_COMPARISON},
-    [LS_TOKEN_LESS_EQUAL]    = {NULL,     binary, LS_PREC_COMPARISON},    
+    [LS_TOKEN_LESS_EQUAL]    = {NULL,     binary, LS_PREC_COMPARISON},
 
-    [LS_TOKEN_IDENTIFIER]    = {NULL,     NULL,   LS_PREC_NONE},
+    [LS_TOKEN_IDENTIFIER]    = {variable, NULL,   LS_PREC_NONE},
     [LS_TOKEN_STRING]        = {string,   NULL,   LS_PREC_NONE},
     [LS_TOKEN_INT64]         = {number,   NULL,   LS_PREC_NONE},
-    [LS_TOKEN_FLOAT64]       = {number,   NULL,   LS_PREC_NONE},    
+    [LS_TOKEN_FLOAT64]       = {number,   NULL,   LS_PREC_NONE},
 
     [LS_TOKEN_NULL]          = {literal,  NULL,   LS_PREC_NONE},
     [LS_TOKEN_ANY]           = {NULL,     NULL,   LS_PREC_NONE},
@@ -331,7 +456,7 @@ parse_rule_t rules[] = {
     [LS_TOKEN_CLASS]         = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_THIS]          = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_SUPER]         = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_PRINT]         = {NULL,     NULL,   LS_PREC_NONE},    
+    [LS_TOKEN_PRINT]         = {NULL,     NULL,   LS_PREC_NONE}, /* temp */
 
     [LS_TOKEN_ERROR]         = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_EOF]           = {NULL,     NULL,   LS_PREC_NONE},
@@ -346,6 +471,7 @@ static void parse_precedence(ls_precedence precedence, ls_context_t *ctx) {
         return;
     }
 
+    ctx->is_assign = precedence <= LS_PREC_ASSIGNMENT;
     prefix_rule(ctx);
 
     while (precedence <= get_rule(ls_parser.current.type)->precedence) {
@@ -353,6 +479,39 @@ static void parse_precedence(ls_precedence precedence, ls_context_t *ctx) {
         ls_parse_fn infix_rule = get_rule(ls_parser.previous.type)->infix;
         infix_rule(ctx);
     }
+
+    if (ctx->is_assign && match(LS_TOKEN_EQUAL)) {
+        error("Invalid assignment target."); 
+    }
+}
+
+static void add_scope(ls_token_t name) {
+    if (current->scope_count == LS_UINT8_COUNT) {
+        error("Too many variables in scope.");
+        return;
+    }
+
+    ls_scope_t *scope = &current->scopes[current->scope_count++];
+    scope->name = name;
+    scope->depth = current->scope_depth;
+    scope->reg = alloc_reg();
+    scope->ready = false;
+}
+
+static void declare_variable(void) {
+    ls_token_t *name = &ls_parser.previous;
+    for (int64_t i = (int64_t)current->scope_count - 1; i >= 0; --i) {
+        ls_scope_t *scope = &current->scopes[i];
+        if (scope->depth < current->scope_depth) {
+            break;
+        }
+
+        if (identifiers_equal(name, &scope->name)) {
+            error("Already a variable with this name in this scope.");
+        }
+    }
+
+    add_scope(*name);
 }
 
 static parse_rule_t *get_rule(ls_token_type type) {
@@ -363,21 +522,110 @@ static void expression(ls_context_t *ctx) {
     parse_precedence(LS_PREC_ASSIGNMENT, ctx);
 }
 
+static void var_declaration(ls_context_t *ctx) {
+    consume(LS_TOKEN_IDENTIFIER, "Expected variable name.");
+    declare_variable();
+    uint8_t reg = current->scopes[current->scope_count - 1].reg;
+
+    uint8_t saved_top = current->reg_top;
+    if (match(LS_TOKEN_EQUAL)) {
+        ls_context_t init_ctx = {0};
+        expression(&init_ctx);
+        if (init_ctx.reg != reg) {
+            emit_inst(LS_ABC(LS_OP_MOVE, reg, init_ctx.reg, 0));
+        }
+        free_regs_to(saved_top);
+    } else {
+        emit_inst(LS_ABC(LS_OP_LOADNULL, reg, 0, 0));
+    }
+    current->scopes[current->scope_count - 1].ready = true;
+
+    consume(LS_TOKEN_SEMICOLON, "Expected ';' after declaration.");
+}
+
+static void block(ls_context_t *ctx) {
+    while (!check(LS_TOKEN_RIGHT_BRACE) && !check(LS_TOKEN_EOF)) {
+        declaration(ctx);
+    }
+
+    consume(LS_TOKEN_RIGHT_BRACE, "Expect '}' after block.");
+}
+
+static void expression_statement(ls_context_t *ctx) {
+    uint8_t saved_top = current->reg_top;
+    expression(ctx);
+    consume(LS_TOKEN_SEMICOLON, "Expect ';' after expression.");
+    free_regs_to(saved_top);
+}
+
+static void print_statement(ls_context_t *ctx) {
+    uint8_t saved_top = current->reg_top;
+    expression(ctx);
+    consume(LS_TOKEN_SEMICOLON, "Expect ';' after value.");
+    emit_inst(LS_ABC(LS_OP_PRINT, ctx->reg, 0 , 0));
+    free_regs_to(saved_top);
+}
+
+static void synchronize(void) {
+    ls_parser.panic_mode = false;
+
+    while (ls_parser.current.type != LS_TOKEN_EOF) {
+        if (ls_parser.previous.type == LS_TOKEN_SEMICOLON) return;
+        switch (ls_parser.current.type) {
+            case LS_TOKEN_ANY:
+            case LS_TOKEN_IF:
+            case LS_TOKEN_FOR:
+            case LS_TOKEN_WHILE:
+            case LS_TOKEN_RETURN:
+            case LS_TOKEN_FUN:
+            case LS_TOKEN_CLASS:
+            case LS_TOKEN_PRINT:
+                return;
+            default: ;
+        }
+
+        advance();
+    }
+}
+
+static void declaration(ls_context_t *ctx) {
+    if (match(LS_TOKEN_ANY)) {
+        var_declaration(ctx);
+    } else {
+        statement(ctx);
+    }
+
+    if (ls_parser.panic_mode) synchronize();
+}
+
+static void statement(ls_context_t *ctx) {
+    if (match(LS_TOKEN_PRINT)) {
+        print_statement(ctx); /* temp */
+    } else if(match(LS_TOKEN_LEFT_BRACE)) {
+        begin_scope();
+        block(ctx);
+        end_scope();
+    } else {
+        expression_statement(ctx);
+    }
+}
+
 bool ls_compile(const char *source, ls_chunk_t *chunk) {
     ls_scanner_init(source);
+    ls_compiler_t compiler;
+    compiler_init(&compiler);
     compiling_chunk = chunk;
 
     ls_parser.had_error = false;
     ls_parser.panic_mode = false;
-    ls_parser.reg_count = 0;
 
     advance();
 
-    ls_context_t ctx;
-    expression(&ctx);
-    consume(LS_TOKEN_EOF, "Expected end of expression.");
+    ls_context_t ctx = {0};
+    while (!match(LS_TOKEN_EOF)) {
+        declaration(&ctx);
+    }
 
-    emit_return(ctx.reg);
     end_compiler();
     return !ls_parser.had_error;
 }

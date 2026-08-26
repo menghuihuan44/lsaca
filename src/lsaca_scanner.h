@@ -48,7 +48,7 @@ typedef enum {
     LS_TOKEN_CLASS,
     LS_TOKEN_THIS,
     LS_TOKEN_SUPER,
-    LS_TOKEN_PRINT,
+    LS_TOKEN_PRINT, /* temp */
 
     LS_TOKEN_ERROR,
     LS_TOKEN_EOF

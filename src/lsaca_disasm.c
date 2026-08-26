@@ -21,6 +21,8 @@ static const char *opcode_names[] = {
     "MUL",
     "DIV",
     "RETURN",
+
+    "PRINT",
 };
 
 static size_t disasm_ABC(ls_chunk_t *chunk, size_t offset) {
@@ -106,6 +108,9 @@ size_t ls_disasm_inst(ls_chunk_t *chunk, size_t offset) {
         case LS_OP_DIV:
             return disasm_ABC(chunk, offset);
         case LS_OP_RETURN:
+            return disasm_ABC(chunk, offset);
+        /* temp */
+        case LS_OP_PRINT:
             return disasm_ABC(chunk, offset);
         default:
             printf("%04zu: Unknown opcode %"PRIu32"\n", offset, LS_OP(inst));

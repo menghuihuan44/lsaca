@@ -56,8 +56,8 @@ typedef enum {
     LS_OP_LOADFALSE, /* R(A) := false */
     LS_OP_LOADTRUE, /* R(A) := true */
 
-    LS_OP_NEG, /* R(A) := -R(A) */
-    LS_OP_NOT, /* R(A) := !R(A) */
+    LS_OP_NEG, /* R(A) := -R(B) */
+    LS_OP_NOT, /* R(A) := !R(B) */
 
     LS_OP_BANG_EQUAL, /* R(A) := R(B) != R(C) */
     LS_OP_EQUAL_EQUAL, /* R(A) := R(B) == R(C) */
@@ -71,7 +71,9 @@ typedef enum {
     LS_OP_MUL, /* R(A) := R(B) * R(C) */
     LS_OP_DIV, /* R(A) := R(B) / R(C) */
 
-    LS_OP_RETURN, /* return R(A) */
+    LS_OP_RETURN, /* return R(A), ..., R(B); if B < A, return nothing */
+
+    LS_OP_PRINT, /* print R(A); it is a temp opcode */
 } ls_opcode;
 
 typedef struct {

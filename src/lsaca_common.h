@@ -11,4 +11,6 @@
 
 #define LS_DEBUG_GC 1
 
+#define LS_UINT8_COUNT (UINT8_MAX + 1)
+
 #endif /* LSACA_COMMON_H */

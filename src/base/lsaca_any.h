@@ -17,6 +17,7 @@ typedef enum {
 } ls_any_type;
 
 typedef struct ls_array_t ls_array_t;
+typedef struct ls_map_t ls_map_t;
 
 typedef struct {
     union {

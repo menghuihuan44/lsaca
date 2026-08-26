@@ -139,7 +139,7 @@ static ls_token_type identifier_type(void) {
         case 'i': return check_keyword(1, 1, "f", LS_TOKEN_IF);
         case 'n': return check_keyword(1, 3, "ull", LS_TOKEN_NULL);
         case 'o': return check_keyword(1, 1, "r", LS_TOKEN_OR);
-        case 'p': return check_keyword(1, 4, "rint", LS_TOKEN_PRINT);
+        case 'p': return check_keyword(1, 4, "rint", LS_TOKEN_PRINT); /* temp */
         case 'r': return check_keyword(1, 5, "eturn", LS_TOKEN_RETURN);
         case 's': return check_keyword(1, 4, "uper", LS_TOKEN_SUPER);
         case 't':

@@ -75,28 +75,30 @@ static ls_vm_status run(ls_vm_t *vm) {
             }
             case LS_OP_NEG: {
                 uint32_t a = LS_RA(inst);
-                if (!LS_IS_I64(vm->regs[a]) && !LS_IS_F64(vm->regs[a])) {
+                uint32_t b = LS_RA(inst);
+                if (!LS_IS_I64(vm->regs[b]) && !LS_IS_F64(vm->regs[b])) {
                     runtime_error(vm, "Negation requires an i64 or f64 operand.");
-                    runtime_error(vm, "Value's type is %s.", ls_any_type_name(vm->regs[a]));
+                    runtime_error(vm, "Value's type is %s.", ls_any_type_name(vm->regs[b]));
                     return LS_VM_RUNTIME_ERROR;
                 }
 
-                switch (LS_GET_TYPE(vm->regs[a])) {
-                    case LS_ANY_I64: vm->regs[a] = LS_I64_ANY(-LS_AS_I64(vm->regs[a])); break;
-                    case LS_ANY_F64: vm->regs[a] = LS_F64_ANY(-LS_AS_F64(vm->regs[a])); break;
+                switch (LS_GET_TYPE(vm->regs[b])) {
+                    case LS_ANY_I64: vm->regs[a] = LS_I64_ANY(-LS_AS_I64(vm->regs[b])); break;
+                    case LS_ANY_F64: vm->regs[a] = LS_F64_ANY(-LS_AS_F64(vm->regs[b])); break;
                     default: break;
                 }
                 break;
             }
             case LS_OP_NOT: {
                 uint32_t a = LS_RA(inst);
-                if (!LS_IS_BOOL(vm->regs[a])) {
+                uint32_t b = LS_RA(inst);
+                if (!LS_IS_BOOL(vm->regs[b])) {
                     runtime_error(vm, "Logical NOT requires a boolean operand.");
-                    runtime_error(vm, "Value's type is %s.", ls_any_type_name(vm->regs[a]));
+                    runtime_error(vm, "Value's type is %s.", ls_any_type_name(vm->regs[b]));
                     return LS_VM_RUNTIME_ERROR;
                 }
 
-                vm->regs[a] = LS_BOOL_ANY(!LS_AS_BOOL(vm->regs[a]));
+                vm->regs[a] = LS_BOOL_ANY(!LS_AS_BOOL(vm->regs[b]));
                 break;
             }
             case LS_OP_BANG_EQUAL: {
@@ -362,11 +364,19 @@ static ls_vm_status run(ls_vm_t *vm) {
                 break;
             }
             case LS_OP_RETURN: {
-                /* temp */
                 uint32_t a = LS_RA(inst);
+                uint32_t b = LS_RB(inst);
+                
+                /* It will add something in the future. */
+                return LS_VM_OK;
+            }
+            /* temp */
+            case LS_OP_PRINT: {
+                uint32_t a = LS_RA(inst);
+
                 ls_any_print(vm->regs[a]);
                 printf("\n");
-                return LS_VM_OK;
+                break;
             }
             default:
                 return LS_VM_RUNTIME_ERROR;
