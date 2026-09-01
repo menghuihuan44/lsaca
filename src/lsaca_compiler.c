@@ -53,6 +53,13 @@ typedef struct {
     bool ready;
 } ls_scope_t;
 
+typedef struct ls_loop_t {
+    size_t start;
+    size_t breaks[LS_UINT8_COUNT];
+    size_t break_count;
+    struct ls_loop_t *enclosing;
+} ls_loop_t;
+
 typedef struct {
     ls_scope_t scopes[LS_UINT8_COUNT];
     size_t scope_count;
@@ -61,6 +68,7 @@ typedef struct {
 } ls_compiler_t;
 
 ls_parser_t ls_parser;
+ls_loop_t *current_loop = NULL;
 ls_compiler_t *current = NULL;
 ls_chunk_t *compiling_chunk;
 
@@ -658,9 +666,34 @@ static void if_statement(ls_context_t *ctx) {
     }
 }
 
+static void continue_statement(ls_context_t *ctx) {
+    if (current_loop == NULL) {
+        error("'continue' outside of a loop.");
+        return;
+    }
+    consume(LS_TOKEN_SEMICOLON, "Expect ';' after 'continue'.");
+
+    emit_loop(current_loop->start);
+}
+
+static void break_statement(ls_context_t *ctx) {
+    if (current_loop == NULL) {
+        error("'break' outside of a loop.");
+        return;
+    }
+    consume(LS_TOKEN_SEMICOLON, "Expect ';' after 'break'.");
+    
+    current_loop->breaks[current_loop->break_count++] = emit_jump(LS_OP_JUMP, 0);
+}
+
 static void while_statement(ls_context_t *ctx) {
+    ls_loop_t loop;
+    loop.enclosing = current_loop;
+    loop.break_count = 0;
+    current_loop = &loop;
+
     consume(LS_TOKEN_LEFT_PAREN, "Expected '(' after 'while'.");
-    size_t loop_start = current_chunk()->size;
+    loop.start = current_chunk()->size;
     uint8_t saved_top = current->reg_top;
     ls_context_t cond_ctx = {0};
     expression(&cond_ctx);
@@ -670,11 +703,21 @@ static void while_statement(ls_context_t *ctx) {
     free_regs_to(saved_top);
     statement(ctx);
 
-    emit_loop(loop_start);
+    emit_loop(loop.start);
     patch_jump(exit_jump);
+
+    for (size_t i = 0; i < loop.break_count; ++i) {
+        patch_jump(loop.breaks[i]);
+    }
+    current_loop = loop.enclosing;
 }
 
 static void for_statement(ls_context_t *ctx) {
+    ls_loop_t loop;
+    loop.enclosing = current_loop;
+    loop.break_count = 0;
+    current_loop = &loop;
+
     begin_scope();
     consume(LS_TOKEN_LEFT_PAREN, "Expect '(' after 'for'.");
     if (match(LS_TOKEN_SEMICOLON)) {
@@ -686,6 +729,7 @@ static void for_statement(ls_context_t *ctx) {
     }
 
     size_t loop_start = current_chunk()->size;
+    loop.start = loop_start;
     size_t exit_jump = (size_t)-1;
     if (!match(LS_TOKEN_SEMICOLON)) {
         uint8_t saved_top = current->reg_top;
@@ -700,6 +744,7 @@ static void for_statement(ls_context_t *ctx) {
     if (!match(LS_TOKEN_RIGHT_PAREN)) {
         size_t body_jump = emit_jump(LS_OP_JUMP, 0);
         size_t increment_start = current_chunk()->size;
+        loop.start = increment_start;
         uint8_t saved_top = current->reg_top;
         ls_context_t cond_ctx = {0};
         expression(&cond_ctx);
@@ -717,6 +762,11 @@ static void for_statement(ls_context_t *ctx) {
     if (exit_jump != (size_t)-1) {
         patch_jump(exit_jump);
     }
+
+    for (size_t i = 0; i < loop.break_count; ++i) {
+        patch_jump(loop.breaks[i]);
+    }
+    current_loop = loop.enclosing;
 
     end_scope();
 }
@@ -770,6 +820,10 @@ static void statement(ls_context_t *ctx) {
         end_scope();
     } else if (match(LS_TOKEN_IF)) {
         if_statement(ctx);
+    } else if (match(LS_TOKEN_CONTINUE)) {
+        continue_statement(ctx);
+    } else if (match(LS_TOKEN_BREAK)) {
+        break_statement(ctx);
     } else if (match(LS_TOKEN_WHILE)) {
         while_statement(ctx);
     } else if (match((LS_TOKEN_FOR))) {

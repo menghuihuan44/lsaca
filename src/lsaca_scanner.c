@@ -125,7 +125,14 @@ static ls_token_type identifier_type(void) {
                 }
             }
             break;
-        case 'c': return check_keyword(1, 4, "lass", LS_TOKEN_CLASS);
+        case 'b': return check_keyword(1, 4, "reak", LS_TOKEN_BREAK);
+        case 'c':
+            if (ls_scanner.current - ls_scanner.start > 1) {
+                switch (ls_scanner.start[1]) {
+                    case 'o': return check_keyword(2, 6, "ntinue", LS_TOKEN_CONTINUE);
+                    case 'l': return check_keyword(2, 3, "ass", LS_TOKEN_CLASS);
+                }
+            }
         case 'e': return check_keyword(1, 3, "lse", LS_TOKEN_ELSE);
         case 'f':
             if (ls_scanner.current - ls_scanner.start > 1) {
