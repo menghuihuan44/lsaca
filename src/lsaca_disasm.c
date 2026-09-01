@@ -8,18 +8,25 @@ static const char *opcode_names[] = {
     "LOADNULL",
     "LOADFALSE",
     "LOADTRUE",
+
     "NEG",
     "NOT",
+
     "BANG_EQUAL",
     "EQUAL_EQUAL",
     "GREATER",
     "GREATER_EQUAL",
     "LESS",
     "LESS_EQUAL",
+
     "ADD",
     "SUB",
     "MUL",
     "DIV",
+
+    "JUMP",
+    "JUMP_IF_FALSE",
+
     "RETURN",
 
     "PRINT",
@@ -53,6 +60,25 @@ static size_t disasm_Ax(ls_chunk_t *chunk, size_t offset) {
     printf("%04zu: %-8s K%"PRIu32" '", offset, opcode_names[LS_OP(inst)], ax);
     ls_any_print(chunk->constants.values[ax]);
     printf("'\n");
+    return offset + 1;
+}
+
+static size_t disasm_AsBx(ls_chunk_t *chunk, size_t offset) {
+    ls_inst_t inst = chunk->codes[offset];
+    uint32_t a = LS_RA(inst);
+    uint32_t bx = LS_RsBx(inst);
+
+    printf("%04zu: %-8s R%"PRIu32" [ip%+"PRIi32"]", offset, opcode_names[LS_OP(inst)], a, bx);
+    printf("\n");
+    return offset + 1;
+}
+
+static size_t disasm_sAx(ls_chunk_t *chunk, size_t offset) {
+    ls_inst_t inst = chunk->codes[offset];
+    uint32_t ax = LS_RsAx(inst);
+
+    printf("%04zu: %-8s [ip%+"PRIi32"]", offset, opcode_names[LS_OP(inst)], ax);
+    printf("\n");
     return offset + 1;
 }
 
@@ -107,6 +133,10 @@ size_t ls_disasm_inst(ls_chunk_t *chunk, size_t offset) {
             return disasm_ABC(chunk, offset);
         case LS_OP_DIV:
             return disasm_ABC(chunk, offset);
+        case LS_OP_JUMP:
+            return disasm_sAx(chunk, offset);
+        case LS_OP_JUMP_IF_FALSE:
+            return disasm_AsBx(chunk, offset);
         case LS_OP_RETURN:
             return disasm_ABC(chunk, offset);
         /* temp */

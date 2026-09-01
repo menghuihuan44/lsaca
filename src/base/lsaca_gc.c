@@ -1,6 +1,5 @@
 #include <stdlib.h>
 #include <string.h>
-#include <stdalign.h>
 #include "src/base/lsaca_gc.h"
 
 #if LS_DEBUG_GC != 0
@@ -78,6 +77,15 @@ static void *copy_object(ls_gc_t *gc, void *old_ptr) {
         return old_h->forward_addr;
     }
 
+    if (old_h->size > gc->space_size) {
+#if LS_DEBUG_GC != 0
+        fprintf(stderr, "\n=== GC FATAL ERROR ===\n");
+        fprintf(stderr, "Object header corrupted at %p! size is %zu (space_size is %zu)\n", 
+                old_ptr, old_h->size, gc->space_size);
+#endif
+        abort();
+    }
+
     size_t total_size = sizeof(ls_gc_header_t) + old_h->size;
     total_size = ALIGN(total_size);
 
@@ -131,6 +139,15 @@ static bool resize_spaces(ls_gc_t *gc, size_t new_space_size) {
     void *p = new_from;
     while ((char *)p < (char *)new_from + live_bytes) {
         ls_gc_header_t *h = (ls_gc_header_t *)p;
+
+        if (h->size > new_space_size) {
+#if LS_DEBUG_GC != 0
+            fprintf(stderr, "\n=== GC FATAL ERROR ===\n");
+            fprintf(stderr, "Heap corrupted during resize at %p! size is %zu\n", p, h->size);
+#endif
+            abort();
+        }
+
         if (h->type) {
             void *obj_ptr = PTR_FROM_HEADER(h);
             for (size_t c = 0; c < h->count; ++c) {
@@ -248,6 +265,7 @@ void *ls_gc_realloc(ls_gc_t *gc, void *ptr, size_t new_size) {
     if (!gc || new_size == 0) return NULL;
     if (!ptr) return ls_gc_alloc(gc, new_size, NULL);
 
+    ls_gc_add_root(gc, (void **)&ptr);
     ls_gc_header_t *old_h = HEADER_FROM_PTR(ptr);
     size_t copy_size = old_h->size < new_size ? old_h->size : new_size;
 
@@ -257,6 +275,7 @@ void *ls_gc_realloc(ls_gc_t *gc, void *ptr, size_t new_size) {
     }
 
     void *new_ptr = ls_gc_alloc(gc, alloc_size, old_h->type);
+    ls_gc_remove_root(gc, (void **)&ptr);
     if (!new_ptr) return NULL;
 
     memcpy(new_ptr, ptr, copy_size);

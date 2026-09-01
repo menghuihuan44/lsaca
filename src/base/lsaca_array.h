@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-typedef struct ls_array_t {
+typedef struct {
     ls_any_t *values;
     size_t size;
     size_t capacity;

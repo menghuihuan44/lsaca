@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <inttypes.h>
+#include <stdalign.h>
 
 #define LS_DISASM_PRINT_CODE 1
 #define LS_DISASM_TRACE_EXECUTION 1

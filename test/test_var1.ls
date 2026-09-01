@@ -26,7 +26,9 @@ print "==== e ====";
 print e;
 
 /* It should be an error. */
-/* any a = 99; */
+/* 
+any a = 99; 
+*/
 /* Yes, it is an error. My language handle it correctly. */
 
 

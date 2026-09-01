@@ -147,6 +147,19 @@ static void emit_inst(ls_inst_t inst) {
     ls_chunk_append(current_chunk(), inst, ls_parser.previous.line);
 }
 
+static size_t emit_jump(ls_opcode op, uint8_t reg) {
+    op == LS_OP_JUMP_IF_FALSE ? emit_inst(LS_ABx(op, reg, 0)) : emit_inst(LS_Ax(op, 0));
+    return current_chunk()->size - 1;
+}
+
+static void emit_loop(size_t loop_start) {
+    int32_t offset = loop_start - current_chunk()->size - 1;
+    if (-offset > (1 << LS_SIZE_Ax) - 1) {
+        error("Loop body too large.");
+    }
+    emit_inst(LS_Ax(LS_OP_JUMP, offset));
+}
+
 static void emit_return(uint8_t reg1, uint8_t reg2) {
     ls_inst_t inst = LS_ABC(LS_OP_RETURN, reg1, reg2, 0);
     emit_inst(inst);
@@ -166,6 +179,17 @@ static void emit_constant(ls_any_t value, uint8_t dest_reg) {
     uint16_t const_idx = make_constant(value);
     ls_inst_t inst = LS_ABx(LS_OP_LOADK, dest_reg, const_idx);
     emit_inst(inst);
+}
+
+static void patch_jump(size_t offset) {
+    int32_t jump = current_chunk()->size - offset - 1;
+
+    if (jump > (1 << LS_SIZE_Ax) - 1) {
+        error("Too much code to jump over.");
+    }
+
+    ls_inst_t *inst = &current_chunk()->codes[offset];
+    *inst = LS_OP(*inst) == LS_OP_JUMP_IF_FALSE ? LS_ABx(LS_OP_JUMP_IF_FALSE, LS_RA(*inst), jump) : LS_Ax(LS_OP_JUMP, jump);
 }
 
 static void compiler_init(ls_compiler_t *compiler) {
@@ -413,6 +437,61 @@ static void unary(ls_context_t *ctx) {
     ctx->is_temp = true;
 }
 
+static void and_(ls_context_t *ctx) {
+    uint8_t left_reg = ctx->reg;
+    bool left_is_temp = ctx->is_temp;
+
+    uint8_t result_reg = left_is_temp ? left_reg : alloc_reg();
+    if (!left_is_temp) {
+        emit_inst(LS_ABC(LS_OP_MOVE, result_reg, left_reg, 0));
+    }
+
+    size_t end_jump = emit_jump(LS_OP_JUMP_IF_FALSE, result_reg);
+
+    uint8_t saved_top = current->reg_top;
+    ls_context_t right_ctx = {0};
+    parse_precedence(LS_PREC_AND, &right_ctx);
+
+    if (right_ctx.reg != result_reg) {
+        emit_inst(LS_ABC(LS_OP_MOVE, result_reg, right_ctx.reg, 0));
+    }
+    free_regs_to(saved_top);
+
+    patch_jump(end_jump);
+
+    ctx->reg = result_reg;
+    ctx->is_temp = true;
+}
+
+static void or_(ls_context_t *ctx) {
+    uint8_t left_reg = ctx->reg;
+    bool left_is_temp = ctx->is_temp;
+
+    uint8_t result_reg = left_is_temp ? left_reg : alloc_reg();
+    if (!left_is_temp) {
+        emit_inst(LS_ABC(LS_OP_MOVE, result_reg, left_reg, 0));
+    }
+
+    size_t else_jump = emit_jump(LS_OP_JUMP_IF_FALSE, result_reg);
+    size_t end_jump = emit_jump(LS_OP_JUMP, 0);
+
+    patch_jump(else_jump);
+
+    uint8_t saved_top = current->reg_top;
+    ls_context_t right_ctx = {0};
+    parse_precedence(LS_PREC_OR, &right_ctx);
+
+    if (right_ctx.reg != result_reg) {
+        emit_inst(LS_ABC(LS_OP_MOVE, result_reg, right_ctx.reg, 0));
+    }
+    free_regs_to(saved_top);
+
+    patch_jump(end_jump);
+
+    ctx->reg = result_reg;
+    ctx->is_temp = true;
+}
+
 parse_rule_t rules[] = {
     [LS_TOKEN_LEFT_PAREN]    = {grouping, NULL,   LS_PREC_NONE},
     [LS_TOKEN_RIGHT_PAREN]   = {NULL,     NULL,   LS_PREC_NONE},
@@ -445,8 +524,8 @@ parse_rule_t rules[] = {
     [LS_TOKEN_ANY]           = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_FALSE]         = {literal,  NULL,   LS_PREC_NONE},
     [LS_TOKEN_TRUE]          = {literal,  NULL,   LS_PREC_NONE},
-    [LS_TOKEN_AND]           = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_OR]            = {NULL,     NULL,   LS_PREC_NONE},
+    [LS_TOKEN_AND]           = {NULL,     and_,   LS_PREC_AND},
+    [LS_TOKEN_OR]            = {NULL,     or_,    LS_PREC_OR},
     [LS_TOKEN_IF]            = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_ELSE]          = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_FOR]           = {NULL,     NULL,   LS_PREC_NONE},
@@ -543,6 +622,13 @@ static void var_declaration(ls_context_t *ctx) {
     consume(LS_TOKEN_SEMICOLON, "Expected ';' after declaration.");
 }
 
+static void expression_statement(ls_context_t *ctx) {
+    uint8_t saved_top = current->reg_top;
+    expression(ctx);
+    consume(LS_TOKEN_SEMICOLON, "Expect ';' after expression.");
+    free_regs_to(saved_top);
+}
+
 static void block(ls_context_t *ctx) {
     while (!check(LS_TOKEN_RIGHT_BRACE) && !check(LS_TOKEN_EOF)) {
         declaration(ctx);
@@ -551,11 +637,88 @@ static void block(ls_context_t *ctx) {
     consume(LS_TOKEN_RIGHT_BRACE, "Expect '}' after block.");
 }
 
-static void expression_statement(ls_context_t *ctx) {
+static void if_statement(ls_context_t *ctx) {
+    consume(LS_TOKEN_LEFT_PAREN, "Expect '(' after 'if'.");
     uint8_t saved_top = current->reg_top;
-    expression(ctx);
-    consume(LS_TOKEN_SEMICOLON, "Expect ';' after expression.");
+    ls_context_t cond_ctx = {0};
+    expression(&cond_ctx);
+    consume(LS_TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
+
+    size_t then_jump = emit_jump(LS_OP_JUMP_IF_FALSE, cond_ctx.reg);
     free_regs_to(saved_top);
+    statement(ctx);
+
+    if (match(LS_TOKEN_ELSE)) {
+        size_t else_jump = emit_jump(LS_OP_JUMP, 0);
+        patch_jump(then_jump);
+        statement(ctx);
+        patch_jump(else_jump);
+    } else {
+        patch_jump(then_jump);
+    }
+}
+
+static void while_statement(ls_context_t *ctx) {
+    consume(LS_TOKEN_LEFT_PAREN, "Expected '(' after 'while'.");
+    size_t loop_start = current_chunk()->size;
+    uint8_t saved_top = current->reg_top;
+    ls_context_t cond_ctx = {0};
+    expression(&cond_ctx);
+    consume(LS_TOKEN_RIGHT_PAREN, "Expected ')' after condition.");
+
+    size_t exit_jump = emit_jump(LS_OP_JUMP_IF_FALSE, cond_ctx.reg);
+    free_regs_to(saved_top);
+    statement(ctx);
+
+    emit_loop(loop_start);
+    patch_jump(exit_jump);
+}
+
+static void for_statement(ls_context_t *ctx) {
+    begin_scope();
+    consume(LS_TOKEN_LEFT_PAREN, "Expect '(' after 'for'.");
+    if (match(LS_TOKEN_SEMICOLON)) {
+        /* No initializer. */
+    } else if (match(LS_TOKEN_ANY)) {
+        var_declaration(ctx);
+    } else {
+        expression_statement(ctx);
+    }
+
+    size_t loop_start = current_chunk()->size;
+    size_t exit_jump = (size_t)-1;
+    if (!match(LS_TOKEN_SEMICOLON)) {
+        uint8_t saved_top = current->reg_top;
+        ls_context_t cond_ctx = {0};
+        expression(&cond_ctx);
+        consume(LS_TOKEN_SEMICOLON, "Expect ';' after loop condition.");
+
+        exit_jump = emit_jump(LS_OP_JUMP_IF_FALSE, cond_ctx.reg);
+        free_regs_to(saved_top);
+    }
+
+    if (!match(LS_TOKEN_RIGHT_PAREN)) {
+        size_t body_jump = emit_jump(LS_OP_JUMP, 0);
+        size_t increment_start = current_chunk()->size;
+        uint8_t saved_top = current->reg_top;
+        ls_context_t cond_ctx = {0};
+        expression(&cond_ctx);
+        consume(LS_TOKEN_RIGHT_PAREN, "Expect ')' after for clauses.");
+        free_regs_to(saved_top);
+
+        emit_loop(loop_start);
+        loop_start = increment_start;
+        patch_jump(body_jump);
+    }
+
+    statement(ctx);
+    emit_loop(loop_start);
+
+    if (exit_jump != (size_t)-1) {
+        patch_jump(exit_jump);
+    }
+
+    end_scope();
 }
 
 static void print_statement(ls_context_t *ctx) {
@@ -601,10 +764,16 @@ static void declaration(ls_context_t *ctx) {
 static void statement(ls_context_t *ctx) {
     if (match(LS_TOKEN_PRINT)) {
         print_statement(ctx); /* temp */
-    } else if(match(LS_TOKEN_LEFT_BRACE)) {
+    } else if (match(LS_TOKEN_LEFT_BRACE)) {
         begin_scope();
         block(ctx);
         end_scope();
+    } else if (match(LS_TOKEN_IF)) {
+        if_statement(ctx);
+    } else if (match(LS_TOKEN_WHILE)) {
+        while_statement(ctx);
+    } else if (match((LS_TOKEN_FOR))) {
+        for_statement(ctx);
     } else {
         expression_statement(ctx);
     }

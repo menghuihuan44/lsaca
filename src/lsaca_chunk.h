@@ -13,8 +13,8 @@ typedef uint32_t ls_inst_t;
 /*
  * ls_inst_t format:
  *  LS_ABC: [C(8)][B(8)][A(8)][OP(8)]
- *  LS_ABx: [Bx(16)][A(8)][OP(8)]
- *  LS_Ax:  [Ax(24)][OP(8)]
+ *  LS_ABx: [(s)Bx(16)][A(8)][OP(8)]
+ *  LS_Ax:  [(s)Ax(24)][OP(8)]
  */
 
 #define LS_SIZE_OP 8
@@ -33,21 +33,24 @@ typedef uint32_t ls_inst_t;
 #define LS_POS_Bx (LS_POS_A + LS_SIZE_A)
 #define LS_POS_Ax (LS_SIZE_OP)
 
-#define LS_OP(i) ((i) & ((1 << LS_SIZE_OP) - 1))
+#define LS_OP(i) ((ls_inst_t)(i) & ((1 << LS_SIZE_OP) - 1))
 
-#define LS_RA(i) (((i) >> LS_POS_A) & ((1 << LS_SIZE_A) - 1))
-#define LS_RB(i) (((i) >> LS_POS_B) & ((1 << LS_SIZE_B) - 1))
-#define LS_RC(i) (((i) >> LS_POS_C) & ((1 << LS_SIZE_C) - 1))
+#define LS_RA(i) (((ls_inst_t)(i) >> LS_POS_A) & ((1 << LS_SIZE_A) - 1))
+#define LS_RB(i) (((ls_inst_t)(i) >> LS_POS_B) & ((1 << LS_SIZE_B) - 1))
+#define LS_RC(i) (((ls_inst_t)(i) >> LS_POS_C) & ((1 << LS_SIZE_C) - 1))
 
-#define LS_RBx(i) (((i) >> LS_POS_Bx) & ((1 << LS_SIZE_Bx) - 1))
-#define LS_RAx(i) (((i) >> LS_POS_Ax) & ((1 << LS_SIZE_Ax) - 1))
+#define LS_RBx(i) (((ls_inst_t)(i) >> LS_POS_Bx) & ((1 << LS_SIZE_Bx) - 1))
+#define LS_RAx(i) (((ls_inst_t)(i) >> LS_POS_Ax) & ((1 << LS_SIZE_Ax) - 1))
+
+#define LS_RsBx(i) (((LS_RBx(i)) & (1 << (LS_SIZE_Bx - 1))) ? (LS_RBx(i) | (~((1 << LS_SIZE_Bx) - 1))) : LS_RBx(i))
+#define LS_RsAx(i) (((LS_RAx(i)) & (1 << (LS_SIZE_Ax - 1))) ? (LS_RAx(i) | (~((1 << LS_SIZE_Ax) - 1))) : LS_RAx(i))
 
 #define LS_ABC(op, a, b, c) \
     ((ls_inst_t)(op) | ((ls_inst_t)(a) << LS_POS_A) | ((ls_inst_t)(b) << LS_POS_B) | ((ls_inst_t)(c) << LS_POS_C))
 #define LS_ABx(op, a, bx) \
-    ((ls_inst_t)(op) | ((ls_inst_t)(a) << LS_POS_A) | ((ls_inst_t)(bx) << LS_POS_Bx))
+    ((ls_inst_t)(op) | ((ls_inst_t)(a) << LS_POS_A) | (((ls_inst_t)(bx) & ((1 << LS_SIZE_Bx) - 1)) << LS_POS_Bx))
 #define LS_Ax(op, ax) \
-    ((ls_inst_t)(op) | ((ls_inst_t)(ax) << LS_POS_Ax))
+    ((ls_inst_t)(op) | (((ls_inst_t)(ax) & ((1 << LS_SIZE_Ax) - 1)) << LS_POS_Ax))
 
 typedef enum {
     LS_OP_MOVE, /* R(A) := R(B) */
@@ -70,6 +73,9 @@ typedef enum {
     LS_OP_SUB, /* R(A) := R(B) - R(C) */
     LS_OP_MUL, /* R(A) := R(B) * R(C) */
     LS_OP_DIV, /* R(A) := R(B) / R(C) */
+
+    LS_OP_JUMP, /* ip += sAx */
+    LS_OP_JUMP_IF_FALSE, /* if (R(A) == false) ip += sBx */
 
     LS_OP_RETURN, /* return R(A), ..., R(B); if B < A, return nothing */
 

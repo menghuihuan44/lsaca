@@ -12,7 +12,7 @@ typedef struct {
     ls_any_t value;
 } ls_map_entry_t;
 
-typedef struct ls_map_t {
+typedef struct {
     ls_map_entry_t *entries;
     uint8_t *metadatas;
     size_t size;

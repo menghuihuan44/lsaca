@@ -75,7 +75,7 @@ static ls_vm_status run(ls_vm_t *vm) {
             }
             case LS_OP_NEG: {
                 uint32_t a = LS_RA(inst);
-                uint32_t b = LS_RA(inst);
+                uint32_t b = LS_RB(inst);
                 if (!LS_IS_I64(vm->regs[b]) && !LS_IS_F64(vm->regs[b])) {
                     runtime_error(vm, "Negation requires an i64 or f64 operand.");
                     runtime_error(vm, "Value's type is %s.", ls_any_type_name(vm->regs[b]));
@@ -91,7 +91,7 @@ static ls_vm_status run(ls_vm_t *vm) {
             }
             case LS_OP_NOT: {
                 uint32_t a = LS_RA(inst);
-                uint32_t b = LS_RA(inst);
+                uint32_t b = LS_RB(inst);
                 if (!LS_IS_BOOL(vm->regs[b])) {
                     runtime_error(vm, "Logical NOT requires a boolean operand.");
                     runtime_error(vm, "Value's type is %s.", ls_any_type_name(vm->regs[b]));
@@ -361,6 +361,22 @@ static ls_vm_status run(ls_vm_t *vm) {
                     case LS_ANY_F64: vm->regs[a] = LS_F64_ANY(LS_AS_F64(vm->regs[b]) / LS_AS_F64(vm->regs[c])); break;
                     default: break;
                 }
+                break;
+            }
+            case LS_OP_JUMP: {
+                int32_t ax = LS_RsAx(inst);
+                vm->ip += ax;
+                break;
+            }
+            case LS_OP_JUMP_IF_FALSE: {
+                uint32_t a = LS_RA(inst);
+                int32_t bx = LS_RsBx(inst);
+                if (!LS_IS_BOOL(vm->regs[a])) {
+                    runtime_error(&ls_vm, "Condition must be a boolean expression.");
+                    return LS_VM_RUNTIME_ERROR;
+                }
+
+                vm->ip += (!LS_AS_BOOL(vm->regs[a])) * bx;
                 break;
             }
             case LS_OP_RETURN: {
