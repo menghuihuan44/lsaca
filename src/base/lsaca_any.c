@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "src/base/lsaca_any.h"
+#include "src/base/lsaca_object.h"
 
 static const char *any_type_names[] = {
     "null",
@@ -7,10 +8,11 @@ static const char *any_type_names[] = {
     "i64",
     "f64",
     "str",
+    "func",
 };
 
 const char *ls_any_type_name(ls_any_t value) {
-    return any_type_names[value.type];
+    return any_type_names[LS_GET_TYPE(value)];
 }
 
 void ls_any_print(ls_any_t value) {
@@ -33,8 +35,20 @@ void ls_any_print(ls_any_t value) {
         }
         case LS_ANY_STR: {
             ls_string_t *str = LS_AS_STR(value);
-            fwrite(str->c_str, sizeof(char), str->size, stdout);
+            printf("%s", str->c_str);
             break;
+        }
+        case LS_ANY_FUNC: {
+            ls_function_t *func = LS_AS_FUNC(value);
+            if (func->name != NULL) {
+                printf("<func %s>", func->name->c_str);
+            } else {
+                printf("<func script>");
+            }
+            break;
+        }
+        default: {
+            fprintf(stderr, "Can not print it. Its type is %s\n", any_type_names[LS_GET_TYPE(value)]);
         }
     }
 }

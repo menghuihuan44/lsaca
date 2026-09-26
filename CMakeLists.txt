@@ -75,6 +75,7 @@ add_executable(${PROJECT_NAME}
     src/base/lsaca_array.c
     src/base/lsaca_gc.c
     src/base/lsaca_map.c
+    src/base/lsaca_object.c
     src/base/lsaca_string.c
     src/lsaca_chunk.c
     src/lsaca_compiler.c

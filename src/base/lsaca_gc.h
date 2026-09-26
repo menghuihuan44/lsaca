@@ -7,7 +7,6 @@
 extern "C" {
 #endif
 
-typedef struct ls_gc_t ls_gc_t;
 typedef void (*ls_gc_ref_visitor)(void **ref_ptr);
 typedef void (*ls_gc_trace_func)(void *obj_ptr, ls_gc_ref_visitor visitor);
 
@@ -18,12 +17,13 @@ typedef struct {
     ls_gc_trace_func trace;
 } ls_gc_type_t;
 
-typedef struct {
+typedef struct ls_gc_header_t {
+    struct ls_gc_header_t *next;
     size_t size;
     size_t count;
     const ls_gc_type_t *type;
-    void *forward_addr;
-    bool forwarded;
+    uint32_t magic;
+    bool marked;
 } ls_gc_header_t;
 
 typedef struct ls_gc_root_t {
@@ -31,16 +31,12 @@ typedef struct ls_gc_root_t {
     struct ls_gc_root_t *next;
 } ls_gc_root_t;
 
-typedef struct ls_gc_t {
-    void *from_space;
-    void *to_space;
-    size_t space_size;
-
-    void *alloc_ptr;
-    void *alloc_end;
-    void *scan_ptr;
-
+typedef struct {
+    ls_gc_header_t *all_objects;
     ls_gc_root_t *roots;
+
+    size_t total_alloc_size;
+    size_t gc_threshold;
 } ls_gc_t;
 
 extern ls_gc_t ls_gc;

@@ -60,20 +60,31 @@ typedef struct ls_loop_t {
     struct ls_loop_t *enclosing;
 } ls_loop_t;
 
-typedef struct {
+typedef enum {
+    LS_TYPE_FUNCTION,
+    LS_TYPE_SCRIPT,
+} ls_function_type;
+
+typedef struct ls_compiler_t {
     ls_scope_t scopes[LS_UINT8_COUNT];
     size_t scope_count;
     size_t scope_depth;
+
+    struct ls_compiler_t *enclosing;
+
+    ls_function_t *function;
+    ls_function_type type;
+
     uint16_t reg_top;
+    bool has_return_type;
 } ls_compiler_t;
 
 ls_parser_t ls_parser;
 ls_loop_t *current_loop = NULL;
 ls_compiler_t *current = NULL;
-ls_chunk_t *compiling_chunk;
 
 static ls_chunk_t *current_chunk(void) {
-    return compiling_chunk;
+    return &current->function->chunk;
 }
 
 static void error_at(ls_token_t *token, const char *message) {
@@ -134,7 +145,7 @@ static bool match(ls_token_type type) {
 }
 
 static uint8_t alloc_reg(void) {
-    if (current->reg_top >= LS_MAX_REGS) {
+    if (current->reg_top >= LS_UINT8_COUNT) {
         error("Too many registers are in use.");
         return 0; /* I don't know if this makes sense. */
     }
@@ -200,21 +211,31 @@ static void patch_jump(size_t offset) {
     *inst = LS_OP(*inst) == LS_OP_JUMP_IF_FALSE ? LS_ABx(LS_OP_JUMP_IF_FALSE, LS_RA(*inst), jump) : LS_Ax(LS_OP_JUMP, jump);
 }
 
-static void compiler_init(ls_compiler_t *compiler) {
+static void compiler_init(ls_compiler_t *compiler, ls_function_type type) {
     compiler->scope_count = 0;
     compiler->scope_depth = 0;
+    compiler->type = type;
     compiler->reg_top = 0;
+    compiler->enclosing = current;
+    compiler->function = ls_function_create();
+    ls_gc_add_root(&ls_gc, (void **)&compiler->function);
+    compiler->has_return_type = false;
     current = compiler;
 }
 
-static void end_compiler(void) {
-    emit_return(1, 0); /* temp */
+static ls_function_t *end_compiler(void) {
+    emit_return(0, 0);
+    ls_function_t *function = current->function;
 
 #if LS_DISASM_PRINT_CODE != 0
     if (!ls_parser.had_error) {
-        ls_disasm_chunk(current_chunk(), "code");
+        ls_disasm_chunk(current_chunk(), function->name != NULL ? function->name->c_str : "<script>");
     }
 #endif
+
+    ls_gc_remove_root(&ls_gc, (void **)&current->function);
+    current = current->enclosing;
+    return function;
 }
 
 static void begin_scope(void) {
@@ -365,7 +386,9 @@ static void string(ls_context_t *ctx) {
     ctx->reg = alloc_reg();
     ctx->is_temp = true;
     ls_string_t *str = ls_string_create_with_len(ls_parser.previous.start + 1, ls_parser.previous.length - 2);
+    ls_gc_add_root(&ls_gc, (void **)&str);
     emit_constant(LS_STR_ANY(str), ctx->reg);
+    ls_gc_remove_root(&ls_gc, (void **)&str);
 }
 
 static bool identifiers_equal(ls_token_t *a, ls_token_t *b) {
@@ -500,8 +523,58 @@ static void or_(ls_context_t *ctx) {
     ctx->is_temp = true;
 }
 
+static uint8_t argument_count(uint8_t call_reg) {
+    uint8_t arg_count = 0;
+    if (!check(LS_TOKEN_RIGHT_PAREN)) {
+        do {
+            if (arg_count == UINT8_MAX) {
+                error("Can't have more than 255 arguments.");
+                break;
+            }
+            if ((uint32_t)call_reg + 1u + arg_count > UINT8_MAX) {
+                error("Too many registers are in use.");
+                break;
+            }
+
+            uint8_t expected_reg = call_reg + 1 + arg_count;
+            while (current->reg_top <= expected_reg) {
+                alloc_reg();
+            }
+
+            ls_context_t arg_ctx = {0};
+            expression(&arg_ctx);
+            if (arg_ctx.reg != expected_reg) {
+                emit_inst(LS_ABC(LS_OP_MOVE, expected_reg, arg_ctx.reg, 0));
+            }
+
+            free_regs_to(expected_reg + 1);
+            ++arg_count;
+        } while (match(LS_TOKEN_COMMA));
+    }
+    consume(LS_TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
+    return arg_count;
+}
+
+static void call(ls_context_t *ctx) {
+    uint8_t func_reg = ctx->reg;
+    bool func_is_temp = ctx->is_temp;
+
+    uint8_t call_reg = func_is_temp ? func_reg : alloc_reg();
+    if (!func_is_temp) {
+        emit_inst(LS_ABC(LS_OP_MOVE, call_reg, func_reg, 0));
+    }
+
+    uint8_t arg_count = argument_count(call_reg);
+    emit_inst(LS_ABC(LS_OP_CALL, call_reg, arg_count, 0));
+
+    free_regs_to(call_reg + 1);
+
+    ctx->reg = call_reg;
+    ctx->is_temp = true;
+}
+
 parse_rule_t rules[] = {
-    [LS_TOKEN_LEFT_PAREN]    = {grouping, NULL,   LS_PREC_NONE},
+    [LS_TOKEN_LEFT_PAREN]    = {grouping, call,   LS_PREC_CALL},
     [LS_TOKEN_RIGHT_PAREN]   = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_LEFT_BRACE]    = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_RIGHT_BRACE]   = {NULL,     NULL,   LS_PREC_NONE},
@@ -539,7 +612,7 @@ parse_rule_t rules[] = {
     [LS_TOKEN_FOR]           = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_WHILE]         = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_RETURN]        = {NULL,     NULL,   LS_PREC_NONE},
-    [LS_TOKEN_FUN]           = {NULL,     NULL,   LS_PREC_NONE},
+    [LS_TOKEN_FUNC]          = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_CLASS]         = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_THIS]          = {NULL,     NULL,   LS_PREC_NONE},
     [LS_TOKEN_SUPER]         = {NULL,     NULL,   LS_PREC_NONE},
@@ -609,6 +682,14 @@ static void expression(ls_context_t *ctx) {
     parse_precedence(LS_PREC_ASSIGNMENT, ctx);
 }
 
+static void block(ls_context_t *ctx) {
+    while (!check(LS_TOKEN_RIGHT_BRACE) && !check(LS_TOKEN_EOF)) {
+        declaration(ctx);
+    }
+
+    consume(LS_TOKEN_RIGHT_BRACE, "Expect '}' after block.");
+}
+
 static void var_declaration(ls_context_t *ctx) {
     consume(LS_TOKEN_IDENTIFIER, "Expected variable name.");
     declare_variable();
@@ -630,19 +711,72 @@ static void var_declaration(ls_context_t *ctx) {
     consume(LS_TOKEN_SEMICOLON, "Expected ';' after declaration.");
 }
 
+static void func_declaration(ls_context_t *ctx) {
+    consume(LS_TOKEN_IDENTIFIER, "Expect function name.");
+    ls_token_t function_name = ls_parser.previous;
+
+    declare_variable();
+    uint8_t var_reg = current->scopes[current->scope_count - 1].reg;
+    
+    ls_compiler_t function_compiler;
+    compiler_init(&function_compiler, LS_TYPE_FUNCTION);
+
+    current->function->name = ls_string_create_with_len(function_name.start, function_name.length);
+
+    begin_scope();
+
+    consume(LS_TOKEN_LEFT_PAREN, "Expect '(' after function name.");
+    if (!check(LS_TOKEN_RIGHT_PAREN)) {
+        do {
+            consume(LS_TOKEN_ANY, "Currently only 'any' parameter type is supported.");
+            consume(LS_TOKEN_IDENTIFIER, "Expect parameter name.");
+            declare_variable();
+            current->scopes[current->scope_count - 1].ready = true;
+            current->function->arity++;
+            if (current->function->arity > UINT8_MAX) {
+                error_at_current("Can't have more than 255 parameters.");
+            }
+        } while (match(LS_TOKEN_COMMA));
+    }
+    consume(LS_TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
+
+    current->has_return_type = false;
+    if (match(LS_TOKEN_ARROW)) {
+        consume(LS_TOKEN_ANY, "Currently only 'any' return type is supported.");
+        current->has_return_type = true;
+    }
+
+    consume(LS_TOKEN_LEFT_BRACE, "Expect '{' before function body.");
+    ls_context_t dummy_ctx = {0};
+    block(&dummy_ctx);
+
+    if(current->has_return_type) {
+        if (current_chunk()->size == 0 || LS_OP(current_chunk()->codes[current_chunk()->size - 1]) != LS_OP_RETURN) {
+            error("Missing 'return' at end of function with return type.");
+        }
+    } else {
+        emit_inst(LS_ABC(LS_OP_LOADNULL, 0, 0, 0));
+        emit_return(0, 0);
+    }
+
+    end_scope();
+
+    ls_function_t *compiled_function = current->function;
+    ls_gc_add_root(&ls_gc, (void **)&compiled_function);
+    ls_gc_remove_root(&ls_gc, (void **)&current->function);
+    current = current->enclosing;
+
+    emit_constant(LS_FUNC_ANY(compiled_function), var_reg);
+    current->scopes[current->scope_count - 1].ready = true;
+
+    ls_gc_remove_root(&ls_gc, (void **)&compiled_function);
+}
+
 static void expression_statement(ls_context_t *ctx) {
     uint8_t saved_top = current->reg_top;
     expression(ctx);
     consume(LS_TOKEN_SEMICOLON, "Expect ';' after expression.");
     free_regs_to(saved_top);
-}
-
-static void block(ls_context_t *ctx) {
-    while (!check(LS_TOKEN_RIGHT_BRACE) && !check(LS_TOKEN_EOF)) {
-        declaration(ctx);
-    }
-
-    consume(LS_TOKEN_RIGHT_BRACE, "Expect '}' after block.");
 }
 
 static void if_statement(ls_context_t *ctx) {
@@ -771,6 +905,30 @@ static void for_statement(ls_context_t *ctx) {
     end_scope();
 }
 
+static void return_statement(ls_context_t *ctx) {
+    if (match(LS_TOKEN_SEMICOLON)) {
+        if (current->has_return_type) {
+            error("Must return a value in function with return type.");
+        }
+        emit_inst(LS_ABC(LS_OP_LOADNULL, 0, 0, 0));
+        emit_return(0, 0);
+    } else {
+        if (!current->has_return_type) {
+            error("Cannot return a value from a function without return type.");
+        }
+
+        ls_context_t ret_ctx = {0};
+        expression(&ret_ctx);
+        consume(LS_TOKEN_SEMICOLON, "Expect ';' after return value.");
+
+        if (ret_ctx.reg != 0) {
+            emit_inst(LS_ABC(LS_OP_MOVE, 0, ret_ctx.reg, 0));
+            free_regs_to(1);
+        }
+        emit_return(0, 0);
+    }
+}
+
 static void print_statement(ls_context_t *ctx) {
     uint8_t saved_top = current->reg_top;
     expression(ctx);
@@ -790,7 +948,7 @@ static void synchronize(void) {
             case LS_TOKEN_FOR:
             case LS_TOKEN_WHILE:
             case LS_TOKEN_RETURN:
-            case LS_TOKEN_FUN:
+            case LS_TOKEN_FUNC:
             case LS_TOKEN_CLASS:
             case LS_TOKEN_PRINT:
                 return;
@@ -804,6 +962,8 @@ static void synchronize(void) {
 static void declaration(ls_context_t *ctx) {
     if (match(LS_TOKEN_ANY)) {
         var_declaration(ctx);
+    } else if (match(LS_TOKEN_FUNC)) {
+        func_declaration(ctx);
     } else {
         statement(ctx);
     }
@@ -826,18 +986,19 @@ static void statement(ls_context_t *ctx) {
         break_statement(ctx);
     } else if (match(LS_TOKEN_WHILE)) {
         while_statement(ctx);
-    } else if (match((LS_TOKEN_FOR))) {
+    } else if (match(LS_TOKEN_FOR)) {
         for_statement(ctx);
+    } else if (match(LS_TOKEN_RETURN)) {
+        return_statement(ctx);
     } else {
         expression_statement(ctx);
     }
 }
 
-bool ls_compile(const char *source, ls_chunk_t *chunk) {
+ls_function_t *ls_compile(const char *source) {
     ls_scanner_init(source);
     ls_compiler_t compiler;
-    compiler_init(&compiler);
-    compiling_chunk = chunk;
+    compiler_init(&compiler, LS_TYPE_SCRIPT);
 
     ls_parser.had_error = false;
     ls_parser.panic_mode = false;
@@ -849,6 +1010,6 @@ bool ls_compile(const char *source, ls_chunk_t *chunk) {
         declaration(&ctx);
     }
 
-    end_compiler();
-    return !ls_parser.had_error;
+    ls_function_t *function = end_compiler();
+    return ls_parser.had_error ? NULL : function;
 }

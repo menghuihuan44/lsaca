@@ -28,6 +28,8 @@ typedef enum {
     LS_TOKEN_LESS, /* < */
     LS_TOKEN_LESS_EQUAL, /* <= */
 
+    LS_TOKEN_ARROW, /* -> */
+
     LS_TOKEN_IDENTIFIER,
     LS_TOKEN_STRING,
     LS_TOKEN_INT64,
@@ -46,7 +48,7 @@ typedef enum {
     LS_TOKEN_CONTINUE,
     LS_TOKEN_BREAK,
     LS_TOKEN_RETURN,
-    LS_TOKEN_FUN,
+    LS_TOKEN_FUNC,
     LS_TOKEN_CLASS,
     LS_TOKEN_THIS,
     LS_TOKEN_SUPER,

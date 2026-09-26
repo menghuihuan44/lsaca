@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-bool ls_compile(const char *source, ls_chunk_t *chunk);
+ls_function_t *ls_compile(const char *source);
 
 #ifdef __cplusplus
 }

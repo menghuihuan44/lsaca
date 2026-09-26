@@ -77,6 +77,7 @@ typedef enum {
     LS_OP_JUMP, /* ip += sAx */
     LS_OP_JUMP_IF_FALSE, /* if (R(A) == false) ip += sBx */
 
+    LS_OP_CALL, /* R(A) := call R(A) with args R(A + 1), ..., R(A + B) */
     LS_OP_RETURN, /* return R(A), ..., R(B); if B < A, return nothing */
 
     LS_OP_PRINT, /* print R(A); it is a temp opcode */

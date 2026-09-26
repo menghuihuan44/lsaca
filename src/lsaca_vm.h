@@ -2,18 +2,25 @@
 #define LSACA_VM_H
 
 #include "src/lsaca_chunk.h"
+#include "src/base/lsaca_object.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define LS_MAX_REGS 256
+#define LS_MAX_FRAMES 64
+#define LS_MAX_STACK (LS_MAX_FRAMES * LS_UINT8_COUNT)
 
 typedef struct {
-    ls_chunk_t *chunk;
+    ls_function_t *function;
     ls_inst_t *ip;
+    ls_any_t *regs;
+} ls_call_frame_t;
 
-    ls_any_t regs[LS_MAX_REGS];
+typedef struct {
+    ls_any_t stack[LS_MAX_STACK];
+    ls_call_frame_t frames[LS_MAX_FRAMES];
+    size_t frame_count;
 } ls_vm_t;
 
 typedef enum {

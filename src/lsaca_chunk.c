@@ -16,8 +16,8 @@ void ls_chunk_deinit(ls_chunk_t *chunk) {
     if (!chunk) return;
 
     ls_array_deinit(&chunk->constants);
-    ls_gc_remove_root(&ls_gc, (void **)&chunk->codes);
-    ls_gc_remove_root(&ls_gc, (void **)&chunk->lines);
+    chunk->codes = NULL;
+    chunk->lines = NULL;
     chunk->size = 0;
     chunk->capacity = 0;
 }
@@ -33,21 +33,13 @@ void ls_chunk_append(ls_chunk_t *chunk, ls_inst_t code, size_t line) {
         chunk->codes = (ls_inst_t *)ls_gc_realloc(&ls_gc, chunk->codes, new_capa * sizeof(ls_inst_t));
         if (!chunk->codes) {
             chunk->codes = old_codes;
-            ls_gc_remove_root(&ls_gc, (void **)&chunk->codes);
             return;
-        }
-        if (chunk->capacity == 0) {
-            ls_gc_add_root(&ls_gc, (void **)&chunk->codes);
         }
 
         chunk->lines = (size_t *)ls_gc_realloc(&ls_gc, chunk->lines, new_capa * sizeof(size_t));
         if (!chunk->lines) {
             chunk->lines = old_lines;
-            ls_gc_remove_root(&ls_gc, (void **)&chunk->lines);
             return;
-        }
-        if (chunk->capacity == 0) {
-            ls_gc_add_root(&ls_gc, (void **)&chunk->lines);
         }
 
         chunk->capacity = new_capa;

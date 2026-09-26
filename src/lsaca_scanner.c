@@ -139,7 +139,7 @@ static ls_token_type identifier_type(void) {
                 switch (ls_scanner.start[1]) {
                     case 'a': return check_keyword(2, 3, "lse", LS_TOKEN_FALSE);
                     case 'o': return check_keyword(2, 1, "r", LS_TOKEN_FOR);
-                    case 'u': return check_keyword(2, 1, "n", LS_TOKEN_FUN);
+                    case 'u': return check_keyword(2, 2, "nc", LS_TOKEN_FUNC);
                 }
             }
             break;
@@ -221,7 +221,7 @@ ls_token_t ls_scanner_scan_token(void) {
         case ';': return make_token(LS_TOKEN_SEMICOLON);
         case ',': return make_token(LS_TOKEN_COMMA);
         case '.': return make_token(LS_TOKEN_DOT);
-        case '-': return make_token(LS_TOKEN_MINUS);
+        case '-': return make_token(match('>') ? LS_TOKEN_ARROW : LS_TOKEN_MINUS);
         case '+': return make_token(LS_TOKEN_PLUS);
         case '/': return make_token(LS_TOKEN_SLASH);
         case '*': return make_token(LS_TOKEN_STAR);

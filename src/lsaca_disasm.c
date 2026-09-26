@@ -27,6 +27,7 @@ static const char *opcode_names[] = {
     "JUMP",
     "JUMP_IF_FALSE",
 
+    "CALL",
     "RETURN",
 
     "PRINT",
@@ -137,6 +138,8 @@ size_t ls_disasm_inst(ls_chunk_t *chunk, size_t offset) {
             return disasm_sAx(chunk, offset);
         case LS_OP_JUMP_IF_FALSE:
             return disasm_AsBx(chunk, offset);
+        case LS_OP_CALL:
+            return disasm_ABC(chunk, offset);
         case LS_OP_RETURN:
             return disasm_ABC(chunk, offset);
         /* temp */
