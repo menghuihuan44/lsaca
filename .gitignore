@@ -25,6 +25,9 @@ build.ninja
 .ninja_log
 rules.ninja
 
+# Generated documentation site
+_site/
+
 # Editor / OS noise
 *.swp
 *~

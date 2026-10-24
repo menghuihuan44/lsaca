@@ -1822,6 +1822,200 @@ LsString* ls_fmt_f32_debug(LsString* acc, float v) {
     return ls_rt_format_float(acc, true, (double)v, true);
 }
 
+/* ====================================================================== */
+/* Formatting: precision, sign and padding                                */
+/* ====================================================================== */
+
+static size_t ls_rt_encode_codepoint(uint32_t codepoint, char out[4]) {
+    if (codepoint <= 0x7FU) {
+        out[0] = (char)codepoint;
+        return 1;
+    }
+    if (codepoint <= 0x7FFU) {
+        out[0] = (char)(0xC0U | (codepoint >> 6));
+        out[1] = (char)(0x80U | (codepoint & 0x3FU));
+        return 2;
+    }
+    if (codepoint <= 0xFFFFU) {
+        out[0] = (char)(0xE0U | (codepoint >> 12));
+        out[1] = (char)(0x80U | ((codepoint >> 6) & 0x3FU));
+        out[2] = (char)(0x80U | (codepoint & 0x3FU));
+        return 3;
+    }
+    out[0] = (char)(0xF0U | (codepoint >> 18));
+    out[1] = (char)(0x80U | ((codepoint >> 12) & 0x3FU));
+    out[2] = (char)(0x80U | ((codepoint >> 6) & 0x3FU));
+    out[3] = (char)(0x80U | (codepoint & 0x3FU));
+    return 4;
+}
+
+/* Number of Unicode scalar values in a String, counted by UTF-8 lead bytes.
+ * Malformed UTF-8 cannot be built by the language itself, so a byte count is
+ * an adequate fallback here. */
+static size_t ls_rt_codepoint_count(const LsString* s) {
+    size_t i;
+    size_t count = 0;
+
+    for (i = 0; i < s->len; i += 1) {
+        if (((unsigned char)s->data[i] & 0xC0U) != 0x80U) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+LsString* ls_fmt_i64_signed(LsString* acc, int64_t v, bool plus) {
+    if (plus && v >= 0) {
+        acc = ls_fmt_append(acc, "+", 1);
+    }
+    return ls_fmt_i64(acc, v);
+}
+
+LsString* ls_fmt_u64_signed(LsString* acc, uint64_t v, bool plus) {
+    if (plus) {
+        acc = ls_fmt_append(acc, "+", 1);
+    }
+    return ls_fmt_u64(acc, v);
+}
+
+static LsString* ls_rt_append_float_special(LsString* acc, double v,
+                                            bool plus) {
+    bool negative = v < 0;
+
+    if (isnan(v)) {
+        if (plus) {
+            acc = ls_fmt_append(acc, "+", 1);
+        }
+        return ls_fmt_append(acc, "NaN", 3);
+    }
+    if (negative) {
+        return ls_fmt_append(acc, "-inf", 4);
+    }
+    if (plus) {
+        acc = ls_fmt_append(acc, "+", 1);
+    }
+    return ls_fmt_append(acc, "inf", 3);
+}
+
+/* Fixed-notation float formatting with "precision" digits after the decimal
+ * point. printf("%.*f") gives the exact rounding we need; the buffer is sized
+ * from the maximum decimal exponent of a double (308 digits before the point)
+ * plus the requested precision. */
+static LsString* ls_rt_format_float_prec(LsString* acc, double v,
+                                        int32_t precision, bool plus) {
+    size_t capacity;
+    char* buf;
+    int written;
+
+    if (isnan(v) || isinf(v)) {
+        return ls_rt_append_float_special(acc, v, plus);
+    }
+    if (plus && !(v < 0) && signbit(v) == 0) {
+        acc = ls_fmt_append(acc, "+", 1);
+    }
+    if (precision < 0) {
+        return ls_rt_format_float(acc, false, v, false);
+    }
+    if ((uint64_t)precision > 10000U) {
+        precision = 10000;
+    }
+    capacity = 340U + (size_t)precision;
+    buf = (char*)malloc(capacity);
+    if (buf == NULL) {
+        ls_rt_alloc_failure(capacity);
+    }
+    written = snprintf(buf, capacity, "%.*f", (int)precision, v);
+    if (written > 0) {
+        acc = ls_fmt_append(acc, buf, (size_t)written);
+    }
+    free(buf);
+    return acc;
+}
+
+LsString* ls_fmt_f64_prec(LsString* acc, double v, int32_t precision,
+                          bool plus) {
+    return ls_rt_format_float_prec(acc, v, precision, plus);
+}
+
+LsString* ls_fmt_f32_prec(LsString* acc, float v, int32_t precision,
+                          bool plus) {
+    return ls_rt_format_float_prec(acc, (double)v, precision, plus);
+}
+
+LsString* ls_fmt_str_prec(LsString* acc, const LsString* v, int32_t precision) {
+    size_t i = 0;
+    size_t kept = 0;
+
+    if (precision < 0 || (size_t)precision >= ls_rt_codepoint_count(v)) {
+        return ls_format_push_str(acc, v);
+    }
+    while (i < v->len && kept < (size_t)precision) {
+        i += 1;
+        while (i < v->len && ((unsigned char)v->data[i] & 0xC0U) == 0x80U) {
+            i += 1;
+        }
+        kept += 1;
+    }
+    return ls_fmt_append(acc, v->data, i);
+}
+
+static LsString* ls_rt_pad_zero(LsString* acc, const LsString* piece,
+                                size_t padding) {
+    size_t i;
+
+    if (piece->len > 0 && (piece->data[0] == '+' || piece->data[0] == '-')) {
+        acc = ls_fmt_append(acc, piece->data, 1);
+        for (i = 0; i < padding; i += 1) {
+            acc = ls_fmt_append(acc, "0", 1);
+        }
+        return ls_fmt_append(acc, piece->data + 1, piece->len - 1);
+    }
+    for (i = 0; i < padding; i += 1) {
+        acc = ls_fmt_append(acc, "0", 1);
+    }
+    return ls_format_push_str(acc, piece);
+}
+
+LsString* ls_fmt_apply_width(LsString* acc, LsString* piece, int64_t width,
+                             int32_t align, uint32_t fill, bool zero_pad) {
+    size_t count;
+    size_t padding;
+    size_t left = 0;
+    size_t right = 0;
+    size_t i;
+    char fill_bytes[4];
+    size_t fill_len;
+
+    if (width <= 1) {
+        return ls_format_push_str(acc, piece);
+    }
+    count = ls_rt_codepoint_count(piece);
+    if ((size_t)width <= count) {
+        return ls_format_push_str(acc, piece);
+    }
+    padding = (size_t)width - count;
+    if (zero_pad) {
+        return ls_rt_pad_zero(acc, piece, padding);
+    }
+    if (align == LS_ALIGN_RIGHT) {
+        left = padding;
+    } else if (align == LS_ALIGN_CENTER) {
+        left = padding / 2;
+        right = padding - left;
+    } else {
+        right = padding;
+    }
+    fill_len = ls_rt_encode_codepoint(fill, fill_bytes);
+    for (i = 0; i < left; i += 1) {
+        acc = ls_fmt_append(acc, fill_bytes, fill_len);
+    }
+    acc = ls_format_push_str(acc, piece);
+    for (i = 0; i < right; i += 1) {
+        acc = ls_fmt_append(acc, fill_bytes, fill_len);
+    }
+    return acc;
+}
+
 /* Rust-style Debug quoting for strings: escape quote, backslash and the
  * common control characters; other control bytes use \u{...}. */
 LsString* ls_fmt_debug_string(LsString* acc, const LsString* v) {

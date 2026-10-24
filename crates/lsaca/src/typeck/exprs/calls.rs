@@ -4,7 +4,8 @@ use crate::ast::{self, ExprKind};
 use crate::hir::{HBuiltinAssoc, HBuiltinFn, HMacroKind};
 use crate::span::Span;
 use crate::typeck::builtins::{
-    FormatPiece, builtin_assoc, builtin_fn, builtin_method, parse_alias, parse_format_string,
+    FormatPiece, FormatValueKind, builtin_assoc, builtin_fn, builtin_method, format_spec_error,
+    parse_alias, parse_format_string,
 };
 use crate::typeck::check::Checker;
 use crate::typeck::items::{TypeKey, closest_name};
@@ -565,6 +566,37 @@ impl<'a> Checker<'a> {
                     span,
                 )
             }
+            HBuiltinAssoc::BoxNew => {
+                let mut explicit: Vec<ITy> = Vec::new();
+                for generic in generics {
+                    let resolved = self
+                        .resolve_ty(generic, self.current_self_key())
+                        .unwrap_or_else(|| self.infer.fresh_var());
+                    explicit.push(resolved);
+                }
+                let inner = match explicit.first() {
+                    Some(inner) => inner.clone(),
+                    None => match hint {
+                        Some(hint) => match self.infer.resolve(hint) {
+                            ITy::Box(inner) => (*inner).clone(),
+                            _ => self.infer.fresh_var(),
+                        },
+                        None => self.infer.fresh_var(),
+                    },
+                };
+                let arg_exprs = self.check_call_args(std::slice::from_ref(&inner), args, span);
+                let ret = ITy::box_(inner.clone());
+                self.apply_hint(&ret, hint);
+                TExpr::new(
+                    ret,
+                    TExprKind::BuiltinAssoc {
+                        func,
+                        args: arg_exprs,
+                        type_args: vec![inner],
+                    },
+                    span,
+                )
+            }
             HBuiltinAssoc::VecNew | HBuiltinAssoc::VecWithCapacity => {
                 let mut type_args: Vec<ITy> = Vec::new();
                 for generic in generics {
@@ -874,6 +906,7 @@ impl<'a> Checker<'a> {
                 "get", "extend", "reverse",
             ],
             ITy::Rc(_) => &["get", "set", "strong_count"],
+            ITy::Box(_) => &["get", "set"],
             ITy::Option(_) => &["is_some", "is_none", "unwrap", "unwrap_or", "expect"],
             ITy::Result(_, _) => &[
                 "is_ok",
@@ -959,7 +992,7 @@ impl<'a> Checker<'a> {
                     vec![TFormatPart {
                         kind: TFormatPartKind::Arg {
                             expr: Box::new(value),
-                            debug: false,
+                            spec: crate::hir::FormatSpec::plain(),
                         },
                     }]
                 } else {
@@ -1080,6 +1113,29 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// Classify an already type checked format argument so that format
+    /// specifiers can be validated before literal variables are defaulted.
+    fn format_value_kind(&self, ty: &ITy) -> FormatValueKind {
+        match ty {
+            ITy::String => FormatValueKind::String,
+            ITy::Bool => FormatValueKind::Bool,
+            ITy::Int(int_ty) => {
+                if int_ty.is_signed() {
+                    FormatValueKind::SignedInt
+                } else {
+                    FormatValueKind::UnsignedInt
+                }
+            }
+            ITy::Float(_) => FormatValueKind::Float,
+            ITy::Var(id) => match self.infer.var_kind(*id) {
+                VarKind::IntLiteral => FormatValueKind::SignedInt,
+                VarKind::FloatLiteral => FormatValueKind::Float,
+                VarKind::General => FormatValueKind::Other,
+            },
+            _ => FormatValueKind::Other,
+        }
+    }
+
     fn check_format_parts(&mut self, m: &ast::MacroCall, span: Span) -> Option<Vec<TFormatPart>> {
         if m.args.is_empty() {
             return Some(Vec::new());
@@ -1122,13 +1178,18 @@ impl<'a> Checker<'a> {
                         FormatPiece::Literal(text) => parts.push(TFormatPart {
                             kind: TFormatPartKind::Literal(text),
                         }),
-                        FormatPiece::Hole { debug } => {
+                        FormatPiece::Hole { spec } => {
                             if arg_index < m.args.len() {
                                 let expr = self.check_expr(&m.args[arg_index], None);
+                                if let Some(message) =
+                                    format_spec_error(&spec, self.format_value_kind(&expr.ty))
+                                {
+                                    self.error_code(message, m.args[arg_index].span, "E0001");
+                                }
                                 parts.push(TFormatPart {
                                     kind: TFormatPartKind::Arg {
                                         expr: Box::new(expr),
-                                        debug,
+                                        spec,
                                     },
                                 });
                             }

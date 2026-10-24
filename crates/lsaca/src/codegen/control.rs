@@ -179,8 +179,19 @@ impl<'a> Gen<'a> {
                 self.bind_pattern(inner, &sub);
             }
             HPatKind::Or(alternatives) => {
-                if let Some(first) = alternatives.first() {
-                    self.bind_pattern(first, source);
+                // Bind the variables from whichever alternative matched.
+                // Each alternative is re-tested here: the pattern tests are
+                // side-effect free, and re-testing keeps the binding pass
+                // independent from the C scopes created by the test pass.
+                for alternative in alternatives {
+                    let matched = self.new_plain(&Ty::Bool, "o");
+                    self.w.line(format!("{} = true;", matched));
+                    self.gen_match_tests(alternative, source, &matched);
+                    self.w.line(format!("if ({}) {{", matched));
+                    self.w.indent();
+                    self.bind_pattern(alternative, source);
+                    self.w.dedent();
+                    self.w.line("}");
                 }
             }
         }
@@ -294,13 +305,17 @@ impl<'a> Gen<'a> {
             self.predeclare_pattern(&arm.pat);
             let matched = self.new_plain(&Ty::Bool, "m");
             self.w.line(format!("{} = true;", matched));
+            // The guard result is tracked in its own flag outside the arm
+            // body: a pattern match alone must not skip the remaining arms
+            // when the guard evaluates to false.
+            let pass = self.new_plain(&Ty::Bool, "g");
+            self.w.line(format!("{} = false;", pass));
             self.gen_match_tests(&arm.pat, &scrutinee_value, &matched);
             self.w.line(format!("if ({}) {{", matched));
             self.w.indent();
             self.bind_pattern(&arm.pat, &scrutinee_value);
             let guard_frame = self.frames.len();
             self.push_frame();
-            let pass = self.new_plain(&Ty::Bool, "g");
             match &arm.guard {
                 Some(guard) => self.gen_into(guard, &pass),
                 None => self.w.line(format!("{} = true;", pass)),
@@ -320,7 +335,9 @@ impl<'a> Gen<'a> {
             self.w.line("}");
             self.frame_cleanup(arm_frame);
             self.pop_frame();
-            self.w.line(format!("if ({}) break;", matched));
+            // Continue with the next arm unless both the pattern matched
+            // and the guard accepted it.
+            self.w.line(format!("if ({} && {}) break;", matched, pass));
             self.w.dedent();
             self.w.line("}");
             self.block_terminated = false;
@@ -436,17 +453,23 @@ impl<'a> Gen<'a> {
                 self.w.line("}");
             }
             HPatKind::Or(alternatives) => {
-                self.w.line(format!("if (!{}) {{", matched));
+                // Every alternative is tested independently and the arm
+                // matches if at least one succeeds. Leaving `matched` at its
+                // incoming value would make the arm match unconditionally.
+                self.w.line(format!("if ({}) {{", matched));
                 self.w.indent();
+                let mut alternatives_matched = Vec::with_capacity(alternatives.len());
                 for alternative in alternatives {
                     let alternative_matched = self.new_plain(&Ty::Bool, "o");
                     self.w.line(format!("{} = true;", alternative_matched));
                     self.gen_match_tests(alternative, source, &alternative_matched);
-                    self.w.line(format!(
-                        "if ({}) {{ {} = true; }}",
-                        alternative_matched, matched
-                    ));
+                    alternatives_matched.push(alternative_matched);
                 }
+                self.w.line(format!(
+                    "{} = ({});",
+                    matched,
+                    alternatives_matched.join(" || ")
+                ));
                 self.w.dedent();
                 self.w.line("}");
             }

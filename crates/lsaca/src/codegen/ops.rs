@@ -78,6 +78,14 @@ pub fn eq_expr(names: &TypeNames, ty: &Ty, a: &str, b: &str) -> String {
         // Scalars compare directly; Rc handles compare by identity (their C
         // representation is the cell pointer).
         format!("(({}) == ({}))", a, b)
+    } else if let Ty::Box(inner) = ty {
+        // Boxes compare by payload value, like the value they box.
+        eq_expr(
+            names,
+            inner,
+            &format!("({})->payload", a),
+            &format!("({})->payload", b),
+        )
     } else if ty.is_fn() {
         format!(
             "(({}.env == {}.env) && ({} != NULL) && ({}.fn_ptr == {}.fn_ptr))",

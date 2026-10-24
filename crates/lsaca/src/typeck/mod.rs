@@ -236,6 +236,12 @@ mod tests {
         })
     }
 
+    fn has_note(diagnostics: &Diagnostics, needle: &str) -> bool {
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.notes.iter().any(|note| note.contains(needle)))
+    }
+
     fn main_fn(program: &hir::Program) -> &hir::HFn {
         &program.fns[program.main_fn]
     }
@@ -429,6 +435,44 @@ fn main() { }"#,
         let diagnostics = expect_errors(r#"fn main() { let x: i64 = "text"; }"#);
         assert!(has_code(&diagnostics, "E0308"));
         assert!(has_message(&diagnostics, "mismatched types"));
+    }
+
+    #[test]
+    fn conditions_must_have_type_bool() {
+        // An annotated integer is rejected.
+        let diagnostics =
+            expect_errors(r#"fn main() { let n: i64 = 3; if n { println!("yes"); } }"#);
+        assert!(has_code(&diagnostics, "E0308"));
+        assert!(has_note(&diagnostics, "expected bool, found i64"));
+        // So is an unannotated binding whose type is still an integer
+        // inference variable, and a bare numeric literal.
+        let diagnostics = expect_errors("fn main() { let n = 3; if n { } }");
+        assert!(has_code(&diagnostics, "E0308"));
+        assert!(has_note(&diagnostics, "expected bool, found {integer}"));
+        let diagnostics = expect_errors("fn main() { while 3 { } }");
+        assert!(has_code(&diagnostics, "E0308"));
+        // Logical operators and match guards use the same rule.
+        let diagnostics = expect_errors("fn main() { let n = 1; let x = n && true; }");
+        assert!(has_code(&diagnostics, "E0308"));
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let n = 4;
+    let result = match n { n if n => 1, _ => 0 };
+    println!("{}", result);
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0308"));
+        // Genuine boolean conditions still type check, including one
+        // whose type is inferred as `bool`.
+        expect_ok(
+            r#"fn main() {
+    let flag = true;
+    if flag { println!("yes"); }
+    let mut n = 0;
+    while n < 3 { n += 1; }
+    match flag { b if b => println!("{}", b), _ => { } }
+}"#,
+        );
     }
 
     #[test]

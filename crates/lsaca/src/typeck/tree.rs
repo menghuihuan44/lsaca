@@ -4,7 +4,8 @@
 //! lowering step needs (mutability of places, closure capture expressions).
 
 use crate::hir::{
-    HBinaryOp, HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HFieldRef, HMacroKind, HUnaryOp,
+    FormatSpec, HBinaryOp, HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HFieldRef, HMacroKind,
+    HUnaryOp,
 };
 use crate::span::Span;
 
@@ -194,7 +195,7 @@ pub struct TFormatPart {
 #[derive(Clone, Debug)]
 pub enum TFormatPartKind {
     Literal(String),
-    Arg { expr: Box<TExpr>, debug: bool },
+    Arg { expr: Box<TExpr>, spec: FormatSpec },
 }
 
 #[derive(Clone, Debug)]

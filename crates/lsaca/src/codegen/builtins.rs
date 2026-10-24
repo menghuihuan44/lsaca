@@ -5,8 +5,8 @@
 //! following the same ownership protocol as ordinary expressions.
 
 use crate::hir::{
-    HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HExpr, HFormatPart, HFormatPartKind, HMacroCall,
-    HMacroKind,
+    FormatAlign, FormatSpec, HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HExpr, HFormatPart,
+    HFormatPartKind, HMacroCall, HMacroKind,
 };
 use crate::span::Span;
 use crate::types::{FloatTy, Ty};
@@ -655,6 +655,34 @@ impl<'a> Gen<'a> {
                 let ctype = self.ctype(ty);
                 self.line(format!("{} = ({})ls_refcount({});", target, ctype, place));
             }
+            HBuiltinMethod::BoxGet => {
+                if let Ty::Box(inner) = &receiver.ty {
+                    let place = self.gen_place(receiver);
+                    let suffix = self.names.mangle(inner);
+                    let ctype = self.ctype(ty);
+                    self.line(format!(
+                        "{} = ({})lsaca_box_get_{}({});",
+                        target, ctype, suffix, place
+                    ));
+                } else {
+                    let zero = self.zero_expr(ty);
+                    self.line(format!("{} = {};", target, zero));
+                }
+            }
+            HBuiltinMethod::BoxSet => {
+                if let (Ty::Box(inner), Some(arg)) = (&receiver.ty, args.first()) {
+                    let place = self.gen_place(receiver);
+                    let suffix = self.names.mangle(inner);
+                    // The cell takes ownership of the new payload, so the
+                    // generated code must not release the argument again.
+                    let value = self.gen_owned(arg);
+                    self.line(format!("lsaca_box_set_{}({}, {});", suffix, place, value));
+                    self.mark_moved(&value);
+                    self.assign_unit(target);
+                } else {
+                    self.assign_unit(target);
+                }
+            }
             HBuiltinMethod::ResErr => {
                 let place = self.gen_place(receiver);
                 let err_ty = result_err_type(&receiver.ty);
@@ -715,6 +743,21 @@ impl<'a> Gen<'a> {
                     ));
                 }
             }
+            HBuiltinAssoc::BoxNew => {
+                if let (Some(arg), Ty::Box(inner)) = (args.first(), ty) {
+                    // The new cell owns the payload: transfer ownership
+                    // instead of releasing the argument at the end of the
+                    // statement.
+                    let value = self.gen_owned(arg);
+                    self.mark_moved(&value);
+                    let suffix = self.names.mangle(inner);
+                    let ctype = self.ctype(ty);
+                    self.line(format!(
+                        "{} = ({})lsaca_box_new_{}({});",
+                        target, ctype, suffix, value
+                    ));
+                }
+            }
             HBuiltinAssoc::VecNew => {
                 let zero = self.zero_expr(ty);
                 self.line(format!("{} = {};", target, zero));
@@ -739,8 +782,10 @@ impl<'a> Gen<'a> {
                     } else {
                         let element = vec_element(ty);
                         let element_ctype = self.ctype(&element);
+                        // `ls_vec_alloc` returns `void*`: cast to the element pointer type
+                        // exactly like the other vector constructors do.
                         self.line(format!(
-                            "{}.data = ({})ls_vec_alloc((size_t)({}), sizeof({}));",
+                            "{}.data = ({}*)ls_vec_alloc((size_t)({}), sizeof({}));",
                             target, element_ctype, capacity, element_ctype
                         ));
                         self.line(format!("{}.cap = (size_t)({});", target, capacity));
@@ -1073,17 +1118,131 @@ impl<'a> Gen<'a> {
                         util::c_string_literal(text)
                     ));
                 }
-                HFormatPartKind::Arg { expr, debug } => {
+                HFormatPartKind::Arg { expr, spec } => {
                     let value = self.gen_owned(expr);
-                    if *debug {
-                        if let Some(statement) =
-                            ops::debug_append_statement(self.names, &expr.ty, accumulator, &value)
-                        {
-                            self.line(statement);
-                        }
-                    } else {
+                    if spec.is_plain() {
                         self.append_display(accumulator, &expr.ty, &value);
+                    } else {
+                        self.append_specified(accumulator, &expr.ty, &value, spec);
                     }
+                }
+            }
+        }
+    }
+
+    /// Append one format argument that carries a non-plain format specifier.
+    ///
+    /// Without a width the value is rendered straight into the accumulator.
+    /// With a width the rendered text first goes into a temporary piece so the
+    /// runtime can pad it (and so the sign and leading zeros stay in front of
+    /// any zero padding).
+    fn append_specified(&mut self, accumulator: &str, ty: &Ty, value: &str, spec: &FormatSpec) {
+        let has_padding = spec.width.is_some() || spec.align.is_some();
+        if !has_padding {
+            if spec.debug {
+                if let Some(statement) =
+                    ops::debug_append_statement(self.names, ty, accumulator, value)
+                {
+                    self.line(statement);
+                }
+            } else {
+                self.append_display_spec(accumulator, ty, value, spec);
+            }
+            return;
+        }
+        self.push_frame();
+        // The piece is a real temporary: declare it through declare_temp so the
+        // frame cleanup releases it like every other owned handle.
+        let piece = self.declare_temp(&Ty::String);
+        self.line(format!("{} = ls_format_begin(0);", piece));
+        if spec.debug {
+            if let Some(statement) = ops::debug_append_statement(self.names, ty, &piece, value) {
+                self.line(statement);
+            }
+        } else {
+            self.append_display_spec(&piece, ty, value, spec);
+        }
+        let width = spec.width.unwrap_or(0);
+        let align = match spec.align {
+            Some(FormatAlign::Left) => "LS_ALIGN_LEFT",
+            Some(FormatAlign::Center) => "LS_ALIGN_CENTER",
+            Some(FormatAlign::Right) => "LS_ALIGN_RIGHT",
+            None if ty.is_integer() || ty.is_float() => "LS_ALIGN_RIGHT",
+            None => "LS_ALIGN_LEFT",
+        };
+        self.line(format!(
+            "{} = ls_fmt_apply_width({}, {}, {}, {}, {}, {});",
+            accumulator,
+            accumulator,
+            piece,
+            width,
+            align,
+            spec.fill as u32,
+            if spec.zero_pad { "true" } else { "false" }
+        ));
+        self.frame_cleanup(self.frame_index());
+        self.pop_frame();
+    }
+
+    /// Display one value with the precision and sign parts of a format
+    /// specification; padding is applied by the caller.
+    fn append_display_spec(&mut self, accumulator: &str, ty: &Ty, value: &str, spec: &FormatSpec) {
+        let plus = if spec.sign_plus { "true" } else { "false" };
+        let precision = spec.precision.unwrap_or(-1);
+        match ty {
+            Ty::Unit => self.line(format!(
+                "{} = ls_format_push_cstr({}, {});",
+                accumulator,
+                accumulator,
+                util::c_string_literal("()")
+            )),
+            Ty::String => {
+                if spec.precision.is_some() {
+                    self.line(format!(
+                        "{} = ls_fmt_str_prec({}, {}, {});",
+                        accumulator, accumulator, value, precision
+                    ));
+                } else {
+                    self.line(format!(
+                        "{} = ls_format_push_str({}, {});",
+                        accumulator, accumulator, value
+                    ));
+                }
+            }
+            Ty::Bool => self.line(format!(
+                "{} = ls_fmt_bool({}, {});",
+                accumulator, accumulator, value
+            )),
+            Ty::Int(int_ty) => {
+                if int_ty.is_signed() {
+                    self.line(format!(
+                        "{} = ls_fmt_i64_signed({}, (int64_t)({}), {});",
+                        accumulator, accumulator, value, plus
+                    ));
+                } else {
+                    self.line(format!(
+                        "{} = ls_fmt_u64_signed({}, (uint64_t)({}), {});",
+                        accumulator, accumulator, value, plus
+                    ));
+                }
+            }
+            Ty::Float(FloatTy::F32) => self.line(format!(
+                "{} = ls_fmt_f32_prec({}, (float)({}), {}, {});",
+                accumulator, accumulator, value, precision, plus
+            )),
+            Ty::Float(FloatTy::F64) => self.line(format!(
+                "{} = ls_fmt_f64_prec({}, (double)({}), {}, {});",
+                accumulator, accumulator, value, precision, plus
+            )),
+            Ty::Box(inner) => {
+                let inner_value = format!("({})->payload", value);
+                self.append_display_spec(accumulator, inner, &inner_value, spec);
+            }
+            _ => {
+                if let Some(statement) =
+                    ops::debug_append_statement(self.names, ty, accumulator, value)
+                {
+                    self.line(statement);
                 }
             }
         }
@@ -1128,6 +1287,11 @@ impl<'a> Gen<'a> {
                     accumulator, accumulator, value
                 )),
             },
+            Ty::Box(inner) => {
+                // Like Rust, displaying a box displays the value inside it.
+                self.append_display(accumulator, inner, &format!("({})->payload", value));
+                None
+            }
             _ => ops::debug_append_statement(self.names, ty, accumulator, value),
         };
         if let Some(statement) = statement {

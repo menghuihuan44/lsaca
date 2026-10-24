@@ -953,8 +953,16 @@ impl<'a> Checker<'a> {
         let resolved = self.infer.resolve(ty);
         match &resolved {
             ITy::Bool | ITy::Never => {}
-            ITy::Var(_) => {
-                let _ = self.unify_quiet(&resolved, &ITy::bool_());
+            ITy::Var(id) => {
+                // An inference variable may still become `bool` here, but it
+                // has to unify with `bool`: silently accepting a numeric
+                // literal variable would let `if 3` compile even though a C
+                // integer is not a condition in this language.
+                if self.unify_quiet(&resolved, &ITy::bool_()) {
+                    return;
+                }
+                let found = self.infer.resolve(&ITy::Var(*id));
+                self.report_mismatch(&ITy::bool_(), &found, span);
             }
             _ => self.report_mismatch(&ITy::bool_(), &resolved, span),
         }

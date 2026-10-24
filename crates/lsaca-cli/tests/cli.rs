@@ -58,7 +58,7 @@ fn version_is_printed() {
         output.status.code()
     );
     assert!(
-        stdout.contains("lsaca 1.0.0"),
+        stdout.contains("lsaca 1.1.0"),
         "unexpected version output: {:?}",
         stdout
     );

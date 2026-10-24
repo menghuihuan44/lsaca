@@ -189,6 +189,38 @@ fn emits_vec_storage_and_bounds_checks() {
     assert!(main_c.contains("lsaca_release_Vec_i64("));
 }
 
+const VEC_CAPACITY: &str = r#"
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn main() {
+    let mut numbers: Vec<i64> = Vec::with_capacity(8);
+    numbers.push(1);
+    let mut points: Vec<Point> = Vec::with_capacity(4);
+    points.push(Point { x: 1, y: 2 });
+    let mut names: Vec<String> = Vec::with_capacity(2);
+    names.push(String::from("hi"));
+    println!("{} {} {}", numbers.len(), points.len(), names.len());
+}
+"#;
+
+#[test]
+fn capacity_constructor_casts_to_the_element_pointer_type() {
+    let (main_c, _) = generate_source("capacity", VEC_CAPACITY, true);
+    assert!(main_c.contains("(int64_t*)ls_vec_alloc("));
+    assert!(main_c.contains("(LsPoint*)ls_vec_alloc("));
+    // A String vector uses the frozen shared representation and its helper.
+    assert!(main_c.contains("ls_vec_string_with_capacity("));
+    // The negative capacity guard panics instead of allocating.
+    assert!(main_c.contains("capacity overflow"));
+    // Regression guard: the cast used to drop the pointer star, which does not
+    // compile (a scalar cast to a struct type, an integer assigned to a pointer).
+    assert!(!main_c.contains("(int64_t)ls_vec_alloc("));
+    assert!(!main_c.contains("(LsPoint)ls_vec_alloc("));
+}
+
 #[test]
 fn omits_location_information_when_disabled() {
     let frontend = Frontend::new("noloc.ls", ARITH);
@@ -303,4 +335,90 @@ fn main() {
         !main_c[set_end..].contains(&release_set),
         "the payload passed to Rc::set is released after being moved into the cell"
     );
+}
+
+const BOX_PROGRAM: &str = r#"
+struct Node {
+    value: i64,
+    next: Option<Box<Node>>,
+}
+
+fn main() {
+    let a = Box::new(10);
+    let mut b = a;
+    b.set(20);
+    println!("{} {}", a.get(), b.get());
+    println!("{}", b == Box::new(20));
+    let chain = Node {
+        value: 1,
+        next: Some(Box::new(Node { value: 2, next: None })),
+    };
+    println!("{}", chain.value);
+}
+"#;
+
+#[test]
+fn emits_box_allocation_copy_and_helpers() {
+    let (main_c, _) = generate_source("box_fixture", BOX_PROGRAM, true);
+
+    // Every box is one managed allocation that the cycle collector traces
+    // through, like the Rc<T> cells.
+    assert!(main_c.contains("typedef struct LsBox_i64 LsBox_i64;"));
+    assert!(main_c.contains("struct LsBox_i64 {"));
+    assert!(main_c.contains("int64_t payload;"));
+    assert!(
+        main_c.contains(
+            "ls_alloc_managed(sizeof(LsBox_i64), lsaca_box_drop_i64, lsaca_box_trace_i64)"
+        )
+    );
+    // new/get/set helpers and the deep copy that gives Box value semantics.
+    assert!(main_c.contains("LsBox_i64* lsaca_box_new_i64("));
+    assert!(main_c.contains("int64_t lsaca_box_get_i64("));
+    assert!(main_c.contains("void lsaca_box_set_i64("));
+    assert!(main_c.contains("LsBox_i64* lsaca_copy_Box_i64("));
+    // Recursive struct fields use a pointer to the box cell.
+    assert!(main_c.contains("LsBox_Node*"));
+    assert!(main_c.contains("visit((void*)("));
+}
+
+const FORMAT_SPEC_PROGRAM: &str = r#"
+fn main() {
+    let name = String::from("lsaca");
+    println!("[{:*>8}]", name);
+    println!("[{:08.2}]", 3.14159);
+    println!("[{:.3}]", 2.0 / 3.0);
+    println!("[{:^20}]", 7);
+    println!("[{:.2}]", name);
+}
+"#;
+
+#[test]
+fn emits_width_and_precision_format_helpers() {
+    let (main_c, _) = generate_source("format_spec_fixture", FORMAT_SPEC_PROGRAM, true);
+
+    // Widths and alignment are delegated to the runtime, which counts
+    // codepoints and inserts the fill character.
+    assert!(main_c.contains("ls_fmt_apply_width("));
+    assert!(main_c.contains("LS_ALIGN_CENTER"));
+    assert!(main_c.contains("ls_format_begin(0)"));
+    // Precision goes through the dedicated formatters.
+    assert!(main_c.contains("ls_fmt_f64_prec("));
+    assert!(main_c.contains("ls_fmt_str_prec("));
+    // The temporary piece is released by the generated code, so formatted
+    // output does not leak reference counted allocations.
+    let mut formatted = 0;
+    for line in main_c.lines() {
+        if let Some(index) = line.find(" = ls_format_begin(0);") {
+            let name = line[..index].trim();
+            assert!(
+                main_c.contains(&format!("ls_release({});", name)),
+                "the format buffer {} is not released",
+                name
+            );
+            formatted += 1;
+        }
+    }
+    // Two holes need a temporary piece (the two width specs); the precision
+    // only holes append directly to the accumulator.
+    assert!(formatted >= 2, "no formatted buffers were generated");
 }

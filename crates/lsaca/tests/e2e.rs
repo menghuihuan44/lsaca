@@ -370,6 +370,70 @@ fn cases() -> Vec<Case> {
             stderr_contains: &[],
         },
         Case {
+            name: "box_basic",
+            source: include_str!("programs/box_basic.ls"),
+            args: &[],
+            stdout: "10\n20 10\ntrue\n2\n7\nhi [\"hi\"]\nbye\n2\nsecond\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "box_recursive",
+            source: include_str!("programs/box_recursive.ls"),
+            args: &[],
+            stdout: "11\n5\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "format_specs",
+            source: include_str!("programs/format_specs.ls"),
+            args: &[],
+            stdout: "[lsaca]\n[   lsaca]\n[lsaca   ]\n[ lsaca  ]\n[***lsaca]\n[00003.14]\n[+42] [-7] [+0]\n[     3.5] [       2]\n[2.67] [2]\n[0.333]\n[你好]\n[   3.000]\n[\"lsaca\"]\n[  \"hi\"]\n[0005]\n[    1234.568]\n[         7          ]\n[**true***]\n[   42]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "or_patterns",
+            source: include_str!("programs/or_patterns.ls"),
+            args: &[],
+            stdout: "small\nmedium\nlarge\na\nq\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "or_pattern_bindings",
+            source: include_str!("programs/or_pattern_bindings.ls"),
+            args: &[],
+            stdout: "pair\nsingle\nmid 9\nb 4\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "match_guards",
+            source: include_str!("programs/match_guards.ls"),
+            args: &[],
+            stdout: "1\n2\n3\n4\nsmall\nzero\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "vec_capacity",
+            source: include_str!("programs/vec_capacity.ls"),
+            args: &[],
+            stdout: "0 true\n[1, 2, 3]\n[\"hi\", \"there\"]\n1\n1 4\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "panic_capacity",
+            source: include_str!("programs/vec_capacity_negative.ls"),
+            args: &[],
+            stdout: "",
+            exit: 101,
+            stderr_contains: &["panicked at", "capacity overflow"],
+        },
+        Case {
             name: "panic_div",
             source: include_str!("programs/panic_div.ls"),
             args: &[],
@@ -475,6 +539,7 @@ fn frontend_rejects_invalid_programs() {
         ("bad_match", include_str!("programs/bad_match.ls")),
         ("bad_mut", include_str!("programs/bad_mut.ls")),
         ("bad_args", include_str!("programs/bad_args.ls")),
+        ("bad_condition", include_str!("programs/bad_condition.ls")),
         ("missing_main", "fn helper() {}\n"),
     ];
     let mut problems: Vec<String> = Vec::new();
@@ -495,6 +560,73 @@ fn frontend_rejects_invalid_programs() {
                         "{}: rendered diagnostics do not mention an error:\n{}",
                         name, rendered
                     ));
+                }
+            }
+        }
+    }
+    if !problems.is_empty() {
+        panic!("{}", problems.join("\n\n"));
+    }
+}
+
+/// `if`, `while` and match guards require a `bool`; numeric conditions are
+/// rejected with a type error instead of being treated as C truthiness.
+#[test]
+fn non_bool_conditions_are_rejected() {
+    let source = include_str!("programs/bad_condition.ls");
+    let frontend = Frontend::new("bad_condition.ls", source);
+    let diagnostics = match frontend.check() {
+        Ok(_) => panic!("expected condition type errors, but the program was accepted"),
+        Err(diagnostics) => diagnostics,
+    };
+    let rendered = diagnostics.render(frontend.file());
+    for missing in ["expected bool, found i64", "expected bool, found {integer}"] {
+        assert!(
+            rendered.contains(missing),
+            "rendered diagnostics do not contain {:?}:\n{}",
+            missing,
+            rendered
+        );
+    }
+}
+
+/// Format specifications are checked against the argument type at compile time;
+/// each invalid combination has to name the offending construct.
+#[test]
+fn format_specifier_errors_are_reported() {
+    let programs: &[(&str, &str, &[&str])] = &[
+        (
+            "bad_format",
+            include_str!("programs/bad_format.ls"),
+            &[
+                "unsupported format specifier '{:q}' in format string",
+                "precision is only supported for floats and strings",
+                "the '0' flag is only supported for numeric values",
+            ],
+        ),
+        (
+            "bad_format_unsigned",
+            include_str!("programs/bad_format_unsigned.ls"),
+            &["the '+' sign flag is not supported for unsigned integers"],
+        ),
+    ];
+    let mut problems: Vec<String> = Vec::new();
+    for (name, source, expected) in programs {
+        let frontend = Frontend::new(format!("{}.ls", name), *source);
+        match frontend.check() {
+            Ok(_) => problems.push(format!(
+                "{}: expected a compile error, but the program was accepted",
+                name
+            )),
+            Err(diagnostics) => {
+                let rendered = diagnostics.render(frontend.file());
+                for message in *expected {
+                    if !rendered.contains(message) {
+                        problems.push(format!(
+                            "{}: diagnostics do not mention {:?}:\n{}",
+                            name, message, rendered
+                        ));
+                    }
                 }
             }
         }

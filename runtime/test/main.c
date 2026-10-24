@@ -1163,6 +1163,87 @@ static void test_formatting(void) {
 }
 
 /* ====================================================================== */
+/* Format specifiers                                                      */
+/* ====================================================================== */
+
+static void check_width(const char* text, int64_t width, int32_t align,
+                        uint32_t fill, bool zero_pad, const char* expected,
+                        int line) {
+    LsString* piece = ls_str_cstr(text);
+    LsString* acc = ls_format_begin(8);
+    acc = ls_fmt_apply_width(acc, piece, width, align, fill, zero_pad);
+    check_str_at(acc, expected, "applied width", line);
+    ls_release(acc);
+    ls_release(piece);
+}
+
+#define CHECK_WIDTH(text, width, align, fill, zero_pad, expected)              \
+    check_width((text), (width), (align), (fill), (zero_pad), (expected),      \
+                __LINE__)
+
+static void test_format_specs(void) {
+    /* "[fill]align" and "[width]" are applied by ls_fmt_apply_width, which
+     * counts Unicode scalar values instead of bytes. */
+    CHECK_WIDTH("abc", 6, LS_ALIGN_RIGHT, '*', false, "***abc");
+    CHECK_WIDTH("abc", 6, LS_ALIGN_LEFT, ' ', false, "abc   ");
+    CHECK_WIDTH("abc", 6, LS_ALIGN_CENTER, ' ', false, " abc  ");
+    CHECK_WIDTH("中文", 5, LS_ALIGN_RIGHT, '-', false, "---中文");
+    CHECK_WIDTH("x", 4, LS_ALIGN_CENTER, 0x4E2DU, false, "中x中中");
+    CHECK_WIDTH("x", 4, LS_ALIGN_RIGHT, 0x4E2DU, false, "中中中x");
+    /* A piece that is already wide enough is not truncated. */
+    CHECK_WIDTH("abc", 2, LS_ALIGN_RIGHT, '*', false, "abc");
+    CHECK_WIDTH("abc", 1, LS_ALIGN_RIGHT, '*', false, "abc");
+    /* The '0' flag pads with zeros after a sign character. */
+    CHECK_WIDTH("7", 4, LS_ALIGN_RIGHT, ' ', true, "0007");
+    CHECK_WIDTH("-7", 4, LS_ALIGN_LEFT, ' ', true, "-007");
+    CHECK_WIDTH("+5", 5, LS_ALIGN_RIGHT, ' ', true, "+0005");
+    CHECK_WIDTH("", 3, LS_ALIGN_CENTER, '.', false, "...");
+
+    /* The '+' sign flag. */
+    CHECK_RENDER(ls_fmt_i64_signed(ls_format_begin(0), 42, true), "+42");
+    CHECK_RENDER(ls_fmt_i64_signed(ls_format_begin(0), -7, true), "-7");
+    CHECK_RENDER(ls_fmt_i64_signed(ls_format_begin(0), 0, true), "+0");
+    CHECK_RENDER(ls_fmt_i64_signed(ls_format_begin(0), 42, false), "42");
+    CHECK_RENDER(ls_fmt_u64_signed(ls_format_begin(0), 3, false), "3");
+
+    /* "[.precision]" uses fixed notation for floats. */
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), 3.14159, 2, false), "3.14");
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), 2.5, 0, false), "2");
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), 8.0 / 3.0, 2, false),
+                 "2.67");
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), 3.0, 1, true), "+3.0");
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), -2.0, 3, false), "-2.000");
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), 1.0, 2, false), "1.00");
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), INFINITY, 2, true),
+                 "+inf");
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), -INFINITY, 2, false),
+                 "-inf");
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), NAN, 2, false), "NaN");
+    /* A negative precision means "display formatting". */
+    CHECK_RENDER(ls_fmt_f64_prec(ls_format_begin(0), 1.5, -1, false), "1.5");
+    CHECK_RENDER(ls_fmt_f32_prec(ls_format_begin(0), 0.1f, 3, false), "0.100");
+
+    /* "[.precision]" truncates strings on a UTF-8 boundary. */
+    {
+        LsString* ascii = ls_str_cstr("abcdef");
+        LsString* utf8 = ls_str_cstr("你好世界");
+        LsString* empty = ls_str_cstr("");
+
+        CHECK_RENDER(ls_fmt_str_prec(ls_format_begin(0), ascii, 3), "abc");
+        CHECK_RENDER(ls_fmt_str_prec(ls_format_begin(0), ascii, 0), "");
+        CHECK_RENDER(ls_fmt_str_prec(ls_format_begin(0), ascii, 10), "abcdef");
+        CHECK_RENDER(ls_fmt_str_prec(ls_format_begin(0), ascii, -1), "abcdef");
+        CHECK_RENDER(ls_fmt_str_prec(ls_format_begin(0), utf8, 2), "你好");
+        CHECK_RENDER(ls_fmt_str_prec(ls_format_begin(0), utf8, 10), "你好世界");
+        CHECK_RENDER(ls_fmt_str_prec(ls_format_begin(0), empty, 4), "");
+
+        ls_release(ascii);
+        ls_release(utf8);
+        ls_release(empty);
+    }
+}
+
+/* ====================================================================== */
 /* Frozen shared instantiations                                           */
 /* ====================================================================== */
 
@@ -1339,6 +1420,7 @@ static void run_all(const char* io_path) {
     test_vec_string();
     test_vec_primitives();
     test_formatting();
+    test_format_specs();
     test_option_result();
     test_checked_math();
     test_io(io_path);

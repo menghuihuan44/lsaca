@@ -11,12 +11,18 @@ This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
+The current release is **1.1.0**, which adds the builtin `Box<T>` type and
+format-specifier widths/precision on top of the 1.0 language, fixes or-patterns
+and match guards, and makes a non-`bool` condition (in `if`, `while`, `&&`, `||`
+and match guards) a compile-time error instead of silently accepting integers.
+
 ## Highlights
 
 - **Rust-like language**: `fn`, `let`/`let mut`, `struct`, `enum`, `impl`,
   `match` with exhaustiveness checking, `Option`, `Result`, `Vec<T>`, `Rc<T>`,
-  tuples, closures, `if let`/`while let`, `for` loops, compound assignment and
-  `print!`/`println!` macros. Blocks, `if` and `match` are expressions.
+  `Box<T>`, tuples, closures, `if let`/`while let`, `for` loops, compound
+  assignment and `print!`/`println!` macros. Blocks, `if` and `match` are
+  expressions.
 - **Static typing with local inference**: annotations are optional where the type
   follows from the initializer; numeric literals default to `i64`/`f64`.
 - **ORC memory management**: every owned value is reference counted (strings,
@@ -24,15 +30,26 @@ redesigned rather than ported.
   passing, capture and return copy handles; no use-after-free is possible.
   Shared mutable state is written with the builtin `Rc<T>` cell, and reference
   cycles created through `Rc<T>` are reclaimed automatically by a Bacon-Rajan
-  trial-deletion cycle collector.
+  trial-deletion cycle collector. `Box<T>` provides owned indirection with
+  value semantics for recursive types.
+- **Formatting controls**: format strings accept the Rust-style
+  `[[fill]align][sign][0][width][.precision][?]` specification, so
+  `{:>8}`, `{:*^9}`, `{:+}`, `{:08}`, `{:08.2}`, `{:.3}` and `{:?}` all
+  work; invalid specifications are reported at compile time.
 - **C17 + CMake back end**: the compiler emits a small portable C project
   (`main.c`, the runtime and `CMakeLists.txt`) and builds it. `lsaca emit-c`
   keeps the generated project so it can be inspected or embedded in another
   build.
 - **Pure Rust compiler, no third-party crates**: the compiler uses only the Rust
   standard library and forbids unsafe code. The runtime is plain C17.
-- **Tested end to end**: unit tests for every compiler stage, an end-to-end suite
-  that compiles and runs real programs, a C runtime test suite and CLI tests.
+- **Documented and measured**: a detailed multi-page language manual under
+  [docs/](docs/README.md), published as a static documentation site, plus
+  cross-language benchmarks (compile time, runtime and peak memory) against C,
+  Rust, Python and Node.js with the raw data checked in.
+- **Tested end to end**: 160 compiler unit tests, an end-to-end suite that
+  compiles and runs real programs, 13 CLI tests, a 411-check C runtime suite and
+  a 100-check runtime smoke script; CI runs the test matrix on Linux, macOS and
+  Windows.
 
 ## Requirements
 
@@ -201,9 +218,83 @@ fn main() {
 }
 ```
 
-[docs/LANGUAGE.md](docs/LANGUAGE.md) is the language manual: full syntax,
-semantics, the standard library, memory rules and the deliberate deviations from
-Rust. See [examples/](examples/) for runnable programs.
+[docs/README.md](docs/README.md) is the entry point to the language manual: full
+syntax, semantics, the standard library, memory rules and the deliberate
+deviations from Rust. See [examples/](examples/) for runnable programs.
+
+Two 1.1 features are worth showing here. `Box<T>` is owned heap indirection with
+value semantics (`Box::new`, `.get()`, `.set()`); unlike `Rc<T>` it is not
+shared, and it provides the indirection needed for recursive types. Format macros
+accept widths, alignment, fill characters, signs, zero padding and precision:
+
+```rust
+fn main() {
+    let name = "lsaca";
+    println!("[{:*^9}]", name);       // [**lsaca**]
+    println!("[{:08.2}]", 3.141592);  // [00003.14]
+    let boxed = Box::new(7);
+    println!("{}", boxed.get());      // 7
+}
+```
+
+## Documentation
+
+The manual is split into one detailed page per topic under [docs/](docs/):
+
+- [docs/README.md](docs/README.md) - the manual hub: overview, reading order and
+  a table linking every chapter.
+- [docs/language/01-getting-started.md](docs/language/01-getting-started.md)
+  through
+  [docs/language/14-roadmap.md](docs/language/14-roadmap.md) - getting started,
+  program structure, lexical structure, types, the ORC memory model (`Rc<T>`,
+  `Box<T>` and cycle collection), variables and mutability, operators,
+  statements and control flow, functions, structs/enums/`impl`, pattern
+  matching, closures, the standard library and formatting, and the roadmap with
+  the deviations from Rust.
+- [docs/language/15-benchmarks.md](docs/language/15-benchmarks.md) - benchmark
+  methodology, per-workload analysis and the measured numbers.
+
+The same pages are published as a static site with GitHub Pages at
+<https://menghuihuan44.github.io/lsaca/> (built by
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) from the Markdown
+sources with `scripts/docsite.py`).
+
+## Benchmarks
+
+`python scripts/bench.py` runs four workloads in lsaca and in C, Rust, Python and
+Node.js, verifies each output checksum, and records compile time, runtime median
+and peak working set. lsaca programs are built through the normal cached
+`lsaca build` pipeline (official mode); where CMake is unavailable the harness
+falls back to `emit-c` plus a direct `gcc` invocation and records that mode in
+the results.
+
+Measured on Windows 11 with a 12th Gen Intel Core i7-1260P (16 logical CPUs,
+15.6 GiB RAM), gcc 15.2.0, rustc 1.99.0, Python 3.14.4 and Node.js 24.14.1;
+median of 7 runs after one warm-up, 3 compile repetitions. Full methodology and
+caveats are in [docs/language/15-benchmarks.md](docs/language/15-benchmarks.md);
+raw data is in [benchmarks/results/](benchmarks/results/).
+
+Runtime, median milliseconds (lower is better):
+
+| program | lsaca | C (gcc -O2) | Rust (rustc -O) | Python 3 | Node.js |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fib (recursive, n=30, 10 calls) | 30.6 | 30.6 | 15.7 | 1082.3 | 241.4 |
+| loop_sum (8,000,000 additions) | 11.4 | 10.9 | 12.0 | 987.1 | 165.3 |
+| string_build (1,000,000 appends) | 212.9 | 14.8 | 76.3 | 431.1 | 231.5 |
+| vec_memory (1,000,000 structs) | 86.1 | 18.4 | 24.9 | 535.7 | 241.2 |
+
+Compile time, seconds (lower is better): lsaca cold build 2.8-3.3, lsaca cached
+build 0.017-0.019, `gcc -O2` 0.25-0.31, `rustc -O` 0.26-0.36. The cold lsaca
+number includes CMake configure plus the C build; the cached number is what a
+program pays after it has been built once.
+
+Peak working set, MiB (lower is better): lsaca 4.0 on fib and loop_sum, 10.6 on
+string_build and 35.1 on vec_memory; C 4.0/4.0/7.3/18.8; Rust
+4.1/4.1/7.3/18.9; Python 11.0/11.0/74.1/142.2; Node.js
+43.0/45.7/89.3/121.4 (same program order). Numeric loops reach C parity in this
+run, while the vector and string workloads pay for per-element reference
+counting, copy-on-write appends and value-semantics copies of vectors; these are
+the next code generation optimizations, documented on the benchmark page.
 
 ## Environment variables
 
@@ -233,17 +324,21 @@ Rust. See [examples/](examples/) for runnable programs.
 ## Testing
 
 ```sh
-cargo test --workspace          # unit, end-to-end and CLI tests
+cargo test --workspace          # 160 unit + 5 end-to-end + 13 CLI tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
 The end-to-end tests in `crates/lsaca/tests/` compile and run the programs under
 `crates/lsaca/tests/programs/` and `examples/`, and are skipped when no C
-compiler is available. The C runtime has its own test suite under
-`runtime/test/` (`runtime/test/main.c` plus the `runtime/test/run_smoke.ps1`
-smoke script for Windows). Generated projects are expected to compile without
-warnings under `-Wall -Wextra`.
+compiler is available. The C runtime has its own 411-check suite
+(`runtime/test/main.c`) plus a 100-check Windows smoke script
+(`runtime/test/run_smoke.ps1`). Generated projects are expected to compile
+without warnings under `-Wall -Wextra`; CI additionally builds them with
+`-Werror`, runs the C runtime in release, debug and leak-tracking modes, and
+checks the documentation site with `scripts/docsite.py --check`. The complete CI
+definition is in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 ## Repository layout
 
@@ -252,9 +347,12 @@ crates/lsaca/            the compiler library (lexer, parser, type checker, C co
 crates/lsaca/tests/      end-to-end tests and test programs
 crates/lsaca-cli/        the lsaca command line tool
 runtime/                 the C17 ORC runtime embedded into generated projects
-runtime/test/            C runtime tests
+runtime/test/            C runtime tests (411-check suite and Windows smoke script)
 examples/                example programs
-docs/LANGUAGE.md         the language manual
+benchmarks/              benchmark programs in five languages, harness and recorded results
+scripts/                 benchmark harness (bench.py) and documentation site generator
+docs/                    the multi-page language manual (docs/README.md is the hub)
+.github/workflows/       CI, benchmark smoke and GitHub Pages workflows
 ```
 
 ## License

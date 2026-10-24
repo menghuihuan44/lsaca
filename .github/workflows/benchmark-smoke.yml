@@ -1,0 +1,62 @@
+# Optional weekly quick benchmark smoke run.
+#
+# The benchmark harness lives in scripts/bench.py and is owned by a separate
+# workstream. It needs this repository's release compiler and a C toolchain:
+# the harness compiles reference programs and runs both implementations, but it
+# never invokes cargo itself, so the workflow builds the CLI first.
+#
+# This workflow must stay green while scripts/bench.py does not exist yet, so it
+# skips gracefully instead of failing every week.
+#
+# Trigger it manually from the Actions tab ("Run workflow") or wait for the
+# weekly schedule; it is intentionally not part of ci.yml because benchmarks are
+# slower and can be noisy on shared runners.
+
+name: Benchmark smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Monday at 06:00 UTC.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-smoke
+  cancel-in-progress: false
+
+jobs:
+  benchmark-smoke:
+    name: Quick benchmark smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install the C toolchain, CMake and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc cmake ninja-build
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmark-smoke
+      - name: Run the quick benchmark
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/bench.py ]; then
+            echo "scripts/bench.py is not present yet; skipping the benchmark smoke run."
+            exit 0
+          fi
+          # The harness runs target/release/lsaca and expects it to exist; it does
+          # not build the compiler itself.
+          cargo build --release -p lsaca-cli
+          python scripts/bench.py --quick

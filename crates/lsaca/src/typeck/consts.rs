@@ -159,12 +159,18 @@ impl<'a> Checker<'a> {
                 for part in parts {
                     match &part.kind {
                         TFormatPartKind::Literal(literal) => text.push_str(literal),
-                        TFormatPartKind::Arg { expr, debug } => {
+                        TFormatPartKind::Arg { expr, spec } => {
+                            // A width, precision, sign or alignment needs the
+                            // runtime formatter, so such format strings are not
+                            // folded to a constant.
+                            if !spec.is_plain() {
+                                return FoldOutcome::NotConst;
+                            }
                             let value = match self.fold_expr(expr) {
                                 FoldOutcome::Value(value) => value,
                                 FoldOutcome::NotConst => return FoldOutcome::NotConst,
                             };
-                            match format_const(&value, *debug) {
+                            match format_const(&value, spec.debug) {
                                 Some(rendered) => text.push_str(&rendered),
                                 None => return FoldOutcome::NotConst,
                             }

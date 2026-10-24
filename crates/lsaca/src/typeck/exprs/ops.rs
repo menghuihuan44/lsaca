@@ -252,9 +252,15 @@ impl<'a> Checker<'a> {
             AstBinaryOp::Eq | AstBinaryOp::Ne => match &unified {
                 // Rc<T> handles compare by identity: the generated code compares
                 // the cell pointers, so comparing the handles of a cycle is safe.
-                ITy::Bool | ITy::Int(_) | ITy::Float(_) | ITy::String | ITy::Rc(_) | ITy::Never => {
-                    (hop, ITy::bool_())
-                }
+                // Box<T> is an owned value, so comparing two boxes compares
+                // their payloads, like comparing the values in Rust.
+                ITy::Bool
+                | ITy::Int(_)
+                | ITy::Float(_)
+                | ITy::String
+                | ITy::Rc(_)
+                | ITy::Box(_)
+                | ITy::Never => (hop, ITy::bool_()),
                 _ if self.is_int_literal_var(&unified) => (hop, ITy::bool_()),
                 _ if self.is_float_literal_var(&unified) => (hop, ITy::bool_()),
                 _ => {

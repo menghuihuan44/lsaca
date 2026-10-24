@@ -513,6 +513,9 @@ pub enum HBuiltinMethod {
     RcGet,
     RcSet,
     RcStrongCount,
+    // Box
+    BoxGet,
+    BoxSet,
 }
 
 impl HBuiltinMethod {
@@ -564,6 +567,8 @@ impl HBuiltinMethod {
             RcGet => "get",
             RcSet => "set",
             RcStrongCount => "strong_count",
+            BoxGet => "get",
+            BoxSet => "set",
         }
     }
 }
@@ -581,6 +586,8 @@ pub enum HBuiltinAssoc {
     VecWithCapacity,
     /// `Rc::<T>::new(value)`
     RcNew,
+    /// `Box::<T>::new(value)`
+    BoxNew,
 }
 
 /// Builtin free functions.
@@ -634,8 +641,61 @@ impl HBuiltinFn {
     }
 }
 
+/// Alignment of a padded format field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatAlign {
+    /// `<`: content is left aligned, padding on the right.
+    Left,
+    /// `^`: content is centered, extra padding goes to the right.
+    Center,
+    /// `>`: content is right aligned, padding on the left.
+    Right,
+}
+
+/// The parsed specification of one format placeholder, for example
+/// `<8`, `+.2` or `*^7?`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatSpec {
+    /// Fill character used for padding; a space unless an align was given.
+    pub fill: char,
+    /// Alignment; `None` means the default (left for most values).
+    pub align: Option<FormatAlign>,
+    /// `+`: prefix non-negative numbers with a plus sign.
+    pub sign_plus: bool,
+    /// `0`: pad numbers with zeros after the sign instead of the fill.
+    pub zero_pad: bool,
+    /// Minimum field width in characters.
+    pub width: Option<i64>,
+    /// Digits after the decimal point for floats, maximum characters for
+    /// strings.
+    pub precision: Option<i64>,
+    /// `?`: use Debug instead of Display formatting.
+    pub debug: bool,
+}
+
+impl FormatSpec {
+    /// The specification of a plain `{}` placeholder.
+    pub fn plain() -> Self {
+        Self {
+            fill: ' ',
+            align: None,
+            sign_plus: false,
+            zero_pad: false,
+            width: None,
+            precision: None,
+            debug: false,
+        }
+    }
+
+    /// True when the placeholder is plain `{}`: no width, precision, sign,
+    /// zero padding, alignment or debug flag.
+    pub fn is_plain(&self) -> bool {
+        *self == Self::plain()
+    }
+}
+
 /// One piece of a formatted string. Literal text is copied verbatim; arguments
-/// are formatted with Display or Debug.
+/// are formatted with Display or Debug and the parsed format specification.
 #[derive(Debug, Clone)]
 pub struct HFormatPart {
     pub kind: HFormatPartKind,
@@ -644,10 +704,13 @@ pub struct HFormatPart {
 #[derive(Debug, Clone)]
 pub enum HFormatPartKind {
     Literal(String),
-    /// An argument formatted with {} (debug == false) or {:?} (debug == true).
+    /// An argument formatted with the given specification.
+    ///
+    /// The specification is boxed to keep this enum (and every HIR expression
+    /// that embeds it) small.
     Arg {
         expr: HExpr,
-        debug: bool,
+        spec: Box<FormatSpec>,
     },
 }
 

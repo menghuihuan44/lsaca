@@ -1,0 +1,71 @@
+# Build and deploy the static documentation site to GitHub Pages.
+#
+# Required one-time repository configuration:
+#   Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+# The published site URL is https://menghuihuan44.github.io/lsaca/
+#
+# Link validation and site generation use scripts/docsite.py, the same
+# dependency-free generator that the "site" job in ci.yml exercises.
+#
+# This workflow is kept independent of ci.yml: a documentation change only
+# needs the Python generator, and it can also be deployed on demand.
+
+name: Deploy documentation site
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "scripts/docsite.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# GitHub Pages deployment needs these scopes; the repository itself is only read.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deployment may run at a time, and in-flight deployments are never
+# cancelled because that could leave the published site in an inconsistent state.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate the documentation links
+        run: python scripts/docsite.py --check
+      - name: Build the static site
+        run: python scripts/docsite.py --output _site
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

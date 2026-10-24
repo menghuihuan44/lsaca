@@ -245,7 +245,7 @@ impl<'a> Gen<'a> {
                 self.w.line("};");
                 self.w.blank();
             }
-            TypeDef::Rc(elem) => {
+            TypeDef::Rc(elem) | TypeDef::Box(elem) => {
                 let c_name = self.registry.tag(ty);
                 let payload = self.registry.ctype(&elem);
                 self.w.line(format!("struct {} {{", c_name));

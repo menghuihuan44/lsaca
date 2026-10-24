@@ -1,35 +1,268 @@
+# Continuous integration for the lsaca compiler workspace.
+#
+# The compiler emits C17 code and drives CMake/Ninja, so every test runner needs
+# a C toolchain, CMake and Ninja in addition to a Rust toolchain.
+#
+# Jobs:
+#   fmt          rustfmt check
+#   clippy       clippy over all targets, warnings denied
+#   test         cargo test --workspace on Linux, macOS and Windows
+#   docs         rustdoc build with warnings denied
+#   runtime      the generated-program C runtime smoke test (gcc, C17)
+#   generated-c  emit C for every example, compile with -Werror, run hello,
+#                and build one generated project through CMake + Ninja
+#   site         validate the markdown documentation and build the static site
+#
+# The Pages deployment lives in pages.yml; the optional benchmark smoke run
+# lives in benchmark-smoke.yml.
+
 name: CI
 
 on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
+
+# CI only needs to read the repository: no job writes to it.
+permissions:
+  contents: read
+
+# Superseded runs on the same branch are cancelled, but a run for main is never
+# cancelled half way through.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
 
 jobs:
-  check:
-    name: Format, lint and test
+  fmt:
+    name: Formatting
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: Install C toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build gcc
-
+          components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Run tests
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the C toolchain, CMake and Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc cmake ninja-build
+
+      - name: Install CMake and Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+
+      - name: Install the C toolchain, CMake and Ninja (Windows, MSYS2 UCRT64)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+
+      # The MSYS2 action only exports its environment to steps that use the
+      # MSYS2 shell, so put the UCRT64 toolchain on PATH explicitly. The e2e
+      # tests invoke gcc, cmake and ninja as child processes.
+      - name: Put the MSYS2 UCRT64 toolchain on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "C:\msys64\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.os }}
+
+      - name: Run the workspace tests
         run: cargo test --workspace
+
+  docs:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+      - name: Build the API documentation
+        run: cargo doc --workspace --no-deps
+
+  runtime:
+    name: C runtime smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install the C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev
+      # The runtime is deliberately standalone: it does not need cargo or CMake,
+      # so this job proves that the C17 sources build with a plain gcc.
+      - name: Build and run the smoke test (release build)
+        run: |
+          gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG \
+            runtime/test/main.c runtime/lsaca_rt.c -lm -o rt-test
+          ./rt-test
+      - name: Build and run the smoke test (debug build with leak tracking)
+        run: |
+          gcc -std=c17 -Wall -Wextra -Werror -O0 -g -DLSACA_DEBUG -DLSACA_DEBUG_RC \
+            runtime/test/main.c runtime/lsaca_rt.c -lm -o rt-test-debug
+          ./rt-test-debug
+      # Panic paths call exit(101); a bash script must not treat that as an
+      # unhandled failure before inspecting the output.
+      - name: Check panic exits and the debug leak report
+        shell: bash
+        run: |
+          set +e
+          ./rt-test-debug --panic-div-zero > /dev/null 2> panic.txt
+          panic_status=$?
+          set -e
+          if [ "$panic_status" -ne 101 ]; then
+            echo "expected panic exit code 101, got $panic_status"
+            cat panic.txt
+            exit 1
+          fi
+          grep -F "thread 'main' panicked at smoke.c:3:9:" panic.txt
+          grep -F "attempt to divide by zero" panic.txt
+          set +e
+          ./rt-test-debug --leak > /dev/null 2> leak.txt
+          leak_status=$?
+          set -e
+          if [ "$leak_status" -ne 0 ]; then
+            echo "expected leak-reporting run to exit 0, got $leak_status"
+            cat leak.txt
+            exit 1
+          fi
+          grep -F "reference-counted allocation(s) leaked" leak.txt
+
+  generated-c:
+    name: Generated C is warning-free
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install the C toolchain, CMake and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc cmake ninja-build
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: generated-c
+      - name: Build the release CLI
+        run: cargo build --release -p lsaca-cli
+      # Every example is lowered to C and compiled with -Werror so accidental
+      # warnings in generated code fail CI. One generated project is also built
+      # through the CMake + Ninja backend to cover the real driver path.
+      - name: Emit, compile and run every example
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          echo "Generated projects are written to $workdir"
+          for example in examples/*.ls; do
+            name="$(basename "$example" .ls)"
+            out="$workdir/$name"
+            echo "::group::Generating $name"
+            ./target/release/lsaca emit-c -r -o "$out" "$example"
+            gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -I "$out" \
+              "$out/main.c" "$out/lsaca_rt.c" -lm -o "$out/$name"
+            if [ "$name" = "hello" ]; then
+              output="$("$out/$name")"
+              if [ "$output" != "hello, world!" ]; then
+                echo "unexpected hello output: $output"
+                exit 1
+              fi
+            fi
+            echo "::endgroup::"
+          done
+          cmake -S "$workdir/hello" -B "$workdir/hello/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$workdir/hello/build"
+
+  site:
+    name: Documentation site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate the documentation links
+        run: python scripts/docsite.py --check
+      - name: Build the static site
+        run: python scripts/docsite.py --output _site
+      # Prove the generator actually produced a browsable tree before uploading.
+      - name: Sanity check the generated site
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f _site/index.html
+          pages="$(find _site -name '*.html' | wc -l)"
+          echo "generated $pages HTML page(s)"
+          test "$pages" -ge 1
+      - name: Upload the site as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: _site
+          retention-days: 7

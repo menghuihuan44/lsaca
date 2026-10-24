@@ -19,6 +19,7 @@ pub enum ITy {
     String,
     Vec(Box<ITy>),
     Rc(Box<ITy>),
+    Box(Box<ITy>),
     Option(Box<ITy>),
     Result(Box<ITy>, Box<ITy>),
     Tuple(Vec<ITy>),
@@ -60,6 +61,10 @@ impl ITy {
         ITy::Rc(Box::new(elem))
     }
 
+    pub fn box_(elem: ITy) -> ITy {
+        ITy::Box(Box::new(elem))
+    }
+
     pub fn option(elem: ITy) -> ITy {
         ITy::Option(Box::new(elem))
     }
@@ -98,6 +103,7 @@ impl ITy {
             Ty::String => ITy::String,
             Ty::Vec(elem) => ITy::vec(ITy::from_ty(elem)),
             Ty::Rc(elem) => ITy::rc(ITy::from_ty(elem)),
+            Ty::Box(elem) => ITy::box_(ITy::from_ty(elem)),
             Ty::Option(elem) => ITy::option(ITy::from_ty(elem)),
             Ty::Result(ok, err) => ITy::result(ITy::from_ty(ok), ITy::from_ty(err)),
             Ty::Tuple(elems) => ITy::Tuple(elems.iter().map(ITy::from_ty).collect()),
@@ -204,6 +210,7 @@ impl Infer {
             ITy::Var(_) => self.resolve_var(ty),
             ITy::Vec(elem) => ITy::vec(self.resolve(elem)),
             ITy::Rc(elem) => ITy::rc(self.resolve(elem)),
+            ITy::Box(elem) => ITy::box_(self.resolve(elem)),
             ITy::Option(elem) => ITy::option(self.resolve(elem)),
             ITy::Result(ok, err) => ITy::result(self.resolve(ok), self.resolve(err)),
             ITy::Tuple(elems) => ITy::Tuple(elems.iter().map(|ty| self.resolve(ty)).collect()),
@@ -270,6 +277,7 @@ impl Infer {
             (ITy::Float(a), ITy::Float(b)) if a == b => Ok(()),
             (ITy::Vec(a), ITy::Vec(b)) => self.unify_resolved(*a, *b),
             (ITy::Rc(a), ITy::Rc(b)) => self.unify_resolved(*a, *b),
+            (ITy::Box(a), ITy::Box(b)) => self.unify_resolved(*a, *b),
             (ITy::Option(a), ITy::Option(b)) => self.unify_resolved(*a, *b),
             (ITy::Result(a_ok, a_err), ITy::Result(b_ok, b_err)) => {
                 self.unify_resolved(*a_ok, *b_ok)?;
@@ -346,7 +354,9 @@ impl Infer {
                     None => false,
                 }
             }
-            ITy::Vec(elem) | ITy::Rc(elem) | ITy::Option(elem) => self.occurs(id, elem),
+            ITy::Vec(elem) | ITy::Rc(elem) | ITy::Box(elem) | ITy::Option(elem) => {
+                self.occurs(id, elem)
+            }
             ITy::Result(ok, err) => self.occurs(id, ok) || self.occurs(id, err),
             ITy::Tuple(elems) => elems.iter().any(|elem| self.occurs(id, elem)),
             ITy::Fn(params, ret) => {
@@ -396,6 +406,7 @@ impl Infer {
             ITy::String => Ok(Ty::String),
             ITy::Vec(elem) => Ok(Ty::vec(self.finalize_resolved(elem)?)),
             ITy::Rc(elem) => Ok(Ty::rc(self.finalize_resolved(elem)?)),
+            ITy::Box(elem) => Ok(Ty::box_(self.finalize_resolved(elem)?)),
             ITy::Option(elem) => Ok(Ty::option(self.finalize_resolved(elem)?)),
             ITy::Result(ok, err) => Ok(Ty::result(
                 self.finalize_resolved(ok)?,

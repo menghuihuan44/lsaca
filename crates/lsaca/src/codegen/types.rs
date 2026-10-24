@@ -49,6 +49,7 @@ impl TypeNames {
             Ty::String => String::from("String"),
             Ty::Vec(elem) => format!("Vec_{}", self.mangle(elem)),
             Ty::Rc(elem) => format!("Rc_{}", self.mangle(elem)),
+            Ty::Box(elem) => format!("Box_{}", self.mangle(elem)),
             Ty::Option(elem) => format!("Opt_{}", self.mangle(elem)),
             Ty::Result(ok, err) => format!("Res_{}_{}", self.mangle(ok), self.mangle(err)),
             Ty::Tuple(elems) => {
@@ -89,8 +90,8 @@ impl TypeNames {
             Ty::Int(int_ty) => int_ty.c_type().to_string(),
             Ty::Float(float_ty) => float_ty.c_type().to_string(),
             Ty::String => String::from("LsString*"),
-            // An Rc value is the pointer to its reference counted cell.
-            Ty::Rc(_) => format!("Ls{}*", self.mangle(ty)),
+            // Rc and Box values are pointers to their managed cells.
+            Ty::Rc(_) | Ty::Box(_) => format!("Ls{}*", self.mangle(ty)),
             _ => format!("Ls{}", self.mangle(ty)),
         }
     }
@@ -107,6 +108,7 @@ pub enum TypeDef {
     Enum(usize),
     Vec(Ty),
     Rc(Ty),
+    Box(Ty),
     Option(Ty),
     Result(Ty, Ty),
     Tuple(Vec<Ty>),
@@ -272,7 +274,7 @@ impl TypeRegistry {
                 push_if_compound(&mut deps, ret);
             }
             Ty::Vec(_) => {}
-            Ty::Rc(elem) => push_if_compound(&mut deps, elem),
+            Ty::Rc(elem) | Ty::Box(elem) => push_if_compound(&mut deps, elem),
             _ => {}
         }
         deps
@@ -280,9 +282,10 @@ impl TypeRegistry {
 }
 
 fn push_if_compound(deps: &mut Vec<Ty>, ty: &Ty) {
-    // Rc<T> is a pointer to its cell, so a value that contains it only needs
-    // the forward declaration of the cell, never its complete definition.
-    if !ty.is_bitwise_copy() && !ty.is_rc() && !deps.contains(ty) {
+    // Rc<T> and Box<T> are pointers to their cells, so a value that contains
+    // one only needs the forward declaration of the cell, never its complete
+    // definition.
+    if !ty.is_bitwise_copy() && !ty.is_rc() && !ty.is_box() && !deps.contains(ty) {
         deps.push(ty.clone());
     }
 }
@@ -574,6 +577,7 @@ impl TypeRegistry {
             Ty::Enum(index) => TypeDef::Enum(*index),
             Ty::Vec(elem) => TypeDef::Vec((**elem).clone()),
             Ty::Rc(elem) => TypeDef::Rc((**elem).clone()),
+            Ty::Box(elem) => TypeDef::Box((**elem).clone()),
             Ty::Option(elem) => TypeDef::Option((**elem).clone()),
             Ty::Result(ok, err) => TypeDef::Result((**ok).clone(), (**err).clone()),
             Ty::Tuple(elems) => TypeDef::Tuple(elems.clone()),
@@ -626,7 +630,7 @@ impl TypeNames {
             Ty::Float(float_ty) => crate::codegen::util::float_literal(0.0, *float_ty),
             Ty::String => String::from("ls_str_new()"),
             Ty::Vec(_) => format!("(({}){{0, 0, NULL}})", self.ctype(ty)),
-            Ty::Rc(_) => format!("(({})NULL)", self.ctype(ty)),
+            Ty::Rc(_) | Ty::Box(_) => format!("(({})NULL)", self.ctype(ty)),
             Ty::Option(elem) => {
                 if **elem == Ty::String {
                     String::from("ls_opt_string_none()")

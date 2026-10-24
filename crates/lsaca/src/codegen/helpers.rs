@@ -56,6 +56,32 @@ pub fn emit_env_support(w: &mut CWriter) {
     w.blank();
 }
 
+/// Declarations of the Box cell helpers for one boxed value type.
+fn emit_box_decls(w: &mut CWriter, registry: &TypeRegistry, inner: &Ty) {
+    let names = registry.names();
+    let suffix = names.mangle(inner);
+    let cell = names.tag(&Ty::box_(inner.clone()));
+    let cell_ptr = format!("{}*", cell);
+    let inner_ty = names.ctype(inner);
+    w.line(format!(
+        "{} lsaca_box_new_{}({} value);",
+        cell_ptr, suffix, inner_ty
+    ));
+    w.line(format!(
+        "{} lsaca_box_get_{}({} self);",
+        inner_ty, suffix, cell_ptr
+    ));
+    w.line(format!(
+        "void lsaca_box_set_{}({} self, {} value);",
+        suffix, cell_ptr, inner_ty
+    ));
+    w.line(format!("void lsaca_box_drop_{}(void* payload);", suffix));
+    w.line(format!(
+        "void lsaca_box_trace_{}(const void* payload, LsTraceVisit visit);",
+        suffix
+    ));
+}
+
 /// Declarations of the Rc cell helpers for one shared heap cell type.
 fn emit_rc_decls(w: &mut CWriter, registry: &TypeRegistry, inner: &Ty) {
     let names = registry.names();
@@ -98,6 +124,8 @@ fn helper_decls(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry
         w.line(format!("bool lsaca_eq_{}({} a, {} b);", suffix, c_ty, c_ty));
         if let Ty::Rc(inner) = &ty {
             emit_rc_decls(w, registry, inner);
+        } else if let Ty::Box(inner) = &ty {
+            emit_box_decls(w, registry, inner);
         } else {
             w.line(format!(
                 "void lsaca_trace_{}(const {}* value, LsTraceVisit visit);",

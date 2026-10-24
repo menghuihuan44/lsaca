@@ -486,10 +486,10 @@ impl<'a> Checker<'a> {
                 TFormatPartKind::Literal(text) => HFormatPart {
                     kind: HFormatPartKind::Literal(text.clone()),
                 },
-                TFormatPartKind::Arg { expr, debug } => HFormatPart {
+                TFormatPartKind::Arg { expr, spec } => HFormatPart {
                     kind: HFormatPartKind::Arg {
                         expr: self.lower_expr(expr),
-                        debug: *debug,
+                        spec: Box::new(spec.clone()),
                     },
                 },
             })

@@ -23,13 +23,15 @@ pub fn emit_all(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry
         emit_eq(w, program, &names, &ty);
     }
     for ty in compound_types(program, registry) {
-        if !matches!(ty, Ty::Rc(_)) {
+        if !matches!(ty, Ty::Rc(_) | Ty::Box(_)) {
             emit_trace(w, program, &names, &ty);
         }
     }
     for ty in managed_types(program, registry) {
-        if let Ty::Rc(inner) = ty {
-            emit_rc_helpers(w, &names, &inner);
+        match ty {
+            Ty::Rc(inner) => emit_rc_helpers(w, &names, &inner),
+            Ty::Box(inner) => emit_box_helpers(w, &names, &inner),
+            _ => {}
         }
     }
 }
@@ -202,6 +204,14 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
         Ty::Rc(_) => {
             w.line(format!("return ({})ls_retain(v);", c_ty));
         }
+        Ty::Box(inner) => {
+            // Copying a box deep-copies the payload: boxes own their value.
+            w.line(format!(
+                "return lsaca_box_new_{}({});",
+                names.mangle(inner),
+                ops::copy_expr(names, inner, "v->payload")
+            ));
+        }
         _ => {
             w.line("(void)v;");
             w.line(format!("{} out = ({}){{0}};", c_ty, c_ty));
@@ -327,7 +337,7 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
                 crate::codegen::types::FN_ENV_FIELD
             ));
         }
-        Ty::Rc(_) => {
+        Ty::Rc(_) | Ty::Box(_) => {
             w.line("ls_release(v);");
         }
         _ => {
@@ -506,6 +516,10 @@ fn emit_debug_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, t
             emit_debug_append(w, names, inner, "v->payload");
             push_cstr(w, ")");
         }
+        Ty::Box(inner) => {
+            // Like Rust, formatting a box formats the value inside it.
+            emit_debug_append(w, names, inner, "v->payload");
+        }
         _ => {
             w.line("(void)v;");
         }
@@ -673,6 +687,13 @@ fn emit_eq_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
         Ty::Rc(_) => {
             w.line("return a == b;");
         }
+        Ty::Box(inner) => {
+            // Boxes compare by payload value, like the value they box.
+            w.line(format!(
+                "return {};",
+                ops::eq_expr(names, inner, "a->payload", "b->payload")
+            ));
+        }
         _ => {
             w.line("(void)a;");
             w.line("(void)b;");
@@ -688,7 +709,7 @@ fn emit_eq_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
 /// True when values of this type can hold a reference to a managed allocation.
 fn traceable(ty: &Ty) -> bool {
     match ty {
-        Ty::Rc(_) | Ty::Fn(_, _) => true,
+        Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) => true,
         Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::String => false,
         _ => true,
     }
@@ -698,7 +719,7 @@ fn traceable(ty: &Ty) -> bool {
 /// so the cycle collector can follow the ownership graph.
 pub(crate) fn emit_trace_slot(w: &mut CWriter, names: &TypeNames, ty: &Ty, slot: &str) {
     match ty {
-        Ty::Rc(_) => {
+        Ty::Rc(_) | Ty::Box(_) => {
             w.line(format!("if ({} != NULL) {{", slot));
             w.indent();
             w.line(format!("visit((void*)({}));", slot));
@@ -920,6 +941,77 @@ fn emit_rc_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
 
     w.line(format!(
         "void lsaca_rc_trace_{}(const void* payload, LsTraceVisit visit) {{",
+        suffix
+    ));
+    w.indent();
+    w.line(format!("const {}* self = (const {}*)payload;", cell, cell));
+    w.line("(void)self;");
+    emit_trace_slot(w, names, inner, "self->payload");
+    w.line("(void)visit;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+}
+
+/// Emit the helpers of one Box cell type: allocation, payload access, deep
+/// copy and tracing. Unlike an Rc cell, a box is uniquely owned, so copying a
+/// box allocates a fresh cell and deep-copies the payload.
+fn emit_box_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
+    let suffix = names.mangle(inner);
+    let cell = names.tag(&Ty::box_(inner.clone()));
+    let cell_ptr = format!("{}*", cell);
+    let inner_ty = names.ctype(inner);
+
+    w.line(format!(
+        "{} lsaca_box_new_{}({} value) {{",
+        cell_ptr, suffix, inner_ty
+    ));
+    w.indent();
+    w.line(format!(
+        "{} self = ({})ls_alloc_managed(sizeof({}), lsaca_box_drop_{}, lsaca_box_trace_{});",
+        cell_ptr, cell_ptr, cell, suffix, suffix
+    ));
+    w.line("self->payload = value;");
+    w.line("return self;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!(
+        "{} lsaca_box_get_{}({} self) {{",
+        inner_ty, suffix, cell_ptr
+    ));
+    w.indent();
+    w.line(format!(
+        "return {};",
+        ops::copy_expr(names, inner, "self->payload")
+    ));
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!(
+        "void lsaca_box_set_{}({} self, {} value) {{",
+        suffix, cell_ptr, inner_ty
+    ));
+    w.indent();
+    emit_release_value(w, names, inner, "self->payload");
+    w.line("self->payload = value;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!("void lsaca_box_drop_{}(void* payload) {{", suffix));
+    w.indent();
+    w.line(format!("{} self = ({})payload;", cell_ptr, cell_ptr));
+    emit_release_value(w, names, inner, "self->payload");
+    w.line("(void)self;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!(
+        "void lsaca_box_trace_{}(const void* payload, LsTraceVisit visit) {{",
         suffix
     ));
     w.indent();

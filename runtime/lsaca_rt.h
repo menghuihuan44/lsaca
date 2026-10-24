@@ -373,6 +373,37 @@ LsString* ls_fmt_debug_string(LsString* acc, const LsString* v);
 LsString* ls_fmt_f64_debug(LsString* acc, double v);
 LsString* ls_fmt_f32_debug(LsString* acc, float v);
 
+/* Format specifiers: precision, sign and padding.
+ *
+ * A format hole like {:<8} or {:+.3} is compiled into one of the precision
+ * aware formatters below followed by ls_fmt_apply_width(). A negative
+ * "precision" means "not specified": the ordinary shortest representation is
+ * used. The "plus" flag prefixes a '+' to non-negative numbers (including
+ * +inf and +NaN). */
+LsString* ls_fmt_i64_signed(LsString* acc, int64_t v, bool plus);
+LsString* ls_fmt_u64_signed(LsString* acc, uint64_t v, bool plus);
+/* Fixed notation with exactly "precision" digits after the decimal point,
+ * rounding half to even like printf("%.*f"), e.g. {:.2} on 1.005. */
+LsString* ls_fmt_f64_prec(LsString* acc, double v, int32_t precision, bool plus);
+LsString* ls_fmt_f32_prec(LsString* acc, float v, int32_t precision, bool plus);
+/* At most "precision" Unicode scalar values of a string. */
+LsString* ls_fmt_str_prec(LsString* acc, const LsString* v, int32_t precision);
+
+/* Alignment values for ls_fmt_apply_width(). */
+#define LS_ALIGN_LEFT 0
+#define LS_ALIGN_RIGHT 1
+#define LS_ALIGN_CENTER 2
+
+/* Append "piece" to "acc" padded to a minimum display width of "width"
+ * Unicode scalar values. "align" is one of the LS_ALIGN_* constants, "fill" is
+ * a Unicode scalar value used as padding (space for the default), and
+ * "zero_pad" inserts ASCII '0' after a leading sign instead of using the fill
+ * (the 0 flag of format strings). "piece" is borrowed: the caller keeps
+ * ownership and releases it. A width of at most 1, or any width that the piece
+ * already reaches, appends the piece unchanged. */
+LsString* ls_fmt_apply_width(LsString* acc, LsString* piece, int64_t width,
+                             int32_t align, uint32_t fill, bool zero_pad);
+
 /* ====================================================================== */
 /* Output                                                                 */
 /* ====================================================================== */
