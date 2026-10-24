@@ -1,57 +1,34 @@
-# Prerequisites
-*.d
+# Rust build artifacts
+/target/
+Cargo.lock.bak
 
-# Object files
+# Generated C projects and native build directories
+/build/
 *.o
-*.ko
 *.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
 *.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
-*.so
-*.so.*
-*.dylib
-
-# Executables
+*.lib
 *.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
-
-# Debug files
+*.pdb
+*.ilk
 *.dSYM/
 *.su
-*.idb
-*.pdb
+*.d
+cmake-build*/
+.lsaca-build-cache/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+rules.ninja
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
-
-# debug information files
-*.dwo
-
-build/
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

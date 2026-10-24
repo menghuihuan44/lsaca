@@ -1,0 +1,15 @@
+[package]
+name = "lsaca"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The lsaca language compiler: a Rust-like language with ORC memory management, compiled to C."
+repository = ""
+
+[lib]
+name = "lsaca"
+path = "src/lib.rs"
+
+[dependencies]

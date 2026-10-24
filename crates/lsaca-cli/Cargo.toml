@@ -1,0 +1,17 @@
+[package]
+name = "lsaca-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Command line driver for the lsaca language."
+repository = ""
+
+[[bin]]
+name = "lsaca"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+lsaca.workspace = true
