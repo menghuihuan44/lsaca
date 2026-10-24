@@ -115,6 +115,7 @@ expected, see Types).
 | Vec<T> | growable array (reference counted, COW) |
 | Option<T> | Some(value) or None |
 | Result<T, E> | Ok(value) or Err(error) |
+| Rc<T> | shared, mutable heap cell; handles share one payload (see Rc<T>) |
 | (T1, T2, ...) | tuples, including the unit tuple () |
 | fn(A, B) -> R | function values and closures |
 | struct types | user defined named-field structs |
@@ -125,9 +126,10 @@ Inside an impl block the type name Self refers to the implemented struct or
 enum type (for example fn new() -> Self); outside an impl block it is an error.
 
 There are no references (&T, &mut T), no raw pointers, no usize, no arrays (use
-Vec), no borrow checker. Lengths and indices are i64. Strings are always
-valid UTF-8 and can be indexed only through methods that cut at character
-boundaries (see the standard library).
+Vec), no borrow checker. Shared mutable indirection is provided only by the
+builtin Rc<T> cell type (see Rc<T>). Lengths and indices are i64. Strings are
+always valid UTF-8 and can be indexed only through methods that cut at
+character boundaries (see the standard library).
 
 ### Type inference
 
@@ -140,6 +142,7 @@ context or an explicit turbofish:
     let empty: Vec<i64> = Vec::new();
     let also = Vec::<i64>::new();
     let none: Option<String> = None;
+    let nothing: Rc<Option<String>> = Rc::new(None);
 
 There are no implicit numeric conversions. Use as:
 
@@ -152,17 +155,22 @@ There are no implicit numeric conversions. Use as:
 ## Memory model: ORC
 
 lsaca manages memory with ORC - ownership and reference counting, in the spirit
-of Nim's ARC/ORC - not a tracing garbage collector. The rules are simple and
-deterministic:
+of Nim's ARC/ORC - not a tracing garbage collector. ORC has two parts:
+automatic reference counting (ARC), which reclaims acyclic data
+deterministically, and a trial-deletion cycle collector, which reclaims cyclic
+garbage. The rules are simple:
 
 1. Owned values (String, Vec, Option/Result with owned payloads, tuples, structs
    and enums that contain owned values, function values and closures) are
-   reference counted. Scalars (integers, floats, bools) are plain values.
+   reference counted. Scalars (integers, floats, bools) are plain values. An
+   Rc<T> cell is reference counted as well: an Rc<T> value is a handle whose
+   copies share one cell (see Rc<T>).
 2. Assigning, passing as an argument, returning, capturing (in a closure) and
    storing into a container copies the handle and increments the reference
-   count. The language has no compile-time move errors: a value can be used
-   after being assigned or passed. This is a deliberate deviation from Rust
-   (see Deviations).
+   count. Copying an Rc<T> handle makes another handle to the same cell rather
+   than copying the payload. The language has no compile-time move errors: a
+   value can be used after being assigned or passed. This is a deliberate
+   deviation from Rust (see Deviations).
 3. Function parameters are borrowed: the callee never releases them. The caller
    owns the argument expressions and releases them at the end of the enclosing
    statement. Returning a value transfers ownership to the caller.
@@ -171,25 +179,49 @@ deterministic:
 5. Mutation is copy-on-write: a String or Vec that is mutated while its handle
    is shared clones its buffer first; unshared handles are mutated in place, so
    the common case is O(1). Consequently two variables that were assigned from
-   the same Vec never observe each other's mutations.
+   the same Vec never observe each other's mutations. Rc<T> is not
+   copy-on-write: it is a shared, mutable cell by design, and a change made
+   through one handle is visible through every handle to the same cell.
 6. Structs, enums and tuples have value semantics: assigning them copies the
    value (retaining owned fields), mutating a copy does not affect the original.
+   An Rc<T> field is copied as a handle, so both copies share the cell.
 7. Closures capture by value (handles are retained); the environment is
-   reference counted. move closures behave identically in version 1.
-8. Reference cycles are impossible: there are no general references, no raw
-   pointers and no global mutable state, so a value can only contain values
-   that existed before it was created, or that it owns itself (Vec<Self> is
-   possible but a cycle needs a reference to close it).
-9. There is no way to observe the reference count from the language. Leak
-   checking is compile-time opt-in: the Debug profile of the generated CMake
-   project compiles the runtime with -DLSACA_DEBUG, and defining
-   -DLSACA_DEBUG_RC when configuring a release build enables tracking there too
-   (there is no runtime environment variable). With either define the runtime
-   tracks reference-counted allocations and prints a report to stderr at exit
-   (this indicates a compiler/runtime bug, not a user bug, unless the program
-   panicked or called exit).
-10. Panics and exit terminate the process; the operating system reclaims memory,
-   so no unwinding is required.
+   reference counted, and capturing an Rc<T> handle shares the cell. move
+   closures behave identically in version 1.
+8. Reference cycles are possible, but only through Rc<T>. The language still
+   has no general references, no raw pointers and no global mutable state, so an
+   owned value cannot point back at a value that contains it. Rc<T> is the only
+   source of shared aliasing and indirection, so a cycle needs at least one
+   Rc<T> handle on the path from an object back to itself (for example a struct
+   with a next: Option<Rc<Node>> field). String, Vec, Option/Result and plain
+   struct fields are owned values: they can hold Rc<T> handles, but without one
+   they can never close a cycle.
+9. Cyclic garbage is reclaimed by a trial-deletion cycle collector (the
+   Bacon-Rajan mark-gray / scan / collect-white algorithm) that runs over the
+   reference-counted objects. It is triggered automatically once enough
+   candidate objects accumulate; the threshold is an internal implementation
+   detail and is not user-visible. A cyclic structure becomes reclaimable as
+   soon as no handles outside the cycle remain, without any action by the
+   program. Reachable cycles are never collected: anything still reachable from
+   a live binding, or from data that binding owns, stays alive. There is no
+   user-facing collect() function and no weak reference type in version 1.
+10. The reference count can be observed with Rc<T>::strong_count (see Rc<T>).
+    Leak checking is opt-in: the Debug profile of the generated CMake project
+    compiles the runtime with -DLSACA_DEBUG. Set the LSACA_DEBUG_RC=1
+    environment variable when running the compiler, or pass
+    -DLSACA_DEBUG_RC=ON when configuring an emitted project, to enable tracking
+    in a release build too (the generated CMakeLists.txt exposes the option
+    LSACA_DEBUG_RC). With either define the
+    runtime tracks reference-counted allocations, runs a final collection
+    during process shutdown, and then prints a report to stderr:
+        lsaca: warning: N reference-counted allocation(s) leaked
+    followed by up to a few "lsaca:   leaked allocation of S bytes" lines.
+    After the final collection the report only counts allocations that are
+    genuinely leaked, for example acyclic data that the compiler failed to
+    release, so it indicates a compiler/runtime bug, not a user bug, unless the
+    program panicked or called exit (those paths skip the shutdown report).
+11. Panics and exit terminate the process; the operating system reclaims memory,
+    so no unwinding is required.
 
 ## Variables and mutability
 
@@ -332,10 +364,13 @@ for or a bare block) may omit the semicolon.
   first, there is at most one, and mut self is not supported); methods without
   a receiver are associated functions called as Type::name(...).
 * Mutating methods require the receiver to be reachable through a mut place;
-  receivers are checked like any other place.
+  receivers are checked like any other place. The one exception is Rc<T>::set,
+  which mutates the shared cell through an immutable handle (see Rc<T>).
 * Fields are private to the compilation unit (there is no module system in
   version 1; pub is accepted and ignored).
-* Structs and enums have value semantics and are copied on assignment.
+* Structs and enums have value semantics and are copied on assignment (owned
+  fields are retained). An Rc<T> field is copied as a handle, so both copies
+  share the cell.
 
 ## Pattern matching
 
@@ -394,7 +429,9 @@ Matching rules:
 * Closures cannot be recursive directly (there is no self reference); use a
   named function instead.
 * Capturing a mutable variable inside a closure and mutating it from outside is
-  not supported (there are no references).
+  not supported (there are no references). Capture an Rc<T> handle instead when
+  a closure and the surrounding code must share mutable state: the closure
+  copies the handle, and both sides see set() calls through the same cell.
 
 ## Macros
 
@@ -485,6 +522,103 @@ is negative or >= len; indexing produces a value copy (assign back to modify).
     expect(self, message: String) -> T
     ok(self) -> Option<T>
     err(self) -> Option<E>
+
+### Rc<T>
+
+Rc<T> is a builtin shared, mutable, heap-allocated cell holding one value of
+type T. It is the only way to write shared mutable state or cyclic data in
+version 1. An Rc<T> value is a handle to the cell; handles are reference
+counted, so copying an Rc<T> is cheap and every copy refers to the same cell.
+Rc::new(value) allocates the cell with a reference count of 1 and stores a copy
+of value. When the payload type cannot be inferred from context, annotate the
+binding (let n: Rc<i64> = Rc::new(0);) or use Rc::<i64>::new(0).
+
+    Rc::new(value: T) -> Rc<T>
+    get(self) -> T                    // owned copy of the payload
+    set(self, value: T)               // replaces the payload
+    strong_count(self) -> i64         // number of live handles to the cell
+
+* get() returns an owned copy of the payload. The copy follows the normal value
+  semantics: owned parts are retained and the copy is independent of the cell,
+  so mutating the copy does not change the cell. Each .get() call takes a copy,
+  so an expression that chains .get() walks copied values rather than the live
+  graph and finishes after a finite number of steps.
+* set(value) releases the value currently in the cell and stores a copy of
+  value. Every handle to the same cell observes the new payload immediately.
+* strong_count() returns the cell's current reference count: the number of live
+  Rc<T> handles that refer to it. The call itself neither retains nor releases
+  the handle, and a freshly created cell reports 1. A count above 1 means the
+  cell is shared; a cycle keeps the count above zero after all outside handles
+  are released.
+* get() and set() both work on an immutable binding: the cell itself is the
+  shared, mutable object, so no let mut binding and no &mut receiver are
+  needed; strong_count() is read-only. All three take the handle by value (a
+  handle produced by an expression is a temporary released at the end of the
+  statement).
+* T may be any value type: integers, floats, bool, String, Vec<T>,
+  Option/Result, tuples, structs, enums and fn types. Rc<T> can appear in struct
+  fields, inside Vec/Option/Result and tuples, and in closures.
+* A type cannot contain itself by value, so recursive types use Rc<T> (or
+  Vec<T>) as indirection; the examples below show the usual pattern.
+* Two handles compare equal with == (and unequal with !=) when they refer to
+  the same cell: Rc<T> equality is handle identity and never compares payloads.
+  This differs from Rust, where Rc<T> equality compares the payloads.
+* `{}` and `{:?}` format a handle as Rc(payload), like Rust. Formatting a
+  handle that takes part in a cycle never terminates, so print a copied payload
+  instead: println!("{}", cell.get()). The same rule applies to assert_eq! and
+  to any other macro that formats a handle.
+* The idiomatic way to print a cell is to print its payload:
+  println!("{}", cell.get()).
+
+Sharing - two handles alias one cell:
+
+    let counter = Rc::new(0);
+    let copy = counter;
+    copy.set(copy.get() + 1);
+    println!("{}", counter.get());   // prints 1
+
+A cyclic structure - the payload of a is a Node whose next field points back at
+the cell that holds it:
+
+    struct Node {
+        value: i64,
+        next: Option<Rc<Node>>,
+    }
+
+    fn main() {
+        let a = Rc::new(Node { value: 1, next: None });
+        let node = Node { value: 1, next: Some(a) };
+        a.set(node);
+        println!("{}", a.get().next.unwrap().get().value);   // prints 1
+    }
+
+The last line walks one hop out of the cell: a.get() copies the Node payload,
+next is that copy's Option<Rc<Node>>, unwrap() yields the captured handle and
+get() copies the Node again. The traversal terminates because .get() copies; it
+never follows the live graph in place. When main returns, the local handles are
+released and no handle outside the cycle remains, so the collector reclaims the
+cell without any action by the program.
+
+Cycles through containers look the same - any owned container can hold the
+handles that close the cycle:
+
+    struct Tree {
+        value: i64,
+        children: Vec<Rc<Tree>>,
+    }
+
+    fn main() {
+        let root = Rc::new(Tree { value: 1, children: Vec::new() });
+        let child = Rc::new(Tree { value: 2, children: vec![root] });
+        root.set(Tree { value: 1, children: vec![child] });
+        println!("{}", root.get().children.len());   // prints 1
+    }
+
+Only Rc<T> introduces shared aliasing and indirection. String, Vec, Option,
+Result and plain struct fields are owned values: they can store Rc<T> handles,
+but without at least one Rc<T> on the path back to an object they cannot close
+a cycle. Reachable cycles are ordinary live data and are never collected; a
+cycle becomes garbage only once no handles outside it remain.
 
 ### Free functions
 
@@ -605,10 +739,13 @@ panic is 101.
 
 lsaca borrows Rust's syntax and most of its semantics, but it is not Rust:
 
-1. Memory is ORC reference counting, not ownership with borrow checking. There
-   are no move errors, no lifetimes, no &T/&mut T references, no borrow checks.
-   Copies of owned values cost a reference count increment unless uniquely
-   owned mutation is possible (COW).
+1. Memory is ORC (automatic reference counting plus a trial-deletion cycle
+   collector), not ownership with borrow checking. There are no move errors, no
+   lifetimes, no &T/&mut T references, no borrow checks. Copies of owned values
+   cost a reference count increment unless uniquely owned mutation is possible
+   (COW). Shared mutable state is written with the builtin Rc<T> cell, where
+   Rust needs Rc<RefCell<T>> or Cell<T>; reference cycles are allowed and
+   collected automatically instead of leaking.
 2. No modules, imports, traits, generics on user items, macros with user
    definitions, unsafe, extern, async, or const generics in version 1.
 3. Closures capture by value (and move closures are accepted). Captures are
@@ -627,11 +764,14 @@ lsaca borrows Rust's syntax and most of its semantics, but it is not Rust:
 11. The standard library is a smaller, built-in subset (see above). There is no
     formatter API besides the format macros.
 12. There is no REPL: lsaca is a compiled language.
+13. Rc<T> handles compare with == by identity (same cell), not by payload.
+    Rust compares Rc<T> payloads; identity is used here so that comparing the
+    handles of a cycle terminates.
 
 ## Not in version 1 (roadmap)
 
-Modules and imports, user generics/traits, recursive data structures via Box,
-reference types, arrays and slices, string formatting widths and precision,
-user-defined macros, iterators and protocol traits, multi-threading, a package
-manager, incremental compilation, and a language server.
+Modules and imports, user generics/traits, a Box type, reference types, arrays
+and slices, string formatting widths and precision, user-defined macros,
+iterators and protocol traits, multi-threading, a package manager, incremental
+compilation, and a language server.
 

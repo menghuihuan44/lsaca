@@ -33,6 +33,7 @@ pub fn render(program_name: &str, fallback: &str) -> String {
     out.push_str("set(CMAKE_C_EXTENSIONS OFF)\n");
     out.push('\n');
     out.push_str("option(LSACA_SANITIZE \"Build with AddressSanitizer and UBSan\" OFF)\n");
+    out.push_str("option(LSACA_DEBUG_RC \"Track reference-counted allocations in every configuration\" OFF)\n");
     out.push('\n');
     out.push_str(&format!("add_executable({0} main.c lsaca_rt.c)\n", name));
     out.push('\n');
@@ -47,6 +48,13 @@ pub fn render(program_name: &str, fallback: &str) -> String {
         "target_compile_options({0} PRIVATE $<$<CONFIG:Debug>:-g;-O0;-DLSACA_DEBUG> $<$<CONFIG:Release>:-O2;-DNDEBUG>)\n",
         name
     ));
+    out.push('\n');
+    out.push_str("if(LSACA_DEBUG_RC)\n");
+    out.push_str(&format!(
+        "  target_compile_definitions({} PRIVATE LSACA_DEBUG_RC)\n",
+        name
+    ));
+    out.push_str("endif()\n");
     out.push('\n');
     out.push_str("if(LSACA_SANITIZE)\n");
     out.push_str(&format!(
@@ -77,6 +85,8 @@ mod tests {
         assert!(text.contains("CONFIG:Debug"));
         assert!(text.contains("CONFIG:Release"));
         assert!(text.contains("LSACA_SANITIZE"));
+        assert!(text.contains("option(LSACA_DEBUG_RC"));
+        assert!(text.contains("target_compile_definitions(hello PRIVATE LSACA_DEBUG_RC)"));
         assert!(text.contains("if(UNIX AND NOT APPLE)"));
         assert!(text.contains("target_link_libraries(hello PRIVATE m)"));
         assert_eq!(text, render("hello", "program"));

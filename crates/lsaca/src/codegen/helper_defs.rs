@@ -5,8 +5,8 @@ use crate::codegen::c_writer::CWriter;
 use crate::codegen::helpers::{compound_types, managed_types};
 use crate::codegen::ops::{self, is_managed};
 use crate::codegen::types::{
-    EMPTY_STRUCT_FIELD, OPTION_SOME_MEMBER, RESULT_ERR_MEMBER, RESULT_OK_MEMBER, TypeNames,
-    TypeRegistry, UNION_FIELD, field_cname, positional_field, variant_member,
+    EMPTY_STRUCT_FIELD, FN_ENV_FIELD, OPTION_SOME_MEMBER, RESULT_ERR_MEMBER, RESULT_OK_MEMBER,
+    TypeNames, TypeRegistry, UNION_FIELD, field_cname, positional_field, variant_member,
 };
 use crate::codegen::util;
 use crate::hir;
@@ -21,6 +21,16 @@ pub fn emit_all(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry
     for ty in compound_types(program, registry) {
         emit_debug(w, program, &names, &ty);
         emit_eq(w, program, &names, &ty);
+    }
+    for ty in compound_types(program, registry) {
+        if !matches!(ty, Ty::Rc(_)) {
+            emit_trace(w, program, &names, &ty);
+        }
+    }
+    for ty in managed_types(program, registry) {
+        if let Ty::Rc(inner) = ty {
+            emit_rc_helpers(w, &names, &inner);
+        }
     }
 }
 
@@ -189,6 +199,9 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
             ));
             w.line("return out;");
         }
+        Ty::Rc(_) => {
+            w.line(format!("return ({})ls_retain(v);", c_ty));
+        }
         _ => {
             w.line("(void)v;");
             w.line(format!("{} out = ({}){{0}};", c_ty, c_ty));
@@ -313,6 +326,9 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
                 "lsaca_env_release(v.{});",
                 crate::codegen::types::FN_ENV_FIELD
             ));
+        }
+        Ty::Rc(_) => {
+            w.line("ls_release(v);");
         }
         _ => {
             w.line("(void)v;");
@@ -485,6 +501,11 @@ fn emit_debug_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, t
             push_cstr(w, "<function>");
             w.line("(void)v;");
         }
+        Ty::Rc(inner) => {
+            push_cstr(w, "Rc(");
+            emit_debug_append(w, names, inner, "v->payload");
+            push_cstr(w, ")");
+        }
         _ => {
             w.line("(void)v;");
         }
@@ -649,12 +670,266 @@ fn emit_eq_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
                 crate::codegen::types::FN_PTR_FIELD
             ));
         }
+        Ty::Rc(_) => {
+            w.line("return a == b;");
+        }
         _ => {
             w.line("(void)a;");
             w.line("(void)b;");
             w.line("return true;");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// tracing helpers for the cycle collector
+// ---------------------------------------------------------------------------
+
+/// True when values of this type can hold a reference to a managed allocation.
+fn traceable(ty: &Ty) -> bool {
+    match ty {
+        Ty::Rc(_) | Ty::Fn(_, _) => true,
+        Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::String => false,
+        _ => true,
+    }
+}
+
+/// Emit the tracing of one value slot: visit every managed handle it contains
+/// so the cycle collector can follow the ownership graph.
+pub(crate) fn emit_trace_slot(w: &mut CWriter, names: &TypeNames, ty: &Ty, slot: &str) {
+    match ty {
+        Ty::Rc(_) => {
+            w.line(format!("if ({} != NULL) {{", slot));
+            w.indent();
+            w.line(format!("visit((void*)({}));", slot));
+            w.dedent();
+            w.line("}");
+        }
+        Ty::Fn(_, _) => {
+            w.line(format!("if ({}.{} != NULL) {{", slot, FN_ENV_FIELD));
+            w.indent();
+            w.line(format!("visit({}.{});", slot, FN_ENV_FIELD));
+            w.dedent();
+            w.line("}");
+        }
+        Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::String => {}
+        _ => {
+            w.line(format!(
+                "lsaca_trace_{}(&{}, visit);",
+                names.mangle(ty),
+                slot
+            ));
+        }
+    }
+}
+
+/// Emit the tracing function of one compound type. The collector calls it for
+/// every managed allocation to discover the handles it owns.
+fn emit_trace(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty) {
+    let c_ty = names.ctype(ty);
+    let suffix = names.mangle(ty);
+    w.line(format!(
+        "void lsaca_trace_{}(const {}* value, LsTraceVisit visit) {{",
+        suffix, c_ty
+    ));
+    w.indent();
+    w.line("(void)value;");
+    match ty {
+        Ty::Vec(elem) => {
+            if traceable(elem) {
+                w.line("size_t i;");
+                w.line("for (i = 0; i < value->len; i += 1) {");
+                w.indent();
+                emit_trace_slot(w, names, elem, "value->data[i]");
+                w.dedent();
+                w.line("}");
+            }
+        }
+        Ty::Option(elem) => {
+            if traceable(elem) {
+                w.line("if (value->tag == 1) {");
+                w.indent();
+                emit_trace_slot(
+                    w,
+                    names,
+                    elem,
+                    &format!("value->{}.{}", UNION_FIELD, OPTION_SOME_MEMBER),
+                );
+                w.dedent();
+                w.line("}");
+            }
+        }
+        Ty::Result(ok, err) => {
+            if traceable(ok) || traceable(err) {
+                w.line("if (value->tag == 0) {");
+                w.indent();
+                emit_trace_slot(
+                    w,
+                    names,
+                    ok,
+                    &format!("value->{}.{}", UNION_FIELD, RESULT_OK_MEMBER),
+                );
+                w.dedent();
+                w.line("} else {");
+                w.indent();
+                emit_trace_slot(
+                    w,
+                    names,
+                    err,
+                    &format!("value->{}.{}", UNION_FIELD, RESULT_ERR_MEMBER),
+                );
+                w.dedent();
+                w.line("}");
+            }
+        }
+        Ty::Tuple(elems) => {
+            for (index, elem) in elems.iter().enumerate() {
+                if traceable(elem) {
+                    emit_trace_slot(
+                        w,
+                        names,
+                        elem,
+                        &format!("value->{}", positional_field(index)),
+                    );
+                }
+            }
+        }
+        Ty::Struct(index) => {
+            if let Some((_, fields)) = struct_item(program, *index) {
+                for (name, field_ty) in &fields {
+                    if traceable(field_ty) {
+                        emit_trace_slot(
+                            w,
+                            names,
+                            field_ty,
+                            &format!("value->{}", field_cname(name)),
+                        );
+                    }
+                }
+            }
+        }
+        Ty::Enum(index) => {
+            if let Some(item) = enum_item(program, *index) {
+                let variants: Vec<_> = item
+                    .variants
+                    .iter()
+                    .filter(|variant| variant.fields.iter().any(traceable))
+                    .collect();
+                if !variants.is_empty() {
+                    w.line("switch (value->tag) {");
+                    w.indent();
+                    for variant in variants {
+                        w.line(format!("case {}: {{", variant.tag));
+                        w.indent();
+                        let member = variant_member(&variant.name);
+                        for (field_index, field_ty) in variant.fields.iter().enumerate() {
+                            if traceable(field_ty) {
+                                emit_trace_slot(
+                                    w,
+                                    names,
+                                    field_ty,
+                                    &format!(
+                                        "value->{}.{}.{}",
+                                        UNION_FIELD,
+                                        member,
+                                        positional_field(field_index)
+                                    ),
+                                );
+                            }
+                        }
+                        w.line("break;");
+                        w.dedent();
+                        w.line("}");
+                    }
+                    w.dedent();
+                    w.line("}");
+                }
+            }
+        }
+        Ty::Fn(_, _) => {
+            w.line(format!("if (value->{} != NULL) {{", FN_ENV_FIELD));
+            w.indent();
+            w.line(format!("visit(value->{});", FN_ENV_FIELD));
+            w.dedent();
+            w.line("}");
+        }
+        _ => {}
+    }
+    w.line("(void)visit;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+}
+
+/// Emit the helpers of one Rc cell type: allocation, payload access, release and
+/// tracing. The cell itself is a managed allocation registered with the cycle
+/// collector, so a cycle through its payload is collectable.
+fn emit_rc_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
+    let suffix = names.mangle(inner);
+    let cell = names.tag(&Ty::rc(inner.clone()));
+    let cell_ptr = format!("{}*", cell);
+    let inner_ty = names.ctype(inner);
+
+    w.line(format!(
+        "{} lsaca_rc_new_{}({} value) {{",
+        cell_ptr, suffix, inner_ty
+    ));
+    w.indent();
+    w.line(format!(
+        "{} self = ({})ls_alloc_managed(sizeof({}), lsaca_rc_drop_{}, lsaca_rc_trace_{});",
+        cell_ptr, cell_ptr, cell, suffix, suffix
+    ));
+    w.line("self->payload = value;");
+    w.line("return self;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!(
+        "{} lsaca_rc_get_{}({} self) {{",
+        inner_ty, suffix, cell_ptr
+    ));
+    w.indent();
+    w.line(format!(
+        "return {};",
+        ops::copy_expr(names, inner, "self->payload")
+    ));
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!(
+        "void lsaca_rc_set_{}({} self, {} value) {{",
+        suffix, cell_ptr, inner_ty
+    ));
+    w.indent();
+    emit_release_value(w, names, inner, "self->payload");
+    w.line("self->payload = value;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!("void lsaca_rc_drop_{}(void* payload) {{", suffix));
+    w.indent();
+    w.line(format!("{} self = ({})payload;", cell_ptr, cell_ptr));
+    emit_release_value(w, names, inner, "self->payload");
+    w.line("(void)self;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!(
+        "void lsaca_rc_trace_{}(const void* payload, LsTraceVisit visit) {{",
+        suffix
+    ));
+    w.indent();
+    w.line(format!("const {}* self = (const {}*)payload;", cell, cell));
+    w.line("(void)self;");
+    emit_trace_slot(w, names, inner, "self->payload");
+    w.line("(void)visit;");
+    w.dedent();
+    w.line("}");
+    w.blank();
 }
 
 fn struct_item(program: &hir::Program, index: usize) -> Option<(String, Vec<(String, Ty)>)> {

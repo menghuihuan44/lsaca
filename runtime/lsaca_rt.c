@@ -46,19 +46,32 @@ static void ls_rt_configure_stdio(void) {
 /* Reference counted allocations                                          */
 /* ====================================================================== */
 
-/* Header stored immediately before every payload. Keeping the leaked-object
- * list intrusive (inside the header) means leak tracking needs no extra
- * allocation. */
+/* Header stored immediately before every payload. Every allocation is linked
+ * into one always maintained live-object list (used by the cycle collector
+ * when freeing objects and by the debug leak report). Keeping the list
+ * intrusive means it needs no extra allocation. */
 #define LS_RT_LIVE_MAGIC ((uint64_t)0x4C53414341525431ULL)
+
+/* Cycle collector configuration (single threaded, see lsaca_rt.h). */
+#define LS_RT_CANDIDATE_THRESHOLD ((size_t)512)
+#define LS_RT_MAX_COLLECT_PASSES ((size_t)8)
+#define LS_RT_COLOR_BLACK 0u
+#define LS_RT_COLOR_GRAY 1u
+#define LS_RT_COLOR_WHITE 2u
+#define LS_RT_FLAG_QUEUED 0x01u       /* present in the candidate buffer */
+#define LS_RT_FLAG_WHITE_LISTED 0x02u /* on the collector's white list */
 
 typedef struct LsRtHeader {
     size_t refcount;
     size_t size; /* payload size in bytes */
     uint64_t magic;
-#ifdef LS_RT_LEAK_TRACKING
-    struct LsRtHeader* prev;
-    struct LsRtHeader* next;
-#endif
+    LsDropFn drop;       /* NULL for unmanaged allocations */
+    LsTraceFn trace;     /* NULL when the payload cannot hold managed children */
+    unsigned char color; /* trial-deletion color, BLACK between collections */
+    unsigned flags;      /* LS_RT_FLAG_* collector bookkeeping */
+    struct LsRtHeader* all_prev; /* always maintained live-object list */
+    struct LsRtHeader* all_next;
+    size_t candidate_index; /* position in the candidate buffer while queued */
 } LsRtHeader;
 
 /* Distance from the malloc block to the payload, rounded up so the payload is
@@ -75,9 +88,53 @@ static void* ls_rt_payload_of(LsRtHeader* header) {
     return (void*)((char*)header + LS_RT_HEADER_SPACE);
 }
 
+/* All live reference counted allocations, most recently allocated first. */
+static LsRtHeader* ls_rt_all_head = NULL;
+static size_t ls_rt_live_count = 0;
+
 #ifdef LS_RT_LEAK_TRACKING
-static LsRtHeader* ls_rt_leak_head = NULL;
+/* Set once a shutdown has reported leaks; a second shutdown must stay silent. */
+static int ls_rt_leak_reported = 0;
 #endif
+
+/* Objects whose managed reference count dropped but stayed above zero. The
+ * trial-deletion collector uses them as roots. */
+static LsRtHeader** ls_rt_candidates = NULL;
+static size_t ls_rt_candidate_count = 0;
+static size_t ls_rt_candidate_capacity = 0;
+static size_t ls_rt_candidate_threshold = LS_RT_CANDIDATE_THRESHOLD;
+
+/* White objects found by the running collection; freed in one bulk at the end
+ * so that all payloads are still intact while their drop functions run. */
+static LsRtHeader** ls_rt_white_list = NULL;
+static size_t ls_rt_white_count = 0;
+static size_t ls_rt_white_capacity = 0;
+
+/* Collector reentrancy guards: the language is single threaded, no atomics. */
+static int ls_rt_collecting = 0;
+static int ls_rt_free_depth = 0;
+static int ls_rt_collect_pending = 0;
+
+static void ls_rt_live_unlink(LsRtHeader* header);
+static void ls_rt_candidate_push(LsRtHeader* header);
+static void ls_rt_candidate_remove(LsRtHeader* header);
+static void ls_rt_mark_gray(LsRtHeader* header);
+static void ls_rt_scan(LsRtHeader* header);
+static void ls_rt_scan_black(LsRtHeader* header);
+static void ls_rt_collect_white(LsRtHeader* header);
+
+static void ls_rt_live_unlink(LsRtHeader* header) {
+    if (header->all_prev != NULL) {
+        header->all_prev->all_next = header->all_next;
+    } else {
+        ls_rt_all_head = header->all_next;
+    }
+    if (header->all_next != NULL) {
+        header->all_next->all_prev = header->all_prev;
+    }
+    header->all_prev = NULL;
+    header->all_next = NULL;
+}
 
 /* Every allocation failure is fatal; there is no recoverable OOM in the
  * language. Print a diagnostic and exit with the panic exit code. */
@@ -89,7 +146,8 @@ LS_NORETURN static void ls_rt_alloc_failure(size_t bytes) {
     exit(101);
 }
 
-static void* ls_rt_alloc_payload(size_t size) {
+static void* ls_rt_alloc_payload(size_t size, LsDropFn drop,
+                                    LsTraceFn trace) {
     size_t total;
     LsRtHeader* header;
     void* payload;
@@ -105,21 +163,29 @@ static void* ls_rt_alloc_payload(size_t size) {
     header->refcount = 1;
     header->size = size;
     header->magic = LS_RT_LIVE_MAGIC;
-#ifdef LS_RT_LEAK_TRACKING
-    header->prev = NULL;
-    header->next = ls_rt_leak_head;
-    if (ls_rt_leak_head != NULL) {
-        ls_rt_leak_head->prev = header;
+    header->drop = drop;
+    header->trace = trace;
+    header->color = LS_RT_COLOR_BLACK;
+    header->flags = 0;
+    header->candidate_index = 0;
+    header->all_prev = NULL;
+    header->all_next = ls_rt_all_head;
+    if (ls_rt_all_head != NULL) {
+        ls_rt_all_head->all_prev = header;
     }
-    ls_rt_leak_head = header;
-#endif
+    ls_rt_all_head = header;
+    ls_rt_live_count += 1;
     payload = ls_rt_payload_of(header);
     memset(payload, 0, size);
     return payload;
 }
 
 void* ls_alloc(size_t size) {
-    return ls_rt_alloc_payload(size);
+    return ls_rt_alloc_payload(size, NULL, NULL);
+}
+
+void* ls_alloc_managed(size_t size, LsDropFn drop, LsTraceFn trace) {
+    return ls_rt_alloc_payload(size, drop, trace);
 }
 
 void* ls_retain(void* obj) {
@@ -130,6 +196,16 @@ void* ls_retain(void* obj) {
     return obj;
 }
 
+/* Clear the live magic word right before a header is freed. The store is
+ * volatile on purpose: a plain store to memory that is about to be released
+ * counts as dead and optimising compilers legitimately delete it, which would
+ * leave the live magic word in the freed block and make a later release of the
+ * stale handle corrupt the heap instead of reporting the runtime error. The
+ * zero magic word is the marker of an invalid or already released handle. */
+static void ls_rt_poison_header(LsRtHeader* header) {
+    ((volatile LsRtHeader*)header)->magic = 0;
+}
+
 void ls_release(void* obj) {
     LsRtHeader* header;
 
@@ -137,7 +213,9 @@ void ls_release(void* obj) {
         return;
     }
     header = ls_rt_header_of(obj);
-    if (header->magic != LS_RT_LIVE_MAGIC || header->refcount == 0) {
+    /* A released object has its magic cleared before free(), so a magic
+     * mismatch detects both invalid and already released handles. */
+    if (header->magic != LS_RT_LIVE_MAGIC) {
         ls_rt_configure_stdio();
         fflush(stdout);
         fprintf(stderr,
@@ -146,20 +224,65 @@ void ls_release(void* obj) {
         fflush(stderr);
         exit(101);
     }
-    header->refcount -= 1;
+    /* While the collector frees white garbage, every edge coming from the
+     * white set was already subtracted by the trial deletion, whether the edge
+     * target ended up white or stayed black (live). Running the white nodes'
+     * drop functions must therefore not decrement those managed handles a
+     * second time; the guarded nodes are exactly the ones the trace functions
+     * visit (cycle nodes, trace != NULL). Unmanaged children (strings) are not
+     * part of the trial graph and are released normally. */
+    if (ls_rt_collecting && ls_rt_free_depth > 0 && header->trace != NULL) {
+        return;
+    }
     if (header->refcount == 0) {
-#ifdef LS_RT_LEAK_TRACKING
-        if (header->prev != NULL) {
-            header->prev->next = header->next;
-        } else {
-            ls_rt_leak_head = header->next;
+        ls_rt_configure_stdio();
+        fflush(stdout);
+        fprintf(stderr,
+                "lsaca: runtime error: release of an invalid or already "
+                "released reference-counted object\n");
+        fflush(stderr);
+        exit(101);
+    }
+    /* The collector only makes a candidate out of an object whose managed
+     * reference count dropped but stayed above zero. */
+    if (header->refcount > 1) {
+        header->refcount -= 1;
+        if (header->trace != NULL &&
+            (header->flags & LS_RT_FLAG_QUEUED) == 0) {
+            ls_rt_candidate_push(header);
         }
-        if (header->next != NULL) {
-            header->next->prev = header->prev;
+        /* Trigger a collection once enough candidates have accumulated. Never
+         * collect from inside a collection or a drop function: the next
+         * release or shutdown does it instead. */
+        if (!ls_rt_collecting && ls_rt_free_depth == 0 &&
+            (ls_rt_collect_pending ||
+             ls_rt_candidate_count > ls_rt_candidate_threshold)) {
+            ls_rt_collect_pending = 0;
+            ls_collect_cycles();
         }
-#endif
-        header->magic = 0;
-        free(header);
+        return;
+    }
+    /* Final reference: free the payload normally. */
+    header->refcount = 0;
+    if ((header->flags & LS_RT_FLAG_QUEUED) != 0) {
+        ls_rt_candidate_remove(header);
+    }
+    ls_rt_free_depth += 1;
+    if (header->drop != NULL) {
+        /* The payload is still intact, so its drop function can release the
+         * handles it owns. */
+        header->drop(ls_rt_payload_of(header));
+    }
+    ls_rt_live_unlink(header);
+    ls_rt_live_count -= 1;
+    ls_rt_poison_header(header);
+    free(header);
+    ls_rt_free_depth -= 1;
+    if (!ls_rt_collecting && ls_rt_free_depth == 0 &&
+        (ls_rt_collect_pending ||
+         ls_rt_candidate_count > ls_rt_candidate_threshold)) {
+        ls_rt_collect_pending = 0;
+        ls_collect_cycles();
     }
 }
 
@@ -168,6 +291,248 @@ size_t ls_refcount(const void* obj) {
         return 0;
     }
     return ls_rt_header_of(obj)->refcount;
+}
+
+/* ====================================================================== */
+/* Cycle collector (trial deletion)                                       */
+/* ====================================================================== */
+
+/* Grow or allocate a pointer array; every runtime allocation failure is
+ * fatal. */
+static void* ls_rt_realloc_array(void* data, size_t count,
+                                 size_t item_size) {
+    void* next;
+    if (count > SIZE_MAX / item_size) {
+        ls_rt_alloc_failure(count);
+    }
+    next = realloc(data, count * item_size);
+    if (next == NULL) {
+        ls_rt_alloc_failure(count * item_size);
+    }
+    return next;
+}
+
+static void ls_rt_candidate_push(LsRtHeader* header) {
+    if (ls_rt_candidate_count == ls_rt_candidate_capacity) {
+        size_t new_capacity =
+            ls_rt_candidate_capacity == 0 ? 64 : ls_rt_candidate_capacity * 2;
+        ls_rt_candidates = (LsRtHeader**)ls_rt_realloc_array(
+            ls_rt_candidates, new_capacity, sizeof(LsRtHeader*));
+        ls_rt_candidate_capacity = new_capacity;
+    }
+    header->candidate_index = ls_rt_candidate_count;
+    ls_rt_candidates[ls_rt_candidate_count] = header;
+    ls_rt_candidate_count += 1;
+    header->flags |= LS_RT_FLAG_QUEUED;
+}
+
+static void ls_rt_candidate_remove(LsRtHeader* header) {
+    size_t index = header->candidate_index;
+    LsRtHeader* moved;
+    if (index >= ls_rt_candidate_count ||
+        ls_rt_candidates[index] != header) {
+        /* Defensive: reaching this point would indicate corrupted bookkeeping;
+         * keep going without corrupting the buffer further. */
+        header->flags &= ~LS_RT_FLAG_QUEUED;
+        return;
+    }
+    ls_rt_candidate_count -= 1;
+    moved = ls_rt_candidates[ls_rt_candidate_count];
+    if (index != ls_rt_candidate_count) {
+        ls_rt_candidates[index] = moved;
+        moved->candidate_index = index;
+    }
+    header->flags &= ~LS_RT_FLAG_QUEUED;
+}
+
+static void ls_rt_white_push(LsRtHeader* header) {
+    if (ls_rt_white_count == ls_rt_white_capacity) {
+        size_t new_capacity =
+            ls_rt_white_capacity == 0 ? 64 : ls_rt_white_capacity * 2;
+        ls_rt_white_list = (LsRtHeader**)ls_rt_realloc_array(
+            ls_rt_white_list, new_capacity, sizeof(LsRtHeader*));
+        ls_rt_white_capacity = new_capacity;
+    }
+    ls_rt_white_list[ls_rt_white_count] = header;
+    ls_rt_white_count += 1;
+}
+
+/* Trial deletion phase 1: gray every object reachable from the roots through
+ * managed handles and subtract every internal edge from the reference counts.
+ * visit_mark is called once per edge; the decrement happens even when the
+ * child was already gray, so each edge is subtracted exactly once. */
+static void ls_rt_visit_mark(void* child) {
+    LsRtHeader* header = ls_rt_header_of(child);
+    if (header->trace == NULL) {
+        /* Unmanaged or untraceable object: its edges are never subtracted. */
+        return;
+    }
+    header->refcount -= 1;
+    ls_rt_mark_gray(header);
+}
+
+static void ls_rt_mark_gray(LsRtHeader* header) {
+    if (header->color == LS_RT_COLOR_GRAY) {
+        return;
+    }
+    header->color = LS_RT_COLOR_GRAY;
+    if (header->trace != NULL) {
+        header->trace(ls_rt_payload_of(header), ls_rt_visit_mark);
+    }
+}
+
+/* Trial deletion phase 2: a gray object whose remaining (external) reference
+ * count is positive is reachable from outside the trial set; paint it black
+ * again and restore the counts of everything it reaches. Otherwise it is
+ * garbage. */
+static void ls_rt_visit_scan(void* child) {
+    LsRtHeader* header = ls_rt_header_of(child);
+    if (header->trace == NULL) {
+        return;
+    }
+    ls_rt_scan(header);
+}
+
+static void ls_rt_scan(LsRtHeader* header) {
+    if (header->color != LS_RT_COLOR_GRAY) {
+        return;
+    }
+    if (header->refcount > 0) {
+        ls_rt_scan_black(header);
+    } else {
+        header->color = LS_RT_COLOR_WHITE;
+    }
+    if (header->trace != NULL) {
+        header->trace(ls_rt_payload_of(header), ls_rt_visit_scan);
+    }
+}
+
+static void ls_rt_visit_scan_black(void* child) {
+    LsRtHeader* header = ls_rt_header_of(child);
+    if (header->trace == NULL) {
+        return;
+    }
+    header->refcount += 1;
+    ls_rt_scan_black(header);
+}
+
+static void ls_rt_scan_black(LsRtHeader* header) {
+    if (header->color == LS_RT_COLOR_BLACK) {
+        return;
+    }
+    header->color = LS_RT_COLOR_BLACK;
+    if (header->trace != NULL) {
+        header->trace(ls_rt_payload_of(header), ls_rt_visit_scan_black);
+    }
+}
+
+/* Trial deletion phase 3: collect every white object into one list. */
+static void ls_rt_visit_collect_white(void* child) {
+    LsRtHeader* header = ls_rt_header_of(child);
+    if (header->trace == NULL) {
+        return;
+    }
+    ls_rt_collect_white(header);
+}
+
+static void ls_rt_collect_white(LsRtHeader* header) {
+    if (header->color != LS_RT_COLOR_WHITE ||
+        (header->flags & LS_RT_FLAG_WHITE_LISTED) != 0) {
+        return;
+    }
+    header->flags |= LS_RT_FLAG_WHITE_LISTED;
+    if (header->trace != NULL) {
+        header->trace(ls_rt_payload_of(header), ls_rt_visit_collect_white);
+    }
+    ls_rt_white_push(header);
+}
+
+/* Free the collected white set. All drop functions run before any allocation
+ * is freed, so a drop function always sees intact payloads of the other white
+ * objects. */
+static void ls_rt_free_whites(void) {
+    size_t i;
+    ls_rt_free_depth += 1;
+    for (i = 0; i < ls_rt_white_count; i += 1) {
+        LsRtHeader* header = ls_rt_white_list[i];
+        if (header->drop != NULL) {
+            header->drop(ls_rt_payload_of(header));
+        }
+    }
+    for (i = 0; i < ls_rt_white_count; i += 1) {
+        LsRtHeader* header = ls_rt_white_list[i];
+        ls_rt_live_unlink(header);
+        ls_rt_live_count -= 1;
+        ls_rt_poison_header(header);
+        header->flags = 0;
+        free(header);
+    }
+    ls_rt_white_count = 0;
+    ls_rt_free_depth -= 1;
+}
+
+void ls_collect_cycles(void) {
+    size_t root_count;
+    size_t i;
+    LsRtHeader** roots;
+
+    if (ls_rt_collecting || ls_rt_free_depth > 0) {
+        return;
+    }
+    if (ls_rt_candidate_count == 0) {
+        ls_rt_collect_pending = 0;
+        return;
+    }
+    root_count = ls_rt_candidate_count;
+    roots = (LsRtHeader**)ls_rt_realloc_array(NULL, root_count,
+                                              sizeof(LsRtHeader*));
+    memcpy(roots, ls_rt_candidates, root_count * sizeof(LsRtHeader*));
+    /* The running collection owns the roots; anything released from now on
+     * (for example by a drop function while the whites are freed) is queued
+     * again for the next collection. */
+    ls_rt_candidate_count = 0;
+    for (i = 0; i < root_count; i += 1) {
+        roots[i]->flags &= ~LS_RT_FLAG_QUEUED;
+        roots[i]->candidate_index = 0;
+    }
+    ls_rt_collecting = 1;
+    for (i = 0; i < root_count; i += 1) {
+        ls_rt_mark_gray(roots[i]);
+    }
+    for (i = 0; i < root_count; i += 1) {
+        ls_rt_scan(roots[i]);
+    }
+    ls_rt_white_count = 0;
+    for (i = 0; i < root_count; i += 1) {
+        ls_rt_collect_white(roots[i]);
+    }
+    if (ls_rt_white_count != 0) {
+        ls_rt_free_whites();
+    }
+    ls_rt_collecting = 0;
+    free(roots);
+    ls_rt_collect_pending =
+        ls_rt_candidate_count > ls_rt_candidate_threshold ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Test harness helpers. They are not part of the generated-code ABI; the */
+/* smoke test declares them directly. Keeping them compiled into the       */
+/* runtime lets the test run against an unmodified runtime build.          */
+/* ---------------------------------------------------------------------- */
+
+size_t ls_rt_test_live_allocations(void) {
+    return ls_rt_live_count;
+}
+
+size_t ls_rt_test_candidate_threshold(void) {
+    return ls_rt_candidate_threshold;
+}
+
+size_t ls_rt_test_set_candidate_threshold(size_t threshold) {
+    size_t previous = ls_rt_candidate_threshold;
+    ls_rt_candidate_threshold = threshold;
+    return previous;
 }
 
 /* ====================================================================== */
@@ -185,31 +550,41 @@ int32_t ls_runtime_init(int argc, char** argv) {
 }
 
 void ls_runtime_shutdown(void) {
+    size_t pass;
+
     ls_rt_configure_stdio();
     fflush(stdout);
+    /* Collect garbage cycles before leak reporting: a program whose only
+     * unreachable objects are cycles must not be reported as leaking. The
+     * pass count is bounded so that a pathological drop function that keeps
+     * producing candidates cannot loop forever. */
+    ls_rt_collect_pending = 0;
+    for (pass = 0; pass < LS_RT_MAX_COLLECT_PASSES; pass += 1) {
+        if (ls_rt_candidate_count == 0) {
+            break;
+        }
+        ls_collect_cycles();
+    }
+    ls_rt_collect_pending = 0;
 #ifdef LS_RT_LEAK_TRACKING
-    {
-        size_t count = 0;
+    if (!ls_rt_leak_reported) {
+        size_t count = ls_rt_live_count;
         size_t shown = 0;
         LsRtHeader* header;
-        for (header = ls_rt_leak_head; header != NULL; header = header->next) {
-            count += 1;
-        }
         if (count != 0) {
             fprintf(stderr,
                     "lsaca: warning: %zu reference-counted allocation(s) "
                     "leaked\n",
                     count);
-            for (header = ls_rt_leak_head;
+            for (header = ls_rt_all_head;
                  header != NULL && shown < 8;
-                 header = header->next, shown += 1) {
+                 header = header->all_next, shown += 1) {
                 fprintf(stderr, "lsaca:   leaked allocation of %zu bytes\n",
                         header->size);
             }
         }
-        /* The process is about to exit; forget the list so that a second
-         * shutdown call cannot report the same objects twice. */
-        ls_rt_leak_head = NULL;
+        /* A second shutdown call must not report the same objects twice. */
+        ls_rt_leak_reported = 1;
     }
 #endif
     fflush(stderr);
@@ -246,7 +621,7 @@ static LsString* ls_str_alloc_capacity(size_t capacity) {
         ls_rt_alloc_failure(capacity);
     }
     payload_size = sizeof(LsString) + capacity + 1;
-    s = (LsString*)ls_rt_alloc_payload(payload_size);
+    s = (LsString*)ls_rt_alloc_payload(payload_size, NULL, NULL);
     s->len = 0;
     s->cap = capacity;
     s->data = (char*)((char*)s + sizeof(LsString));

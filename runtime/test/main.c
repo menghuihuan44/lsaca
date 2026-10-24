@@ -9,6 +9,8 @@
  *     smoke --exit-42       -- tests ls_exit(42)
  *     smoke --panic-<case>  -- panic-path tests, must exit 101
  *     smoke --leak          -- leaks two objects (only reported by debug builds)
+ *     smoke --leak-managed  -- leaks one cycle-capable managed allocation
+ *     smoke --orc-shutdown  -- leaves an unreachable cycle for shutdown to collect
  *
  * The run_smoke.ps1 script drives all of this and checks exit codes, stdout and
  * stderr. This file is not part of the generated CMake project.
@@ -225,6 +227,196 @@ static void test_alloc(void) {
     ls_release(raw);
     CHECK(ls_refcount(raw) == 1);
     ls_release(raw);
+}
+
+/* ====================================================================== */
+/* Reference cycles (ORC collector)                                       */
+/* ====================================================================== */
+
+/* Test-harness helpers exported by lsaca_rt.c; deliberately not part of the
+ * generated-code ABI. */
+extern size_t ls_rt_test_live_allocations(void);
+extern size_t ls_rt_test_candidate_threshold(void);
+extern size_t ls_rt_test_set_candidate_threshold(size_t threshold);
+
+/* A cycle-capable payload with two managed handles (child, extra) and one
+ * unmanaged handle (name). This mirrors the shape of the generated drop and
+ * trace functions for an Rc cell; extra lets a garbage cycle reference a live
+ * object that is also referenced from outside. */
+typedef struct OrcTestNode {
+    void* child;
+    void* extra;
+    LsString* name;
+} OrcTestNode;
+
+static int g_orc_drops = 0;
+
+static void orc_test_drop(void* payload) {
+    OrcTestNode* node = (OrcTestNode*)payload;
+    g_orc_drops += 1;
+    ls_release(node->child);
+    ls_release(node->extra);
+    ls_release(node->name);
+}
+
+static void orc_test_trace(const void* payload, LsTraceVisit visit) {
+    const OrcTestNode* node = (const OrcTestNode*)payload;
+    if (node->child != NULL) {
+        visit(node->child);
+    }
+    if (node->extra != NULL) {
+        visit(node->extra);
+    }
+}
+
+static OrcTestNode* orc_node_new(const char* name) {
+    OrcTestNode* node = (OrcTestNode*)ls_alloc_managed(
+        sizeof(OrcTestNode), orc_test_drop, orc_test_trace);
+    if (name != NULL) {
+        node->name = ls_str_cstr(name);
+    }
+    return node;
+}
+
+static void orc_node_set_child(OrcTestNode* node, void* child) {
+    if (child != NULL) {
+        ls_retain(child);
+    }
+    ls_release(node->child);
+    node->child = child;
+}
+
+static void orc_node_set_extra(OrcTestNode* node, void* extra) {
+    if (extra != NULL) {
+        ls_retain(extra);
+    }
+    ls_release(node->extra);
+    node->extra = extra;
+}
+
+/* (a) A two-node cycle with no external references is only reclaimed by an
+ * explicit collection; plain reference counting must not free it. */
+static void test_orc_cycles(void) {
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    OrcTestNode* a = orc_node_new("a");
+    OrcTestNode* b = orc_node_new("b");
+
+    orc_node_set_child(a, b);
+    orc_node_set_child(b, a);
+    /* Two nodes plus their two names. */
+    CHECK(ls_rt_test_live_allocations() == base + 4);
+    ls_release(a);
+    ls_release(b);
+    CHECK(ls_rt_test_live_allocations() == base + 4);
+    ls_collect_cycles();
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops == drops + 2);
+}
+
+/* (b) An acyclic parent/child pair is freed by reference counting alone; the
+ * collector must leave the still referenced child alone. */
+static void test_orc_acyclic(void) {
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    OrcTestNode* parent = orc_node_new(NULL);
+    OrcTestNode* child = orc_node_new(NULL);
+
+    orc_node_set_child(parent, child); /* child count: 1 -> 2 */
+    CHECK(ls_rt_test_live_allocations() == base + 2);
+    ls_release(parent); /* refcount free; its drop releases the child */
+    CHECK(g_orc_drops == drops + 1);
+    CHECK(ls_rt_test_live_allocations() == base + 1);
+    CHECK(ls_refcount(child) == 1);
+    ls_collect_cycles(); /* still referenced: must not be collected */
+    CHECK(ls_rt_test_live_allocations() == base + 1);
+    CHECK(ls_refcount(child) == 1);
+    ls_release(child);
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops == drops + 2);
+}
+
+/* (c) A cycle that is still externally referenced through one node survives a
+ * collection; releasing that last handle makes it garbage. */
+static void test_orc_referenced_cycle(void) {
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    OrcTestNode* a = orc_node_new("x");
+    OrcTestNode* b = orc_node_new("y");
+
+    orc_node_set_child(a, b);
+    orc_node_set_child(b, a);
+    CHECK(ls_refcount(a) == 2);
+    ls_release(b); /* a still keeps the cycle externally reachable */
+    CHECK(ls_rt_test_live_allocations() == base + 4);
+    ls_collect_cycles(); /* reachable from outside: the cycle must survive */
+    CHECK(ls_rt_test_live_allocations() == base + 4);
+    CHECK(ls_refcount(a) == 2);
+    CHECK(ls_refcount(b) == 1);
+    CHECK(g_orc_drops == drops);
+    ls_release(a);
+    CHECK(ls_rt_test_live_allocations() == base + 4);
+    ls_collect_cycles(); /* now the whole cycle is garbage */
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops == drops + 2);
+}
+
+/* (d) Crossing the candidate threshold triggers collection automatically,
+ * without any explicit ls_collect_cycles() call. */
+static void test_orc_automatic_collection(void) {
+    size_t previous_threshold = ls_rt_test_set_candidate_threshold(8);
+    const size_t cycles = 40;
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    size_t i;
+    size_t freed;
+
+    for (i = 0; i < cycles; i += 1) {
+        OrcTestNode* a = orc_node_new(NULL);
+        OrcTestNode* b = orc_node_new(NULL);
+        orc_node_set_child(a, b);
+        orc_node_set_child(b, a);
+        ls_release(a);
+        ls_release(b);
+    }
+    /* The candidate threshold must already have collected some garbage
+     * cycles: no explicit collection was requested in the loop. */
+    freed = (size_t)(g_orc_drops - drops);
+    CHECK(freed > 0);
+    CHECK(ls_rt_test_live_allocations() == base + 2 * cycles - freed);
+    CHECK(ls_rt_test_live_allocations() < base + 2 * cycles);
+    ls_collect_cycles();
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops - drops == (int)(2 * cycles));
+    (void)ls_rt_test_set_candidate_threshold(previous_threshold);
+}
+
+/* (e) A garbage cycle that also references a live managed object: the trial
+ * deletion already accounts for the cycle's outgoing edges, so freeing the
+ * cycle's drops must not decrement the live object's count a second time. The
+ * live object must survive with only its external reference. */
+static void test_orc_live_edge(void) {
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    OrcTestNode* a = orc_node_new("la");
+    OrcTestNode* b = orc_node_new("lb");
+    OrcTestNode* live = orc_node_new("live");
+
+    orc_node_set_child(a, b);
+    orc_node_set_child(b, a);
+    orc_node_set_extra(b, live); /* live: external handle + edge from b */
+    CHECK(ls_refcount(live) == 2);
+    CHECK(ls_rt_test_live_allocations() == base + 6);
+    ls_release(a);
+    ls_release(b);
+    CHECK(ls_rt_test_live_allocations() == base + 6);
+    ls_collect_cycles(); /* frees a and b, keeps the live node */
+    CHECK(ls_rt_test_live_allocations() == base + 2);
+    CHECK(ls_refcount(live) == 1);
+    CHECK(g_orc_drops == drops + 2);
+    ls_release(live);
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops == drops + 3);
 }
 
 /* ====================================================================== */
@@ -1134,6 +1326,11 @@ static void test_io(const char* path) {
 
 static void run_all(const char* io_path) {
     test_alloc();
+    test_orc_cycles();
+    test_orc_acyclic();
+    test_orc_referenced_cycle();
+    test_orc_automatic_collection();
+    test_orc_live_edge();
     test_strings();
     test_cow();
     test_search_transform();
@@ -1182,6 +1379,28 @@ static void mode_leak(void) {
     (void)first;
     (void)second;
     printf("leaked 10+10 bytes\n");
+}
+
+static void mode_orc_shutdown(void) {
+    /* Build an unreachable reference cycle and drop both external handles
+     * without calling ls_collect_cycles(): shutdown itself must reclaim the
+     * cycle, otherwise the leak-tracking builds would report it. */
+    OrcTestNode* a = orc_node_new("shutdown-a");
+    OrcTestNode* b = orc_node_new("shutdown-b");
+    orc_node_set_child(a, b);
+    orc_node_set_child(b, a);
+    ls_release(a);
+    ls_release(b);
+    printf("shutdown cycle pending: %zu live allocations\n",
+           ls_rt_test_live_allocations());
+}
+
+static void mode_leak_managed(void) {
+    /* A cycle-capable allocation that is never released and is part of no
+     * cycle: reference counting cannot free it and the collector must not
+     * collect it, so the leak-tracking builds must report it. */
+    (void)ls_alloc_managed(24, orc_test_drop, orc_test_trace);
+    printf("leaked 24 managed bytes\n");
 }
 
 static int run_panic_mode(const char* mode) {
@@ -1236,6 +1455,16 @@ int main(int argc, char** argv) {
         }
         if (strcmp(argv[1], "--leak") == 0) {
             mode_leak();
+            ls_runtime_shutdown();
+            return 0;
+        }
+        if (strcmp(argv[1], "--leak-managed") == 0) {
+            mode_leak_managed();
+            ls_runtime_shutdown();
+            return 0;
+        }
+        if (strcmp(argv[1], "--orc-shutdown") == 0) {
+            mode_orc_shutdown();
             ls_runtime_shutdown();
             return 0;
         }

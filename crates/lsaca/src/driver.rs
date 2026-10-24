@@ -185,6 +185,12 @@ pub fn build_project(project_dir: &Path, options: &BuildOptions) -> io::Result<B
             "-DCMAKE_BUILD_TYPE={}",
             if options.release { "Release" } else { "Debug" }
         ));
+    if debug_rc_requested() {
+        // The generated project defines a CMake option for leak tracking in
+        // every configuration; expose it through the environment so users do
+        // not have to edit the generated build system.
+        configure.arg("-DLSACA_DEBUG_RC=ON");
+    }
     configure.current_dir(project_dir);
     prepare_child(&mut configure, compiler.parent(), &tmp_dir);
     run_tool(&mut configure, "cmake configure", options.verbose)?;
@@ -275,7 +281,24 @@ pub fn cache_key(generated: &Generated, options: &BuildOptions, compiler: &Path)
         hash = fnv1a(hash, &[0xff]);
     }
     hash = fnv1a(hash, &[if options.release { 1 } else { 0 }]);
+    hash = fnv1a(hash, &[if debug_rc_requested() { 1 } else { 0 }]);
     hash
+}
+
+/// Whether the environment asks for reference-count leak tracking in every
+/// build configuration (`LSACA_DEBUG_RC`).
+fn debug_rc_requested() -> bool {
+    std::env::var("LSACA_DEBUG_RC")
+        .map(|value| debug_rc_enabled(&value))
+        .unwrap_or(false)
+}
+
+/// Parse the boolean spelling accepted by `LSACA_DEBUG_RC`.
+fn debug_rc_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "on" | "yes"
+    )
 }
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -646,5 +669,21 @@ mod tests {
         let candidates = cache_root_candidates();
         let cwd = env::current_dir().expect("the current directory should be available");
         assert_eq!(candidates.last(), Some(&cwd.join(".lsaca-build-cache")));
+    }
+
+    #[test]
+    fn parses_the_debug_rc_switch() {
+        for enabled in ["1", "true", "ON", " yes "] {
+            assert!(
+                debug_rc_enabled(enabled),
+                "{enabled:?} should enable tracking"
+            );
+        }
+        for disabled in ["", "0", "false", "off", "no", "2"] {
+            assert!(
+                !debug_rc_enabled(disabled),
+                "{disabled:?} should disable tracking"
+            );
+        }
     }
 }

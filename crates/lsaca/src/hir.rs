@@ -509,6 +509,10 @@ pub enum HBuiltinMethod {
     ResExpect,
     ResOk,
     ResErr,
+    // Rc
+    RcGet,
+    RcSet,
+    RcStrongCount,
 }
 
 impl HBuiltinMethod {
@@ -557,6 +561,9 @@ impl HBuiltinMethod {
             ResExpect => "expect",
             ResOk => "ok",
             ResErr => "err",
+            RcGet => "get",
+            RcSet => "set",
+            RcStrongCount => "strong_count",
         }
     }
 }
@@ -572,6 +579,8 @@ pub enum HBuiltinAssoc {
     VecNew,
     /// `Vec::<T>::with_capacity(n)`
     VecWithCapacity,
+    /// `Rc::<T>::new(value)`
+    RcNew,
 }
 
 /// Builtin free functions.

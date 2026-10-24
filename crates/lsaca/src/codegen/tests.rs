@@ -137,12 +137,13 @@ const CLOSURES: &str = "fn apply_twice(f: fn(i64) -> i64, value: i64) -> i64 {\n
 #[test]
 fn emits_closure_environment_support() {
     let (main_c, _) = generate_source("closures", CLOSURES, true);
-    assert!(main_c.contains("typedef struct LsEnvHeader"));
+    assert!(!main_c.contains("LsEnvHeader"));
     assert!(main_c.contains("lsaca_env_retain("));
     assert!(main_c.contains("lsaca_env_release("));
     assert!(main_c.contains("lsaca_env_drop_"));
+    assert!(main_c.contains("lsaca_trace_env_"));
     assert!(main_c.contains("lsaca_closure_"));
-    assert!(main_c.contains("ls_alloc(sizeof(LsEnv_"));
+    assert!(main_c.contains("ls_alloc_managed(sizeof(LsEnv_"));
     assert!(main_c.contains("fn_ptr"));
     assert!(main_c.contains("lsaca_thunk_"));
 }
@@ -203,4 +204,103 @@ fn omits_location_information_when_disabled() {
     assert!(main_c.contains("ls_add_i64_checked("));
     assert!(main_c.contains("NULL, 0, 0"));
     assert!(!main_c.contains("\"noloc.ls\""));
+}
+
+const RC_CELLS: &str = r#"
+struct Node {
+    value: i64,
+    next: Option<Rc<Node>>,
+}
+
+fn main() {
+    let a = Rc::new(Node { value: 1, next: None });
+    let b = Rc::new(Node { value: 2, next: None });
+    let a2 = a;
+    b.set(Node { value: 2, next: Some(a2) });
+    a.set(Node { value: 1, next: Some(b) });
+    println!("{}", a.get().value);
+}
+"#;
+
+#[test]
+fn emits_rc_cells_and_cycle_tracing() {
+    let (main_c, _) = generate_source("rc_cells", RC_CELLS, true);
+    // A reference counted cell is a managed allocation that knows how to drop
+    // and how to trace its payload.
+    assert!(main_c.contains("typedef struct LsRc_Node LsRc_Node;"));
+    assert!(main_c.contains("struct LsRc_Node {"));
+    assert!(main_c.contains("LsNode payload;"));
+    assert!(
+        main_c.contains(
+            "ls_alloc_managed(sizeof(LsRc_Node), lsaca_rc_drop_Node, lsaca_rc_trace_Node)"
+        )
+    );
+    // Copying and releasing an Rc handle retains and releases the cell.
+    assert!(main_c.contains("(LsRc_Node*)ls_retain("));
+    assert!(main_c.contains("ls_release("));
+    // The generated tracing functions visit the managed handles stored in a
+    // value, which is what the trial-deletion collector walks.
+    assert!(main_c.contains("void lsaca_trace_Node("));
+    assert!(main_c.contains("void lsaca_trace_Opt_Rc_Node("));
+    assert!(main_c.contains("void lsaca_rc_trace_Node("));
+    assert!(main_c.contains("visit((void*)("));
+    // Rc::new / get / set / strong_count helpers exist.
+    assert!(main_c.contains("LsRc_Node* lsaca_rc_new_Node("));
+    assert!(main_c.contains("LsNode lsaca_rc_get_Node("));
+    assert!(main_c.contains("void lsaca_rc_set_Node("));
+}
+
+/// Return the end of the generated call line and the last argument passed to
+/// the helper: the first argument of a call like "lsaca_rc_set_i64(v0, t1);"
+/// or of "t2 = (LsRc_i64*)lsaca_rc_new_i64(t3);".
+fn last_call_argument(main_c: &str, marker: &str) -> (usize, String) {
+    let call = main_c
+        .find(marker)
+        .unwrap_or_else(|| panic!("generated C does not contain {}", marker));
+    let line_start = main_c[..call]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = main_c[call..].find(';').map(|index| call + index).unwrap();
+    let line = &main_c[line_start..=line_end];
+    let open = line.find('(').expect("call has arguments");
+    let close = line.rfind(')').expect("call has arguments");
+    let arguments = &line[open + 1..close];
+    let last = arguments
+        .rsplit(',')
+        .next()
+        .unwrap_or(arguments)
+        .trim()
+        .to_string();
+    (line_end, last)
+}
+
+#[test]
+fn does_not_release_ownership_of_moved_rc_arguments() {
+    let source = r#"
+fn main() {
+    let a = Rc::new(String::from("a"));
+    a.set(String::from("b"));
+    println!("{}", a.get());
+}
+"#;
+    let (main_c, _) = generate_source("rc_moves", source, true);
+
+    // Rc::new takes ownership of its payload, so the temporary passed to the
+    // helper must not be released again after the cell stored it.
+    let (new_end, new_argument) = last_call_argument(&main_c, "lsaca_rc_new_String(");
+    let release_new = format!("ls_release({});", new_argument);
+    assert!(
+        !main_c[new_end..].contains(&release_new),
+        "the payload passed to Rc::new is released after being moved into the cell"
+    );
+
+    // Rc::set releases the old payload itself and takes ownership of the new
+    // one, so the argument must not be released by the caller either.
+    let (set_end, set_argument) = last_call_argument(&main_c, "lsaca_rc_set_String(");
+    let release_set = format!("ls_release({});", set_argument);
+    assert!(
+        !main_c[set_end..].contains(&release_set),
+        "the payload passed to Rc::set is released after being moved into the cell"
+    );
 }

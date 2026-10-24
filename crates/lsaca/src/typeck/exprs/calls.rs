@@ -534,6 +534,37 @@ impl<'a> Checker<'a> {
                     span,
                 )
             }
+            HBuiltinAssoc::RcNew => {
+                let mut explicit: Vec<ITy> = Vec::new();
+                for generic in generics {
+                    let resolved = self
+                        .resolve_ty(generic, self.current_self_key())
+                        .unwrap_or_else(|| self.infer.fresh_var());
+                    explicit.push(resolved);
+                }
+                let inner = match explicit.first() {
+                    Some(inner) => inner.clone(),
+                    None => match hint {
+                        Some(hint) => match self.infer.resolve(hint) {
+                            ITy::Rc(inner) => (*inner).clone(),
+                            _ => self.infer.fresh_var(),
+                        },
+                        None => self.infer.fresh_var(),
+                    },
+                };
+                let arg_exprs = self.check_call_args(std::slice::from_ref(&inner), args, span);
+                let ret = ITy::rc(inner.clone());
+                self.apply_hint(&ret, hint);
+                TExpr::new(
+                    ret,
+                    TExprKind::BuiltinAssoc {
+                        func,
+                        args: arg_exprs,
+                        type_args: vec![inner],
+                    },
+                    span,
+                )
+            }
             HBuiltinAssoc::VecNew | HBuiltinAssoc::VecWithCapacity => {
                 let mut type_args: Vec<ITy> = Vec::new();
                 for generic in generics {
@@ -842,6 +873,7 @@ impl<'a> Checker<'a> {
                 "len", "is_empty", "push", "pop", "insert", "remove", "clear", "first", "last",
                 "get", "extend", "reverse",
             ],
+            ITy::Rc(_) => &["get", "set", "strong_count"],
             ITy::Option(_) => &["is_some", "is_none", "unwrap", "unwrap_or", "expect"],
             ITy::Result(_, _) => &[
                 "is_ok",

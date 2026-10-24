@@ -48,6 +48,7 @@ impl TypeNames {
             Ty::Float(float_ty) => float_ty.name().to_string(),
             Ty::String => String::from("String"),
             Ty::Vec(elem) => format!("Vec_{}", self.mangle(elem)),
+            Ty::Rc(elem) => format!("Rc_{}", self.mangle(elem)),
             Ty::Option(elem) => format!("Opt_{}", self.mangle(elem)),
             Ty::Result(ok, err) => format!("Res_{}_{}", self.mangle(ok), self.mangle(err)),
             Ty::Tuple(elems) => {
@@ -73,6 +74,13 @@ impl TypeNames {
         }
     }
 
+    /// The C name of the generated struct that holds this compound type,
+    /// without any pointer. Unlike `ctype` this is also usable for `Rc<T>`,
+    /// whose `ctype` is a pointer to the generated cell.
+    pub fn tag(&self, ty: &Ty) -> String {
+        format!("Ls{}", self.mangle(ty))
+    }
+
     /// The C type used to store a value of this type.
     pub fn ctype(&self, ty: &Ty) -> String {
         match ty {
@@ -81,6 +89,8 @@ impl TypeNames {
             Ty::Int(int_ty) => int_ty.c_type().to_string(),
             Ty::Float(float_ty) => float_ty.c_type().to_string(),
             Ty::String => String::from("LsString*"),
+            // An Rc value is the pointer to its reference counted cell.
+            Ty::Rc(_) => format!("Ls{}*", self.mangle(ty)),
             _ => format!("Ls{}", self.mangle(ty)),
         }
     }
@@ -96,6 +106,7 @@ pub enum TypeDef {
     Struct(usize),
     Enum(usize),
     Vec(Ty),
+    Rc(Ty),
     Option(Ty),
     Result(Ty, Ty),
     Tuple(Vec<Ty>),
@@ -147,6 +158,11 @@ impl TypeRegistry {
 
     pub fn ctype(&self, ty: &Ty) -> String {
         self.names.ctype(ty)
+    }
+
+    /// The C struct name of a compound type (no pointer, see `TypeNames::tag`).
+    pub fn tag(&self, ty: &Ty) -> String {
+        self.names.tag(ty)
     }
 
     /// True for types whose definition is emitted by codegen (not scalars and
@@ -256,6 +272,7 @@ impl TypeRegistry {
                 push_if_compound(&mut deps, ret);
             }
             Ty::Vec(_) => {}
+            Ty::Rc(elem) => push_if_compound(&mut deps, elem),
             _ => {}
         }
         deps
@@ -263,7 +280,9 @@ impl TypeRegistry {
 }
 
 fn push_if_compound(deps: &mut Vec<Ty>, ty: &Ty) {
-    if !ty.is_bitwise_copy() && !deps.contains(ty) {
+    // Rc<T> is a pointer to its cell, so a value that contains it only needs
+    // the forward declaration of the cell, never its complete definition.
+    if !ty.is_bitwise_copy() && !ty.is_rc() && !deps.contains(ty) {
         deps.push(ty.clone());
     }
 }
@@ -554,6 +573,7 @@ impl TypeRegistry {
             Ty::Struct(index) => TypeDef::Struct(*index),
             Ty::Enum(index) => TypeDef::Enum(*index),
             Ty::Vec(elem) => TypeDef::Vec((**elem).clone()),
+            Ty::Rc(elem) => TypeDef::Rc((**elem).clone()),
             Ty::Option(elem) => TypeDef::Option((**elem).clone()),
             Ty::Result(ok, err) => TypeDef::Result((**ok).clone(), (**err).clone()),
             Ty::Tuple(elems) => TypeDef::Tuple(elems.clone()),
@@ -606,6 +626,7 @@ impl TypeNames {
             Ty::Float(float_ty) => crate::codegen::util::float_literal(0.0, *float_ty),
             Ty::String => String::from("ls_str_new()"),
             Ty::Vec(_) => format!("(({}){{0, 0, NULL}})", self.ctype(ty)),
+            Ty::Rc(_) => format!("(({})NULL)", self.ctype(ty)),
             Ty::Option(elem) => {
                 if **elem == Ty::String {
                     String::from("ls_opt_string_none()")

@@ -611,16 +611,16 @@ impl<'a> Checker<'a> {
                 Some(float_ty) => self.simple_type(span, generics, ITy::Float(float_ty)),
                 None => None,
             },
-            "Vec" | "Option" => {
+            "Vec" | "Rc" | "Option" => {
                 if generics.len() != 1 {
                     self.arity_error(1, span, generics.len());
                     return None;
                 }
                 let inner = self.resolve_ty(&generics[0], self_key)?;
-                if name == "Vec" {
-                    Some(ITy::vec(inner))
-                } else {
-                    Some(ITy::option(inner))
+                match name {
+                    "Vec" => Some(ITy::vec(inner)),
+                    "Rc" => Some(ITy::rc(inner)),
+                    _ => Some(ITy::option(inner)),
                 }
             }
             "Result" => {
@@ -986,7 +986,7 @@ impl<'a> Checker<'a> {
                         )
                         .with_code("E0072")
                         .with_note(
-                            "types cannot contain themselves by value; break the cycle with Vec<T> (heap allocated)"
+                            "types cannot contain themselves by value; break the cycle with Rc<T> or Vec<T> (both are heap allocated)"
                                 .to_string(),
                         );
                     self.diagnostics.push(diag);

@@ -180,6 +180,30 @@ foreach ($config in $leakCases) {
     Assert-Contains $result.StdErr 'leaked allocation of 10 bytes' "$($config.Name): leak report lists allocation sizes"
 }
 
+# --- ORC cycle collector --------------------------------------------------
+$orcCases = @(
+    @{ Name = 'release'; Exe = $release },
+    @{ Name = 'debug'; Exe = $debug },
+    @{ Name = 'rc'; Exe = $rc }
+)
+foreach ($config in $orcCases) {
+    $result = Invoke-Program -Exe $config.Exe -Arguments @('--orc-shutdown')
+    Assert-Equal $result.ExitCode 0 "$($config.Name): --orc-shutdown exits 0"
+    Assert-Contains $result.StdOut 'shutdown cycle pending' "$($config.Name): --orc-shutdown leaves an unreachable cycle"
+    Assert-Equal $result.StdErr '' "$($config.Name): shutdown collects the leftover cycle (no leak report)"
+}
+
+$result = Invoke-Program -Exe $release -Arguments @('--leak-managed')
+Assert-Equal $result.ExitCode 0 'release: --leak-managed exits 0'
+Assert-Equal $result.StdErr '' 'release: leaked managed objects are not reported'
+
+foreach ($config in $leakCases) {
+    $result = Invoke-Program -Exe $config.Exe -Arguments @('--leak-managed')
+    Assert-Equal $result.ExitCode 0 "$($config.Name): --leak-managed exits 0"
+    Assert-Contains $result.StdErr 'lsaca: warning: 1 reference-counted allocation(s) leaked' "$($config.Name): leak report counts the managed object"
+    Assert-Contains $result.StdErr 'leaked allocation of 24 bytes' "$($config.Name): leak report lists the managed allocation size"
+}
+
 # --- panic paths ----------------------------------------------------------
 $panicCases = @(
     @{ Mode = '--panic-div-zero'; Line = 3; Col = 9; Message = 'attempt to divide by zero' },

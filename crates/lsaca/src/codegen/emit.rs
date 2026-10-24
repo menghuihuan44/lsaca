@@ -521,12 +521,8 @@ impl<'a> Gen<'a> {
         let ctype = format!("LsEnv_{}", closure_id);
         let env_name = self.fresh("env");
         self.w.line(format!(
-            "{}* {} = ({}*)ls_alloc(sizeof({}));",
-            ctype, env_name, ctype, ctype
-        ));
-        self.w.line(format!(
-            "{}->header.drop = lsaca_env_drop_{};",
-            env_name, closure_id
+            "{}* {} = ({}*)ls_alloc_managed(sizeof({}), lsaca_env_drop_{}, lsaca_trace_env_{});",
+            ctype, env_name, ctype, ctype, closure_id, closure_id
         ));
         for (index, value) in values.iter().enumerate() {
             self.w

@@ -185,6 +185,11 @@ pub enum Ty {
     String,
     /// Builtin growable vector, monomorphized in generated code.
     Vec(Box<Ty>),
+    /// Builtin reference counted heap cell, monomorphized in generated code.
+    /// `Rc<T>` is the only type with enough indirection to close a reference
+    /// cycle, so it is also the only place where the ORC cycle collector is
+    /// observable.
+    Rc(Box<Ty>),
     /// Builtin optional value, monomorphized in generated code.
     Option(Box<Ty>),
     /// Builtin result value, monomorphized in generated code.
@@ -256,6 +261,10 @@ impl Ty {
         Ty::Vec(Box::new(elem))
     }
 
+    pub fn rc(elem: Ty) -> Ty {
+        Ty::Rc(Box::new(elem))
+    }
+
     pub fn option(elem: Ty) -> Ty {
         Ty::Option(Box::new(elem))
     }
@@ -304,6 +313,10 @@ impl Ty {
         matches!(self, Ty::Vec(_))
     }
 
+    pub fn is_rc(&self) -> bool {
+        matches!(self, Ty::Rc(_))
+    }
+
     pub fn is_option(&self) -> bool {
         matches!(self, Ty::Option(_))
     }
@@ -333,7 +346,7 @@ impl Ty {
     pub fn is_bitwise_copy(&self) -> bool {
         match self {
             Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) => true,
-            Ty::String | Ty::Vec(_) | Ty::Fn(_, _) => false,
+            Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Fn(_, _) => false,
             Ty::Option(inner) => inner.is_bitwise_copy(),
             Ty::Result(ok, err) => ok.is_bitwise_copy() && err.is_bitwise_copy(),
             Ty::Tuple(elems) => elems.iter().all(Ty::is_bitwise_copy),
@@ -374,6 +387,7 @@ impl fmt::Display for Ty {
             Ty::Float(float) => write!(f, "{}", float.name()),
             Ty::String => write!(f, "String"),
             Ty::Vec(elem) => write!(f, "Vec<{}>", elem),
+            Ty::Rc(elem) => write!(f, "Rc<{}>", elem),
             Ty::Option(elem) => write!(f, "Option<{}>", elem),
             Ty::Result(ok, err) => write!(f, "Result<{}, {}>", ok, err),
             Ty::Tuple(elems) => {

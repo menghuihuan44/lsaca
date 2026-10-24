@@ -276,6 +276,7 @@ impl<'a> Checker<'a> {
             ITy::Float(float_ty) => float_ty.name().to_string(),
             ITy::String => "String".to_string(),
             ITy::Vec(elem) => format!("Vec<{}>", self.describe_resolved(elem)),
+            ITy::Rc(elem) => format!("Rc<{}>", self.describe_resolved(elem)),
             ITy::Option(elem) => format!("Option<{}>", self.describe_resolved(elem)),
             ITy::Result(ok, err) => format!(
                 "Result<{}, {}>",

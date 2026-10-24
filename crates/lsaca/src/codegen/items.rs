@@ -6,10 +6,10 @@
 //! 1. includes and the runtime header;
 //! 2. the unit type and float to integer cast helpers;
 //! 3. forward typedefs and topologically ordered type definitions;
-//! 4. closure environment structs and the environment header;
-//! 5. prototypes for helpers, functions, closures and environment drops;
-//! 6. helper definitions (copy, release, debug, equality);
-//! 7. environment support and per closure environment drop functions;
+//! 4. closure environment structs;
+//! 5. prototypes for helpers, functions, closures and environment drop / trace functions;
+//! 6. helper definitions (copy, release, debug, equality, tracing);
+//! 7. environment support and per closure environment drop and trace functions;
 //! 8. function value thunks, closure bodies, user function bodies;
 //! 9. the C main wrapper that drives the runtime lifecycle.
 
@@ -19,6 +19,7 @@ use crate::types::{IntTy, SelfKind, Ty};
 use super::CodegenOptions;
 use super::c_writer::CWriter;
 use super::emit::{BoundVar, EnvInfo, Gen, Receiver};
+use super::helper_defs;
 use super::helpers;
 use super::ops;
 use super::types::{
@@ -53,6 +54,7 @@ impl<'a> Gen<'a> {
         helpers::emit_helper_definitions(&mut self.w, self.program, self.registry);
         helpers::emit_env_support(&mut self.w);
         self.emit_env_drops();
+        self.emit_env_traces();
         self.emit_thunks();
         self.emit_closure_fns();
         self.emit_user_fns();
@@ -130,7 +132,7 @@ impl<'a> Gen<'a> {
             if self.registry.is_frozen(ty) {
                 continue;
             }
-            let c_name = self.registry.ctype(ty);
+            let c_name = self.registry.tag(ty);
             self.w
                 .line(format!("typedef struct {} {};", c_name, c_name));
         }
@@ -158,7 +160,7 @@ impl<'a> Gen<'a> {
             TypeDef::Struct(index) => self.emit_struct_definition(ty, index),
             TypeDef::Enum(index) => self.emit_enum_definition(ty, index),
             TypeDef::Vec(elem) => {
-                let c_name = self.registry.ctype(ty);
+                let c_name = self.registry.tag(ty);
                 let element = self.registry.ctype(&elem);
                 self.w.line(format!("struct {} {{", c_name));
                 self.w.indent();
@@ -170,7 +172,7 @@ impl<'a> Gen<'a> {
                 self.w.blank();
             }
             TypeDef::Option(elem) => {
-                let c_name = self.registry.ctype(ty);
+                let c_name = self.registry.tag(ty);
                 let payload = self.registry.ctype(&elem);
                 self.w.line(format!("struct {} {{", c_name));
                 self.w.indent();
@@ -185,7 +187,7 @@ impl<'a> Gen<'a> {
                 self.w.blank();
             }
             TypeDef::Result(ok, err) => {
-                let c_name = self.registry.ctype(ty);
+                let c_name = self.registry.tag(ty);
                 let ok_type = self.registry.ctype(&ok);
                 let err_type = self.registry.ctype(&err);
                 self.w.line(format!("struct {} {{", c_name));
@@ -202,7 +204,7 @@ impl<'a> Gen<'a> {
                 self.w.blank();
             }
             TypeDef::Tuple(elems) => {
-                let c_name = self.registry.ctype(ty);
+                let c_name = self.registry.tag(ty);
                 self.w.line(format!("struct {} {{", c_name));
                 self.w.indent();
                 if elems.is_empty() {
@@ -219,7 +221,7 @@ impl<'a> Gen<'a> {
                 self.w.blank();
             }
             TypeDef::Fn(params, ret) => {
-                let c_name = self.registry.ctype(ty);
+                let c_name = self.registry.tag(ty);
                 let return_type = self.registry.ctype(&ret);
                 let mut parameter_types = Vec::with_capacity(params.len());
                 for param in &params {
@@ -243,6 +245,16 @@ impl<'a> Gen<'a> {
                 self.w.line("};");
                 self.w.blank();
             }
+            TypeDef::Rc(elem) => {
+                let c_name = self.registry.tag(ty);
+                let payload = self.registry.ctype(&elem);
+                self.w.line(format!("struct {} {{", c_name));
+                self.w.indent();
+                self.w.line(format!("{} payload;", payload));
+                self.w.dedent();
+                self.w.line("};");
+                self.w.blank();
+            }
         }
     }
 
@@ -251,7 +263,7 @@ impl<'a> Gen<'a> {
             Some(item) => item.clone(),
             None => return,
         };
-        let c_name = self.registry.ctype(ty);
+        let c_name = self.registry.tag(ty);
         self.w.line(format!("struct {} {{", c_name));
         self.w.indent();
         if item.fields.is_empty() {
@@ -273,7 +285,7 @@ impl<'a> Gen<'a> {
             Some(item) => item.clone(),
             None => return,
         };
-        let c_name = self.registry.ctype(ty);
+        let c_name = self.registry.tag(ty);
         self.w.line(format!("struct {} {{", c_name));
         self.w.indent();
         self.w.line(format!("int32_t {};", TAG_FIELD));
@@ -312,7 +324,6 @@ impl<'a> Gen<'a> {
             self.w
                 .line(format!("typedef struct LsEnv_{} {{", closure.id));
             self.w.indent();
-            self.w.line("LsEnvHeader header;");
             for (index, capture) in closure.captures.iter().enumerate() {
                 let capture_type = self.registry.ctype(&capture.ty);
                 self.w.line(format!("{} c{};", capture_type, index));
@@ -353,6 +364,32 @@ impl<'a> Gen<'a> {
         }
     }
 
+    fn emit_env_traces(&mut self) {
+        let closures = self.program.closures.clone();
+        for closure in &closures {
+            let c_type = format!("LsEnv_{}", closure.id);
+            self.w.line(format!(
+                "void lsaca_trace_env_{}(const void* payload, LsTraceVisit visit) {{",
+                closure.id
+            ));
+            self.w.indent();
+            let env_name = self.fresh("env");
+            self.w.line(format!(
+                "const {}* {} = (const {}*)payload;",
+                c_type, env_name, c_type
+            ));
+            self.w.line(format!("(void){};", env_name));
+            for (index, capture) in closure.captures.iter().enumerate() {
+                let field = format!("{}->c{}", env_name, index);
+                helper_defs::emit_trace_slot(&mut self.w, self.names, &capture.ty, &field);
+            }
+            self.w.line("(void)visit;");
+            self.w.dedent();
+            self.w.line("}");
+            self.w.blank();
+        }
+    }
+
     fn emit_function_prototypes(&mut self) {
         let fns = self.program.fns.clone();
         for function in &fns {
@@ -377,6 +414,10 @@ impl<'a> Gen<'a> {
             ));
             self.w
                 .line(format!("void lsaca_env_drop_{}(void* self);", closure.id));
+            self.w.line(format!(
+                "void lsaca_trace_env_{}(const void* payload, LsTraceVisit visit);",
+                closure.id
+            ));
         }
         self.w.blank();
     }

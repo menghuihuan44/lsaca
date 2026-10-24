@@ -622,6 +622,39 @@ impl<'a> Gen<'a> {
                 self.w.dedent();
                 self.line("}");
             }
+            HBuiltinMethod::RcGet => {
+                if let Ty::Rc(inner) = &receiver.ty {
+                    let place = self.gen_place(receiver);
+                    let suffix = self.names.mangle(inner);
+                    let ctype = self.ctype(ty);
+                    self.line(format!(
+                        "{} = ({})lsaca_rc_get_{}({});",
+                        target, ctype, suffix, place
+                    ));
+                } else {
+                    let zero = self.zero_expr(ty);
+                    self.line(format!("{} = {};", target, zero));
+                }
+            }
+            HBuiltinMethod::RcSet => {
+                if let (Ty::Rc(inner), Some(arg)) = (&receiver.ty, args.first()) {
+                    let place = self.gen_place(receiver);
+                    let suffix = self.names.mangle(inner);
+                    // The cell takes ownership of the new payload, so the
+                    // generated code must not release the argument again.
+                    let value = self.gen_owned(arg);
+                    self.line(format!("lsaca_rc_set_{}({}, {});", suffix, place, value));
+                    self.mark_moved(&value);
+                    self.assign_unit(target);
+                } else {
+                    self.assign_unit(target);
+                }
+            }
+            HBuiltinMethod::RcStrongCount => {
+                let place = self.gen_place(receiver);
+                let ctype = self.ctype(ty);
+                self.line(format!("{} = ({})ls_refcount({});", target, ctype, place));
+            }
             HBuiltinMethod::ResErr => {
                 let place = self.gen_place(receiver);
                 let err_ty = result_err_type(&receiver.ty);
@@ -665,6 +698,21 @@ impl<'a> Gen<'a> {
                 if let Some(arg) = args.first() {
                     let value = self.gen_owned(arg);
                     self.line(format!("{} = ls_str_clone({});", target, value));
+                }
+            }
+            HBuiltinAssoc::RcNew => {
+                if let (Some(arg), Ty::Rc(inner)) = (args.first(), ty) {
+                    // The new cell owns the payload: transfer ownership
+                    // instead of releasing the argument at the end of the
+                    // statement.
+                    let value = self.gen_owned(arg);
+                    self.mark_moved(&value);
+                    let suffix = self.names.mangle(inner);
+                    let ctype = self.ctype(ty);
+                    self.line(format!(
+                        "{} = ({})lsaca_rc_new_{}({});",
+                        target, ctype, suffix, value
+                    ));
                 }
             }
             HBuiltinAssoc::VecNew => {

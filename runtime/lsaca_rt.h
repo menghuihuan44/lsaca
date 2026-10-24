@@ -6,9 +6,14 @@
  * the full description.
  *
  * Conventions:
- *   - A reference counted object is an ls_alloc() payload. ls_alloc() returns
- *     the payload pointer; the reference count header lives right before it.
- *     The initial count is 1. ls_retain()/ls_release() accept NULL.
+ *   - A reference counted object is an allocated payload; the reference count
+ *     header lives right before it and the initial count is 1.
+ *     ls_retain()/ls_release() accept NULL. Strings and other payloads that
+ *     cannot form reference cycles use ls_alloc() (unmanaged: no drop
+ *     function, no trace function, never a cycle collector node). Payloads
+ *     that can form cycles (Rc cells and closure environments in generated
+ *     code) use ls_alloc_managed() and carry a compiler generated drop
+ *     function and a trace function used by the cycle collector.
  *   - LsString values are *handles*: a value of type "LsString *". The struct
  *     LsString is opaque to generated code; use ls_str_* accessors.
  *   - LsVec_String / LsOpt_String / LsRes_String_String are plain by-value
@@ -43,25 +48,65 @@ extern "C" {
 #endif
 
 /* ====================================================================== */
-/* Reference counted allocations                                          */
+/* Reference counted allocations (ARC + cycle collector)                  */
 /* ====================================================================== */
+
+/* Drop function of an ORC-managed allocation. It is called once, immediately
+ * before the payload memory is freed, while the payload is still intact. It
+ * must release every owned handle stored in the payload (strings and managed
+ * handles). Unmanaged ls_alloc() payloads have no drop function. */
+typedef void (*LsDropFn)(void* payload);
+
+/* Visitor called by a trace function once for every managed (cycle capable)
+ * child handle stored in a payload. */
+typedef void (*LsTraceVisit)(void* child);
+
+/* Trace function of an ORC-managed allocation. It visits every managed child
+ * handle owned by the payload, without mutating anything and without
+ * allocating. A NULL trace means "this payload cannot hold managed children
+ * and can never be part of a reference cycle"; such an allocation is never a
+ * cycle collector node. */
+typedef void (*LsTraceFn)(const void* payload, LsTraceVisit visit);
 
 /* Allocate a zeroed, reference counted payload of "size" bytes with natural
  * alignment (at least max_align_t, which covers every language type). The
  * payload pointer is returned; the reference count starts at 1.
+ * This is the UNMANAGED allocation used for strings and other payloads that
+ * cannot form cycles: no drop function, no trace function. It is still
+ * reference counted, so ls_retain()/ls_release() work as usual.
  * Never returns NULL: out of memory terminates the program with an error. */
 void* ls_alloc(size_t size);
 
+/* Allocate a zeroed ORC-managed payload of "size" bytes with the same
+ * alignment and initial reference count as ls_alloc(). "drop" may be NULL;
+ * "trace" may be NULL (then the payload cannot be part of a cycle and is not
+ * a collector node). Otherwise the payload participates in cycle collection:
+ * when its managed reference count drops but stays above zero it becomes a
+ * collector candidate.
+ * Never returns NULL: out of memory terminates the program with an error. */
+void* ls_alloc_managed(size_t size, LsDropFn drop, LsTraceFn trace);
+
 /* Increment the reference count and return the same payload pointer.
- * NULL is a no-op (returns NULL). */
+ * NULL is a no-op (returns NULL). Works for managed and unmanaged payloads. */
 void* ls_retain(void* obj);
 
 /* Decrement the reference count, freeing the payload at zero. NULL is a
- * no-op. */
+ * no-op. At zero the drop function (if any) runs while the payload is still
+ * intact, then the allocation is freed normally. Under a running collection
+ * the collector suppresses the releases it already accounted for, so drop
+ * functions always see consistent counts. */
 void ls_release(void* obj);
 
 /* Current reference count of a payload pointer, 0 for NULL. */
 size_t ls_refcount(const void* obj);
+
+/* Run the cycle collector synchronously: trial-delete candidate objects,
+ * determine which candidates are only reachable from garbage cycles and free
+ * those cycles. A no-op when nothing is pending. Reentrancy safe: calling it
+ * while a collection runs (for example from a drop function) does nothing.
+ * The runtime is single threaded; the collector uses no atomics and is not
+ * thread safe either. */
+void ls_collect_cycles(void);
 
 /* ====================================================================== */
 /* Process lifetime                                                       */
@@ -71,9 +116,11 @@ size_t ls_refcount(const void* obj);
  * calls this before the user's main function. */
 int32_t ls_runtime_init(int argc, char** argv);
 
-/* Flush the standard streams and, when the runtime is compiled with
- * LSACA_DEBUG or LSACA_DEBUG_RC defined, walk all live reference counted
- * objects and report leaks to stderr as
+/* Flush the standard streams, run pending cycle collections (bounded number
+ * of passes) so that unreachable reference cycles are reclaimed first, and
+ * then, when the runtime is compiled with LSACA_DEBUG or LSACA_DEBUG_RC
+ * defined, walk all still live reference counted objects and report leaks to
+ * stderr as
  *     lsaca: warning: N reference-counted allocation(s) leaked
  * followed by up to a few "lsaca:   leaked allocation of S bytes" lines.
  * Without the flag nothing is printed (a correct program never writes to

@@ -47,6 +47,9 @@ pub fn copy_expr(names: &TypeNames, ty: &Ty, expr: &str) -> String {
     if ty.is_string() {
         return format!("((LsString*)ls_retain({}))", expr);
     }
+    if ty.is_rc() {
+        return format!("(({})ls_retain({}))", names.ctype(ty), expr);
+    }
     format!("{}({})", copy_fn_name(names, ty), expr)
 }
 
@@ -59,6 +62,9 @@ pub fn release_stmt(names: &TypeNames, ty: &Ty, expr: &str) -> Option<String> {
     if ty.is_string() {
         return Some(format!("ls_release({});", expr));
     }
+    if ty.is_rc() {
+        return Some(format!("ls_release({});", expr));
+    }
     Some(format!("{}({});", release_fn_name(names, ty), expr))
 }
 
@@ -68,7 +74,9 @@ pub fn eq_expr(names: &TypeNames, ty: &Ty, a: &str, b: &str) -> String {
         String::from("true")
     } else if ty.is_string() {
         format!("ls_str_eq(({}), ({}))", a, b)
-    } else if ty.is_bool() || ty.is_integer() || ty.is_float() {
+    } else if ty.is_bool() || ty.is_integer() || ty.is_float() || ty.is_rc() {
+        // Scalars compare directly; Rc handles compare by identity (their C
+        // representation is the cell pointer).
         format!("(({}) == ({}))", a, b)
     } else if ty.is_fn() {
         format!(
@@ -190,6 +198,18 @@ mod tests {
         assert_eq!(
             copy_expr(&names, &Ty::vec(Ty::i64()), "v0"),
             "lsaca_copy_Vec_i64(v0)"
+        );
+        assert_eq!(
+            copy_expr(&names, &Ty::rc(Ty::i64()), "v0"),
+            "((LsRc_i64*)ls_retain(v0))"
+        );
+        assert_eq!(
+            release_stmt(&names, &Ty::rc(Ty::i64()), "v0"),
+            Some(String::from("ls_release(v0);"))
+        );
+        assert_eq!(
+            eq_expr(&names, &Ty::rc(Ty::i64()), "a", "b"),
+            "((a) == (b))"
         );
     }
 }

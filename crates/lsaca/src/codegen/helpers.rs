@@ -1,6 +1,7 @@
 //! Emission of generated helper functions: reference counted environment
-//! support for closures and the per-type copy / release / debug / equality
-//! helpers derived from the monomorphized type registry.
+//! support for closures, the per-type copy / release / debug / equality
+//! helpers and the cycle collector tracing helpers derived from the
+//! monomorphized type registry.
 
 use crate::codegen::c_writer::CWriter;
 use crate::codegen::ops::is_managed;
@@ -9,7 +10,7 @@ use crate::hir;
 use crate::types::Ty;
 
 /// Compound types whose layout is emitted by codegen or comes from the frozen
-/// runtime header. These need generated debug and equality helpers.
+/// runtime header. These need generated debug, equality and tracing helpers.
 pub fn compound_types(program: &hir::Program, registry: &TypeRegistry) -> Vec<Ty> {
     let _ = program;
     registry
@@ -28,58 +29,57 @@ pub fn managed_types(program: &hir::Program, registry: &TypeRegistry) -> Vec<Ty>
         .collect()
 }
 
-/// Environment header shared by every closure environment plus the generic
-/// retain/release pair used by function values.
+/// Retain/release pair shared by function values to keep closure environments
+/// alive. Both forward to the runtime reference count, which accepts NULL.
 pub fn emit_env_types(w: &mut CWriter) {
-    w.line("typedef struct LsEnvHeader {");
-    w.indent();
-    w.line("void (*drop)(void* self);");
-    w.dedent();
-    w.line("} LsEnvHeader;");
-    w.blank();
     w.line("void* lsaca_env_retain(void* env);");
     w.line("void lsaca_env_release(void* env);");
     w.blank();
 }
 
+/// Environment support is a thin wrapper around the runtime: a managed
+/// allocation carries its own drop function, so releasing the environment runs
+/// the generated capture releases and then frees the allocation.
 pub fn emit_env_support(w: &mut CWriter) {
     w.line("void* lsaca_env_retain(void* env) {");
     w.indent();
-    w.line("if (env == NULL) {");
-    w.indent();
-    w.line("return NULL;");
-    w.dedent();
-    w.line("}");
-    w.line("ls_retain(env);");
-    w.line("return env;");
+    w.line("return ls_retain(env);");
     w.dedent();
     w.line("}");
     w.blank();
 
     w.line("void lsaca_env_release(void* env) {");
     w.indent();
-    w.line("LsEnvHeader* header;");
-    w.line("if (env == NULL) {");
-    w.indent();
-    w.line("return;");
-    w.dedent();
-    w.line("}");
-    w.line("if (ls_refcount(env) == 1) {");
-    w.indent();
-    w.line("header = (LsEnvHeader*)env;");
-    w.line("if (header->drop != NULL) {");
-    w.indent();
-    w.line("void (*drop)(void*) = header->drop;");
-    w.line("header->drop = NULL;");
-    w.line("drop(env);");
-    w.dedent();
-    w.line("}");
-    w.dedent();
-    w.line("}");
     w.line("ls_release(env);");
     w.dedent();
     w.line("}");
     w.blank();
+}
+
+/// Declarations of the Rc cell helpers for one shared heap cell type.
+fn emit_rc_decls(w: &mut CWriter, registry: &TypeRegistry, inner: &Ty) {
+    let names = registry.names();
+    let suffix = names.mangle(inner);
+    let cell = names.tag(&Ty::rc(inner.clone()));
+    let cell_ptr = format!("{}*", cell);
+    let inner_ty = names.ctype(inner);
+    w.line(format!(
+        "{} lsaca_rc_new_{}({} value);",
+        cell_ptr, suffix, inner_ty
+    ));
+    w.line(format!(
+        "{} lsaca_rc_get_{}({} self);",
+        inner_ty, suffix, cell_ptr
+    ));
+    w.line(format!(
+        "void lsaca_rc_set_{}({} self, {} value);",
+        suffix, cell_ptr, inner_ty
+    ));
+    w.line(format!("void lsaca_rc_drop_{}(void* payload);", suffix));
+    w.line(format!(
+        "void lsaca_rc_trace_{}(const void* payload, LsTraceVisit visit);",
+        suffix
+    ));
 }
 
 fn helper_decls(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry) {
@@ -96,6 +96,14 @@ fn helper_decls(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry
             suffix, c_ty
         ));
         w.line(format!("bool lsaca_eq_{}({} a, {} b);", suffix, c_ty, c_ty));
+        if let Ty::Rc(inner) = &ty {
+            emit_rc_decls(w, registry, inner);
+        } else {
+            w.line(format!(
+                "void lsaca_trace_{}(const {}* value, LsTraceVisit visit);",
+                suffix, c_ty
+            ));
+        }
     }
 }
 

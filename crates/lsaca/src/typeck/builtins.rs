@@ -42,6 +42,7 @@ pub fn builtin_method(recv: &ITy, name: &str) -> Option<BuiltinMethodInfo> {
     match recv {
         ITy::String => string_method(name),
         ITy::Vec(elem) => vec_method(elem, name),
+        ITy::Rc(elem) => rc_method(elem, name),
         ITy::Option(elem) => option_method(elem, name),
         ITy::Result(ok, err) => result_method(ok, err, name),
         _ => None,
@@ -93,6 +94,20 @@ fn vec_method(elem: &ITy, name: &str) -> Option<BuiltinMethodInfo> {
         "get" => method(VecGet, vec![i64()], ITy::option(elem)),
         "extend" => mutating(VecExtend, vec![ITy::vec(elem)], ITy::Unit),
         "reverse" => mutating(VecReverse, vec![], ITy::Unit),
+        _ => return None,
+    };
+    Some(info)
+}
+
+fn rc_method(elem: &ITy, name: &str) -> Option<BuiltinMethodInfo> {
+    use HBuiltinMethod::*;
+    let elem = elem.clone();
+    let info = match name {
+        "get" => method(RcGet, vec![], elem),
+        // The cell is shared and mutated through the handle, so `set` needs
+        // only a shared (immutable) binding, not a mutable one.
+        "set" => method(RcSet, vec![elem], ITy::Unit),
+        "strong_count" => method(RcStrongCount, vec![], i64()),
         _ => return None,
     };
     Some(info)
@@ -180,6 +195,7 @@ pub fn builtin_assoc(type_name: &str, name: &str) -> Option<HBuiltinAssoc> {
         ("String", "from") => Some(StringFrom),
         ("Vec", "new") => Some(VecNew),
         ("Vec", "with_capacity") => Some(VecWithCapacity),
+        ("Rc", "new") => Some(RcNew),
         _ => None,
     }
 }
