@@ -4,7 +4,7 @@
 //! monomorphized type registry.
 
 use crate::codegen::c_writer::CWriter;
-use crate::codegen::ops::is_managed;
+use crate::codegen::ops::{self, is_frozen_shared, is_managed};
 use crate::codegen::types::TypeRegistry;
 use crate::hir;
 use crate::types::Ty;
@@ -122,6 +122,17 @@ fn helper_decls(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry
             suffix, c_ty
         ));
         w.line(format!("bool lsaca_eq_{}({} a, {} b);", suffix, c_ty, c_ty));
+        if let Ty::Vec(element) = &ty
+            && !is_frozen_shared(&ty)
+        {
+            w.line(format!(
+                "{} {}({} v, {} value);",
+                c_ty,
+                ops::push_slow_fn_name(names, &ty),
+                c_ty,
+                names.ctype(element)
+            ));
+        }
         if let Ty::Rc(inner) = &ty {
             emit_rc_decls(w, registry, inner);
         } else if let Ty::Box(inner) = &ty {

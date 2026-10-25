@@ -205,7 +205,7 @@ negation is folded, so the most negative value of a signed type cannot be writte
 as a plain negative literal: `let x: i8 = -128;` is rejected with
 `error[E0080]: literal out of range for i8: 128`. Compute it instead, for
 example `-127 - 1`, or produce it by arithmetic. This is a known simplification
-of the 1.1.0 constant checker.
+of the 1.2.0 constant checker.
 
 ## Float literals
 

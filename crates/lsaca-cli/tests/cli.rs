@@ -25,6 +25,23 @@ fn lsaca() -> Command {
     command
 }
 
+/// A `lsaca` invocation with a private cache directory, so the test always
+/// exercises a cold build.
+fn lsaca_with_cache(cache: &Path) -> Command {
+    let mut command = std::process::Command::new(binary());
+    command.env("LSACA_CACHE_DIR", cache);
+    command
+}
+
+/// Executable file name for a program built on the current platform.
+fn executable_name(program_name: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", program_name)
+    } else {
+        program_name.to_string()
+    }
+}
+
 fn unique_dir(name: &str) -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let id = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -57,11 +74,38 @@ fn version_is_printed() {
         "version exited with {:?}",
         output.status.code()
     );
+    let expected = format!("lsaca {}", env!("CARGO_PKG_VERSION"));
     assert!(
-        stdout.contains("lsaca 1.1.0"),
+        stdout.contains(&expected),
         "unexpected version output: {:?}",
         stdout
     );
+}
+
+#[test]
+fn version_and_help_take_no_arguments() {
+    for (command, extra) in [("version", "--cmake"), ("help", "--cmake")] {
+        let output = lsaca()
+            .arg(command)
+            .arg(extra)
+            .output()
+            .expect("could not run lsaca");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "lsaca {} {} was accepted",
+            command,
+            extra
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unexpected argument '--cmake'"),
+            "unexpected diagnostic for lsaca {} {}: {:?}",
+            command,
+            extra,
+            stderr
+        );
+    }
 }
 
 #[test]
@@ -199,9 +243,25 @@ fn emit_c_writes_a_cmake_project() {
         .expect("could not run lsaca");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "emit-c failed: {:?}", stderr);
-    for name in ["main.c", "lsaca_rt.h", "lsaca_rt.c", "CMakeLists.txt"] {
+    for name in ["main.c", "CMakeLists.txt"] {
         let generated = out_dir.join(name);
         assert!(generated.is_file(), "emit-c did not write {}", name);
+    }
+    for (name, _) in lsaca::runtime::sources() {
+        let generated = out_dir.join(name);
+        assert!(generated.is_file(), "emit-c did not write {}", name);
+    }
+    let cmake = fs::read_to_string(out_dir.join("CMakeLists.txt"))
+        .expect("could not read the generated CMakeLists.txt");
+    assert!(cmake.contains("main.c"), "CMakeLists.txt must list main.c");
+    for (name, _) in lsaca::runtime::sources() {
+        if name.ends_with(".c") {
+            assert!(
+                cmake.contains(name),
+                "CMakeLists.txt does not list the runtime file {}",
+                name
+            );
+        }
     }
 }
 
@@ -352,6 +412,105 @@ fn unusable_cache_directory_is_reported() {
     assert!(
         stderr.contains("hello.ls"),
         "expected the source file to be named, got {:?}",
+        stderr
+    );
+}
+
+#[test]
+fn default_build_uses_the_direct_compiler() {
+    let dir = unique_dir("direct");
+    let path = write_program(
+        &dir,
+        "direct_prog.ls",
+        "fn main() {\n    println!(\"direct ok\");\n}\n",
+    );
+    let out_dir = dir.join("out");
+    let output = lsaca_with_cache(&dir.join("cache"))
+        .arg("build")
+        .arg("-r")
+        .arg("-v")
+        .arg(&path)
+        .arg("-o")
+        .arg(&out_dir)
+        .output()
+        .expect("could not run lsaca");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "build failed: {:?}", stderr);
+    assert!(
+        stderr.contains("direct compiler backend"),
+        "the default build should use the direct C compiler backend: {:?}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("cmake configure"),
+        "the default build must not configure a CMake project: {:?}",
+        stderr
+    );
+    let executable = out_dir.join(executable_name("direct_prog"));
+    let executed = Command::new(&executable)
+        .output()
+        .expect("could not execute the built program");
+    assert_eq!(String::from_utf8_lossy(&executed.stdout), "direct ok\n");
+}
+
+#[test]
+fn cmake_flag_builds_through_the_generated_project() {
+    let dir = unique_dir("cmake-backend");
+    let path = write_program(
+        &dir,
+        "cmake_prog.ls",
+        "fn main() {\n    println!(\"cmake ok\");\n}\n",
+    );
+    let out_dir = dir.join("out");
+    let output = lsaca_with_cache(&dir.join("cache"))
+        .arg("build")
+        .arg("--cmake")
+        .arg(&path)
+        .arg("-o")
+        .arg(&out_dir)
+        .output()
+        .expect("could not run lsaca");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the --cmake build failed: {:?}",
+        stderr
+    );
+    let executable = out_dir.join(executable_name("cmake_prog"));
+    let executed = Command::new(&executable)
+        .output()
+        .expect("could not execute the built program");
+    assert_eq!(String::from_utf8_lossy(&executed.stdout), "cmake ok\n");
+}
+
+#[test]
+fn invalid_compiler_is_reported() {
+    let dir = unique_dir("bad-compiler");
+    let path = write_program(
+        &dir,
+        "hello.ls",
+        "fn main() {\n    println!(\"hello\");\n}\n",
+    );
+    let missing = dir.join("not-a-compiler.exe");
+    let output = lsaca_with_cache(&dir.join("cache"))
+        .env("LSACA_CC", &missing)
+        .arg("build")
+        .arg(&path)
+        .arg("-o")
+        .arg(dir.join("out"))
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LSACA_CC"),
+        "expected a compiler configuration error, got {:?}",
+        stderr
+    );
+    assert!(
+        stderr.contains("not an executable file"),
+        "expected an explanatory compiler error, got {:?}",
         stderr
     );
 }

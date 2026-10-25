@@ -6,8 +6,9 @@ that is always in scope. Builtin generic types are `Vec<T>`, `Option<T>`,
 non-generic. The `fn main()` program can use all of them without declarations.
 
 The page is organised by builtin: formatting first, because every example in the
-documentation uses it, then `String`, `Vec`, `Option`, `Result`, `Rc`, `Box`, the
-free functions and finally the panic and exit-code rules.
+documentation uses it, then `String`, `Vec`, `Option` (including its
+combinators), `Result` (including its combinators and the `?` operator), `Rc`,
+`Box`, the free functions and finally the panic and exit-code rules.
 
 ## Formatting and printing
 
@@ -406,7 +407,9 @@ message is `"invalid integer"` or `"invalid float"`.
 
 A `Vec<T>` is a growable array. Elements are stored contiguously and the vector
 is a refcounted handle: copies share the buffer until one is modified
-(copy-on-write). Two ways to create one:
+(copy-on-write). Create one with `Vec::new()`, with the `vec![…]` macro, or with
+`Vec::with_capacity(n)` when you already know roughly how large the vector will
+grow:
 
 ```ls
 fn main() {
@@ -414,22 +417,27 @@ fn main() {
     let literal = vec![1, 2, 3];
     let repeated = vec![7; 4];
     let typed: Vec<String> = vec![];
-    println!("{} {} {} {}", explicit.len(), literal.len(), repeated.len(), typed.len());
+    let mut reserved: Vec<i64> = Vec::with_capacity(8);
+    reserved.push(5);
+    println!("{} {} {} {} {}", explicit.len(), literal.len(), repeated.len(), typed.len(), reserved.len());
 }
 ```
 
 Output:
 ```text
-0 3 4 0
+0 3 4 0 1
 ```
 
 `Vec::new()` needs type context: annotate the binding or use the turbofish
 `Vec::<i64>::new()`. The `vec![…]` macro builds a vector from elements or from
-`vec![value; count]`.
+`vec![value; count]`. `Vec::with_capacity(n)` reserves room for at least `n`
+elements without changing the length; the language has no `capacity()` method,
+so the reservation is only observable as avoided reallocations.
 
 | Method | Description |
 | --- | --- |
 | `len` / `is_empty` | number of elements / emptiness |
+| `Vec::with_capacity(n)` | creates a vector with room reserved for at least `n` elements |
 | `push(v)` | appends a value |
 | `pop()` | removes and returns the last element as `Option<T>` |
 | `insert(i, v)` | inserts at index `i`, shifting later elements right |
@@ -508,11 +516,6 @@ index out of bounds: the len is 3 but the index is 5
 vector whose element type is itself a handle (`Vec<Vec<i64>>`, `Vec<String>`,
 `Vec<Rc<T>>`, `Vec<Box<T>>`) works; nested `Vec` display is structural.
 
-### Known limitation: Vec::with_capacity
-
-`Vec::with_capacity(n)` exists in the source and parses, but the generated C in
-1.1.0 is invalid, so it cannot be used. Use `Vec::new()` and let the vector grow.
-
 ## Option
 
 `Option<T>` is `Some(value)` or `None`. It is the return type used by `find`,
@@ -524,6 +527,11 @@ vector whose element type is itself a handle (`Vec<Vec<i64>>`, `Vec<String>`,
 | `unwrap()` | returns the value, panics on `None` |
 | `unwrap_or(default)` | returns the value or the default |
 | `expect(message)` | returns the value, panics with the message on `None` |
+| `map(f)` | applies `f` to the value: `Some(f(v))`, or `None` |
+| `map_or(default, f)` | applies `f` to the value, or returns `default` |
+| `and_then(f)` | chains a function that itself returns an `Option` |
+| `filter(pred)` | keeps `Some(v)` only when `pred(v)` is `true`, else `None` |
+| `ok_or(err)` | converts to `Result<T, E>`: `Ok(v)` or `Err(err)` |
 
 ```ls
 fn main() {
@@ -550,6 +558,47 @@ true false false true
 -1
 ```
 
+### Option combinators
+
+The combinators transform an `Option` without unwrapping it by hand:
+
+```ls
+fn main() {
+    let some: Option<i64> = Some(21);
+    let none: Option<i64> = None;
+
+    println!("{:?}", some.map(|n| n * 2));
+    println!("{}", none.map(|n| n * 2).unwrap_or(-1));
+    println!("{}", none.map_or(7, |n| n + 1));
+    println!("{} {}", some.filter(|n| n > 10).is_some(), some.filter(|n| n > 100).is_none());
+
+    match none.ok_or(String::from("missing")) {
+        Ok(value) => println!("ok {}", value),
+        Err(message) => println!("err {}", message),
+    }
+
+    println!("{:?}", some.and_then(|n| if n > 0 { Some(n / 3) } else { None }));
+}
+```
+
+Output:
+```text
+Some(42)
+-1
+7
+true true
+err missing
+Some(7)
+```
+
+`map` and `map_or` transform the payload, `and_then` chains a computation that
+may fail again, `filter` turns `Some` into `None` when a predicate fails, and
+`ok_or` lifts an `Option` into a `Result`. The combinators are ordinary
+function calls, so their arguments are evaluated eagerly: the `default` of
+`map_or` and the error of `ok_or` are computed even when the `Option` is
+`Some`. A plain function item can be passed where a closure is expected, for
+example `some.map(double)`.
+
 Printing an `Option` shows its structure: `Some(42)` or `None`. Access the
 payload with `match`/`if let`/`unwrap`; there is no `==` for `Option`.
 
@@ -566,6 +615,9 @@ payload with `match`/`if let`/`unwrap`; there is no `==` for `Option`.
 | `expect(message)` | returns the value, panics with the message on `Err` |
 | `ok()` | converts to `Option<T>`, discarding the error |
 | `err()` | converts to `Option<E>`, discarding the value |
+| `map(f)` | applies `f` to the `Ok` value: `Ok(f(v))` or the original `Err` |
+| `map_err(f)` | applies `f` to the `Err` value: `Err(f(e))` or the original `Ok` |
+| `and_then(f)` | chains a function that itself returns a `Result` |
 
 ```ls
 fn main() {
@@ -588,8 +640,313 @@ None
 Some("boom")
 ```
 
-Like `Option`, `Result` has no `==`; match on it. There is no `ok_or` and no
-`and_then`/`map`/`?` operator in 1.1.0 — write `match` or `if let`.
+### Result combinators
+
+`map` transforms the success value, `map_err` transforms the error, and
+`and_then` chains another fallible step:
+
+```ls
+fn double(n: i64) -> i64 {
+    n * 2
+}
+
+fn main() {
+    let good: Result<i64, String> = Ok(5);
+    let bad: Result<i64, String> = Err(String::from("boom"));
+
+    println!("{}", good.map(double).unwrap());
+    println!("{:?}", bad.map_err(|e| e + "!"));
+    println!("{:?}", good.and_then(|n| if n > 0 { Ok(n + 1) } else { Err(String::from("negative")) }));
+    println!("{:?}", bad.map(double));
+}
+```
+
+Output:
+```text
+10
+Err("boom!")
+Ok(6)
+Err("boom")
+```
+
+`Result::map` leaves an `Err` untouched and `Result::map_err` leaves an `Ok`
+untouched. Unlike `Option`, `Result` has no `map_or` method (Rust does not
+have one either); match on the result, or use `map`/`map_err`/`and_then`.
+Error values are not modified by `map`, so the error type of `good.map(double)`
+stays `String`.
+
+Like `Option`, `Result` has no `==`; match on it.
+
+## Error propagation with `?`
+
+The postfix `?` operator is the concise way to propagate failure. It applies to
+an `Option<T>` or a `Result<T, E>`:
+
+* on `Some(v)` or `Ok(v)` it evaluates to `v`;
+* on `None` it returns `None` from the enclosing function;
+* on `Err(e)` it returns `Err(e)` from the enclosing function.
+
+The enclosing function must return the same kind of value: `?` on an `Option`
+requires the function to return an `Option`, and `?` on a `Result` requires the
+function to return a `Result`. `Result` error types must match exactly: `?`
+does **not** convert error types (there is no `From` conversion), so
+`Result<T, String>` cannot propagate an `Err(MyError)`.
+
+```ls
+fn half(n: i64) -> Option<i64> {
+    if n % 2 == 0 {
+        Some(n / 2)
+    } else {
+        None
+    }
+}
+
+fn quarter(n: i64) -> Option<i64> {
+    let h = half(n)?;
+    Some(h / 2)
+}
+
+fn main() {
+    println!("{:?}", quarter(12));
+    println!("{:?}", quarter(10));
+    println!("{:?}", quarter(7));
+}
+```
+
+Output:
+```text
+Some(3)
+Some(2)
+None
+```
+
+`quarter` reads as "unwrap `half(n)` or return `None`". The operator is
+postfix and binds tighter than any binary operator: `half(n)? + 1` is
+`(half(n)?) + 1`. The operand is evaluated exactly once:
+
+```ls
+fn first_with_count(values: Vec<i64>, counter: Rc<i64>) -> Option<i64> {
+    counter.set(counter.get() + 1);
+    values.first()
+}
+
+fn pick(values: Vec<i64>, counter: Rc<i64>) -> Option<i64> {
+    let value = first_with_count(values, counter)?;
+    Some(value)
+}
+
+fn main() {
+    let counter = Rc::new(0);
+    let empty: Vec<i64> = Vec::new();
+    println!("{:?}", pick(empty, counter));
+    println!("{}", counter.get());
+}
+```
+
+Output:
+```text
+None
+1
+```
+
+Only one call is recorded even though the operand fails: `?` desugars to a
+`match` on the operand value, not to a re-evaluation. Attach `?` to a call,
+method call or variable; the parser currently rejects `?` written directly
+after a block expression.
+
+The same works for `Result`; an error early-return keeps its type:
+
+```ls
+fn parse_pair(a: String, b: String) -> Result<i64, String> {
+    let x = a.parse_i64()?;
+    let y = b.parse_i64()?;
+    Ok(x + y)
+}
+
+fn main() {
+    println!("{:?}", parse_pair(String::from("20"), String::from("22")));
+    println!("{:?}", parse_pair(String::from("20"), String::from("x")));
+}
+```
+
+Output:
+```text
+Ok(42)
+Err("invalid integer")
+```
+
+A method may use `?` on its receiver data, as long as the method itself returns
+an `Option` or `Result`:
+
+```ls
+struct Bag {
+    values: Vec<i64>,
+}
+
+impl Bag {
+    fn first_plus(&self) -> Option<i64> {
+        let first = self.values.first()?;
+        Some(first + 1)
+    }
+}
+
+fn main() {
+    let bag = Bag { values: vec![4, 5] };
+    println!("{:?}", bag.first_plus());
+
+    let empty = Bag { values: Vec::new() };
+    println!("{:?}", empty.first_plus());
+}
+```
+
+Output:
+```text
+Some(5)
+None
+```
+
+The `?` operator cannot be used everywhere:
+
+* **`main` returns `()`**, so `?` cannot appear in `main` itself; catch the
+  error with `match`/`if let`, or move the fallible work into a helper function
+  that returns `Option`/`Result`.
+* **Closures** must declare (or otherwise fix) an `Option`/`Result` return
+  type before `?` can be used inside; annotate the closure's return type or
+  give it a `fn` type through a `let` binding.
+* **Constant initializers** cannot use `?` because the operator performs an
+  early return.
+* The operand must be an `Option` or `Result`; other types are rejected.
+
+These rules produce clear front-end errors:
+
+```ls,compile-fail
+fn main() {
+    let value: Option<i64> = Some(1);
+    let inner = value?;
+    println!("{}", inner);
+}
+```
+
+Error:
+```text
+error[E0277]: the ? operator can only be used in a function that returns Option, but this function returns ()
+  --> example-25.ls:3:17
+   |
+ 3 |     let inner = value?;
+   |                 ^^^^^^
+   = note: propagate the value with an explicit match, or change the function to return Option
+
+lsaca: example-25.ls: could not compile example-25.ls due to previous error(s)
+```
+
+```ls,compile-fail
+fn number() -> Option<i64> {
+    let value: i64 = 42;
+    let inner = value?;
+    Some(inner)
+}
+
+fn main() {}
+```
+
+Error:
+```text
+error[E0277]: the ? operator can only be applied to Option or Result values, but found i64
+  --> example-26.ls:3:17
+   |
+ 3 |     let inner = value?;
+   |                 ^^^^^^
+   = note: the ? operator propagates None or Err out of the enclosing function
+
+lsaca: example-26.ls: could not compile example-26.ls due to previous error(s)
+```
+
+```ls,compile-fail
+fn convert() -> Result<i64, String> {
+    let other: Result<i64, i64> = Err(1);
+    let value = other?;
+    Ok(value)
+}
+
+fn main() {}
+```
+
+Error:
+```text
+error[E0308]: the ? operator cannot convert error types: expected String, found i64
+  --> example-27.ls:3:17
+   |
+ 3 |     let value = other?;
+   |                 ^^^^^^
+   = note: the ? operator requires the error types to match exactly; use map_err or an explicit match to convert
+
+lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
+```
+
+```ls,compile-fail
+fn main() {
+    let bad = |value: Option<i64>| {
+        let inner = value?;
+        Some(inner)
+    };
+    println!("{:?}", bad(Some(1)));
+}
+```
+
+Error:
+```text
+error[E0277]: the ? operator requires the enclosing closure to declare an Option return type
+  --> example-28.ls:3:21
+   |
+ 3 |         let inner = value?;
+   |                     ^^^^^^
+   = note: add an explicit return type such as -> Option<i64> to this closure
+
+lsaca: example-28.ls: could not compile example-28.ls due to previous error(s)
+```
+
+```ls,compile-fail
+const VALUE: i64 = 1?;
+
+fn main() {
+    println!("{}", VALUE);
+}
+```
+
+Error:
+```text
+error[E0015]: the ? operator is not allowed in a constant initializer
+  --> example-29.ls:1:20
+   |
+ 1 | const VALUE: i64 = 1?;
+   |                    ^^
+
+error[E0015]: constant initializer must be a constant expression
+  --> example-29.ls:1:20
+   |
+ 1 | const VALUE: i64 = 1?;
+   |                    ^^
+
+lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
+```
+
+A closure can use `?` when its return type is known, for example through a
+`fn` type annotation on the binding:
+
+```ls
+fn main() {
+    let parse: fn(Option<i64>) -> Option<i64> = |value| {
+        let inner = value?;
+        Some(inner + 1)
+    };
+    println!("{:?} {:?}", parse(Some(1)), parse(None));
+}
+```
+
+Output:
+```text
+Some(2) None
+```
 
 ## Rc
 
@@ -753,8 +1110,9 @@ fn main() {
 
 Output:
 ```text
-1
+2
 alpha
+beta
 ```
 
 `exit` stops the process immediately with the given status; nothing after the
@@ -850,20 +1208,20 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-27.ls:2:24
+  --> example-39.ls:2:24
    |
  2 |     println!("{}", pow(2, 10));
    |                        ^
    = note: expected f64, found {integer}
 
 error[E0308]: mismatched types
-  --> example-27.ls:2:27
+  --> example-39.ls:2:27
    |
  2 |     println!("{}", pow(2, 10));
    |                           ^^
    = note: expected f64, found {integer}
 
-lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
+lsaca: example-39.ls: could not compile example-39.ls due to previous error(s)
 ```
 
 ## assert and vec macros
@@ -918,7 +1276,7 @@ fn main() {
 
 Panic:
 ```text
-thread 'main' panicked at example-29.ls:3:20:
+thread 'main' panicked at example-41.ls:3:20:
 called `Option::unwrap()` on a `None` value
 ```
 
@@ -930,7 +1288,7 @@ fn main() {
 
 Panic:
 ```text
-thread 'main' panicked at example-30.ls:2:5:
+thread 'main' panicked at example-42.ls:2:5:
 explicit panic
 ```
 
@@ -962,7 +1320,8 @@ CLI contract.
 
 Whatever the exit path — return from `main`, `exit` or a panic — the operating
 system reclaims all memory. Cycles and leaked allocations only matter for the
-optional leak report (`LSACA_DEBUG_RC`), described in
+leak report, which Debug builds print by default and other profiles print when
+the compiler is invoked with `LSACA_DEBUG_RC=1`; see
 [Memory model](05-memory-model.md#leak-tracking).
 
 ## What next

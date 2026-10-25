@@ -1,5 +1,6 @@
 //! Call expressions, method calls, enum constructors and macros.
 
+use super::combinators::is_combinator_method;
 use crate::ast::{self, ExprKind};
 use crate::hir::{HBuiltinAssoc, HBuiltinFn, HMacroKind};
 use crate::span::Span;
@@ -839,6 +840,9 @@ impl<'a> Checker<'a> {
                 method_span,
                 "E0107",
             );
+        }
+        if is_combinator_method(&receiver_ty, method) {
+            return self.check_combinator_method(receiver_expr, method, args, span, hint);
         }
         if let Some(info) = builtin_method(&receiver_ty, method) {
             if info.mutable_receiver {

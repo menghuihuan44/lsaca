@@ -83,6 +83,8 @@ pub enum TokenKind {
     PipePipe,
     Caret,
     Bang,
+    /// Question mark: the postfix try operator.
+    Question,
     Underscore,
     /// Shift left: <<
     Shl,
@@ -190,6 +192,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::PipePipe => write!(f, "||"),
             TokenKind::Caret => write!(f, "^"),
             TokenKind::Bang => write!(f, "!"),
+            TokenKind::Question => write!(f, "?"),
             TokenKind::Underscore => write!(f, "_"),
             TokenKind::Shl => write!(f, "<<"),
             TokenKind::Shr => write!(f, ">>"),
@@ -1011,6 +1014,7 @@ impl<'a> Lexer<'a> {
                     Dot
                 }
             }
+            '?' => Question,
             _ => {
                 let end = self.pos;
                 let message = if ch.is_control() {
@@ -1185,17 +1189,35 @@ mod tests {
     #[test]
     fn punctuation_and_operators() {
         use TokenKind::*;
-        let source = "( ) { } [ ] , ; : :: -> => . .. ..= = == != <= >= && || + - * / % & | ^ ! \
+        let source = "( ) { } [ ] , ; : :: -> => . .. ..= = == != <= >= && || + - * / % & | ^ ! ? \
                       += -= *= /= %= &= |= ^= << >> <<= >>=";
         assert_eq!(
             kinds(source),
             vec![
                 LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Semi, Colon, ColonColon,
                 Arrow, FatArrow, Dot, DotDot, DotDotEq, Eq, EqEq, Ne, Le, Ge, AmpAmp, PipePipe,
-                Plus, Minus, Star, Slash, Percent, Amp, Pipe, Caret, Bang, PlusEq, MinusEq, StarEq,
-                SlashEq, PercentEq, AmpEq, PipeEq, CaretEq, Shl, Shr, ShlEq, ShrEq, Eof,
+                Plus, Minus, Star, Slash, Percent, Amp, Pipe, Caret, Bang, Question, PlusEq,
+                MinusEq, StarEq, SlashEq, PercentEq, AmpEq, PipeEq, CaretEq, Shl, Shr, ShlEq,
+                ShrEq, Eof,
             ]
         );
+    }
+
+    #[test]
+    fn question_mark_is_its_own_token() {
+        use TokenKind::*;
+        assert_eq!(
+            kinds("a? ?opt?"),
+            vec![
+                Ident("a".to_string()),
+                Question,
+                Question,
+                Ident("opt".to_string()),
+                Question,
+                Eof,
+            ]
+        );
+        assert!(errors("a?").is_empty());
     }
 
     #[test]

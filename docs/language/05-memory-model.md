@@ -376,14 +376,19 @@ types.
 ## Leak tracking
 
 Reference counting cannot reclaim a cycle if the collector is disabled or if the
-program exits abnormally. lsaca therefore provides optional leak tracking,
-compiled into the Debug runtime:
+program exits abnormally. lsaca therefore provides leak tracking, compiled into
+the runtime:
 
-* the compiler's generated project uses `-DLSACA_DEBUG` in the Debug profile,
-  which enables the tracking code;
-* set the environment variable `LSACA_DEBUG_RC=1` when running the program (or
-  pass `-DLSACA_DEBUG_RC=ON` to CMake when building a Release project) to turn
-  reporting on;
+* in the Debug profile (the default for `lsaca run` and `lsaca build`) the
+  compiler builds the runtime with `-DLSACA_DEBUG`, which enables the tracking
+  code and the report; the direct backend passes the flag to the C compiler,
+  and an emitted CMake project sets it in its Debug configuration;
+* to track and report in *every* profile, including Release, set the environment
+  variable `LSACA_DEBUG_RC=1` when invoking the compiler - not the program. The
+  compiler reads it at build time and adds `-DLSACA_DEBUG_RC` to the C
+  compilation (`LSACA_DEBUG_RC=1 lsaca build -r prog.ls`); when you configure
+  an emitted project with CMake instead, the equivalent is
+  `-DLSACA_DEBUG_RC=ON`;
 * at shutdown, after the final collection, if allocations are still live the
   runtime prints to stderr:
 

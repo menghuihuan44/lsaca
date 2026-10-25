@@ -225,18 +225,14 @@ impl<'a> Gen<'a> {
             if temp.moved {
                 continue;
             }
-            if let Some(stmt) = ops::release_stmt(self.names, &temp.ty, &temp.c_name) {
-                self.w.line(stmt);
-            }
+            self.emit_release(&temp.ty, &temp.c_name);
         }
         let vars: Vec<BoundVar> = std::mem::take(&mut self.frames[index].vars);
         for var in vars.iter().rev() {
             if !var.owned {
                 continue;
             }
-            if let Some(stmt) = ops::release_stmt(self.names, &var.ty, &var.c_name) {
-                self.w.line(stmt);
-            }
+            self.emit_release(&var.ty, &var.c_name);
         }
     }
 
@@ -255,18 +251,14 @@ impl<'a> Gen<'a> {
             if temp.moved {
                 continue;
             }
-            if let Some(stmt) = ops::release_stmt(self.names, &temp.ty, &temp.c_name) {
-                self.w.line(stmt);
-            }
+            self.emit_release(&temp.ty, &temp.c_name);
         }
         let vars = self.frames[index].vars.clone();
         for var in vars.iter().rev() {
             if !var.owned {
                 continue;
             }
-            if let Some(stmt) = ops::release_stmt(self.names, &var.ty, &var.c_name) {
-                self.w.line(stmt);
-            }
+            self.emit_release(&var.ty, &var.c_name);
         }
     }
 
@@ -278,9 +270,7 @@ impl<'a> Gen<'a> {
                 if temp.moved {
                     continue;
                 }
-                if let Some(stmt) = ops::release_stmt(self.names, &temp.ty, &temp.c_name) {
-                    self.w.line(stmt);
-                }
+                self.emit_release(&temp.ty, &temp.c_name);
             }
         }
     }
@@ -288,6 +278,9 @@ impl<'a> Gen<'a> {
     // ----- value level operations ------------------------------------------
 
     pub(crate) fn emit_release(&mut self, ty: &Ty, expr: &str) {
+        if self.is_trivial_copy(ty) {
+            return;
+        }
         if let Some(stmt) = ops::release_stmt(self.names, ty, expr) {
             self.w.line(stmt);
         }
@@ -295,8 +288,19 @@ impl<'a> Gen<'a> {
 
     /// `target = <copy of src>`; target and src must not alias.
     pub(crate) fn emit_copy_into(&mut self, target: &str, ty: &Ty, src: &str) {
+        if self.is_trivial_copy(ty) {
+            self.w.line(format!("{} = {};", target, src));
+            return;
+        }
         let value = ops::copy_expr(self.names, ty, src);
         self.w.line(format!("{} = {};", target, value));
+    }
+
+    /// True when values of this type own no reference counted resources at
+    /// any depth, so that copying is a plain C assignment and releasing is a
+    /// no-op. See [`ops::is_trivially_copyable`].
+    pub(crate) fn is_trivial_copy(&self, ty: &Ty) -> bool {
+        ops::is_trivially_copyable(self.program, ty)
     }
 
     /// Materialise `expr` into a fresh owned temporary and return its name.

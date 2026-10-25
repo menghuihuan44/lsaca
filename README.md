@@ -1,20 +1,24 @@
 # lsaca
 
 lsaca is a small, statically typed programming language with Rust-like syntax and
-semantics, implemented in Rust. Source code is compiled to C17, then built into a
-native executable with CMake and the system C compiler. Memory is managed with
-**ORC** (Ownership and Reference Counting): automatic reference counting (ARC,
-in the spirit of Nim's ARC) plus a trial-deletion cycle collector. There is no
-tracing garbage collector, no borrow checker, and no manual `free` calls.
+semantics, implemented in Rust. Source code is compiled to C17 and built into a
+native executable with the system C compiler. Memory is managed with **ORC**
+(Ownership and Reference Counting): automatic reference counting (ARC, in the
+spirit of Nim's ARC) plus a trial-deletion cycle collector. There is no tracing
+garbage collector, no borrow checker, and no manual `free` calls.
 
 This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
-The current release is **1.1.0**, which adds the builtin `Box<T>` type and
-format-specifier widths/precision on top of the 1.0 language, fixes or-patterns
-and match guards, and makes a non-`bool` condition (in `if`, `while`, `&&`, `||`
-and match guards) a compile-time error instead of silently accepting integers.
+The current release is **1.2.0**. It adds the postfix `?` error-propagation
+operator and the Option/Result combinators (`map`, `map_or`, `and_then`,
+`filter`, `ok_or`, `map_err`) on top of the 1.1 language, and it changes how
+programs are built: the compiler now invokes the C compiler directly instead of
+generating and configuring a CMake project. Builds are much faster, compiled
+runtime objects are cached and reused, and the compiler needs no CMake at all
+unless you ask for it with the new `--cmake` flag. The 1.2.0 language is source
+compatible with 1.1.0.
 
 ## Highlights
 
@@ -23,6 +27,10 @@ and match guards) a compile-time error instead of silently accepting integers.
   `Box<T>`, tuples, closures, `if let`/`while let`, `for` loops, compound
   assignment and `print!`/`println!` macros. Blocks, `if` and `match` are
   expressions.
+- **Fallible code without ceremony**: postfix `?` works on `Option` and
+  `Result`, returns from the enclosing function with the same return kind, and
+  composes with the standard combinators `Option::map`/`map_or`/`and_then`/
+  `filter`/`ok_or` and `Result::map`/`map_err`/`and_then`.
 - **Static typing with local inference**: annotations are optional where the type
   follows from the initializer; numeric literals default to `i64`/`f64`.
 - **ORC memory management**: every owned value is reference counted (strings,
@@ -36,29 +44,35 @@ and match guards) a compile-time error instead of silently accepting integers.
   `[[fill]align][sign][0][width][.precision][?]` specification, so
   `{:>8}`, `{:*^9}`, `{:+}`, `{:08}`, `{:08.2}`, `{:.3}` and `{:?}` all
   work; invalid specifications are reported at compile time.
-- **C17 + CMake back end**: the compiler emits a small portable C project
-  (`main.c`, the runtime and `CMakeLists.txt`) and builds it. `lsaca emit-c`
-  keeps the generated project so it can be inspected or embedded in another
-  build.
+- **C17 back end, built directly**: the compiler emits a small portable C
+  project (the program plus a vendored runtime) and compiles and links it with
+  the system C compiler. `lsaca emit-c` writes the whole project, including a
+  complete `CMakeLists.txt`, so it can be inspected or embedded in another
+  build; `--cmake` makes `run`/`build` use that CMake project instead.
+- **Fast, cached builds**: the direct backend cut a cold build of the benchmark
+  corpus from roughly 2.9 s to about 1.2 s on the reference machine, a cached
+  rebuild takes about 0.03 s, and runtime objects are compiled once per profile
+  and shared by every program.
 - **Pure Rust compiler, no third-party crates**: the compiler uses only the Rust
   standard library and forbids unsafe code. The runtime is plain C17.
 - **Documented and measured**: a detailed multi-page language manual under
   [docs/](docs/README.md), published as a static documentation site, plus
   cross-language benchmarks (compile time, runtime and peak memory) against C,
   Rust, Python and Node.js with the raw data checked in.
-- **Tested end to end**: 160 compiler unit tests, an end-to-end suite that
-  compiles and runs real programs, 13 CLI tests, a 411-check C runtime suite and
-  a 100-check runtime smoke script; CI runs the test matrix on Linux, macOS and
+- **Tested end to end**: 184 compiler unit tests, 6 end-to-end tests that compile
+  and run real programs, 17 CLI tests, a 411-check C runtime suite and a
+  100-check runtime smoke script; CI runs the test matrix on Linux, macOS and
   Windows.
 
 ## Requirements
 
 - Rust 1.99 or newer (`cargo`, 2024 edition).
 - A C17 compiler: GCC or Clang. On Windows, MSYS2's `gcc` (UCRT64 environment)
-  is detected automatically.
-- CMake 3.16 or newer and a build generator: Ninja is used when available,
-  otherwise CMake falls back to MinGW Makefiles on Windows and Unix Makefiles
-  elsewhere.
+  is detected automatically, and `LSACA_CC` can point at any other compiler.
+- Optional: CMake 3.16 or newer plus a build generator (Ninja is used when
+  available, otherwise CMake falls back to MinGW Makefiles on Windows and Unix
+  Makefiles elsewhere). CMake is only needed when you build with `--cmake` or
+  build an emitted project yourself.
 
 ## Quick start
 
@@ -91,10 +105,14 @@ lsaca check <file.ls>                        run the front end and report diagno
 lsaca version | help
 ```
 
-Options: `-r, --release` (optimized build; arithmetic overflow wraps instead of
-panicking in release mode), `-o, --out-dir <dir>` (output directory for
-`build` and `emit-c`), `-v, --verbose` (show external commands) and `--keep`
-(print the location of the temporary build tree).
+Global option `--cmake` makes `run` and `build` go through the generated CMake
+project instead of the built-in direct C backend; without it the compiler needs
+no CMake. It is rejected (exit code `2`) by `check`, `emit-c`, `version` and
+`help`. Other options: `-r, --release` (optimized build; arithmetic overflow
+wraps instead of panicking in release mode), `-o, --out-dir <dir>` (output
+directory for `build` and `emit-c`), `-v, --verbose` (show external commands and
+the cache location) and `--keep` (print the location of the temporary build
+tree).
 
 Exit codes: `0` success, `1` compile or build error, `2` command line usage
 error, `101` a panic inside the compiled program.
@@ -106,30 +124,36 @@ error, `101` a panic inside the compiled program.
     |  lexer            tokens
     |  parser           AST
     |  type checker     typed HIR: name resolution, inference,
-    |                   exhaustiveness and constant evaluation
-    |  C code generator main.c + CMakeLists.txt
+    |                   exhaustiveness, constant evaluation, ? desugaring
+    |  C code generator main.c
     v
- C17 project  +  runtime (lsaca_rt.h/.c, embedded in the compiler)
+ C17 project  +  runtime (4 C files, 2 headers, embedded in the compiler)
     |
-    v  CMake + system C compiler
- native executable
+    +--> system C compiler (default, no CMake) ----> native executable
+    |
+    +--> CMake + C compiler (--cmake) ------------> native executable
 ```
 
 The generated project is self contained:
 
 ```text
-main.c          the user program plus generated copy/release/format helpers
-lsaca_rt.h      runtime ABI: reference counting and cycle collection, String,
-                Vec, Option, Result
-lsaca_rt.c      runtime implementation: formatting, checked arithmetic, panics
-CMakeLists.txt  portable build description (Debug: -g -O0 -DLSACA_DEBUG,
-                Release: -O2 -DNDEBUG)
+main.c               the user program plus generated copy/release/format helpers
+lsaca_rt.h           public runtime ABI
+lsaca_rt_internal.h  internal runtime declarations shared by the C files
+lsaca_rt.c           reference counting, cycle collection, panics, checked math
+lsaca_rt_string.c    String implementation and formatting support
+lsaca_rt_vec.c       Vec implementation
+lsaca_rt_fmt.c       format-string machinery
+CMakeLists.txt       portable build description (Debug: -g -O0 -DLSACA_DEBUG,
+                     Release: -O2 -DNDEBUG)
 ```
 
-Builds are cached by content hash (source, generated C, runtime, compiler path,
-build mode and leak-tracking mode), so repeated runs of unchanged programs are
-fast. The cache
-location is chosen defensively:
+Builds are cached by content hash (source, generated C, runtime sources,
+compiler version and path, build mode and leak-tracking mode), so repeated runs
+of unchanged programs are fast. The compiler object files for the runtime are
+compiled once per profile and cached under `_runtime/<hash>/` in the cache root;
+only `main.c` is recompiled for each program. The cache location is chosen
+defensively:
 
 1. `LSACA_CACHE_DIR`, when set;
 2. `lsaca-builds` under the system temporary directory, when that path is
@@ -139,23 +163,21 @@ location is chosen defensively:
 The fallback keeps builds working in sandboxes that only allow writes inside the
 workspace, when the temporary directory is not writable, and when its path is
 not ASCII-only (some C toolchains handle non-ASCII paths poorly). The chosen
-cache root is probed for writability before it is used, and `-v` prints it.
-Every build also runs CMake and the compiler with `TEMP`, `TMP` and `TMPDIR`
-pointing inside the build tree, so the toolchain does not depend on the system
-temporary directory either. The cache is safe to delete at any time. Built
+cache root is probed for writability before it is used, and `-v` prints it and
+the C compiler commands. The cache is safe to delete at any time. Built
 executables are copied to the requested output directory, so source paths may
 contain any characters.
 
 ## Memory management (ORC)
 
-Every heap value (String, Vec, closure environment, an `Rc<T>` cell, or a
-struct/enum value that contains one) is owned by its holder through a reference
-count. Copying a value - assignment, argument passing, capture or return -
-retains it; the holder releases it when the variable or temporary goes out of
-scope. Strings and vectors are copy-on-write, so mutating one holder never
-affects another. Function arguments are borrowed rather than moved: programs
-never fail to compile because of a move. Unlike Rust, ORC keeps memory safety
-but not the move checker.
+Every heap value (String, Vec, closure environment, an `Rc<T>` cell, a
+`Box<T>` payload, or a struct/enum value that contains one) is owned by its
+holder through a reference count. Copying a value - assignment, argument
+passing, capture or return - retains it; the holder releases it when the
+variable or temporary goes out of scope. Strings and vectors are copy-on-write,
+so mutating one holder never affects another. Function arguments are borrowed
+rather than moved: programs never fail to compile because of a move. Unlike
+Rust, ORC keeps memory safety but not the move checker.
 
 Ordinary values cannot form reference cycles: copying a value never creates a
 second path back to the same object. The builtin `Rc<T>` type is the exception:
@@ -181,15 +203,18 @@ copy.set(copy.get() + 1);
 println!("{}", counter.get());   // prints 1
 ```
 
-Generated programs built in the CMake Debug configuration define
-`LSACA_DEBUG`, which makes the runtime track reference-counted allocations and
-report leaks at shutdown. Set `LSACA_DEBUG_RC=1` when running `lsaca` (or pass
-`-DLSACA_DEBUG_RC=ON` when building an emitted project yourself) to enable the
-same tracking in a release build as well. Cyclic garbage is collected before the
-report, so the report only counts genuinely leaked allocations (for example
-acyclic data that the compiler failed to release); it indicates a
+Debug-profile builds - the default for `lsaca run` and `lsaca build` - compile
+the runtime with `-DLSACA_DEBUG`, which makes it track reference-counted
+allocations and print a leak report at shutdown. To get the same tracking in a
+release build, set `LSACA_DEBUG_RC=1` in the environment in which you run the
+*compiler* (not the program): `LSACA_DEBUG_RC=1 lsaca build -r program.ls`. The
+compiler then defines `-DLSACA_DEBUG_RC` for the C compilation, which turns the
+tracking on in every profile; for an emitted CMake project the equivalent
+switch is `-DLSACA_DEBUG_RC=ON` at configure time. Cyclic garbage is collected
+before the report, so the report only counts genuinely leaked allocations (for
+example acyclic data that the compiler failed to release); it indicates a
 compiler/runtime bug, not a user bug, unless the program panicked or called
-`exit`. With either define the report is:
+`exit`. The report is:
 
 ```text
 lsaca: warning: N reference-counted allocation(s) leaked
@@ -222,10 +247,31 @@ fn main() {
 syntax, semantics, the standard library, memory rules and the deliberate
 deviations from Rust. See [examples/](examples/) for runnable programs.
 
-Two 1.1 features are worth showing here. `Box<T>` is owned heap indirection with
-value semantics (`Box::new`, `.get()`, `.set()`); unlike `Rc<T>` it is not
-shared, and it provides the indirection needed for recursive types. Format macros
-accept widths, alignment, fill characters, signs, zero padding and precision:
+The 1.2 additions are the postfix `?` operator and the Option/Result
+combinators. `?` unwraps `Some`/`Ok` and returns early on `None`/`Err`; the
+enclosing function must return the same kind (`Option` or `Result`), and the
+error type must match exactly (there is no `From` conversion):
+
+```rust
+fn half(n: i64) -> Option<i64> {
+    if n % 2 == 0 { Some(n / 2) } else { None }
+}
+
+fn quarter(n: i64) -> Option<i64> {
+    Some(half(half(n)?)?)
+}
+
+fn main() {
+    println!("{:?} {:?}", quarter(8), quarter(6));   // Some(2) None
+    let x: Option<i64> = Some(4);
+    println!("{:?}", x.map(|v| v + 1));              // Some(5)
+}
+```
+
+`Box<T>` is owned heap indirection with value semantics (`Box::new`, `.get()`,
+`.set()`); unlike `Rc<T>` it is not shared, and it provides the indirection
+needed for recursive types. Format macros accept widths, alignment, fill
+characters, signs, zero padding and precision:
 
 ```rust
 fn main() {
@@ -249,8 +295,8 @@ The manual is split into one detailed page per topic under [docs/](docs/):
   program structure, lexical structure, types, the ORC memory model (`Rc<T>`,
   `Box<T>` and cycle collection), variables and mutability, operators,
   statements and control flow, functions, structs/enums/`impl`, pattern
-  matching, closures, the standard library and formatting, and the roadmap with
-  the deviations from Rust.
+  matching, closures, the standard library (including `?` and the combinators)
+  and the roadmap with the deviations from Rust.
 - [docs/language/15-benchmarks.md](docs/language/15-benchmarks.md) - benchmark
   methodology, per-workload analysis and the measured numbers.
 
@@ -261,52 +307,36 @@ sources with `scripts/docsite.py`).
 
 ## Benchmarks
 
-`python scripts/bench.py` runs four workloads in lsaca and in C, Rust, Python and
-Node.js, verifies each output checksum, and records compile time, runtime median
-and peak working set. lsaca programs are built through the normal cached
-`lsaca build` pipeline (official mode); where CMake is unavailable the harness
-falls back to `emit-c` plus a direct `gcc` invocation and records that mode in
-the results.
+`python scripts/bench.py` runs a corpus of workloads in lsaca and in C, Rust,
+Python and Node.js, verifies each output checksum, and records compile time,
+runtime median and peak working set. lsaca programs are built through the normal
+cached `lsaca build` pipeline; where the C toolchain is unavailable the harness
+can fall back to a labelled direct-compile mode.
 
-Measured on Windows 11 with a 12th Gen Intel Core i7-1260P (16 logical CPUs,
-15.6 GiB RAM), gcc 15.2.0, rustc 1.99.0, Python 3.14.4 and Node.js 24.14.1;
-median of 7 runs after one warm-up, 3 compile repetitions. Full methodology and
+Release 1.2.0 is a large improvement on the reference machine (Windows 11,
+Core i7-1260P, gcc 15.2.0). A cold `lsaca build -r` of the benchmark programs
+dropped from roughly 2.9 s to about 1.2 s because CMake is no longer configured,
+a cached rebuild takes about 0.03 s, and the compiled runtime objects are reused
+across programs. Argument passing and memory layout changes made vector-heavy
+code much faster: `vec_memory` went from about 86 ms to about 27 ms and its peak
+working set from 35.1 MiB to 18.8 MiB, and `string_build` from about 213 ms to
+about 35 ms; the numeric workloads are unchanged. Full tables, methodology and
 caveats are in [docs/language/15-benchmarks.md](docs/language/15-benchmarks.md);
 raw data is in [benchmarks/results/](benchmarks/results/).
 
-Runtime, median milliseconds (lower is better):
-
-| program | lsaca | C (gcc -O2) | Rust (rustc -O) | Python 3 | Node.js |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| fib (recursive, n=30, 10 calls) | 30.6 | 30.6 | 15.7 | 1082.3 | 241.4 |
-| loop_sum (8,000,000 additions) | 11.4 | 10.9 | 12.0 | 987.1 | 165.3 |
-| string_build (1,000,000 appends) | 212.9 | 14.8 | 76.3 | 431.1 | 231.5 |
-| vec_memory (1,000,000 structs) | 86.1 | 18.4 | 24.9 | 535.7 | 241.2 |
-
-Compile time, seconds (lower is better): lsaca cold build 2.8-3.3, lsaca cached
-build 0.017-0.019, `gcc -O2` 0.25-0.31, `rustc -O` 0.26-0.36. The cold lsaca
-number includes CMake configure plus the C build; the cached number is what a
-program pays after it has been built once.
-
-Peak working set, MiB (lower is better): lsaca 4.0 on fib and loop_sum, 10.6 on
-string_build and 35.1 on vec_memory; C 4.0/4.0/7.3/18.8; Rust
-4.1/4.1/7.3/18.9; Python 11.0/11.0/74.1/142.2; Node.js
-43.0/45.7/89.3/121.4 (same program order). Numeric loops reach C parity in this
-run, while the vector and string workloads pay for per-element reference
-counting, copy-on-write appends and value-semantics copies of vectors; these are
-the next code generation optimizations, documented on the benchmark page.
-
 ## Environment variables
 
-- `LSACA_CC` - C compiler used for generated projects (default: `gcc`, `cc` or
-  `clang` from `PATH`, then common MSYS2 locations on Windows).
-- `LSACA_JOBS` - parallel build jobs passed to the C build.
+- `LSACA_CC` - C compiler used to build generated programs (default: `gcc`,
+  `cc` or `clang` from `PATH`, then common MSYS2 locations on Windows).
+- `LSACA_JOBS` - parallel build jobs for the C compiler (with `--cmake`, passed
+  to the CMake build instead).
 - `LSACA_CACHE_DIR` - build cache location (default: tried under the system
   temporary directory first, then `.lsaca-build-cache` in the current
   directory).
-- `LSACA_DEBUG_RC` - set to `1` to track reference-counted allocations and
-  report leaks in release builds too (generated projects expose the same switch
-  as the CMake option `LSACA_DEBUG_RC`).
+- `LSACA_DEBUG_RC` - read by the compiler: set to `1` (`true`, `on` or `yes`
+  also work) to compile the runtime with leak tracking in *every* build
+  profile, including release; emitted CMake projects expose the same switch as
+  the CMake option `LSACA_DEBUG_RC`.
 
 ## Troubleshooting
 
@@ -317,14 +347,15 @@ the next code generation optimizations, documented on the benchmark page.
   the current directory instead of failing on an unwritable `%TEMP%`.
 - **`no C compiler found`**: install GCC or Clang (MSYS2 UCRT64 on Windows) and
   put it on `PATH`, or set `LSACA_CC` to the compiler executable.
-- **`CMake was not found on PATH`**: install CMake 3.16 or newer.
-- **`no build generator found`**: install Ninja (recommended) or
-  `mingw32-make`.
+- **`CMake was not found on PATH`** or **`no build generator found`**: these
+  errors only occur with `--cmake` (or when you build an emitted project
+  yourself). Install CMake 3.16+ and Ninja (recommended) or `mingw32-make`, or
+  drop `--cmake` - the default backend needs neither.
 
 ## Testing
 
 ```sh
-cargo test --workspace          # 160 unit + 5 end-to-end + 13 CLI tests
+cargo test --workspace          # 184 unit + 6 end-to-end + 17 CLI tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -340,6 +371,19 @@ without warnings under `-Wall -Wextra`; CI additionally builds them with
 checks the documentation site with `scripts/docsite.py --check`. The complete CI
 definition is in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
+## Release history
+
+- **1.2.0** - postfix `?` on `Option`/`Result` and the Option/Result
+  combinators; direct C backend by default with cached runtime objects (`--cmake`
+  restores the old pipeline); split runtime (`lsaca_rt_string.c`,
+  `lsaca_rt_vec.c`, `lsaca_rt_fmt.c`, `lsaca_rt_internal.h`); faster builds,
+  faster vector/string workloads and lower peak memory. Source compatible with
+  1.1.0.
+- **1.1.0** - builtin `Box<T>`; format-specifier widths, alignment, fill,
+  signs, zero padding and precision; correctly implemented or-patterns and
+  match guards; non-`bool` conditions became a compile-time error.
+- **1.0.0** - first release of the rewrite.
+
 ## Repository layout
 
 ```text
@@ -347,6 +391,8 @@ crates/lsaca/            the compiler library (lexer, parser, type checker, C co
 crates/lsaca/tests/      end-to-end tests and test programs
 crates/lsaca-cli/        the lsaca command line tool
 runtime/                 the C17 ORC runtime embedded into generated projects
+                         (lsaca_rt.c, lsaca_rt_string.c, lsaca_rt_vec.c,
+                         lsaca_rt_fmt.c, lsaca_rt.h, lsaca_rt_internal.h)
 runtime/test/            C runtime tests (411-check suite and Windows smoke script)
 examples/                example programs
 benchmarks/              benchmark programs in five languages, harness and recorded results

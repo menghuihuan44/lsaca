@@ -5,9 +5,10 @@
 //! following the same ownership protocol as ordinary expressions.
 
 use crate::hir::{
-    FormatAlign, FormatSpec, HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HExpr, HFormatPart,
-    HFormatPartKind, HMacroCall, HMacroKind,
+    FormatAlign, FormatSpec, HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HExpr, HExprKind,
+    HFormatPart, HFormatPartKind, HMacroCall, HMacroKind,
 };
+
 use crate::span::Span;
 use crate::types::{FloatTy, Ty};
 
@@ -55,13 +56,34 @@ impl<'a> Gen<'a> {
                 self.line(format!("{} = ls_str_is_empty({});", target, place));
             }
             HBuiltinMethod::StrPushStr => {
-                let place = self.gen_place(receiver);
-                if let Some(arg) = args.first() {
-                    let value = self.gen_owned(arg);
-                    self.line(format!(
-                        "{} = ls_str_push_str({}, {});",
-                        place, place, value
-                    ));
+                // `s.push_str(format!(...))` appends the formatted pieces
+                // straight to `s`: the intermediate string and the second
+                // COW pass are pure overhead. All arguments are still
+                // evaluated before the receiver is touched, so the produced
+                // text and the evaluation order are exactly those of the
+                // temporary.
+                let fused = if receiver.ty.is_string()
+                    && matches!(&receiver.kind, HExprKind::Local { .. })
+                {
+                    match args.first().map(|argument| &argument.kind) {
+                        Some(HExprKind::Format { parts }) => {
+                            self.gen_format_append(receiver, parts);
+                            true
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+                if !fused {
+                    let place = self.gen_place(receiver);
+                    if let Some(arg) = args.first() {
+                        let value = self.gen_owned(arg);
+                        self.line(format!(
+                            "{} = ls_str_push_str({}, {});",
+                            place, place, value
+                        ));
+                    }
                 }
                 self.assign_unit(target);
             }
@@ -239,11 +261,32 @@ impl<'a> Gen<'a> {
                     if ops::is_frozen_shared(&receiver.ty) {
                         self.line(format!("ls_vec_string_push(&({}), {});", place, value));
                     } else {
-                        let element = vec_element(&receiver.ty);
-                        let element_ctype = self.ctype(&element);
+                        // Fast path: append into spare capacity directly.
+                        // The runtime is only needed when the buffer has to
+                        // grow; the slot past `len` is uninitialised, so
+                        // storing the new element cannot leak or alias.
+                        //
+                        // The length is read into a local so that the store
+                        // through `data` cannot force a reload of `len`, and
+                        // growth is delegated to a helper that takes the vector
+                        // by value: the vector's address never escapes, which
+                        // lets the compiler keep `len` and `cap` in registers
+                        // across the whole push loop.
+                        let length = self.new_plain_of("size_t", "len");
+                        self.line(format!("{} = ({place}).len;", length));
+                        self.line(format!("if ({} < ({place}).cap) {{", length));
+                        self.w.indent();
+                        self.line(format!("({place}).data[{}] = {value};", length));
+                        self.line(format!("({place}).len = {} + 1;", length));
+                        self.w.dedent();
+                        self.line("} else {");
+                        self.w.indent();
                         self.line(format!(
-                            "ls_vec_insert_bytes((void**)&({place}).data, &({place}).len, &({place}).cap, ({place}).len, (const void*)&{value}, sizeof({element_ctype}));"
+                            "({place}) = {}(({place}), {value});",
+                            ops::push_slow_fn_name(self.names, &receiver.ty)
                         ));
+                        self.w.dedent();
+                        self.line("}");
                         self.mark_moved(&value);
                     }
                 }
@@ -335,7 +378,7 @@ impl<'a> Gen<'a> {
                     self.line(format!("ls_vec_string_clear(&({}));", place));
                 } else {
                     let element = vec_element(&receiver.ty);
-                    if ops::is_managed(&element) {
+                    if !self.is_trivial_copy(&element) {
                         let index = self.fresh("i");
                         self.line(format!(
                             "for (size_t {} = 0; {} < ({}).len; {} += 1) {{",
@@ -1100,6 +1143,46 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Append the pieces of a `format!` expression directly to the string
+    /// held by `receiver`, avoiding the intermediate accumulator string and
+    /// the extra copy that `push_str` would perform.
+    ///
+    /// Every argument is evaluated before the first piece is appended, which
+    /// is exactly the order in which building a temporary string first would
+    /// evaluate them; the receiver itself is only read while appending.
+    fn gen_format_append(&mut self, receiver: &HExpr, parts: &[HFormatPart]) {
+        let accumulator = self.gen_place(receiver);
+        let mut arguments: Vec<Option<(String, Ty, FormatSpec)>> = Vec::with_capacity(parts.len());
+        for part in parts {
+            match &part.kind {
+                HFormatPartKind::Literal(_) => arguments.push(None),
+                HFormatPartKind::Arg { expr, spec } => {
+                    let value = self.gen_owned(expr);
+                    arguments.push(Some((value, expr.ty.clone(), (**spec).clone())));
+                }
+            }
+        }
+        for (part, argument) in parts.iter().zip(arguments) {
+            match (&part.kind, argument) {
+                (HFormatPartKind::Literal(text), _) => {
+                    self.line(format!(
+                        "{} = ls_format_push_cstr({}, {});",
+                        accumulator,
+                        accumulator,
+                        util::c_string_literal(text)
+                    ));
+                }
+                (HFormatPartKind::Arg { .. }, Some((value, ty, spec))) => {
+                    if spec.is_plain() {
+                        self.append_display(&accumulator, &ty, &value);
+                    } else {
+                        self.append_specified(&accumulator, &ty, &value, &spec);
+                    }
+                }
+                (HFormatPartKind::Arg { .. }, None) => {}
+            }
+        }
+    }
     fn build_format(&mut self, parts: &[HFormatPart]) -> String {
         let accumulator = self.new_plain_of("LsString*", "acc");
         self.line(format!("{} = ls_format_begin(0);", accumulator));

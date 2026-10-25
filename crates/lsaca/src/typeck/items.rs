@@ -215,6 +215,7 @@ fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
         ExprKind::Unary { expr, .. }
         | ExprKind::Cast { expr, .. }
         | ExprKind::TupleField { base: expr, .. }
+        | ExprKind::Try { expr }
         | ExprKind::Field { base: expr, .. } => scan_expr(expr, out),
         ExprKind::Binary { lhs, rhs, .. } => {
             scan_expr(lhs, out);

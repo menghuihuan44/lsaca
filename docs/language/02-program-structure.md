@@ -375,7 +375,7 @@ lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
 
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 1.1.0 parser. Optional parts
+The grammar below is the authoritative EBNF of the 1.2.0 parser. Optional parts
 are written with `[...]`, repetitions with `*` and `+`, and alternatives with
 `|`. It is reproduced here for reference; the individual pages explain each
 construct in detail.
@@ -417,7 +417,7 @@ addExpr      = mulExpr ( ( "+" | "-" ) mulExpr )* ;
 mulExpr      = castExpr ( ( "*" | "/" | "%" ) castExpr )* ;
 castExpr     = unaryExpr ( "as" type )* ;
 unaryExpr    = ( "-" | "!" ) unaryExpr | postfixExpr ;
-postfixExpr  = primary ( call | methodCall | "." IDENT | "." INT | "[" expr "]" )* ;
+postfixExpr  = primary ( call | methodCall | "." IDENT | "." INT | "[" expr "]" | "?" )* ;
 call         = "(" args? ")" ;
 methodCall   = "." IDENT ( "::" "<" typeArgs ">" )? "(" args? ")" ;
 args         = expr ( "," expr )* ","? ;
@@ -469,7 +469,7 @@ name, but the type checker rejects generic methods; and `break expr` /
 `return expr` parse even where a value cannot be carried.
 
 Or-patterns (`orPattern`) and match guards (the optional `if` in `matchArm`) are
-fully implemented in 1.1.0: every alternative of an or-pattern is tested, and a
+fully implemented since 1.1.0: every alternative of an or-pattern is tested, and a
 guard filters the arm. Together they allow compact classification:
 
 ```ls

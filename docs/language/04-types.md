@@ -144,7 +144,7 @@ Output:
 They are the idiomatic way to express a missing value or an operation that can
 fail, and they support pattern matching and the methods listed in
 [Standard library](13-standard-library.md). Neither type supports `==` in
-version 1.1.0: compare them by pattern matching.
+version 1.2.0: compare them by pattern matching.
 
 ```ls
 fn classify(n: i64) -> Result<String, String> {
@@ -185,7 +185,7 @@ allocation: a `Box` has value semantics, and copying a `Box` copies the payload
 (deep copy), so boxes never alias. Both exist to break the "everything is a
 value" rule in controlled ways: `Rc` when you need shared mutable state or a
 cycle, `Box` when you need indirection (a recursive data structure, or a large
-value moved without a deep copy on the surface). 1.1.0's `Box` is described in
+value moved without a deep copy on the surface). `Box` is described in
 [Memory model](05-memory-model.md).
 
 ```ls
@@ -220,7 +220,7 @@ tuple. Elements are accessed by index (`t.0`, `t.1`, ...) or destructured in a
 **Current limitation:** the C code generator only handles *flat* tuples. A tuple
 nested inside another tuple, whether as a value or as a type of a struct field,
 generates invalid C and fails at the C compiler, so avoid nested tuples in
-1.1.0. Tuples with other element types (including `String`, `Rc<T>`,
+1.2.0. Tuples with other element types (including `String`, `Rc<T>`,
 `Option<String>`) work.
 
 ```ls

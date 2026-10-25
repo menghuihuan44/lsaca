@@ -470,6 +470,15 @@ impl<'a> Checker<'a> {
                 parts: self.lower_format_parts(&call.parts),
                 args: call.args.iter().map(|arg| self.lower_expr(arg)).collect(),
             }),
+            TExprKind::Try {
+                expr,
+                ret,
+                value_c_name,
+                error_c_name,
+            } => {
+                let operand = self.lower_expr(expr);
+                self.lower_try(operand, ret, value_c_name, error_c_name, span)
+            }
             TExprKind::Break => HExprKind::Break,
             TExprKind::Continue => HExprKind::Continue,
             TExprKind::Return(value) => {
@@ -580,6 +589,152 @@ impl<'a> Checker<'a> {
             ty,
             kind,
             span: pat.span,
+        }
+    }
+
+    /// Lower a try expression into a match that returns the payload in the
+    /// success arm and propagates None or Err with an early return in the
+    /// failure arm. The operand expression is evaluated exactly once.
+    fn lower_try(
+        &mut self,
+        operand: HExpr,
+        ret: &ITy,
+        value_c_name: &str,
+        error_c_name: &str,
+        span: Span,
+    ) -> HExprKind {
+        let ret_ty = self.finalize_ty(ret, span);
+        let operand_ty = operand.ty.clone();
+        match &operand_ty {
+            Ty::Option(payload) => {
+                let payload = (**payload).clone();
+                let some_pat = HPat {
+                    ty: operand_ty.clone(),
+                    kind: HPatKind::OptionSome(Box::new(HPat {
+                        ty: payload.clone(),
+                        kind: HPatKind::Bind {
+                            c_name: value_c_name.to_string(),
+                            name: "value".to_string(),
+                        },
+                        span,
+                    })),
+                    span,
+                };
+                let none_pat = HPat {
+                    ty: operand_ty.clone(),
+                    kind: HPatKind::OptionNone,
+                    span,
+                };
+                let value_expr = HExpr::new(
+                    payload.clone(),
+                    HExprKind::Local {
+                        name: "value".to_string(),
+                        c_name: value_c_name.to_string(),
+                    },
+                    span,
+                );
+                let none_return = HExpr::new(
+                    Ty::Unit,
+                    HExprKind::Return(Some(Box::new(HExpr::new(
+                        ret_ty.clone(),
+                        HExprKind::OptionNone,
+                        span,
+                    )))),
+                    span,
+                );
+                HExprKind::Match {
+                    scrutinee: Box::new(operand),
+                    arms: vec![
+                        HArm {
+                            pat: some_pat,
+                            guard: None,
+                            body: value_expr,
+                        },
+                        HArm {
+                            pat: none_pat,
+                            guard: None,
+                            body: none_return,
+                        },
+                    ],
+                }
+            }
+            Ty::Result(ok_ty, err_ty) => {
+                let ok_ty = (**ok_ty).clone();
+                let err_ty = (**err_ty).clone();
+                let ok_pat = HPat {
+                    ty: operand_ty.clone(),
+                    kind: HPatKind::ResultOk(Box::new(HPat {
+                        ty: ok_ty.clone(),
+                        kind: HPatKind::Bind {
+                            c_name: value_c_name.to_string(),
+                            name: "value".to_string(),
+                        },
+                        span,
+                    })),
+                    span,
+                };
+                let err_pat = HPat {
+                    ty: operand_ty.clone(),
+                    kind: HPatKind::ResultErr(Box::new(HPat {
+                        ty: err_ty.clone(),
+                        kind: HPatKind::Bind {
+                            c_name: error_c_name.to_string(),
+                            name: "error".to_string(),
+                        },
+                        span,
+                    })),
+                    span,
+                };
+                let ok_expr = HExpr::new(
+                    ok_ty.clone(),
+                    HExprKind::Local {
+                        name: "value".to_string(),
+                        c_name: value_c_name.to_string(),
+                    },
+                    span,
+                );
+                let err_local = HExpr::new(
+                    err_ty.clone(),
+                    HExprKind::Local {
+                        name: "error".to_string(),
+                        c_name: error_c_name.to_string(),
+                    },
+                    span,
+                );
+                let err_return = HExpr::new(
+                    Ty::Unit,
+                    HExprKind::Return(Some(Box::new(HExpr::new(
+                        ret_ty.clone(),
+                        HExprKind::ResultErr(Box::new(err_local)),
+                        span,
+                    )))),
+                    span,
+                );
+                HExprKind::Match {
+                    scrutinee: Box::new(operand),
+                    arms: vec![
+                        HArm {
+                            pat: ok_pat,
+                            guard: None,
+                            body: ok_expr,
+                        },
+                        HArm {
+                            pat: err_pat,
+                            guard: None,
+                            body: err_return,
+                        },
+                    ],
+                }
+            }
+            _ => {
+                // The checker rejects every other operand type, so this arm is
+                // unreachable for accepted programs. Keep lowering total.
+                HExprKind::Block(HBlock {
+                    stmts: Vec::new(),
+                    tail: Some(Box::new(operand)),
+                    span,
+                })
+            }
         }
     }
 

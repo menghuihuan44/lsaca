@@ -3,7 +3,7 @@
 
 use crate::codegen::c_writer::CWriter;
 use crate::codegen::helpers::{compound_types, managed_types};
-use crate::codegen::ops::{self, is_managed};
+use crate::codegen::ops::{self, is_trivially_copyable};
 use crate::codegen::types::{
     EMPTY_STRUCT_FIELD, FN_ENV_FIELD, OPTION_SOME_MEMBER, RESULT_ERR_MEMBER, RESULT_OK_MEMBER,
     TypeNames, TypeRegistry, UNION_FIELD, field_cname, positional_field, variant_member,
@@ -19,6 +19,13 @@ pub fn emit_all(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry
         emit_release(w, program, &names, &ty);
     }
     for ty in compound_types(program, registry) {
+        if let Ty::Vec(element) = &ty
+            && !ops::is_frozen_shared(&ty)
+        {
+            emit_push_slow(w, &names, &ty, element);
+        }
+    }
+    for ty in compound_types(program, registry) {
         emit_debug(w, program, &names, &ty);
         emit_eq(w, program, &names, &ty);
     }
@@ -29,11 +36,36 @@ pub fn emit_all(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry
     }
     for ty in managed_types(program, registry) {
         match ty {
-            Ty::Rc(inner) => emit_rc_helpers(w, &names, &inner),
-            Ty::Box(inner) => emit_box_helpers(w, &names, &inner),
+            Ty::Rc(inner) => emit_rc_helpers(w, program, &names, &inner),
+            Ty::Box(inner) => emit_box_helpers(w, program, &names, &inner),
             _ => {}
         }
     }
+}
+
+/// Out-of-line growing append used by `Vec::push`. Taking and returning the
+/// vector by value keeps the vector's address from escaping in the emitted fast
+/// path, so the compiler can keep `len` and `cap` in registers inside push
+/// loops instead of reloading them from the stack on every iteration.
+fn emit_push_slow(w: &mut CWriter, names: &TypeNames, ty: &Ty, element: &Ty) {
+    let c_ty = names.ctype(ty);
+    let element_ty = names.ctype(element);
+    w.line(format!(
+        "{} {}({} v, {} value) {{",
+        c_ty,
+        ops::push_slow_fn_name(names, ty),
+        c_ty,
+        element_ty
+    ));
+    w.indent();
+    w.line(format!(
+        "ls_vec_insert_bytes((void**)&v.data, &v.len, &v.cap, v.len, (const void*)&value, sizeof({}));",
+        element_ty
+    ));
+    w.line("return v;");
+    w.dedent();
+    w.line("}");
+    w.blank();
 }
 
 // ---------------------------------------------------------------------------
@@ -49,7 +81,7 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
         Ty::Vec(elem) => {
             let elem_ty = names.ctype(elem);
             w.line(format!("{} out;", c_ty));
-            if is_managed(elem) {
+            if !is_trivially_copyable(program, elem) {
                 w.line("size_t i;");
                 w.line("out.len = v.len;");
                 w.line("out.cap = v.len;");
@@ -128,7 +160,7 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
             for (index, elem) in elems.iter().enumerate() {
                 let target = format!("out.{}", positional_field(index));
                 let value = format!("v.{}", positional_field(index));
-                emit_assign_copy(w, names, elem, &target, &value);
+                emit_assign_copy(w, program, names, elem, &target, &value);
             }
             w.line("return out;");
         }
@@ -139,7 +171,7 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
                     for (field_name, field_ty) in &fields {
                         let target = format!("out.{}", field_cname(field_name));
                         let value = format!("v.{}", field_cname(field_name));
-                        emit_assign_copy(w, names, field_ty, &target, &value);
+                        emit_assign_copy(w, program, names, field_ty, &target, &value);
                     }
                 }
                 _ => {
@@ -174,7 +206,7 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
                             member,
                             positional_field(field_index)
                         );
-                        emit_assign_copy(w, names, field_ty, &target, &value);
+                        emit_assign_copy(w, program, names, field_ty, &target, &value);
                     }
                     w.line("break;");
                     w.dedent();
@@ -223,15 +255,22 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
     w.blank();
 }
 
-fn emit_assign_copy(w: &mut CWriter, names: &TypeNames, ty: &Ty, target: &str, value: &str) {
-    if is_managed(ty) {
+fn emit_assign_copy(
+    w: &mut CWriter,
+    program: &hir::Program,
+    names: &TypeNames,
+    ty: &Ty,
+    target: &str,
+    value: &str,
+) {
+    if is_trivially_copyable(program, ty) {
+        w.line(format!("{} = {};", target, value));
+    } else {
         w.line(format!(
             "{} = {};",
             target,
             ops::copy_expr(names, ty, value)
         ));
-    } else {
-        w.line(format!("{} = {};", target, value));
     }
 }
 
@@ -246,7 +285,7 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
     w.indent();
     match ty {
         Ty::Vec(elem) => {
-            if is_managed(elem) {
+            if !is_trivially_copyable(program, elem) {
                 w.line("size_t i;");
                 w.line("for (i = 0; i < v.len; i += 1) {");
                 w.indent();
@@ -261,24 +300,42 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
         Ty::Option(elem) => {
             w.line("if (v.tag == 1) {");
             w.indent();
-            emit_release_value(w, names, elem, &format!("v.u.{}", OPTION_SOME_MEMBER));
+            emit_release_value(
+                w,
+                program,
+                names,
+                elem,
+                &format!("v.u.{}", OPTION_SOME_MEMBER),
+            );
             w.dedent();
             w.line("}");
         }
         Ty::Result(ok, err) => {
             w.line("if (v.tag == 0) {");
             w.indent();
-            emit_release_value(w, names, ok, &format!("v.u.{}", RESULT_OK_MEMBER));
+            emit_release_value(w, program, names, ok, &format!("v.u.{}", RESULT_OK_MEMBER));
             w.dedent();
             w.line("} else {");
             w.indent();
-            emit_release_value(w, names, err, &format!("v.u.{}", RESULT_ERR_MEMBER));
+            emit_release_value(
+                w,
+                program,
+                names,
+                err,
+                &format!("v.u.{}", RESULT_ERR_MEMBER),
+            );
             w.dedent();
             w.line("}");
         }
         Ty::Tuple(elems) => {
             for (index, elem) in elems.iter().enumerate() {
-                emit_release_value(w, names, elem, &format!("v.{}", positional_field(index)));
+                emit_release_value(
+                    w,
+                    program,
+                    names,
+                    elem,
+                    &format!("v.{}", positional_field(index)),
+                );
             }
             w.line("(void)v;");
         }
@@ -287,6 +344,7 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
                 for (field_name, field_ty) in &fields {
                     emit_release_value(
                         w,
+                        program,
                         names,
                         field_ty,
                         &format!("v.{}", field_cname(field_name)),
@@ -309,6 +367,7 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
                     for (field_index, field_ty) in variant.fields.iter().enumerate() {
                         emit_release_value(
                             w,
+                            program,
                             names,
                             field_ty,
                             &format!(
@@ -349,7 +408,16 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
     w.blank();
 }
 
-fn emit_release_value(w: &mut CWriter, names: &TypeNames, ty: &Ty, value: &str) {
+fn emit_release_value(
+    w: &mut CWriter,
+    program: &hir::Program,
+    names: &TypeNames,
+    ty: &Ty,
+    value: &str,
+) {
+    if is_trivially_copyable(program, ty) {
+        return;
+    }
     if let Some(stmt) = ops::release_stmt(names, ty, value) {
         w.line(stmt);
     }
@@ -885,7 +953,7 @@ fn emit_trace(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &T
 /// Emit the helpers of one Rc cell type: allocation, payload access, release and
 /// tracing. The cell itself is a managed allocation registered with the cycle
 /// collector, so a cycle through its payload is collectable.
-fn emit_rc_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
+fn emit_rc_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, inner: &Ty) {
     let suffix = names.mangle(inner);
     let cell = names.tag(&Ty::rc(inner.clone()));
     let cell_ptr = format!("{}*", cell);
@@ -924,7 +992,7 @@ fn emit_rc_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
         suffix, cell_ptr, inner_ty
     ));
     w.indent();
-    emit_release_value(w, names, inner, "self->payload");
+    emit_release_value(w, program, names, inner, "self->payload");
     w.line("self->payload = value;");
     w.dedent();
     w.line("}");
@@ -933,7 +1001,7 @@ fn emit_rc_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
     w.line(format!("void lsaca_rc_drop_{}(void* payload) {{", suffix));
     w.indent();
     w.line(format!("{} self = ({})payload;", cell_ptr, cell_ptr));
-    emit_release_value(w, names, inner, "self->payload");
+    emit_release_value(w, program, names, inner, "self->payload");
     w.line("(void)self;");
     w.dedent();
     w.line("}");
@@ -956,7 +1024,7 @@ fn emit_rc_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
 /// Emit the helpers of one Box cell type: allocation, payload access, deep
 /// copy and tracing. Unlike an Rc cell, a box is uniquely owned, so copying a
 /// box allocates a fresh cell and deep-copies the payload.
-fn emit_box_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
+fn emit_box_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, inner: &Ty) {
     let suffix = names.mangle(inner);
     let cell = names.tag(&Ty::box_(inner.clone()));
     let cell_ptr = format!("{}*", cell);
@@ -995,7 +1063,7 @@ fn emit_box_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
         suffix, cell_ptr, inner_ty
     ));
     w.indent();
-    emit_release_value(w, names, inner, "self->payload");
+    emit_release_value(w, program, names, inner, "self->payload");
     w.line("self->payload = value;");
     w.dedent();
     w.line("}");
@@ -1004,7 +1072,7 @@ fn emit_box_helpers(w: &mut CWriter, names: &TypeNames, inner: &Ty) {
     w.line(format!("void lsaca_box_drop_{}(void* payload) {{", suffix));
     w.indent();
     w.line(format!("{} self = ({})payload;", cell_ptr, cell_ptr));
-    emit_release_value(w, names, inner, "self->payload");
+    emit_release_value(w, program, names, inner, "self->payload");
     w.line("(void)self;");
     w.dedent();
     w.line("}");

@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-110), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-120), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 1.1.0 are:
+The pattern forms available in 1.2.0 are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ The pattern forms available in 1.1.0 are:
 Patterns nest: a variant pattern can contain a struct pattern, a struct pattern
 can contain tuple patterns, and so on. There are no string-literal, range, slice,
 `@`-binding or `ref` patterns. Or-patterns (`p | q`) and match guards
-(`pattern if condition`) are fully supported in 1.1.0 — see
+(`pattern if condition`) are fully supported since 1.1.0 — see
 [Or-patterns](#or-patterns) and [Match guards](#match-guards).
 
 ### Binding and wildcards
@@ -127,7 +127,7 @@ on
 
 Tuple patterns match the tuple's arity and bind each component. All tuple
 patterns must be **flat**: nested tuple values and nested tuple patterns are a
-known codegen limitation in 1.1.0 (see [Roadmap](14-roadmap.md)).
+known codegen limitation in 1.2.0 (see [Roadmap](14-roadmap.md)).
 
 ```ls
 fn main() {
@@ -715,9 +715,9 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 1.1.0
+## Known limitations in 1.2.0
 
-Or-patterns and match guards are implemented correctly in 1.1.0. The pattern
+Or-patterns and match guards are implemented correctly since 1.1.0. The pattern
 restrictions that remain are:
 
 * **Nested tuples** — tuple patterns inside tuple patterns still produce invalid

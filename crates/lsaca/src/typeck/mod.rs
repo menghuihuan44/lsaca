@@ -154,7 +154,7 @@ fn program_name(file: &SourceFile) -> String {
 mod tests {
     use super::*;
     use crate::diag::Severity;
-    use crate::hir::{ConstValue, HExprKind, HStmt};
+    use crate::hir::{ConstValue, HExpr, HExprKind, HPatKind, HStmt};
     use crate::types::{FloatTy, IntTy, SelfKind, Ty};
 
     fn parse_source(source: &str) -> (ast::Program, SourceFile, Diagnostics) {
@@ -1063,6 +1063,542 @@ fn main() { }"#,
         assert_eq!(body.stmts.len(), 3);
     }
 
+    #[test]
+    fn lowers_try_operator_on_option() {
+        let program = expect_ok(
+            r#"fn first(values: Vec<i64>) -> Option<i64> {
+    let value = values.first()?;
+    Some(value + 1)
+}
+
+fn main() {
+    println!("{}", first(vec![1, 2]).unwrap());
+}"#,
+        );
+        let function = find_fn(&program, "first").expect("first should be lowered");
+        assert_eq!(function.ret, Ty::Option(Box::new(Ty::Int(IntTy::I64))));
+        match &function.body.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => {
+                assert_eq!(init.ty, Ty::Int(IntTy::I64));
+                match &init.kind {
+                    HExprKind::Match { arms, .. } => {
+                        assert_eq!(arms.len(), 2);
+                        assert!(matches!(arms[0].pat.kind, HPatKind::OptionSome(_)));
+                        assert!(matches!(arms[1].pat.kind, HPatKind::OptionNone));
+                        assert!(matches!(
+                            &arms[1].body.kind,
+                            HExprKind::Return(Some(value))
+                                if matches!(value.kind, HExprKind::OptionNone)
+                        ));
+                    }
+                    other => panic!("expected the lowered try match, got {:?}", other),
+                }
+            }
+            other => panic!("expected a let statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lowers_try_operator_on_result() {
+        let program = expect_ok(
+            r#"fn parse_plus(text: String) -> Result<i64, String> {
+    let value = text.parse_i64()?;
+    Ok(value + 1)
+}
+
+fn main() {
+    println!("{}", parse_plus("1").unwrap());
+}"#,
+        );
+        let function = find_fn(&program, "parse_plus").expect("parse_plus should be lowered");
+        assert_eq!(
+            function.ret,
+            Ty::Result(Box::new(Ty::Int(IntTy::I64)), Box::new(Ty::String))
+        );
+        match &function.body.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => match &init.kind {
+                HExprKind::Match { arms, .. } => {
+                    assert_eq!(arms.len(), 2);
+                    assert!(matches!(arms[0].pat.kind, HPatKind::ResultOk(_)));
+                    assert!(matches!(arms[1].pat.kind, HPatKind::ResultErr(_)));
+                    assert!(matches!(
+                        &arms[1].body.kind,
+                        HExprKind::Return(Some(value))
+                            if matches!(value.kind, HExprKind::ResultErr(_))
+                    ));
+                }
+                other => panic!("expected the lowered try match, got {:?}", other),
+            },
+            other => panic!("expected a let statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn checks_try_operator_payload_types() {
+        let diagnostics = expect_errors(
+            r#"fn first(opt: Option<i64>) -> Option<String> {
+    let value = opt?;
+    Some(value)
+}
+
+fn main() {
+    let _ = first(Some(1));
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0308"));
+        assert!(has_message(&diagnostics, "mismatched types"));
+
+        let diagnostics = expect_errors(
+            r#"fn convert(res: Result<i64, i64>) -> Result<i64, String> {
+    let value = res?;
+    Ok(value)
+}
+
+fn main() {
+    let _ = convert(Ok(1));
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0308"));
+        assert!(has_message(&diagnostics, "cannot convert error types"));
+    }
+
+    #[test]
+    fn reports_try_operator_scope_errors() {
+        let diagnostics = expect_errors(
+            r#"fn maybe(value: i64) -> Option<i64> {
+    Some(value)
+}
+
+fn main() {
+    let value = maybe(1)?;
+    println!("{}", value);
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0277"));
+        assert!(has_message(
+            &diagnostics,
+            "can only be used in a function that returns Option"
+        ));
+        assert!(has_note(
+            &diagnostics,
+            "change the function to return Option"
+        ));
+
+        let diagnostics = expect_errors(
+            r#"fn compute(value: i64) -> Option<i64> {
+    let number = value?;
+    Some(number)
+}
+
+fn main() {
+    let _ = compute(1);
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0277"));
+        assert!(has_message(
+            &diagnostics,
+            "can only be applied to Option or Result values"
+        ));
+    }
+
+    #[test]
+    fn checks_try_operator_inside_closures() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let opt: Option<i64> = Some(1);
+    let bump = || {
+        let value = opt?;
+        value + 1
+    };
+    println!("{}", bump());
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0277"));
+        assert!(has_message(
+            &diagnostics,
+            "requires the enclosing closure to declare an Option return type"
+        ));
+
+        let program = expect_ok(
+            r#"fn first(opt: Option<i64>) -> i64 {
+    let bump = |value: Option<i64>| -> Option<i64> {
+        let inner = value?;
+        Some(inner + 1)
+    };
+    bump(opt).unwrap()
+}
+
+fn main() {
+    println!("{}", first(Some(41)));
+}"#,
+        );
+        assert_eq!(program.closures.len(), 1);
+        let closure = &program.closures[0];
+        assert_eq!(closure.ret, Ty::Option(Box::new(Ty::Int(IntTy::I64))));
+        let inner_block = match closure.body.tail.as_deref() {
+            Some(HExpr {
+                kind: HExprKind::Block(block),
+                ..
+            }) => block,
+            other => panic!("expected the closure block, got {:?}", other),
+        };
+        match &inner_block.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => assert!(matches!(init.kind, HExprKind::Match { .. })),
+            other => panic!("expected the lowered try match, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn try_operator_chains_through_calls_and_methods() {
+        let program = expect_ok(
+            r#"struct Holder {
+    items: Vec<i64>,
+}
+
+impl Holder {
+    fn second(&self) -> Option<i64> {
+        let first = self.items.first()?;
+        let second = self.items.get(1)?;
+        Some(first + second)
+    }
+}
+
+fn main() {
+    let holder = Holder { items: vec![1, 2] };
+    println!("{}", holder.second().unwrap());
+}"#,
+        );
+        let method = find_fn(&program, "Holder::second").expect("Holder::second should exist");
+        assert_eq!(method.ret, Ty::Option(Box::new(Ty::Int(IntTy::I64))));
+        assert_eq!(method.body.stmts.len(), 2);
+        for stmt in &method.body.stmts {
+            match stmt {
+                HStmt::Let {
+                    init: Some(init), ..
+                } => assert!(matches!(init.kind, HExprKind::Match { .. })),
+                other => panic!("expected a lowered try statement, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn lowers_option_map_combinator() {
+        let program = expect_ok(
+            r#"fn main() {
+    let mapped = Some(4).map(|value| value + 1);
+    println!("{}", mapped.unwrap_or(0));
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        assert_eq!(body.stmts.len(), 2);
+        let init = match &body.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        assert_eq!(init.ty, Ty::Option(Box::new(Ty::Int(IntTy::I64))));
+        match &init.kind {
+            HExprKind::Match { scrutinee, arms } => {
+                assert!(matches!(&scrutinee.kind, HExprKind::OptionSome(_)));
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(&arms[0].pat.kind, HPatKind::OptionSome(_)));
+                assert!(matches!(&arms[1].pat.kind, HPatKind::OptionNone));
+                match &arms[0].body.kind {
+                    HExprKind::OptionSome(inner) => {
+                        assert!(matches!(&inner.kind, HExprKind::Call { .. }))
+                    }
+                    other => panic!("expected Some(call), got {:?}", other),
+                }
+                assert!(matches!(&arms[1].body.kind, HExprKind::OptionNone));
+            }
+            other => panic!("expected the lowered map match, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lowers_option_map_or_combinator() {
+        let program = expect_ok(
+            r#"fn main() {
+    let total = Some(2).map_or(7, |value| value * 3);
+    println!("{}", total);
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let init = match &body.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        assert_eq!(init.ty, Ty::Int(IntTy::I64));
+        match &init.kind {
+            HExprKind::Block(block) => {
+                assert_eq!(block.stmts.len(), 2);
+                let tail = block.tail.as_deref().expect("map_or block needs a tail");
+                match &tail.kind {
+                    HExprKind::Match { arms, .. } => {
+                        assert_eq!(arms.len(), 2);
+                        assert!(matches!(&arms[0].body.kind, HExprKind::Call { .. }));
+                        assert!(matches!(
+                            &arms[1].body.kind,
+                            HExprKind::Local { name, .. } if name == "fallback"
+                        ));
+                    }
+                    other => panic!("expected the map_or match, got {:?}", other),
+                }
+            }
+            other => panic!("expected a block expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lowers_option_and_then_and_filter() {
+        let program = expect_ok(
+            r#"fn main() {
+    let chained = Some(3).and_then(|value| {
+        if value > 0 { Some(value * 2) } else { None }
+    });
+    let filtered = chained.filter(|value| value > 4);
+    println!("{}", filtered.unwrap_or(0));
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let chained_init = match &body.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        match &chained_init.kind {
+            HExprKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(&arms[0].body.kind, HExprKind::Call { .. }));
+                assert!(matches!(&arms[1].body.kind, HExprKind::OptionNone));
+            }
+            other => panic!("expected the and_then match, got {:?}", other),
+        }
+        let filter_init = match &body.stmts[1] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        match &filter_init.kind {
+            HExprKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                match &arms[0].body.kind {
+                    HExprKind::If {
+                        cond,
+                        then_block,
+                        else_expr,
+                    } => {
+                        assert!(matches!(&cond.kind, HExprKind::Call { .. }));
+                        let then_tail = then_block.tail.as_deref().expect("if needs a then value");
+                        assert!(matches!(&then_tail.kind, HExprKind::OptionSome(_)));
+                        let else_expr = else_expr.as_deref().expect("if needs an else value");
+                        assert!(matches!(&else_expr.kind, HExprKind::OptionNone));
+                    }
+                    other => panic!("expected a conditional in the filter arm, got {:?}", other),
+                }
+            }
+            other => panic!("expected the filter match, got {:?}", other),
+        }
+        assert_eq!(filter_init.ty, Ty::Option(Box::new(Ty::Int(IntTy::I64))));
+    }
+
+    #[test]
+    fn lowers_option_ok_or_combinator() {
+        let program = expect_ok(
+            r#"fn main() {
+    let converted = Some(5).ok_or("missing");
+    match converted {
+        Ok(value) => println!("ok {}", value),
+        Err(error) => println!("err {}", error),
+    }
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let init = match &body.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        assert_eq!(
+            init.ty,
+            Ty::Result(Box::new(Ty::Int(IntTy::I64)), Box::new(Ty::String))
+        );
+        match &init.kind {
+            HExprKind::Block(block) => {
+                let tail = block.tail.as_deref().expect("ok_or block needs a tail");
+                match &tail.kind {
+                    HExprKind::Match { arms, .. } => {
+                        assert_eq!(arms.len(), 2);
+                        assert!(matches!(&arms[0].pat.kind, HPatKind::OptionSome(_)));
+                        assert!(matches!(&arms[1].pat.kind, HPatKind::OptionNone));
+                        assert!(matches!(&arms[0].body.kind, HExprKind::ResultOk(_)));
+                        assert!(matches!(&arms[1].body.kind, HExprKind::ResultErr(_)));
+                    }
+                    other => panic!("expected the ok_or match, got {:?}", other),
+                }
+            }
+            other => panic!("expected a block expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lowers_result_map_and_map_err() {
+        let program = expect_ok(
+            r#"fn compute() -> Result<i64, String> {
+    Ok(5)
+}
+
+fn main() {
+    let mapped = compute().map(|value| value + 1);
+    let relabeled = compute().map_err(|error| error + "!");
+    println!("{}", mapped.unwrap_or(0));
+    println!("{}", relabeled.is_err());
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let map_init = match &body.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        match &map_init.kind {
+            HExprKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(&arms[0].pat.kind, HPatKind::ResultOk(_)));
+                assert!(matches!(&arms[1].pat.kind, HPatKind::ResultErr(_)));
+                assert!(matches!(&arms[0].body.kind, HExprKind::ResultOk(_)));
+                assert!(matches!(&arms[1].body.kind, HExprKind::ResultErr(_)));
+            }
+            other => panic!("expected the Result map match, got {:?}", other),
+        }
+        let map_err_init = match &body.stmts[1] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        match &map_err_init.kind {
+            HExprKind::Match { arms, .. } => {
+                assert!(matches!(&arms[0].body.kind, HExprKind::ResultOk(_)));
+                match &arms[1].body.kind {
+                    HExprKind::ResultErr(inner) => {
+                        assert!(matches!(&inner.kind, HExprKind::Call { .. }))
+                    }
+                    other => panic!("expected Err(call), got {:?}", other),
+                }
+            }
+            other => panic!("expected the map_err match, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_combinator_misuse() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let mapped = Some(1).map();
+    println!("{}", mapped.unwrap_or(0));
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0061"));
+        assert!(has_message(
+            &diagnostics,
+            "the method map takes 1 argument(s) but 0"
+        ));
+
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let mapped = Some(1).map_or(0);
+    println!("{}", mapped);
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0061"));
+
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let base: Result<i64, String> = Ok(1);
+    let mapped = base.map_or(0);
+    println!("{}", mapped);
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0599"));
+        assert!(has_message(&diagnostics, "no method named map_or"));
+
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let bad = Some(1).filter(2);
+    println!("{}", bad.is_some());
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0308"));
+    }
+
+    #[test]
+    fn infers_combinator_types_through_parse_calls() {
+        let program = expect_ok(
+            r#"fn main() {
+    let doubled = "21".parse_i64().map(|value| value * 2).unwrap_or(0);
+    println!("{}", doubled);
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let init = match &body.stmts[0] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        assert_eq!(init.ty, Ty::Int(IntTy::I64));
+        assert!(matches!(&init.kind, HExprKind::BuiltinMethod { .. }));
+    }
+
+    #[test]
+    fn user_methods_take_precedence_over_combinators() {
+        let program = expect_ok(
+            r#"struct Counter {
+    value: i64,
+}
+
+impl Counter {
+    fn map(&self) -> i64 {
+        self.value + 1
+    }
+}
+
+fn main() {
+    let counter = Counter { value: 4 };
+    let mapped = counter.map();
+    println!("{}", mapped);
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let init = match &body.stmts[1] {
+            HStmt::Let {
+                init: Some(init), ..
+            } => init,
+            other => panic!("expected a let statement, got {:?}", other),
+        };
+        match &init.kind {
+            HExprKind::DirectCall { receiver, .. } => {
+                assert!(
+                    matches!(receiver.as_deref(), Some(HExpr { kind: HExprKind::Local { name, .. }, .. }) if name == "counter")
+                );
+            }
+            other => panic!("expected a direct method call, got {:?}", other),
+        }
+    }
     // -----------------------------------------------------------------
     // End-to-end fixture corpus
     // -----------------------------------------------------------------

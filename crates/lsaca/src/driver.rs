@@ -1,10 +1,13 @@
 //! Pipeline orchestration: source text to a checked HIR, then to a C project
-//! and (optionally) a native executable built with CMake.
+//! and (optionally) a native executable.
 //!
-//! The build strategy mirrors what a C toolchain does best: the compiler emits
-//! a regular, self-contained C project (main.c, the runtime, CMakeLists.txt)
-//! and CMake + a C compiler turn it into a native executable. Build trees are
-//! content-addressed and cached between runs.
+//! The compiler emits a regular, self-contained C project (main.c, the runtime
+//! sources and CMakeLists.txt). By default the project is built by invoking the
+//! C compiler directly: every runtime translation unit is compiled once per
+//! (runtime content, compiler, flags) combination into a shared object cache
+//! and then linked with main.c. The generated CMake project remains available
+//! through [`BuildOptions::use_cmake`] (`lsaca --cmake`) and is what `lsaca
+//! emit-c` writes. Build trees are content-addressed and cached between runs.
 //!
 //! The cache root is chosen defensively, because toolchains dislike non-ASCII
 //! paths and locked-down environments (sandboxes, restricted CI runners) only
@@ -21,6 +24,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use crate::codegen::{self, CodegenOptions, Generated};
 use crate::diag::Diagnostics;
@@ -87,21 +91,30 @@ pub fn generate_c(program: &hir::Program, options: &CodegenOptions) -> Generated
     codegen::generate(program, options)
 }
 
-/// Write the generated C project (main.c, lsaca_rt.h, lsaca_rt.c,
-/// CMakeLists.txt) into a directory, creating it if needed.
+/// Write the generated C project (main.c, every runtime source published by
+/// [`runtime::sources`] and CMakeLists.txt) into a directory, creating it if
+/// needed.
 pub fn write_project(dir: &Path, generated: &Generated) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     fs::write(dir.join("main.c"), &generated.main_c)?;
-    fs::write(dir.join("lsaca_rt.h"), runtime::RUNTIME_H)?;
-    fs::write(dir.join("lsaca_rt.c"), runtime::RUNTIME_C)?;
+    write_runtime_sources(dir)?;
     fs::write(dir.join("CMakeLists.txt"), &generated.cmake)?;
+    Ok(())
+}
+
+/// Write the runtime sources (headers and translation units) next to main.c.
+fn write_runtime_sources(dir: &Path) -> io::Result<()> {
+    for (name, contents) in runtime::sources() {
+        fs::write(dir.join(name), contents)?;
+    }
     Ok(())
 }
 
 /// Result of a successful native build.
 #[derive(Debug, Clone)]
 pub struct BuiltExecutable {
-    /// Directory containing the CMake build tree.
+    /// Directory containing the build tree (the CMake build directory or the
+    /// direct-build object and executable directory).
     pub build_dir: PathBuf,
     /// Path to the built executable.
     pub executable: PathBuf,
@@ -117,6 +130,10 @@ pub struct BuildOptions {
     pub program_name: String,
     /// Print the commands that are executed.
     pub verbose: bool,
+    /// Build through the generated CMake project instead of invoking the C
+    /// compiler directly. The default is the direct backend, which avoids the
+    /// CMake configure step.
+    pub use_cmake: bool,
 }
 
 impl Default for BuildOptions {
@@ -125,6 +142,7 @@ impl Default for BuildOptions {
             release: false,
             program_name: String::from("program"),
             verbose: false,
+            use_cmake: false,
         }
     }
 }
@@ -146,14 +164,40 @@ impl BuildOptions {
         self.verbose = verbose;
         self
     }
+
+    /// Select the CMake back end instead of the default direct compiler back
+    /// end. `lsaca --cmake` sets this.
+    pub fn use_cmake(mut self, use_cmake: bool) -> BuildOptions {
+        self.use_cmake = use_cmake;
+        self
+    }
+}
+
+/// Build a generated C project.
+///
+/// The project directory must already contain main.c, the runtime sources and
+/// CMakeLists.txt (see [write_project]). By default the C compiler is invoked
+/// directly; when [BuildOptions::use_cmake] is set the generated CMake project
+/// is configured and built instead. The build tree is created in
+/// project_dir/build.
+pub fn build_project(project_dir: &Path, options: &BuildOptions) -> io::Result<BuiltExecutable> {
+    let cache_root = project_dir.parent().unwrap_or(project_dir);
+    if options.use_cmake {
+        build_project_with_cmake(project_dir, options)
+    } else {
+        build_project_direct(project_dir, cache_root, options)
+    }
 }
 
 /// Configure and build a generated C project with CMake.
 ///
-/// The project directory must already contain main.c, lsaca_rt.h, lsaca_rt.c
-/// and CMakeLists.txt (see [write_project]). The build tree is created in
-/// project_dir/build.
-pub fn build_project(project_dir: &Path, options: &BuildOptions) -> io::Result<BuiltExecutable> {
+/// This is the optional back end selected by [BuildOptions::use_cmake]
+/// ("lsaca --cmake"). The default back end invokes the compiler directly. The
+/// build tree is created in project_dir/build.
+fn build_project_with_cmake(
+    project_dir: &Path,
+    options: &BuildOptions,
+) -> io::Result<BuiltExecutable> {
     let cmake = find_tool("cmake", &[".exe"])?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -222,6 +266,265 @@ pub fn build_project(project_dir: &Path, options: &BuildOptions) -> io::Result<B
     })
 }
 
+/// Compile and link a generated project by invoking the C compiler directly.
+///
+/// Runtime translation units are compiled once into a shared object cache under
+/// cache_root/_runtime/<key>/, so the runtime cost is paid only when its
+/// sources, the compiler or the flags change. Missing runtime objects are
+/// compiled in parallel and the generated main.c is compiled at the same time;
+/// once both are ready everything is linked into project_dir/build.
+fn build_project_direct(
+    project_dir: &Path,
+    cache_root: &Path,
+    options: &BuildOptions,
+) -> io::Result<BuiltExecutable> {
+    let compiler = find_c_compiler()?;
+    let build_dir = project_dir.join("build");
+    fs::create_dir_all(&build_dir)?;
+    let tmp_dir = project_dir.join("tmp");
+    fs::create_dir_all(&tmp_dir)?;
+    let flags = compiler_flags(options);
+    let started = Instant::now();
+
+    write_runtime_sources(project_dir)?;
+
+    let runtime_sources = runtime_c_sources();
+    let object_dir = runtime_object_dir(cache_root, &compiler, &flags);
+    fs::create_dir_all(&object_dir)?;
+
+    let mut missing: Vec<(String, PathBuf)> = Vec::new();
+    let mut reused = 0usize;
+    for source in &runtime_sources {
+        let object = object_dir.join(runtime_object_name(source));
+        if is_non_empty_file(&object) {
+            reused += 1;
+        } else {
+            missing.push(((*source).to_string(), object));
+        }
+    }
+    let main_object = build_dir.join("main.o");
+    let (runtime_result, main_result) = std::thread::scope(|scope| {
+        let runtime_handle = scope.spawn(|| {
+            compile_runtime_objects(&compiler, project_dir, &tmp_dir, &flags, options, &missing)
+        });
+        let main_handle = scope.spawn(|| {
+            compile_main_object(
+                &compiler,
+                project_dir,
+                &tmp_dir,
+                &flags,
+                &main_object,
+                options.verbose,
+            )
+        });
+        (
+            join_compilation(runtime_handle),
+            join_compilation(main_handle),
+        )
+    });
+    runtime_result?;
+    main_result?;
+
+    let executable = build_dir.join(executable_name(&options.program_name));
+    let mut link = Command::new(&compiler);
+    link.arg(&main_object);
+    for source in &runtime_sources {
+        link.arg(object_dir.join(runtime_object_name(source)));
+    }
+    link.arg("-o").arg(&executable);
+    if cfg!(unix) {
+        link.arg("-lm");
+    }
+    link.current_dir(project_dir);
+    prepare_child(&mut link, compiler.parent(), &tmp_dir);
+    run_tool(&mut link, "link executable", options.verbose)?;
+
+    if options.verbose {
+        eprintln!(
+            "lsaca: build: direct compiler backend, {} runtime object(s) reused, {} compiled, {:.3}s total",
+            reused,
+            missing.len(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+
+    if !executable.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "the C compiler reported success but no executable named {} was found in {}",
+                options.program_name,
+                build_dir.display()
+            ),
+        ));
+    }
+    Ok(BuiltExecutable {
+        build_dir,
+        executable,
+    })
+}
+
+/// Compile the generated main.c translation unit.
+fn compile_main_object(
+    compiler: &Path,
+    project_dir: &Path,
+    tmp_dir: &Path,
+    flags: &[String],
+    main_object: &Path,
+    verbose: bool,
+) -> io::Result<()> {
+    let mut command = Command::new(compiler);
+    command
+        .arg("-c")
+        .arg(project_dir.join("main.c"))
+        .args(flags)
+        .arg("-I")
+        .arg(project_dir)
+        .arg("-o")
+        .arg(main_object);
+    command.current_dir(project_dir);
+    prepare_child(&mut command, compiler.parent(), tmp_dir);
+    run_tool(&mut command, "compile main.c", verbose)
+}
+
+/// Wait for one compilation thread and turn a thread panic into an IO error.
+fn join_compilation(handle: std::thread::ScopedJoinHandle<'_, io::Result<()>>) -> io::Result<()> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::other("a compilation thread panicked")),
+    }
+}
+
+/// Compile the runtime translation units that are not in the object cache yet,
+/// using up to one thread per job for the missing files.
+fn compile_runtime_objects(
+    compiler: &Path,
+    project_dir: &Path,
+    tmp_dir: &Path,
+    flags: &[String],
+    options: &BuildOptions,
+    missing: &[(String, PathBuf)],
+) -> io::Result<()> {
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let threads = build_parallelism().min(missing.len()).max(1);
+    let verbose = options.verbose;
+    let mut results: Vec<io::Result<()>> = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for worker in 0..threads {
+            handles.push(scope.spawn(move || -> io::Result<()> {
+                for index in (worker..missing.len()).step_by(threads) {
+                    let (source, object) = &missing[index];
+                    let mut command = Command::new(compiler);
+                    command
+                        .arg("-c")
+                        .arg(project_dir.join(source))
+                        .args(flags)
+                        .arg("-I")
+                        .arg(project_dir)
+                        .arg("-o")
+                        .arg(object);
+                    command.current_dir(project_dir);
+                    prepare_child(&mut command, compiler.parent(), tmp_dir);
+                    run_tool(
+                        &mut command,
+                        &format!("compile runtime source {}", source),
+                        verbose,
+                    )?;
+                }
+                Ok(())
+            }));
+        }
+        for handle in handles {
+            results.push(handle.join().unwrap_or_else(|_| {
+                Err(io::Error::other("a runtime compilation thread panicked"))
+            }));
+        }
+    });
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
+/// Runtime translation units, in the order published by [runtime::sources].
+fn runtime_c_sources() -> Vec<&'static str> {
+    runtime::sources()
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| name.ends_with(".c"))
+        .collect()
+}
+
+/// Object file name for one runtime source file.
+fn runtime_object_name(source: &str) -> String {
+    let stem = Path::new(source)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(source);
+    format!("{}.o", stem)
+}
+
+/// Directory of the shared runtime object cache for one compiler and flag set.
+fn runtime_object_dir(cache_root: &Path, compiler: &Path, flags: &[String]) -> PathBuf {
+    let mut hash = FNV_OFFSET_BASIS;
+    for (name, contents) in runtime::sources() {
+        for bytes in [name.as_bytes(), contents.as_bytes()] {
+            hash = fnv1a(hash, bytes);
+            hash = fnv1a(hash, &[0xff]);
+        }
+    }
+    hash = fnv1a(hash, compiler.as_os_str().to_string_lossy().as_bytes());
+    hash = fnv1a(hash, &[0xff]);
+    for flag in flags {
+        hash = fnv1a(hash, flag.as_bytes());
+        hash = fnv1a(hash, &[0xff]);
+    }
+    cache_root.join("_runtime").join(format!("{:016x}", hash))
+}
+
+/// Flags shared by every translation unit of a build.
+fn compiler_flags(options: &BuildOptions) -> Vec<String> {
+    let mut flags: Vec<String> = ["-std=c17", "-Wall", "-Wextra"]
+        .iter()
+        .map(|flag| (*flag).to_string())
+        .collect();
+    if options.release {
+        flags.push(String::from("-O2"));
+        flags.push(String::from("-DNDEBUG"));
+    } else {
+        flags.push(String::from("-g"));
+        flags.push(String::from("-O0"));
+        flags.push(String::from("-DLSACA_DEBUG"));
+    }
+    if debug_rc_requested() {
+        flags.push(String::from("-DLSACA_DEBUG_RC"));
+    }
+    flags
+}
+
+fn is_non_empty_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Executable file name for the current platform.
+fn executable_name(program_name: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", program_name)
+    } else {
+        program_name.to_string()
+    }
+}
+
+/// Number of concurrent compiler invocations to use.
+fn build_parallelism() -> usize {
+    jobs().parse::<usize>().unwrap_or(4).clamp(1, 64)
+}
+
 /// Build a generated project inside a content-addressed cache.
 ///
 /// The cache key covers every generated file, the runtime sources, the compiler
@@ -253,7 +556,12 @@ pub fn build_with_cache(
             ),
         )
     })?;
-    build_project(&project_dir, options).map_err(|error| {
+    let result = if options.use_cmake {
+        build_project_with_cmake(&project_dir, options)
+    } else {
+        build_project_direct(&project_dir, cache_root, options)
+    };
+    result.map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
@@ -272,16 +580,26 @@ pub fn cache_key(generated: &Generated, options: &BuildOptions, compiler: &Path)
     for bytes in [
         generated.main_c.as_bytes(),
         generated.cmake.as_bytes(),
-        runtime::RUNTIME_H.as_bytes(),
-        runtime::RUNTIME_C.as_bytes(),
         compiler.as_os_str().to_string_lossy().as_bytes(),
         options.program_name.as_bytes(),
     ] {
         hash = fnv1a(hash, bytes);
         hash = fnv1a(hash, &[0xff]);
     }
-    hash = fnv1a(hash, &[if options.release { 1 } else { 0 }]);
-    hash = fnv1a(hash, &[if debug_rc_requested() { 1 } else { 0 }]);
+    for (name, contents) in runtime::sources() {
+        for bytes in [name.as_bytes(), contents.as_bytes()] {
+            hash = fnv1a(hash, bytes);
+            hash = fnv1a(hash, &[0xff]);
+        }
+    }
+    hash = fnv1a(
+        hash,
+        &[
+            if options.release { 1 } else { 0 },
+            if options.use_cmake { 1 } else { 0 },
+            if debug_rc_requested() { 1 } else { 0 },
+        ],
+    );
     hash
 }
 

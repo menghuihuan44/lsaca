@@ -176,6 +176,17 @@ pub enum TExprKind {
     Break,
     Continue,
     Return(Option<Box<TExpr>>),
+    /// Postfix try operator. Lowered into a match plus an early return that
+    /// propagates None or Err out of the enclosing function or closure.
+    Try {
+        expr: Box<TExpr>,
+        /// Declared return type of the enclosing frame (Option or Result).
+        ret: ITy,
+        /// Fresh local bound to the payload value in the success arm.
+        value_c_name: String,
+        /// Fresh local bound to the error value in the failure arm (Result only).
+        error_c_name: String,
+    },
 }
 
 #[derive(Clone, Debug)]

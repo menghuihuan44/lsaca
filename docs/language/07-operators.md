@@ -23,11 +23,17 @@ From loosest to tightest binding:
 | 10 | `*` `/` `%` | left | Multiplication, division, remainder. |
 | 11 | `as` | left | Type cast. |
 | 12 | `-` `!` | prefix | Unary negation and logical/bitwise NOT. |
-| 13 | `f(x)` `x.m()` `x.f` `x[i]` | left | Calls, method calls, field access, indexing. |
+| 13 | `f(x)` `x.m()` `x.f` `x[i]` `x?` | left | Calls, method calls, field access, indexing, error propagation. |
 
 Two consequences worth remembering: `1 << 3 + 1` is `16` because `+` binds tighter
 than `<<`, and a cast applies to the operand to its left, so `-1 as u8` is
 `(-1) as u8` = `255` — not the negation of a cast.
+
+The postfix `?` operator is at the same (tightest) level as calls and field
+access: it applies to the value to its left, so `half(n)? + 1` is
+`(half(n)?) + 1`. When it propagates `None`/`Err` it returns from the enclosing
+function immediately, so nothing to its right is evaluated. See
+[Error propagation with `?`](13-standard-library.md#error-propagation-with-).
 
 ```ls
 fn main() {
@@ -343,7 +349,7 @@ type:
   same cell;
 * `Box<T>` compares by payload, structurally;
 * tuples, structs, enums, `Vec<T>`, `Option<T>` and `Result<T, E>` do **not**
-  support `==` in 1.1.0, and the compiler reports `E0369`. Compare them by
+  support `==` in 1.2.0, and the compiler reports `E0369`. Compare them by
   pattern matching instead;
 * `()` does not support `==` either.
 

@@ -1,11 +1,147 @@
 //! Statements and control flow: blocks, patterns, branching and loops.
 
-use crate::hir::{HBlock, HExpr, HLit, HPat, HPatKind, HStmt};
+use crate::hir::{HBlock, HExpr, HExprKind, HFormatPartKind, HLit, HPat, HPatKind, HStmt};
 use crate::types::Ty;
 
 use super::emit::{BoundVar, Gen, LoopCtx};
 use super::types;
 use super::util;
+
+// ----- read-only HIR helpers ----------------------------------------------
+
+/// True when the block mentions the local variable `name` anywhere.
+fn block_mentions_local(block: &HBlock, name: &str) -> bool {
+    block
+        .stmts
+        .iter()
+        .any(|statement| statement_mentions_local(statement, name))
+        || block
+            .tail
+            .as_deref()
+            .map(|tail| expr_mentions_local(tail, name))
+            .unwrap_or(false)
+}
+
+fn statement_mentions_local(statement: &HStmt, name: &str) -> bool {
+    match statement {
+        HStmt::Let { init, .. } => init
+            .as_ref()
+            .map(|init| expr_mentions_local(init, name))
+            .unwrap_or(false),
+        HStmt::Expr(expression) => expr_mentions_local(expression, name),
+    }
+}
+
+fn expr_mentions_local(expression: &HExpr, name: &str) -> bool {
+    match &expression.kind {
+        HExprKind::Lit(_)
+        | HExprKind::Capture { .. }
+        | HExprKind::ConstRef { .. }
+        | HExprKind::FnRef { .. }
+        | HExprKind::OptionNone
+        | HExprKind::Break
+        | HExprKind::Continue => false,
+        HExprKind::Local { c_name, .. } => c_name == name,
+        HExprKind::Closure { captures, .. } => captures
+            .iter()
+            .any(|capture| expr_mentions_local(capture, name)),
+        HExprKind::Call { callee, args } => {
+            expr_mentions_local(callee, name)
+                || args.iter().any(|arg| expr_mentions_local(arg, name))
+        }
+        HExprKind::DirectCall { receiver, args, .. } => {
+            receiver
+                .as_deref()
+                .map(|receiver| expr_mentions_local(receiver, name))
+                .unwrap_or(false)
+                || args.iter().any(|arg| expr_mentions_local(arg, name))
+        }
+        HExprKind::BuiltinMethod { receiver, args, .. } => {
+            expr_mentions_local(receiver, name)
+                || args.iter().any(|arg| expr_mentions_local(arg, name))
+        }
+        HExprKind::BuiltinAssoc { args, .. } | HExprKind::BuiltinCall { args, .. } => {
+            args.iter().any(|arg| expr_mentions_local(arg, name))
+        }
+        HExprKind::Field { base, .. } => expr_mentions_local(base, name),
+        HExprKind::Index { base, index } => {
+            expr_mentions_local(base, name) || expr_mentions_local(index, name)
+        }
+        HExprKind::Unary { expr, .. }
+        | HExprKind::Cast { expr }
+        | HExprKind::OptionSome(expr)
+        | HExprKind::ResultOk(expr)
+        | HExprKind::ResultErr(expr) => expr_mentions_local(expr, name),
+        HExprKind::Binary { lhs, rhs, .. } => {
+            expr_mentions_local(lhs, name) || expr_mentions_local(rhs, name)
+        }
+        HExprKind::Assign { target, value, .. } => {
+            expr_mentions_local(target, name) || expr_mentions_local(value, name)
+        }
+        HExprKind::Block(block) => block_mentions_local(block, name),
+        HExprKind::If {
+            cond,
+            then_block,
+            else_expr,
+        } => {
+            expr_mentions_local(cond, name)
+                || block_mentions_local(then_block, name)
+                || else_expr
+                    .as_deref()
+                    .map(|otherwise| expr_mentions_local(otherwise, name))
+                    .unwrap_or(false)
+        }
+        HExprKind::Match { scrutinee, arms } => {
+            expr_mentions_local(scrutinee, name)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .map(|guard| expr_mentions_local(guard, name))
+                        .unwrap_or(false)
+                        || expr_mentions_local(&arm.body, name)
+                })
+        }
+        HExprKind::Loop { body } => block_mentions_local(body, name),
+        HExprKind::While { cond, body } => {
+            expr_mentions_local(cond, name) || block_mentions_local(body, name)
+        }
+        HExprKind::ForRange {
+            start, end, body, ..
+        } => {
+            expr_mentions_local(start, name)
+                || expr_mentions_local(end, name)
+                || block_mentions_local(body, name)
+        }
+        HExprKind::ForVec { vec, body, .. } => {
+            expr_mentions_local(vec, name) || block_mentions_local(body, name)
+        }
+        HExprKind::StructLit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| expr_mentions_local(value, name)),
+        HExprKind::Tuple(elements) | HExprKind::VecLit { elems: elements } => elements
+            .iter()
+            .any(|element| expr_mentions_local(element, name)),
+        HExprKind::VecRepeat { value, count } => {
+            expr_mentions_local(value, name) || expr_mentions_local(count, name)
+        }
+        HExprKind::EnumLit { args, .. } => args.iter().any(|arg| expr_mentions_local(arg, name)),
+        HExprKind::Format { parts } => parts.iter().any(|part| match &part.kind {
+            HFormatPartKind::Literal(_) => false,
+            HFormatPartKind::Arg { expr, .. } => expr_mentions_local(expr, name),
+        }),
+        HExprKind::Macro(call) => {
+            call.args.iter().any(|arg| expr_mentions_local(arg, name))
+                || call.parts.iter().any(|part| match &part.kind {
+                    HFormatPartKind::Literal(_) => false,
+                    HFormatPartKind::Arg { expr, .. } => expr_mentions_local(expr, name),
+                })
+        }
+        HExprKind::Return(value) => value
+            .as_deref()
+            .map(|value| expr_mentions_local(value, name))
+            .unwrap_or(false),
+    }
+}
 
 impl<'a> Gen<'a> {
     // ----- statements ------------------------------------------------------
@@ -23,8 +159,13 @@ impl<'a> Gen<'a> {
         match statement {
             HStmt::Let { pat, init, .. } => {
                 if let Some(init) = init {
-                    let value = self.gen_owned(init);
-                    self.bind_pattern(pat, &value);
+                    // Write the initialiser straight into the predeclared
+                    // local for a single binding: materialising it in a
+                    // temporary first would add a full deep copy.
+                    if !self.write_bind(pat, init) {
+                        let value = self.gen_owned(init);
+                        self.bind_pattern(pat, &value);
+                    }
                 }
             }
             HStmt::Expr(expression) => {
@@ -35,6 +176,31 @@ impl<'a> Gen<'a> {
             }
         }
         self.stmt_cleanup();
+    }
+
+    /// Lower `let <name> = <init>` as a direct write into the local that
+    /// [`Gen::predeclare_pattern`] already declared.
+    ///
+    /// This avoids materialising the value in a temporary and deep-copying it
+    /// into the binding. It is sound because a `let` binding is predeclared
+    /// exactly once per C block and never rebound; every other pattern still
+    /// goes through [`Gen::bind_pattern`].
+    fn write_bind(&mut self, pat: &HPat, init: &HExpr) -> bool {
+        let HPatKind::Bind { c_name, .. } = &pat.kind else {
+            return false;
+        };
+        let predeclared = self
+            .frames
+            .last()
+            .map(|frame| frame.vars.iter().any(|var| var.c_name == c_name.as_str()))
+            .unwrap_or(false);
+        if !predeclared {
+            return false;
+        }
+        let name = c_name.clone();
+        self.emit_release(&pat.ty, &name);
+        self.gen_into(init, &name);
+        true
     }
 
     /// Predeclare every variable bound by a `let` statement of the block, so
@@ -675,7 +841,19 @@ impl<'a> Gen<'a> {
         let continue_label = self.fresh_label("for_next");
         let zero = self.zero_expr(ty);
         self.w.line(format!("{} = {};", target, zero));
-        let vec_value = self.gen_owned(vec);
+        // A loop over a local vector that its body never mentions can iterate
+        // the vector in place: nothing can observe or mutate it during the
+        // loop, so the owned snapshot (a full deep copy) is not needed.
+        let direct = match &vec.kind {
+            HExprKind::Local { c_name, .. } if !block_mentions_local(body, c_name) => {
+                Some(self.local_lvalue(c_name))
+            }
+            _ => None,
+        };
+        let vec_value = match direct {
+            Some(place) => place,
+            None => self.gen_owned(vec),
+        };
         let index = self.new_plain_of("size_t", "i");
         self.w.line(format!("{} = 0;", index));
         self.loops.push(LoopCtx {

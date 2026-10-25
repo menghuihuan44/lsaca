@@ -4,6 +4,7 @@
 //! paths.rs.
 
 mod calls;
+mod combinators;
 mod ops;
 mod paths;
 
@@ -71,6 +72,7 @@ impl<'a> Checker<'a> {
             ExprKind::Break(value) => self.check_break(value.as_deref(), span),
             ExprKind::Continue => self.check_continue(span),
             ExprKind::Return(value) => self.check_return(value.as_deref(), span),
+            ExprKind::Try { expr: inner } => self.check_try(inner, span, hint),
         }
     }
 
@@ -383,6 +385,196 @@ impl<'a> Checker<'a> {
             }
         };
         TExpr::new(ITy::never(), TExprKind::Return(value), span)
+    }
+
+    /// Check the postfix try operator: expr?.
+    ///
+    /// The operand must be an Option or a Result, and the enclosing function or
+    /// closure must declare the same kind of return type. The payload types and,
+    /// for Result, the error types must unify exactly: there is no From
+    /// conversion. Lowering desugars the operator into a match plus early return.
+    fn check_try(&mut self, inner: &ast::Expr, span: Span, hint: Option<&ITy>) -> TExpr {
+        if self.in_const {
+            self.error_code(
+                "the ? operator is not allowed in a constant initializer".to_string(),
+                span,
+                "E0015",
+            );
+            let _ = self.check_expr(inner, None);
+            return self.never_expr(span);
+        }
+        let operand = self.check_expr(inner, None);
+        let operand_ty = self.infer.resolve(&operand.ty);
+        let (frame_ret, is_closure) = match self.frames.last() {
+            Some(frame) => (frame.ret.clone(), frame.is_closure),
+            None => (ITy::unit(), false),
+        };
+        let resolved_ret = self.infer.resolve(&frame_ret);
+        match &operand_ty {
+            ITy::Never => self.never_expr(span),
+            ITy::Option(inner_ty) => {
+                let payload = (**inner_ty).clone();
+                if let ITy::Option(ret_payload) = &resolved_ret {
+                    let expected = (**ret_payload).clone();
+                    if !self.unify_quiet(&expected, &payload) {
+                        let expected = self.infer.resolve(&expected);
+                        let found = self.infer.resolve(&payload);
+                        self.report_mismatch(&expected, &found, span);
+                    }
+                    self.finish_try(operand, payload, frame_ret, hint, span, false)
+                } else {
+                    self.report_try_return_mismatch(&operand_ty, &frame_ret, is_closure, span);
+                    self.never_expr(span)
+                }
+            }
+            ITy::Result(ok_ty, err_ty) => {
+                let payload = (**ok_ty).clone();
+                let error = (**err_ty).clone();
+                if let ITy::Result(ret_ok, ret_err) = &resolved_ret {
+                    let expected_ok = (**ret_ok).clone();
+                    let expected_err = (**ret_err).clone();
+                    if !self.unify_quiet(&expected_ok, &payload) {
+                        let expected = self.infer.resolve(&expected_ok);
+                        let found = self.infer.resolve(&payload);
+                        self.report_mismatch(&expected, &found, span);
+                    }
+                    if !self.unify_quiet(&expected_err, &error) {
+                        let expected = self.infer.resolve(&expected_err);
+                        let found = self.infer.resolve(&error);
+                        let diagnostic = Diagnostic::error(
+                            format!(
+                                "the ? operator cannot convert error types: expected {}, found {}",
+                                self.describe(&expected),
+                                self.describe(&found)
+                            ),
+                            span,
+                        )
+                        .with_code("E0308")
+                        .with_note(
+                            "the ? operator requires the error types to match exactly; use map_err or an explicit match to convert"
+                                .to_string(),
+                        );
+                        self.diagnostics.push(diagnostic);
+                    }
+                    self.finish_try(operand, payload, frame_ret, hint, span, true)
+                } else {
+                    self.report_try_return_mismatch(&operand_ty, &frame_ret, is_closure, span);
+                    self.never_expr(span)
+                }
+            }
+            ITy::Var(_) => {
+                self.error_code(
+                    "type annotations needed: cannot tell whether the operand of ? is an Option or a Result"
+                        .to_string(),
+                    span,
+                    "E0282",
+                );
+                self.never_expr(span)
+            }
+            _ => {
+                let found = self.describe(&operand_ty);
+                let diagnostic = Diagnostic::error(
+                    format!(
+                        "the ? operator can only be applied to Option or Result values, but found {}",
+                        found
+                    ),
+                    span,
+                )
+                .with_code("E0277")
+                .with_note(
+                    "the ? operator propagates None or Err out of the enclosing function".to_string(),
+                );
+                self.diagnostics.push(diagnostic);
+                self.never_expr(span)
+            }
+        }
+    }
+
+    /// Report that the enclosing frame does not return the kind of type that
+    /// would allow the try operator to propagate.
+    fn report_try_return_mismatch(
+        &mut self,
+        operand_ty: &ITy,
+        frame_ret: &ITy,
+        is_closure: bool,
+        span: Span,
+    ) {
+        let kind = match operand_ty {
+            ITy::Option(_) => "Option",
+            _ => "Result",
+        };
+        let resolved_ret = self.infer.resolve(frame_ret);
+        if matches!(resolved_ret, ITy::Var(_)) {
+            let where_ = if is_closure { "closure" } else { "function" };
+            let diagnostic = Diagnostic::error(
+                format!(
+                    "the ? operator requires the enclosing {} to declare an {} return type",
+                    where_, kind
+                ),
+                span,
+            )
+            .with_code("E0277")
+            .with_note(
+                "add an explicit return type such as -> Option<i64> to this closure".to_string(),
+            );
+            self.diagnostics.push(diagnostic);
+            return;
+        }
+        let found = self.describe(&resolved_ret);
+        let (message, note) = if is_closure {
+            (
+                format!(
+                    "the ? operator can only be used in a closure that returns {}, but this closure returns {}",
+                    kind, found
+                ),
+                "a closure must declare its own Option or Result return type; the enclosing function's return type does not apply".to_string(),
+            )
+        } else {
+            (
+                format!(
+                    "the ? operator can only be used in a function that returns {}, but this function returns {}",
+                    kind, found
+                ),
+                format!(
+                    "propagate the value with an explicit match, or change the function to return {}",
+                    kind
+                ),
+            )
+        };
+        self.diagnostics.push(
+            Diagnostic::error(message, span)
+                .with_code("E0277")
+                .with_note(note),
+        );
+    }
+
+    /// Build the typed try node once the operand and frame return type agree.
+    fn finish_try(
+        &mut self,
+        operand: TExpr,
+        ty: ITy,
+        ret: ITy,
+        hint: Option<&ITy>,
+        span: Span,
+        is_result: bool,
+    ) -> TExpr {
+        let value_c_name = self.fresh_local_c_name();
+        let error_c_name = if is_result {
+            self.fresh_local_c_name()
+        } else {
+            String::new()
+        };
+        self.apply_hint(&ty, hint);
+        TExpr::new(
+            ty,
+            TExprKind::Try {
+                expr: Box::new(operand),
+                ret,
+                value_c_name,
+                error_c_name,
+            },
+            span,
+        )
     }
 
     fn check_closure(

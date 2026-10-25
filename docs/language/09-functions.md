@@ -186,7 +186,7 @@ Output:
 8 13
 ```
 
-Two limitations apply in 1.1.0:
+Two limitations apply in 1.2.0:
 
 * function values **cannot be stored in struct fields or in a `Vec`** — the C
   backend does not generate a valid representation for them there; using them

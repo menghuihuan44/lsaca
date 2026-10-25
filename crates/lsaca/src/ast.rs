@@ -304,6 +304,12 @@ pub enum ExprKind {
     Break(Option<Box<Expr>>),
     Continue,
     Return(Option<Box<Expr>>),
+    /// Postfix try operator: `expr?`. Only valid where the enclosing function
+    /// or closure returns Option or Result; the type checker verifies that and
+    /// lowering desugars it into a match plus early return.
+    Try {
+        expr: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]

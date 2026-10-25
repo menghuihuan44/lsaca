@@ -588,7 +588,7 @@ in Debug; a top-level `String` prints unquoted. Format widths apply to scalars a
 built-in containers but are ignored for user structs — see
 [Standard library](13-standard-library.md#formatting-and-printing).
 
-Equality (`==`) is not implemented for user structs or enums in 1.1.0: the
+Equality (`==`) is not implemented for user structs or enums in 1.2.0: the
 compiler reports `E0369`. Compare the fields you care about, or want to compare,
 with a `match` expression:
 

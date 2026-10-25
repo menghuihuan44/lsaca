@@ -50,7 +50,13 @@ fn emits_project_scaffolding_and_main_wrapper() {
     assert!(tail.contains("return 0;"));
 
     assert!(cmake.contains("project(hello C)"));
-    assert!(cmake.contains("add_executable(hello main.c lsaca_rt.c)"));
+    let runtime_sources: Vec<&str> = crate::runtime::sources()
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| name.ends_with(".c"))
+        .collect();
+    let expected_sources = format!("add_executable(hello main.c {})", runtime_sources.join(" "));
+    assert!(cmake.contains(&expected_sources));
     assert!(cmake.contains("CMAKE_C_STANDARD 17"));
 }
 
@@ -421,4 +427,241 @@ fn emits_width_and_precision_format_helpers() {
     // Two holes need a temporary piece (the two width specs); the precision
     // only holes append directly to the accumulator.
     assert!(formatted >= 2, "no formatted buffers were generated");
+}
+
+/// Slice of the generated project between the user main function and the C
+/// entry point wrapper.
+fn main_function_body(main_c: &str) -> &str {
+    let start = main_c
+        .rfind("LsUnit lsaca_fn_main()")
+        .expect("the user main function is not emitted");
+    let end = main_c[start..]
+        .find("\nint main(int argc, char** argv)")
+        .map(|offset| start + offset)
+        .unwrap_or(main_c.len());
+    &main_c[start..end]
+}
+
+const MOVE_BIND_PROGRAM: &str = r#"
+fn main() {
+    let mut values: Vec<i64> = Vec::with_capacity(4);
+    values.push(1);
+    let mut text = String::new();
+    text.push_str("x");
+    println!("{} {}", values.len(), text.len());
+}
+"#;
+
+#[test]
+fn moves_fresh_values_into_locals_instead_of_copying() {
+    let (main_c, _) = generate_source("move_bind_fixture", MOVE_BIND_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // Vec::with_capacity initialises the local in place: no deep copy of the
+    // freshly allocated buffer is made when the local is bound.
+    assert!(
+        body.contains(".data = (int64_t*)ls_vec_alloc("),
+        "the vector buffer is not initialised in place:\n{body}"
+    );
+    assert!(
+        !body.contains("lsaca_copy_Vec_i64("),
+        "binding a fresh vector copied it:\n{body}"
+    );
+    // A freshly created String is assigned directly instead of being cloned
+    // and released again.
+    assert!(
+        !body.contains(" = ls_str_clone("),
+        "binding a fresh String cloned it:\n{body}"
+    );
+}
+
+const FOR_VEC_IN_PLACE_PROGRAM: &str = r#"
+fn main() {
+    let mut values: Vec<i64> = Vec::new();
+    values.push(1);
+    values.push(2);
+    let mut sum = 0;
+    for value in values {
+        sum += value;
+    }
+    println!("{}", sum);
+}
+"#;
+
+#[test]
+fn iterates_a_local_vector_in_place() {
+    let (main_c, _) = generate_source("for_vec_in_place_fixture", FOR_VEC_IN_PLACE_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    assert!(
+        !body.contains("lsaca_copy_Vec_i64("),
+        "the loop snapshotted the vector:\n{body}"
+    );
+    assert!(
+        body.contains(">= (v1).len) break;"),
+        "the loop does not read the vector length in place:\n{body}"
+    );
+    assert!(
+        body.contains("= (v1).data[i"),
+        "the loop does not index the vector buffer directly:\n{body}"
+    );
+}
+
+const FOR_VEC_SNAPSHOT_PROGRAM: &str = r#"
+fn main() {
+    let mut values: Vec<i64> = Vec::new();
+    values.push(1);
+    values.push(2);
+    let mut sum = 0;
+    for value in values {
+        sum += value + values.len();
+    }
+    println!("{}", sum);
+}
+"#;
+
+#[test]
+fn snapshots_a_local_vector_when_the_body_references_it() {
+    let (main_c, _) = generate_source("for_vec_snapshot_fixture", FOR_VEC_SNAPSHOT_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    assert!(
+        body.contains("= lsaca_copy_Vec_i64(v1);"),
+        "the loop mutates or aliases the vector but no snapshot is taken:\n{body}"
+    );
+    assert!(
+        body.contains(">= (t"),
+        "the loop does not iterate the snapshot:\n{body}"
+    );
+}
+
+const VEC_PUSH_PROGRAM: &str = r#"
+fn main() {
+    let mut values: Vec<i64> = Vec::new();
+    values.push(7);
+    println!("{}", values.len());
+}
+"#;
+
+#[test]
+fn emits_inline_vec_push_fast_path_and_by_value_slow_helper() {
+    let (main_c, _) = generate_source("vec_push_fixture", VEC_PUSH_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // The fast path appends into spare capacity without taking the address of
+    // the vector, so the length and capacity can stay in registers.
+    assert!(
+        body.contains("= (v1).len;"),
+        "the push does not read the length into a local:\n{body}"
+    );
+    assert!(
+        body.contains("if (len") && body.contains("< (v1).cap) {"),
+        "the push has no inline capacity fast path:\n{body}"
+    );
+    assert!(
+        body.contains("(v1).data[len"),
+        "the fast path does not store into the buffer:\n{body}"
+    );
+    // Growing is delegated to a helper that takes the vector by value.
+    assert!(
+        body.contains("(v1) = lsaca_vec_push_slow_Vec_i64((v1),"),
+        "the growing path does not use the by-value helper:\n{body}"
+    );
+    assert!(
+        main_c.contains("LsVec_i64 lsaca_vec_push_slow_Vec_i64(LsVec_i64 v, int64_t value);"),
+        "the by-value push helper is not declared"
+    );
+}
+
+const FORMAT_INTO_PUSH_PROGRAM: &str = r#"
+fn main() {
+    let mut text = String::new();
+    text.push_str(format!("{},", 7));
+    println!("{}", text.len());
+}
+"#;
+
+#[test]
+fn fuses_format_into_a_push_on_a_local_string() {
+    let (main_c, _) = generate_source("format_push_fixture", FORMAT_INTO_PUSH_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // The formatted argument is appended straight to the receiver instead of
+    // allocating a temporary format buffer.
+    assert!(
+        !body.contains("ls_str_push_str("),
+        "the formatted push still goes through a temporary String:\n{body}"
+    );
+    let push_line = body
+        .lines()
+        .find(|line| line.contains(" = ls_format_push_cstr("))
+        .expect("no literal append to the receiver");
+    let receiver = push_line
+        .split(" = ")
+        .next()
+        .expect("malformed append line")
+        .trim();
+    assert!(
+        body.contains(&format!("{} = ls_fmt_i64({}, ", receiver, receiver)),
+        "the formatted argument is not appended to the receiver:\n{body}"
+    );
+    assert!(
+        body.contains(&format!("ls_format_push_cstr({}, {:?})", receiver, ",")),
+        "the literal part of the format is not appended to the receiver:\n{body}"
+    );
+    // The only remaining format buffer is the one built by println!.
+    assert_eq!(
+        body.matches("ls_format_begin(0)").count(),
+        1,
+        "a temporary format buffer was created for the push:\n{body}"
+    );
+}
+
+const TRIVIAL_ELEMENT_PROGRAM: &str = r#"
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn main() {
+    let mut points: Vec<Point> = Vec::with_capacity(2);
+    points.push(Point { x: 1, y: 2 });
+    points.push(Point { x: 3, y: 4 });
+    let mut total = 0;
+    for point in points {
+        total += point.x + point.y;
+    }
+    println!("{}", total);
+}
+"#;
+
+#[test]
+fn trivially_copyable_elements_skip_deep_copy_and_release_loops() {
+    let (main_c, _) = generate_source("trivial_elements_fixture", TRIVIAL_ELEMENT_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // Releasing a Point value is a no-op: it only owns scalars.
+    assert!(
+        main_c.contains("void lsaca_release_Point(LsPoint v) {\n  (void)v;\n}"),
+        "the Point release helper is not a no-op"
+    );
+    // Releasing a vector of Points only frees the raw buffer.
+    assert!(
+        main_c.contains(
+            "void lsaca_release_Vec_Point(LsVec_Point v) {\n  ls_vec_free_bytes((void*)v.data);\n}"
+        ),
+        "the Vec<Point> release helper still walks the elements"
+    );
+    // Copying the vector clones the buffer in one call.
+    assert!(
+        main_c.contains(
+            "out.data = (LsPoint*)ls_vec_clone_bytes((const void*)v.data, v.len, sizeof(LsPoint));"
+        ),
+        "the Vec<Point> copy helper does not clone the buffer"
+    );
+    // Iterating the vector needs no per-element copies either.
+    assert!(
+        !body.contains("lsaca_copy_Vec_Point("),
+        "the loop copied the vector of trivially copyable elements:\n{body}"
+    );
 }

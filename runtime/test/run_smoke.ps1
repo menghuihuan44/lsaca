@@ -4,8 +4,10 @@
 
 .DESCRIPTION
     The repository path contains non-ASCII characters, so the runtime sources are
-    copied into an ASCII temporary directory before compiling. Three builds are
-    produced:
+    copied into an ASCII temporary directory before compiling. The runtime is
+    built from its four translation units (lsaca_rt.c, lsaca_rt_string.c,
+    lsaca_rt_vec.c, lsaca_rt_fmt.c) plus the private lsaca_rt_internal.h header,
+    exactly like a generated project links them. Three builds are produced:
 
         smoke_release.exe   plain -O1 build
         smoke_debug.exe     -DLSACA_DEBUG (checked arithmetic + leak report)
@@ -123,7 +125,9 @@ function Build-Config {
     $exePath = Join-Path $script:WorkDir ("smoke_{0}.exe" -f $Name)
     $arguments = @('-std=c17', '-Wall', '-Wextra', '-Wpedantic', '-O1')
     $arguments += $Defines
-    $arguments += @('-o', $exePath, $script:MainC, $script:RtC, '-lm')
+    $arguments += @('-o', $exePath, $script:MainC)
+    $arguments += $script:RtSources
+    $arguments += '-lm'
     $compileOutput = (& $script:Gcc @arguments 2>&1 | Out-String).Trim()
     Assert-Equal $LASTEXITCODE 0 "gcc build '$Name' succeeds"
     Assert-Equal $compileOutput '' "gcc build '$Name' is warning free"
@@ -139,9 +143,17 @@ if (Test-Path -LiteralPath $script:WorkDir) {
 }
 New-Item -ItemType Directory -Path $script:WorkDir | Out-Null
 $script:MainC = Join-Path $script:WorkDir 'main.c'
-$script:RtC = Join-Path $script:WorkDir 'lsaca_rt.c'
+$script:RtSources = @()
+foreach ($runtimeName in @(
+        'lsaca_rt.c',
+        'lsaca_rt_string.c',
+        'lsaca_rt_vec.c',
+        'lsaca_rt_fmt.c')) {
+    Copy-Item -LiteralPath (Join-Path $script:RuntimeDir $runtimeName) -Destination $script:WorkDir
+    $script:RtSources += (Join-Path $script:WorkDir $runtimeName)
+}
 Copy-Item -LiteralPath (Join-Path $script:RuntimeDir 'lsaca_rt.h') -Destination $script:WorkDir
-Copy-Item -LiteralPath (Join-Path $script:RuntimeDir 'lsaca_rt.c') -Destination $script:RtC
+Copy-Item -LiteralPath (Join-Path $script:RuntimeDir 'lsaca_rt_internal.h') -Destination $script:WorkDir
 Copy-Item -LiteralPath (Join-Path $script:TestDir 'main.c') -Destination $script:MainC
 
 $script:Gcc = Find-Gcc

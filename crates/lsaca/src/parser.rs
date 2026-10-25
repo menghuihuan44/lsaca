@@ -1,7 +1,7 @@
 //! The parser: tokens to an AST.
 //!
 //! The parser is a hand written recursive descent parser that follows the
-//! grammar in docs/LANGUAGE.md. It accumulates diagnostics instead of panicking:
+//! grammar in docs/language/02-program-structure.md. It accumulates diagnostics instead of panicking:
 //! on malformed input it reports a clear error, recovers to a statement or item
 //! boundary, and keeps going so that one run can report several independent
 //! problems. The returned AST is always well formed structurally (all required
@@ -1614,6 +1614,17 @@ impl<'a> Parser<'a> {
                     ExprKind::Index {
                         base: Box::new(expr),
                         index: Box::new(index),
+                    },
+                    span,
+                );
+            } else if self.at(TokenKind::Question) {
+                // Postfix try operator. It is the lowest-precedence postfix, so it
+                // chains with calls and fields: f()?.field?.method().
+                let question = self.bump();
+                let span = expr.span.join(question.span);
+                expr = Expr::new(
+                    ExprKind::Try {
+                        expr: Box::new(expr),
                     },
                     span,
                 );
@@ -3397,6 +3408,44 @@ impl Point {
             Some(tail) => assert!(matches!(&tail.kind, ExprKind::Tuple(elems) if elems.len() == 2)),
             None => panic!("expected a tuple tail expression"),
         }
+    }
+
+    #[test]
+    fn parses_try_expressions() {
+        // The question mark is a postfix operator: it binds tighter than the
+        // binary operators, applies to calls and method calls, and nests.
+        let program = parse_ok(
+            "fn main() { let a = lookup(1)?; let b = values?.len(); let c = a??; let d = calc()? + 1; }",
+        );
+        let stmts = main_stmts(&program);
+
+        match &let_init(&stmts[0]).kind {
+            ExprKind::Try { expr } => assert!(matches!(&expr.kind, ExprKind::Call { .. })),
+            other => panic!("expected a try expression, got {:?}", other),
+        }
+
+        match &let_init(&stmts[1]).kind {
+            ExprKind::MethodCall {
+                receiver, method, ..
+            } => {
+                assert_eq!(method, "len");
+                assert!(matches!(&receiver.kind, ExprKind::Try { .. }));
+            }
+            other => panic!("expected a method call, got {:?}", other),
+        }
+
+        match &let_init(&stmts[2]).kind {
+            ExprKind::Try { expr } => match &expr.kind {
+                ExprKind::Try { expr } => assert!(matches!(&expr.kind, ExprKind::Path(_))),
+                other => panic!("expected a nested try expression, got {:?}", other),
+            },
+            other => panic!("expected a try expression, got {:?}", other),
+        }
+
+        let (op, lhs, rhs) = as_binary(let_init(&stmts[3]));
+        assert_eq!(*op, BinaryOp::Add);
+        assert!(matches!(&lhs.kind, ExprKind::Try { .. }));
+        assert_eq!(as_int(rhs), 1);
     }
 
     #[test]

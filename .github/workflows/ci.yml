@@ -155,13 +155,15 @@ jobs:
       # so this job proves that the C17 sources build with a plain gcc.
       - name: Build and run the smoke test (release build)
         run: |
-          gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG \
-            runtime/test/main.c runtime/lsaca_rt.c -lm -o rt-test
+          gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -I runtime \
+            runtime/test/main.c runtime/lsaca_rt.c runtime/lsaca_rt_string.c \
+            runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c -lm -o rt-test
           ./rt-test
       - name: Build and run the smoke test (debug build with leak tracking)
         run: |
           gcc -std=c17 -Wall -Wextra -Werror -O0 -g -DLSACA_DEBUG -DLSACA_DEBUG_RC \
-            runtime/test/main.c runtime/lsaca_rt.c -lm -o rt-test-debug
+            -I runtime runtime/test/main.c runtime/lsaca_rt.c runtime/lsaca_rt_string.c \
+            runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c -lm -o rt-test-debug
           ./rt-test-debug
       # Panic paths call exit(101); a bash script must not treat that as an
       # unhandled failure before inspecting the output.
@@ -223,7 +225,7 @@ jobs:
             echo "::group::Generating $name"
             ./target/release/lsaca emit-c -r -o "$out" "$example"
             gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -I "$out" \
-              "$out/main.c" "$out/lsaca_rt.c" -lm -o "$out/$name"
+              "$out/main.c" "$out"/lsaca_rt*.c -lm -o "$out/$name"
             if [ "$name" = "hello" ]; then
               output="$("$out/$name")"
               if [ "$output" != "hello, world!" ]; then
@@ -233,6 +235,13 @@ jobs:
             fi
             echo "::endgroup::"
           done
+          # The runtime is split into several translation units; every emitted
+          # project must contain all of them (the driver writes runtime::sources()).
+          units=$(ls "$workdir/hello"/lsaca_rt*.c | wc -l)
+          if [ "$units" -ne 4 ]; then
+            echo "expected 4 emitted runtime translation units, found $units"
+            exit 1
+          fi
           cmake -S "$workdir/hello" -B "$workdir/hello/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build "$workdir/hello/build"
 

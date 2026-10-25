@@ -16,9 +16,13 @@ To compile lsaca programs to native executables you also need:
 
 * A C17 compiler: GCC or Clang. On Windows the MSYS2 UCRT64 GCC toolchain is the
   supported configuration.
-* CMake 3.16 or newer (and, optionally, Ninja for faster builds).
 * A C standard library with the usual `libm` math functions (on Unix-like
   systems the emitted project links `m` automatically).
+
+CMake is **not** required: since version 1.2.0 the compiler invokes the C
+compiler directly by default. CMake 3.16 or newer (plus Ninja or MinGW
+Makefiles) is only needed if you pass the global `--cmake` flag to build
+through the generated CMake project instead.
 
 ## Build and install
 
@@ -32,13 +36,13 @@ cargo build --release
 Expected output:
 
 ```text
-lsaca 1.1.0
+lsaca 1.2.0
 ```
 
 The compiler is a single binary at `target/release/lsaca` (`lsaca.exe` on
-Windows). Copy it anywhere on your `PATH`; it finds the C toolchain through
-ordinary environment variables (`CC`, or `LSACA_CC` to override) and CMake
-through `PATH`.
+Windows). Copy it anywhere on your `PATH`; it finds the C compiler through
+ordinary environment variables (`CC`, or `LSACA_CC` to override). CMake is only
+looked up when `--cmake` is used.
 
 ## Your first program
 
@@ -80,13 +84,17 @@ writes a complete C project that you can inspect, edit and build yourself:
 lsaca emit-c hello.ls -o hello-c
 ```
 
-The directory then contains `main.c`, `lsaca_rt.h`, `lsaca_rt.c` and
-`CMakeLists.txt`.
+The directory then contains `main.c`, the runtime sources `lsaca_rt.c`,
+`lsaca_rt_string.c`, `lsaca_rt_vec.c` and `lsaca_rt_fmt.c`, the headers
+`lsaca_rt.h` and `lsaca_rt_internal.h`, and a `CMakeLists.txt`. The project is
+standalone: `CMakeLists.txt` lists all five C translation units, so a plain
+`cmake -S hello-c -B hello-c/build && cmake --build hello-c/build` builds it
+without lsaca.
 
 ## A slightly larger tour
 
 The following program uses a struct, an `impl` block, a `Box<T>`, an `Rc<T>`
-cell and a format specifier, all verified to work in 1.1.0:
+cell, the `?` operator and a format specifier, all verified to work in 1.2.0:
 
 ```ls
 struct Point {
@@ -116,6 +124,19 @@ fn area(shape: Shape) -> f64 {
     }
 }
 
+fn half(n: i64) -> Option<i64> {
+    if n % 2 == 0 {
+        Some(n / 2)
+    } else {
+        None
+    }
+}
+
+fn quarter(n: i64) -> Option<i64> {
+    let h = half(n)?;
+    Some(h / 2)
+}
+
 fn main() {
     let p = Point::new(3, 4);
     println!("manhattan = {}", p.manhattan());
@@ -128,6 +149,8 @@ fn main() {
     shared.set(counter.get() + 1);
     println!("counter = {}", counter.get());
 
+    println!("quarter = {:?}", quarter(12));
+
     println!("area = {:.2}", area(Shape::Circle(2.0)));
     println!("[{:>10}]", "right");
 }
@@ -138,6 +161,7 @@ Output:
 manhattan = 7
 on the heap
 counter = 1
+quarter = Some(3)
 area = 12.00
 [     right]
 ```
@@ -156,17 +180,32 @@ lexer -> parser (AST) -> name resolution + type checker -> typed IR
 C17 code generator (main.c)
    |
    v
-generated C project: main.c + lsaca_rt.h + lsaca_rt.c + CMakeLists.txt
+generated C project:
+    main.c + lsaca_rt.c + lsaca_rt_string.c + lsaca_rt_vec.c + lsaca_rt_fmt.c
+    + lsaca_rt.h + lsaca_rt_internal.h (+ CMakeLists.txt)
    |
-   v
-CMake + C compiler -> native executable
+   +--> direct C compiler (default) --+
+   |                                  |
+   +--> CMake + C compiler (--cmake) -+
+                                      |
+                                      v
+                              native executable
 ```
 
 The type checker rejects the program before any C is generated, so a program
 either type-checks completely or not at all. Diagnostics are reported on the
 source file with line and column, in a rustc-like layout (see
 [Diagnostics](#diagnostics) below). The C runtime implements the standard
-library, reference counting, the cycle collector and the panic machinery.
+library, reference counting, the cycle collector, string/vector storage and the
+panic machinery.
+
+The **direct backend** is used by `run` and `build` by default: the compiler
+writes the C sources into the build cache, invokes the C compiler for the
+program and the runtime units, and links the executable itself. The generated
+CMake project is still written by `emit-c`, and asking for `--cmake` makes
+`run`/`build` configure and build it with CMake instead. The emitted C and the
+runtime are the same either way, so the backends differ only in who drives the
+compiler.
 
 ## The generated C project
 
@@ -176,16 +215,20 @@ library, reference counting, the cycle collector and the panic machinery.
 | --- | --- |
 | `main.c` | Generated C for the program: one C function per lsaca `fn`, struct/enum definitions, formatting and copy/equality helpers specialized for the program's types. |
 | `lsaca_rt.h` | Public declarations of the runtime: strings, vectors, reference counting, panic helpers, math wrappers, I/O. |
-| `lsaca_rt.c` | The runtime implementation, compiled together with the generated code. |
-| `CMakeLists.txt` | A complete CMake project that builds the executable and configures Debug/Release profiles. |
+| `lsaca_rt_internal.h` | Internal declarations shared by the runtime translation units; not meant for user code. |
+| `lsaca_rt.c` | Core runtime implementation: allocation and reference counting, the cycle collector, panics, and other primitives. |
+| `lsaca_rt_string.c` | `String` storage, copy-on-write buffers and the string methods. |
+| `lsaca_rt_vec.c` | `Vec<T>` storage, growth and element helpers. |
+| `lsaca_rt_fmt.c` | Formatting machinery: `Display`/`Debug` helpers used by `print`/`println`/`format!`. |
+| `CMakeLists.txt` | A complete CMake project that builds the executable (all five C files) and configures Debug/Release profiles. |
 
 The generated project is standalone: copy the directory to another machine with
-a C17 compiler and CMake and it builds without lsaca. The project name in
-`CMakeLists.txt` is derived from the source file name.
+a C17 compiler (and CMake if you use the CMake project) and it builds without
+lsaca. The project name in `CMakeLists.txt` is derived from the source file name.
 
 ### Build profiles
 
-The generated `CMakeLists.txt` selects behavior with the CMake build type:
+Both backends compile the same C with the same profile defines:
 
 | Profile | Compiler flags | lsaca behavior |
 | --- | --- | --- |
@@ -193,8 +236,18 @@ The generated `CMakeLists.txt` selects behavior with the CMake build type:
 | Release | `-O2 -DNDEBUG` | Integer arithmetic wraps (two's complement), matching Rust's release mode; out-of-bounds and `unwrap` checks remain. |
 
 `lsaca run` and `lsaca build` use the Debug profile unless you pass
-`-r`/`--release`. When building by hand you can also pass
-`-DLSACA_DEBUG_RC=ON` to CMake to enable leak tracking in a Release build (see
+`-r`/`--release`. The direct backend applies these flags to its compiler
+invocations; the emitted `CMakeLists.txt` applies them through the CMake build
+type.
+
+Leak tracking is compiled in with the rest of the Debug checks
+(`-DLSACA_DEBUG`), so a normal Debug build reports leaked allocations when the
+program shuts down. The `LSACA_DEBUG_RC=1` environment variable is read by the
+*compiler* at build time, not by the program: it adds `-DLSACA_DEBUG_RC` to the
+C compilation, which enables the same tracking in every profile - including
+Release builds (`LSACA_DEBUG_RC=1 lsaca build -r hello.ls`) - and changes the
+build-cache key, so the program is rebuilt. When you build an emitted project
+through CMake you can also pass `-DLSACA_DEBUG_RC=ON` at configure time (see
 [Memory model](05-memory-model.md)).
 
 The same generated C compiles with `-DLSACA_DEBUG` (checked) or without it
@@ -209,7 +262,7 @@ runtime defines.
 | --- | --- |
 | `lsaca run <file.ls> [-- args...]` | Compile, build (using the build cache) and run the program. Arguments after `--` are passed to the program and visible through `args()`. |
 | `lsaca build <file.ls>` | Compile and build a native executable in the output directory (default: next to the source). |
-| `lsaca emit-c <file.ls>` | Write the generated C project only; do not invoke CMake or the C compiler. |
+| `lsaca emit-c <file.ls>` | Write the generated C project only; do not compile or link it. |
 | `lsaca check <file.ls>` | Run the front end only: lexing, parsing, name resolution and type checking. Fast; useful in editors and CI. |
 | `lsaca version` | Print the compiler version. |
 | `lsaca help` | Print the help text. |
@@ -220,14 +273,15 @@ Options:
 | --- | --- |
 | `-r`, `--release` | Build with optimizations and wrapping integer arithmetic. |
 | `-o`, `--out-dir <DIR>` | Output directory for `build` and `emit-c`. |
-| `-v`, `--verbose` | Print the commands executed by the build (CMake and the C compiler). |
+| `-v`, `--verbose` | Print the commands executed by the build (the C compiler invocations, or CMake when `--cmake` is used). |
 | `--keep` | Print the temporary build-tree location instead of deleting it. |
+| `--cmake` | Build through the generated CMake project instead of the built-in direct C compiler backend. Requires CMake 3.16+ and a generator (Ninja or MinGW Makefiles). |
 | `-h`, `--help` | Print the help text. |
 
-The complete help text of version 1.1.0:
+The complete help text of version 1.2.0:
 
 ```console
-lsaca 1.1.0 - a small statically typed language with an ORC memory model
+lsaca 1.2.0 - a small statically typed language with an ORC memory model
 
 USAGE:
     lsaca <COMMAND> [OPTIONS]
@@ -245,6 +299,8 @@ OPTIONS:
     -o, --out-dir <DIR>          output directory for 'build' and 'emit-c'
     -v, --verbose                print the commands executed by the build
         --keep                   print the temporary build tree location
+        --cmake                  build via the generated CMake project instead
+                                 of the built-in direct C compiler back end
     -h, --help                   print this help
 
 EXIT CODES:
@@ -256,7 +312,15 @@ EXIT CODES:
 
 Running `lsaca` with no arguments prints the same help and exits with code
 `2`, because a command is required. An unknown command prints a short error to
-stderr, suggests `lsaca help`, and also exits with `2`.
+stderr, suggests `lsaca help`, and also exits with `2`. A flag that only
+applies to the build commands is accepted only by the commands that build:
+`--cmake` is valid for `run` and `build`; `lsaca check --cmake hello.ls`
+and `lsaca emit-c --cmake hello.ls` fail with
+`lsaca: unknown option '--cmake' for 'lsaca check'` (respectively
+`'--cmake' for 'lsaca emit-c'`) and exit with `2`. `version` and `help`
+take no arguments at all; `lsaca version --cmake` and `lsaca help --cmake`
+fail with `lsaca: unexpected argument '--cmake' for 'lsaca version'`
+(respectively `'--cmake' for 'lsaca help'`) and exit with `2`.
 
 ## Exit codes
 
@@ -308,31 +372,46 @@ both be produced in one run; the summary line is printed once at the end.
 
 ## Build cache and environment
 
-`lsaca run` and `lsaca build` cache generated C and built objects by a content
-hash of the source and compiler version. The cache lives, in order of
-preference:
+`lsaca run` and `lsaca build` cache generated C, executable and compiled
+runtime objects by a content hash of the source, the compiler version and the
+build mode. The cache lives, in order of preference:
 
 1. `LSACA_CACHE_DIR`, when set (created if needed);
 2. the system temporary directory, when that path is ASCII-only and writable;
-3. `.lsaca-build-cache` next to the source file.
+3. `.lsaca-build-cache` in the current working directory.
+
+Within the cache, each compilation gets a directory named after its content
+hash (holding the generated C sources and the build tree), and the compiled C
+runtime objects are shared under `_runtime/<hash>/`. The runtime is compiled
+once per profile and then reused, so only `main.c` has to be compiled for a new
+program. `-v` prints every C compiler invocation verbatim, including the flags
+for the chosen profile.
+
+On this project's development machine, a cold release build of the
+`hello.ls` example takes roughly 1.2 s and a cached rebuild roughly 0.03 s;
+timings vary with the C compiler and the machine.
 
 Environment variables understood by the compiler and the generated runtime:
 
 | Variable | Effect |
 | --- | --- |
 | `LSACA_CC` | C compiler command used for `run`/`build` (overrides `CC`). |
-| `LSACA_JOBS` | Parallel build jobs passed to CMake. |
+| `LSACA_JOBS` | Parallel build jobs for the C compiler (or for CMake when `--cmake` is used). |
 | `LSACA_CACHE_DIR` | Overrides the build cache location. |
-| `LSACA_DEBUG_RC` | When set to `1` in the environment of a Debug-built program (or with `-DLSACA_DEBUG_RC=ON` in Release), the runtime tracks reference-counted allocations and prints a leak report at shutdown. |
+| `LSACA_DEBUG_RC` | Read by the compiler: when set to `1`, the runtime is compiled with `-DLSACA_DEBUG_RC`, so reference-counted allocations are tracked and a leak report is printed at shutdown in every profile, including Release. Emitted CMake projects expose the same switch as `-DLSACA_DEBUG_RC=ON`. |
 
 ## Troubleshooting
 
 * **`lsaca: cannot read <file>: ... (os error 2)`** — the source path does not
   exist or cannot be read. Check the path quoting; the message after the colon
   is the operating system's localized text.
-* **CMake not found or the C compiler fails** — make sure a C17 compiler and
-  CMake 3.16+ are on `PATH`; set `LSACA_CC` to pick a specific compiler. Run
-  with `-v` to see the exact commands.
+* **No C compiler found or the C compiler fails** — make sure a C17 compiler
+  (`gcc` or `clang`) is on `PATH`; set `LSACA_CC` to pick a specific compiler.
+  Run with `-v` to see the exact commands.
+* **CMake errors** — CMake is only needed when you pass `--cmake`. Either drop
+  the flag (the default backend needs no CMake) or install CMake 3.16+ with a
+  supported generator, such as Ninja or MinGW Makefiles. Run with `-v` to see
+  the CMake commands.
 * **The program panics with `attempt to add with overflow`** — the Debug
   profile checks integer overflow. Either the arithmetic is genuinely wrong or
   you want release semantics; pass `-r` for wrapping arithmetic.

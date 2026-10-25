@@ -210,6 +210,62 @@ fn cases() -> Vec<Case> {
             stderr_contains: &[],
         },
         Case {
+            name: "try_option_ok",
+            source: include_str!("programs/try_option_ok.ls"),
+            args: &[],
+            stdout: "some 8\nnone\ndone\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "try_option_none",
+            source: include_str!("programs/try_option_none.ls"),
+            args: &[],
+            stdout: "got 42\nno value\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "try_result_ok",
+            source: include_str!("programs/try_result_ok.ls"),
+            args: &[],
+            stdout: "42\n10\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "try_result_err",
+            source: include_str!("programs/try_result_err.ls"),
+            args: &[],
+            stdout: "ok 42\nerr invalid integer\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "try_chain",
+            source: include_str!("programs/try_chain.ls"),
+            args: &[],
+            stdout: "second 25\ntotal 27\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "combo_map",
+            source: include_str!("programs/combo_map.ls"),
+            args: &[],
+            stdout: "42\n-1\n7\nfalse\ntrue\n22\nerr INVALID INTEGER\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "combo_and_then",
+            source: include_str!("programs/combo_and_then.ls"),
+            args: &[],
+            stdout: "kept lsaca\ndropped\n31\n15\nerr bad\n20\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
             name: "option_result",
             source: include_str!("programs/option_result.ls"),
             args: &[],
@@ -541,6 +597,8 @@ fn frontend_rejects_invalid_programs() {
         ("bad_args", include_str!("programs/bad_args.ls")),
         ("bad_condition", include_str!("programs/bad_condition.ls")),
         ("missing_main", "fn helper() {}\n"),
+        ("bad_try_scope", include_str!("programs/bad_try_scope.ls")),
+        ("bad_try_type", include_str!("programs/bad_try_type.ls")),
     ];
     let mut problems: Vec<String> = Vec::new();
     for (name, source) in programs {
@@ -566,6 +624,49 @@ fn frontend_rejects_invalid_programs() {
     }
     if !problems.is_empty() {
         panic!("{}", problems.join("\n\n"));
+    }
+}
+
+/// The try operator reports targeted diagnostics: the wrong enclosing return
+/// type and a non Option/Result operand both mention what is wrong and how to
+/// fix it.
+#[test]
+fn rejects_try_operator_misuse() {
+    let programs: &[(&str, &str, &str)] = &[
+        (
+            "bad_try_scope",
+            include_str!("programs/bad_try_scope.ls"),
+            "can only be used in a function that returns Option",
+        ),
+        (
+            "bad_try_type",
+            include_str!("programs/bad_try_type.ls"),
+            "can only be applied to Option or Result values",
+        ),
+    ];
+    for (name, source, needle) in programs {
+        let frontend = Frontend::new(format!("{}.ls", name), *source);
+        let diagnostics = match frontend.check() {
+            Ok(_) => panic!(
+                "{}: expected a compile error, but the program was accepted",
+                name
+            ),
+            Err(diagnostics) => diagnostics,
+        };
+        let rendered = diagnostics.render(frontend.file());
+        assert!(
+            rendered.contains("error"),
+            "{}: rendered diagnostics do not mention an error:\n{}",
+            name,
+            rendered
+        );
+        assert!(
+            rendered.contains(needle),
+            "{}: expected the diagnostic to mention {:?}:\n{}",
+            name,
+            needle,
+            rendered
+        );
     }
 }
 

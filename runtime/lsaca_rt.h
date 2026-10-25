@@ -35,6 +35,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -258,6 +259,33 @@ void ls_vec_reverse_bytes(void* data, size_t len, size_t elem_size);
 
 /* Release a raw vector buffer (does not touch the elements). */
 void ls_vec_free_bytes(void* data);
+
+/* Fast append of one element: the hot path of Vec::push.
+ *
+ *     ls_vec_push_bytes(&v.data, &v.len, &v.cap, &value, sizeof value);
+ *
+ * is equivalent to
+ *
+ *     ls_vec_insert_bytes(&v.data, &v.len, &v.cap, v.len, &value,
+ *                         sizeof value);
+ *
+ * but performs the copy inline when the capacity already has room (the common
+ * case) and falls back to the out-of-line helper, which grows the buffer and
+ * handles aliasing, when it is full. "value" points at the element to copy and
+ * may point into the vector buffer itself. */
+static inline void ls_vec_push_bytes(void** data, size_t* len, size_t* cap,
+                                     const void* value, size_t elem_size) {
+    if (elem_size == 0) {
+        *len += 1;
+        return;
+    }
+    if (*len < *cap) {
+        memcpy((char*)*data + (*len) * elem_size, value, elem_size);
+        *len += 1;
+        return;
+    }
+    ls_vec_insert_bytes(data, len, cap, *len, value, elem_size);
+}
 
 /* ====================================================================== */
 /* Frozen shared instantiations                                           */

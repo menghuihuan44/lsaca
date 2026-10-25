@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Cross-language benchmark harness for the lsaca compiler.
 
-Measures, for the same four workloads implemented in lsaca, C, Rust, Python and
-Node.js:
+Measures, for the same eleven workloads implemented in every language it
+supports (lsaca, C, Rust, Python and Node.js; the compile_large workload is
+lsaca-only and compile-only):
 
-  * compile time  - lsaca cold build (fresh content-addressed cache, includes
-                    CMake configure + C compiler), lsaca cached build, gcc -O2,
-                    rustc -O; interpreters are reported as n/a;
+  * compile time  - lsaca cold build (one "lsaca build -r" with a fresh
+                    content-addressed cache: emit C + compile the generated C
+                    and the runtime translation units), lsaca cached build,
+                    gcc -O2, rustc -O; interpreters are reported as n/a;
   * runtime       - one warm-up run plus N measured runs; median and min;
   * peak memory   - peak working set of the child process (Windows: psapi
                     GetProcessMemoryInfo polling; POSIX: /usr/bin/time or
@@ -26,12 +28,16 @@ Raw data is written to benchmarks/results/latest.json, markdown tables to
 benchmarks/results/latest.md and stdout.  The harness is stdlib-only,
 cross-platform and non-interactive.
 
-lsaca build notes: a normal release build goes through CMake (a content-
-addressed cache directory is used, so a cold build means a fresh
-LSACA_CACHE_DIR).  If CMake cannot be driven in the current environment the
-harness falls back to "lsaca emit-c" plus a direct gcc -O2 -DNDEBUG compile of
-the generated C, and labels those numbers accordingly.  --build-mode fallback
-forces that path, --build-mode official disables the fallback.
+lsaca build notes: since 1.2 a normal release build uses the compiler's default
+built-in direct C compiler back end (generate C, invoke gcc on it; the runtime
+translation units are cached under LSACA_CACHE_DIR).  This is what the
+"lsaca cold build" and "lsaca cached build" columns measure.  The compiler
+still ships the older CMake + Ninja path via the --cmake flag, but the harness
+does not measure it by default.  If the default build cannot be driven in the
+current environment, the harness falls back to "lsaca emit-c" plus a direct
+gcc -O2 -DNDEBUG compile of the generated C and labels those numbers
+accordingly; --build-mode fallback forces that path, --build-mode official (the
+default build) disables the fallback.
 """
 
 from __future__ import annotations
@@ -77,6 +83,49 @@ PROGRAMS = {
         "expected": "checksum=1499998500000",
         "description": "build a vector of 1,000,000 Point{x=i64, y=i64}, then checksum",
         "workload": {"points": 1000000},
+    },
+    "sort_i64": {
+        "expected": "checksum=21749,2147481261,214813518297651",
+        "description": "sort 200,000 pseudo-random i64 values with an iterative quicksort "
+                       "written in the language; checksum is first,last,sum",
+        "workload": {"n": 200000, "algorithm": "iterative quicksort, middle pivot", "seed": 12345},
+    },
+    "matrix_multiply": {
+        "expected": "checksum=1018924712000",
+        "description": "multiply two 160x160 i64 matrices with the naive triple loop; "
+                       "checksum is the sum of the result entries",
+        "workload": {"n": 160},
+    },
+    "binary_trees": {
+        "expected": "checksum=2147450880",
+        "description": "build a perfect binary tree of depth 16 (131,071 nodes) and sum "
+                       "all payloads",
+        "workload": {"depth": 16, "nodes": 131071},
+    },
+    "string_split": {
+        "expected": "checksum=194500,50000,24975000",
+        "description": "build a 194,500-byte comma-separated numeric string, split it on "
+                       "commas, parse every token and sum; checksum is len,count,sum",
+        "workload": {"tokens": 50000, "delimiter": ","},
+    },
+    "sieve": {
+        "expected": "checksum=148933",
+        "description": "sieve of Eratosthenes: count the primes below 2,000,000",
+        "workload": {"limit": 2000000},
+    },
+    "mandelbrot": {
+        "expected": "checksum=6282265",
+        "description": "600x400 Mandelbrot escape-time grid, at most 100 iterations per "
+                       "pixel; checksum is the sum of iteration counts",
+        "workload": {"width": 600, "height": 400, "max_iterations": 100},
+    },
+    "compile_large": {
+        "expected": "checksum=14655037",
+        "description": "generated 4,511-line lsaca source (450 functions) used to measure "
+                       "how the lsaca build time scales with program size",
+        "workload": {"functions": 450, "lines": 4511},
+        "languages": ["lsaca"],
+        "compile_only": True,
     },
 }
 
@@ -211,6 +260,38 @@ def capture_first_line(cmd, env, timeout=30.0):
     if not text:
         return None
     return text.splitlines()[0].strip()
+
+
+def capture_help(cmd, env, timeout=30.0):
+    """Run a command and return its combined stdout/stderr (for CLI feature detection)."""
+    try:
+        proc = subprocess.run(
+            [str(part) for part in cmd],
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+
+
+def lsaca_build_backend(help_text):
+    """Derive (default build backend, --cmake availability) from 'lsaca help'.
+
+    lsaca 1.2 defaults to a built-in direct C compiler back end and keeps the
+    CMake + Ninja path behind --cmake; older compilers always used CMake.
+    """
+    text = help_text or ""
+    cmake_flag = "--cmake" in text
+    if cmake_flag and "direct C compiler back end" in text:
+        return "direct C compiler back end (default; --cmake available)", True
+    if cmake_flag:
+        return "cmake (--cmake flag available)", True
+    return "cmake (legacy, no --cmake flag)", False
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +785,9 @@ class Harness:
         self.official_attempt_error = None
         self.compiler = None
         self.lsaca_version = None
+        self.lsaca_help = ""
+        self.default_backend = "unknown"
+        self.cmake_flag = False
         self.programs = (
             [p for p in PROGRAMS if p in args.programs] if args.programs else list(PROGRAMS)
         )
@@ -746,6 +830,8 @@ class Harness:
                 % (rel_path(dest, self.root), version)
             )
         self.lsaca_version = version
+        self.lsaca_help = capture_help([dest, "help"], self.env)
+        self.default_backend, self.cmake_flag = lsaca_build_backend(self.lsaca_help)
 
     def toolchain_info(self):
         info = {
@@ -753,6 +839,8 @@ class Harness:
             "lsaca_compiler": rel_path(self.compiler, self.root) if self.compiler else None,
             "python": "Python " + platform.python_version(),
         }
+        info["lsaca_build_backend"] = self.default_backend
+        info["lsaca_cmake_flag"] = self.cmake_flag
         if self.compiler is not None:
             info["lsaca_compiler_sha256"] = sha256_file(self.compiler)[:16]
             info["lsaca_compiler_mtime"] = (
@@ -852,10 +940,10 @@ class Harness:
                 self.lsaca_mode = "fallback"
                 first_line = str(exc).splitlines()[0]
                 self.warnings.append(
-                    "official lsaca build (CMake) failed or timed out; falling back to "
-                    "lsaca emit-c + gcc for every program. Reason: " + first_line
+                    "the default lsaca build (direct C compiler back end) failed or timed out; "
+                    "falling back to lsaca emit-c + gcc for every program. Reason: " + first_line
                 )
-                eprint("[bench] NOTE: official lsaca build failed, using emit-c + gcc fallback")
+                eprint("[bench] NOTE: default lsaca build failed, using emit-c + gcc fallback")
                 eprint("[bench]       " + first_line)
                 record = self.build_lsaca_fallback(program, src, outdir)
                 record["mode"] = "fallback"
@@ -894,14 +982,22 @@ class Harness:
                     % (program, proc_cached.returncode, describe_failure(proc_cached))
                 )
             cached.append(round(cached_s, 6))
+        # Size of the program-specific generated C (useful context for the
+        # compile-time numbers; the runtime translation units are shared).
+        main_c = next((path for path in cache.rglob("main.c") if path.is_file()), None)
+        generated_c_bytes = main_c.stat().st_size if main_c else None
         return {
             "kind": "lsaca-official",
+            "backend": self.default_backend,
             "cold_s": round(cold_s, 6),
             "cached_runs_s": cached,
             "cached_median_s": round(statistics.median(cached), 6) if cached else None,
+            "generated_c_bytes": generated_c_bytes,
             "exe": rel_path(exe, self.root),
-            "note": "cold build uses a fresh LSACA_CACHE_DIR (CMake configure + C compiler); "
-                    "cached build re-uses the content-addressed cache directory",
+            "note": "cold build runs one default 'lsaca build -r' with a fresh "
+                    "LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime "
+                    "translation units with gcc); the cached build re-uses the same cache "
+                    "directory and only re-links the executable",
         }
 
     def build_lsaca_fallback(self, program, src, outdir):
@@ -913,7 +1009,7 @@ class Harness:
         for _ in range(self.compile_repeats):
             shutil.rmtree(gen, ignore_errors=True)
             proc, emit_s = timed_run(
-                [self.compiler, "emit-c", str(src), "-o", str(gen)],
+                [self.compiler, "emit-c", "-r", str(src), "-o", str(gen)],
                 env,
                 cwd=self.root,
                 timeout=120,
@@ -923,11 +1019,20 @@ class Harness:
                     "lsaca emit-c failed for %s:\n%s" % (program, describe_failure(proc))
                 )
             emit_runs.append(round(emit_s, 6))
-        for name in ("main.c", "lsaca_rt.h", "lsaca_rt.c"):
+        required = ("main.c", "lsaca_rt.h", "lsaca_rt.c")
+        for name in required:
             if not (gen / name).is_file():
                 raise HarnessError(
                     "lsaca emit-c did not produce %s in %s" % (name, rel_path(gen, self.root))
                 )
+        # Since 1.2 the runtime is split into several translation units
+        # (lsaca_rt.c plus optional lsaca_rt_string.c / _vec.c / _fmt.c), so
+        # compile every generated .c file rather than a fixed pair.
+        generated_c = sorted(gen.glob("*.c"), key=lambda path: path.name)
+        if not generated_c:
+            raise HarnessError(
+                "lsaca emit-c produced no .c files in %s" % rel_path(gen, self.root)
+            )
         exe = outdir / ("lsaca_" + program + (".exe" if os.name == "nt" else ""))
         if not self.tools["gcc"]:
             raise HarnessError("gcc is required for the lsaca fallback build path")
@@ -935,15 +1040,9 @@ class Harness:
         for _ in range(self.compile_repeats):
             if exe.exists():
                 exe.unlink()
-            cmd = [
-                self.tools["gcc"],
-                "-O2",
-                "-DNDEBUG",
-                str(gen / "main.c"),
-                str(gen / "lsaca_rt.c"),
-                "-o",
-                str(exe),
-            ]
+            cmd = [self.tools["gcc"], "-O2", "-DNDEBUG"]
+            cmd.extend(str(path) for path in generated_c)
+            cmd.extend(["-o", str(exe)])
             proc, gcc_s = timed_run(cmd, env, cwd=gen, timeout=300)
             if proc.returncode != 0:
                 raise HarnessError(
@@ -959,8 +1058,10 @@ class Harness:
             "gcc_median_s": round(statistics.median(gcc_runs), 6),
             "total_s": round(statistics.median(emit_runs) + statistics.median(gcc_runs), 6),
             "exe": rel_path(exe, self.root),
-            "note": "fallback: lsaca emit-c plus a direct gcc -O2 -DNDEBUG compile of the "
-                    "generated C (the official CMake build could not be driven in this environment)",
+            "note": "fallback: lsaca emit-c -r (release: wrapping arithmetic, same "
+                    "optimizations as the default build) plus a direct gcc -O2 -DNDEBUG compile "
+                    "of the generated C (the default 'lsaca build' path could not be driven in "
+                    "this environment)",
         }
 
     def build_native(self, language, program, src, outdir):
@@ -1060,36 +1161,62 @@ class Harness:
                 "compile_repeats": self.compile_repeats,
                 "quick": self.args.quick,
                 "build_mode": self.args.build_mode,
+                "lsaca_build_backend": self.default_backend,
+                "lsaca_cmake_flag": self.cmake_flag,
                 "official_timeout_s": self.args.official_timeout,
                 "memory": not self.args.no_memory,
                 "programs": self.programs,
                 "languages": self.languages,
+                "compile_only_programs": [
+                    program for program in self.programs if PROGRAMS[program].get("compile_only")
+                ],
                 "child_temp_dir": rel_path(self.tmp_dir, self.root),
                 "path_prepended": self.path_prepend,
             },
             "lsaca_build": {
                 "mode": None,
                 "compiler": rel_path(self.compiler, self.root) if self.compiler else None,
+                "default_backend": self.default_backend,
+                "cmake_flag_available": self.cmake_flag,
                 "official_attempt_error": None,
             },
             "programs": {},
             "warnings": self.warnings,
         }
-        total = len(self.programs) * len(self.languages)
+        # A workload may restrict the languages it covers (compile-only
+        # workloads only exist for lsaca). Drop it with a warning when the
+        # caller's language selection leaves nothing to measure.
+        program_languages = {}
+        for program in self.programs:
+            allowed = PROGRAMS[program].get("languages")
+            languages = [
+                language
+                for language in self.languages
+                if allowed is None or language in allowed
+            ]
+            if not languages:
+                self.warnings.append(
+                    "%s skipped: none of the selected languages covers this workload"
+                    % program
+                )
+            program_languages[program] = languages
+        total = sum(len(languages) for languages in program_languages.values())
         done = 0
         for program in self.programs:
             spec = PROGRAMS[program]
+            compile_only = bool(spec.get("compile_only"))
             entry = {
                 "expected": spec["expected"],
                 "description": spec["description"],
                 "workload": spec["workload"],
+                "compile_only": compile_only,
                 "sources": {
                     language: rel_path(self.src_path(program, language), self.root)
-                    for language in self.languages
+                    for language in program_languages[program]
                 },
                 "languages": {},
             }
-            for language in self.languages:
+            for language in program_languages[program]:
                 done += 1
                 if not self.available(language):
                     reason = self.unavailable_reason(language)
@@ -1105,17 +1232,32 @@ class Harness:
                 outdir = self.build_dir(program, language)
                 if language == "lsaca":
                     compile_record = self.build_lsaca(program, src, outdir)
-                    command = self.program_command(language, program, compile_record["exe"])
                 elif language in ("c", "rust"):
                     compile_record = self.build_native(language, program, src, outdir)
-                    command = self.program_command(language, program, compile_record["exe"])
                 else:
                     compile_record = {
                         "kind": "interpreted",
                         "exe": None,
                         "note": "interpreted language: no ahead-of-time compile step",
                     }
-                    command = self.program_command(language, program, None)
+                if compile_only:
+                    entry["languages"][language] = {
+                        "compile": compile_record,
+                        "runtime": None,
+                        "memory": None,
+                    }
+                    eprint(
+                        "[%d/%d] %-12s %-6s  compile=%-26s (compile-only)"
+                        % (
+                            done,
+                            total,
+                            program,
+                            language,
+                            _compile_summary(compile_record),
+                        )
+                    )
+                    continue
+                command = self.program_command(language, program, compile_record["exe"])
                 runtime = self.measure_runtime(language, program, command, spec["expected"])
                 memory = None
                 if not self.args.no_memory:
@@ -1154,7 +1296,7 @@ def _compile_summary(record):
         return "n/a"
     kind = record.get("kind")
     if kind == "lsaca-official":
-        return "official cold %.3f s" % record["cold_s"]
+        return "cold %.3f s" % record["cold_s"]
     if kind == "lsaca-fallback":
         return "emit-c+gcc %.3f s" % record["total_s"]
     if kind == "native":
@@ -1191,6 +1333,12 @@ def render_markdown(results):
     host = results["host"]
     tools = results["toolchains"]
     programs = list(results["programs"])
+    runtime_programs = [
+        program for program in programs if not results["programs"][program].get("compile_only")
+    ]
+    compile_only_programs = [
+        program for program in programs if results["programs"][program].get("compile_only")
+    ]
     languages = [l for l in LANGUAGES if l in results["settings"]["languages"]]
     lines = []
     lines.append("# lsaca cross-language benchmarks")
@@ -1207,6 +1355,7 @@ def render_markdown(results):
     )
     lines.append("- RAM: %s GiB" % host.get("ram_gib"))
     lines.append("- lsaca: %s (%s)" % (tools.get("lsaca"), tools.get("lsaca_compiler")))
+    lines.append("- lsaca build backend: %s" % (tools.get("lsaca_build_backend") or "unknown"))
     lines.append("- gcc: %s" % tools.get("gcc"))
     lines.append("- rustc: %s" % tools.get("rustc"))
     lines.append("- Python: %s" % tools.get("python"))
@@ -1223,8 +1372,8 @@ def render_markdown(results):
     )
     lines.append("")
     lines.append(
-        "| program | lsaca cold build | lsaca cached build | lsaca emit-c + gcc | "
-        "gcc -O2 | rustc -O | Python 3 | Node.js |"
+        "| program | lsaca cold build (default back end) | lsaca cached build | "
+        "lsaca emit-c + gcc | gcc -O2 | rustc -O | Python 3 | Node.js |"
     )
     lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for program in programs:
@@ -1242,8 +1391,11 @@ def render_markdown(results):
             cold = cached = fallback = "n/a"
         c_compile = (entry.get("c") or {}).get("compile") or {}
         rust_compile = (entry.get("rust") or {}).get("compile") or {}
+        label = program
+        if results["programs"][program].get("compile_only"):
+            label = program + " (compile-only)"
         row = [
-            program,
+            label,
             fmt_seconds(lsaca_compile.get("cold_s")),
             fmt_seconds(lsaca_compile.get("cached_median_s")),
             fallback,
@@ -1254,43 +1406,69 @@ def render_markdown(results):
         ]
         lines.append("| " + " | ".join(row) + " |")
     lines.append("")
-    if results["lsaca_build"].get("mode") == "fallback":
+    if results["lsaca_build"].get("mode") == "official":
         lines.append(
-            "> lsaca fallback: the official CMake-based build could not be driven in this "
-            "environment, so the lsaca numbers are lsaca emit-c plus a direct gcc -O2 -DNDEBUG "
-            "compile of the generated C. The official cold/cached columns are shown as n/a."
+            "> lsaca cold build: one default `lsaca build -r` from a fresh LSACA_CACHE_DIR. "
+            "Since 1.2 the default build back end is the compiler's built-in direct C compiler "
+            "back end: it emits the generated C and compiles it together with the cached runtime "
+            "translation units using gcc. The cached build repeats the command against the same "
+            "cache directory (the runtime objects and the content-addressed project are reused, "
+            "so it mostly just re-links). The compiler still supports the older CMake + Ninja "
+            "path via `lsaca build -r --cmake`; the harness does not measure it by default."
         )
         lines.append("")
-    lines.append("## Runtime (median (min), milliseconds; lower is better)")
-    lines.append("")
-    lines.append("| language | " + " | ".join(programs) + " |")
-    lines.append("| --- | " + " | ".join("---:" for _ in programs) + " |")
-    for language in languages:
-        cells = [LANGUAGE_LABELS[language]]
-        for program in programs:
-            record = results["programs"][program]["languages"].get(language) or {}
-            cells.append(fmt_runtime(record.get("runtime")))
-        lines.append("| " + " | ".join(cells) + " |")
-    lines.append("")
-    lines.append("## Peak memory (MiB, peak working set; lower is better)")
-    lines.append("")
-    lines.append("| language | " + " | ".join(programs) + " |")
-    lines.append("| --- | " + " | ".join("---:" for _ in programs) + " |")
-    for language in languages:
-        cells = [LANGUAGE_LABELS[language]]
-        for program in programs:
-            record = results["programs"][program]["languages"].get(language) or {}
-            cells.append(fmt_memory(record.get("memory")))
-        lines.append("| " + " | ".join(cells) + " |")
-    lines.append("")
+    if results["lsaca_build"].get("mode") == "fallback":
+        lines.append(
+            "> lsaca fallback: the default lsaca build could not be driven in this environment, "
+            "so the lsaca numbers are lsaca emit-c plus a direct gcc -O2 -DNDEBUG compile of the "
+            "generated C. The cold/cached columns are shown as n/a."
+        )
+        lines.append("")
+    if compile_only_programs:
+        lines.append(
+            "> %s: compile-only workload(s). They are generated sources used to measure "
+            "how the lsaca build time scales with program size; they are not executed in "
+            "the runtime or peak-memory tables."
+            % ", ".join(compile_only_programs)
+        )
+        lines.append("")
+    if runtime_programs:
+        lines.append("## Runtime (median (min), milliseconds; lower is better)")
+        lines.append("")
+        lines.append("| language | " + " | ".join(runtime_programs) + " |")
+        lines.append("| --- | " + " | ".join("---:" for _ in runtime_programs) + " |")
+        for language in languages:
+            cells = [LANGUAGE_LABELS[language]]
+            for program in runtime_programs:
+                record = results["programs"][program]["languages"].get(language) or {}
+                cells.append(fmt_runtime(record.get("runtime")))
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+        lines.append("## Peak memory (MiB, peak working set; lower is better)")
+        lines.append("")
+        lines.append("| language | " + " | ".join(runtime_programs) + " |")
+        lines.append("| --- | " + " | ".join("---:" for _ in runtime_programs) + " |")
+        for language in languages:
+            cells = [LANGUAGE_LABELS[language]]
+            for program in runtime_programs:
+                record = results["programs"][program]["languages"].get(language) or {}
+                cells.append(fmt_memory(record.get("memory")))
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
     lines.append("## Workloads")
     lines.append("")
     for program in programs:
         spec = results["programs"][program]
-        lines.append(
-            "- %s: %s; expected stdout %s"
-            % (program, spec["description"], spec["expected"])
-        )
+        if spec.get("compile_only"):
+            lines.append(
+                "- %s: %s; compile-only (expected stdout %s, not measured by this harness)"
+                % (program, spec["description"], spec["expected"])
+            )
+        else:
+            lines.append(
+                "- %s: %s; expected stdout %s"
+                % (program, spec["description"], spec["expected"])
+            )
     lines.append("")
     if results.get("warnings"):
         lines.append("## Warnings")
@@ -1326,14 +1504,14 @@ def parse_args(argv):
         "--build-mode",
         choices=["auto", "official", "fallback"],
         default="auto",
-        help="lsaca build strategy: auto tries the official CMake build then falls back; "
+        help="lsaca build strategy: auto tries the default lsaca build then falls back; "
         "official fails hard; fallback uses emit-c + gcc directly",
     )
     parser.add_argument(
         "--official-timeout",
         type=float,
         default=120.0,
-        help="timeout in seconds for one official lsaca build",
+        help="timeout in seconds for one default ('official') lsaca build",
     )
     parser.add_argument(
         "--run-timeout", type=float, default=180.0, help="timeout in seconds for one benchmark run"
@@ -1388,6 +1566,9 @@ def main(argv=None):
     if args.list:
         print("programs: " + ", ".join(PROGRAMS))
         print("languages: " + ", ".join(LANGUAGES))
+        compile_only = [name for name, spec in PROGRAMS.items() if spec.get("compile_only")]
+        if compile_only:
+            print("compile-only: " + ", ".join(compile_only))
         return 0
     root = Path(args.root).resolve() if args.root else REPO_ROOT
     if not (root / "benchmarks" / "programs").is_dir():

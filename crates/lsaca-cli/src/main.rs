@@ -62,16 +62,29 @@ fn dispatch(args: &[String]) -> CliResult {
         "emit-c" => command_emit_c(&args[1..]),
         "check" => command_check(&args[1..]),
         "version" | "--version" | "-V" => {
+            reject_extra_args("version", &args[1..])?;
             println!("lsaca {}", VERSION);
             Ok(0)
         }
         "help" | "--help" | "-h" => {
+            reject_extra_args("help", &args[1..])?;
             print_help();
             Ok(0)
         }
         other if other.ends_with(".ls") => command_run(args),
         other => Err(Cli::Usage(format!("unknown command '{}'", other))),
     }
+}
+
+/// Reject arguments for a command that takes none (`version` and `help`).
+fn reject_extra_args(command: &str, args: &[String]) -> Result<(), Cli> {
+    if let Some(arg) = args.first() {
+        return Err(Cli::Usage(format!(
+            "unexpected argument '{}' for 'lsaca {}'",
+            arg, command
+        )));
+    }
+    Ok(())
 }
 
 /// Parsed command line options shared by every command.
@@ -81,6 +94,7 @@ struct Options {
     verbose: bool,
     out: Option<PathBuf>,
     keep: bool,
+    cmake: bool,
     program_args: Vec<String>,
 }
 
@@ -91,6 +105,7 @@ fn parse_options(command: &str, args: &[String]) -> Result<Options, Cli> {
         verbose: false,
         out: None,
         keep: false,
+        cmake: false,
         program_args: Vec::new(),
     };
     let mut index = 0;
@@ -100,6 +115,15 @@ fn parse_options(command: &str, args: &[String]) -> Result<Options, Cli> {
             "--release" | "-r" => options.release = true,
             "--verbose" | "-v" => options.verbose = true,
             "--keep" => options.keep = true,
+            "--cmake" => {
+                if command != "run" && command != "build" {
+                    return Err(Cli::Usage(format!(
+                        "unknown option '--cmake' for 'lsaca {}'",
+                        command
+                    )));
+                }
+                options.cmake = true;
+            }
             "--help" | "-h" => return Err(Cli::Help),
             "-o" | "--out-dir" => {
                 index += 1;
@@ -155,7 +179,8 @@ fn command_run(args: &[String]) -> CliResult {
     let cache_root = build_cache(&options)?;
     let build = BuildOptions::new(program_name.clone())
         .release(options.release)
-        .verbose(options.verbose);
+        .verbose(options.verbose)
+        .use_cmake(options.cmake);
     let built = driver::build_with_cache(&generated, &build, &cache_root).map_err(|error| {
         Cli::Failure(format!(
             "failed to build {}: {}",
@@ -177,7 +202,8 @@ fn command_build(args: &[String]) -> CliResult {
     let cache_root = build_cache(&options)?;
     let build = BuildOptions::new(program_name.clone())
         .release(options.release)
-        .verbose(options.verbose);
+        .verbose(options.verbose)
+        .use_cmake(options.cmake);
     let built = driver::build_with_cache(&generated, &build, &cache_root).map_err(|error| {
         Cli::Failure(format!(
             "failed to build {}: {}",
@@ -360,6 +386,8 @@ OPTIONS:
     -o, --out-dir <DIR>          output directory for 'build' and 'emit-c'
     -v, --verbose                print the commands executed by the build
         --keep                   print the temporary build tree location
+        --cmake                  build via the generated CMake project instead
+                                 of the built-in direct C compiler back end
     -h, --help                   print this help
 
 EXIT CODES:
