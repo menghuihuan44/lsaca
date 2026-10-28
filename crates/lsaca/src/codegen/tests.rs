@@ -253,7 +253,7 @@ struct Node {
 fn main() {
     let a = Rc::new(Node { value: 1, next: None });
     let b = Rc::new(Node { value: 2, next: None });
-    let a2 = a;
+    let a2 = a.clone();
     b.set(Node { value: 2, next: Some(a2) });
     a.set(Node { value: 1, next: Some(b) });
     println!("{}", a.get().value);
@@ -351,7 +351,7 @@ struct Node {
 
 fn main() {
     let a = Box::new(10);
-    let mut b = a;
+    let mut b = a.clone();
     b.set(20);
     println!("{} {}", a.get(), b.get());
     println!("{}", b == Box::new(20));
@@ -491,45 +491,111 @@ fn iterates_a_local_vector_in_place() {
     let (main_c, _) = generate_source("for_vec_in_place_fixture", FOR_VEC_IN_PLACE_PROGRAM, true);
     let body = main_function_body(&main_c);
 
+    // for ... in vec consumes the vector: its value is moved into the loop
+    // temporary and the source local is cleared, so the loop can iterate the
+    // owned buffer without copying it.
     assert!(
         !body.contains("lsaca_copy_Vec_i64("),
         "the loop snapshotted the vector:\n{body}"
     );
     assert!(
-        body.contains(">= (v1).len) break;"),
-        "the loop does not read the vector length in place:\n{body}"
+        body.contains("= ((LsVec_i64){0});"),
+        "the consumed vector local is not cleared:\n{body}"
     );
     assert!(
-        body.contains("= (v1).data[i"),
+        body.contains(".len) break;"),
+        "the loop does not read the consumed vector length:\n{body}"
+    );
+    assert!(
+        body.contains(").data[i"),
         "the loop does not index the vector buffer directly:\n{body}"
+    );
+    assert!(
+        body.contains(").len = 0;"),
+        "the exhausted vector is not emptied after the loop:\n{body}"
+    );
+    assert!(
+        body.contains("_live = false;"),
+        "the moved vector local keeps its live flag:\n{body}"
     );
 }
 
-const FOR_VEC_SNAPSHOT_PROGRAM: &str = r#"
+const FOR_VEC_TRANSFER_PROGRAM: &str = r#"
 fn main() {
-    let mut values: Vec<i64> = Vec::new();
-    values.push(1);
-    values.push(2);
-    let mut sum = 0;
-    for value in values {
-        sum += value + values.len();
+    let mut names: Vec<String> = Vec::new();
+    names.push(String::from("a"));
+    names.push(String::from("b"));
+    let mut total = String::new();
+    for name in names {
+        total.push_str(name);
     }
-    println!("{}", sum);
+    println!("{}", total);
 }
 "#;
 
 #[test]
-fn snapshots_a_local_vector_when_the_body_references_it() {
-    let (main_c, _) = generate_source("for_vec_snapshot_fixture", FOR_VEC_SNAPSHOT_PROGRAM, true);
+fn transfers_elements_out_of_a_consumed_vector() {
+    let (main_c, _) = generate_source("for_vec_transfer_fixture", FOR_VEC_TRANSFER_PROGRAM, true);
     let body = main_function_body(&main_c);
 
+    // Each element is moved out of the buffer slot and the slot is cleared, so
+    // the vector teardown cannot release the element a second time.
     assert!(
-        body.contains("= lsaca_copy_Vec_i64(v1);"),
-        "the loop mutates or aliases the vector but no snapshot is taken:\n{body}"
+        body.contains(").data[i"),
+        "the loop does not index the consumed vector buffer:\n{body}"
     );
     assert!(
-        body.contains(">= (t"),
-        "the loop does not iterate the snapshot:\n{body}"
+        body.contains("= NULL;"),
+        "the transferred element slot is not cleared:\n{body}"
+    );
+    assert!(
+        body.contains(").len = 0;"),
+        "the exhausted vector is not emptied after the loop:\n{body}"
+    );
+    // No snapshot copy of the vector is taken anymore.
+    assert!(
+        !body.contains("lsaca_copy_Vec_String("),
+        "the loop snapshotted the vector:\n{body}"
+    );
+    // Nothing is left to release, so no break cleanup loop is emitted.
+    assert!(
+        !body.contains("+ 1; k"),
+        "a cleanup loop was emitted for a loop without break:\n{body}"
+    );
+}
+
+const FOR_VEC_BREAK_PROGRAM: &str = r#"
+fn main() {
+    let mut names: Vec<String> = Vec::new();
+    names.push(String::from("a"));
+    names.push(String::from("b"));
+    names.push(String::from("c"));
+    for name in names {
+        println!("{}", name);
+        break;
+    }
+}
+"#;
+
+#[test]
+fn releases_the_remaining_elements_when_a_vector_loop_breaks() {
+    let (main_c, _) = generate_source("for_vec_break_fixture", FOR_VEC_BREAK_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // A break leaves the elements after the current slot untransferred. A
+    // cleanup loop releases them (starting after the current element, whose
+    // slot was already cleared) before the vector buffer itself is freed.
+    assert!(
+        body.contains("+ 1; k"),
+        "the break path does not release the tail elements:\n{body}"
+    );
+    assert!(
+        body.contains(".len; k"),
+        "the cleanup loop does not walk the remembered length:\n{body}"
+    );
+    assert!(
+        body.contains(").len = 0;"),
+        "the exhausted vector is not emptied after the loop:\n{body}"
     );
 }
 
@@ -661,5 +727,426 @@ fn trivially_copyable_elements_skip_deep_copy_and_release_loops() {
     assert!(
         !body.contains("lsaca_copy_Vec_Point("),
         "the loop copied the vector of trivially copyable elements:\n{body}"
+    );
+}
+
+const DROP_HOOK_PROGRAM: &str = r#"
+struct Holder {
+    name: String,
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        println!("dropping {}", self.name);
+    }
+}
+
+fn main() {
+    let holder = Holder { name: String::from("h") };
+    println!("{}", holder.name);
+}
+"#;
+
+#[test]
+fn releases_through_drop_hooks_before_owning_fields() {
+    let (main_c, _) = generate_source("drop_hook_fixture", DROP_HOOK_PROGRAM, true);
+
+    // The release helper runs the user hook first and only then releases the
+    // owning fields, so the hook observes a fully initialised value.
+    let helper = "void lsaca_release_Holder(LsHolder v) {";
+    let start = main_c
+        .find(helper)
+        .unwrap_or_else(|| panic!("the Holder release helper is missing:\n{main_c}"));
+    let tail = &main_c[start..];
+    let end = tail
+        .find("\n}")
+        .expect("the release helper is unterminated");
+    let body = &tail[..end];
+    let hook = body
+        .find("lsaca_fn_Holder_drop(&v);")
+        .unwrap_or_else(|| panic!("the drop hook is not called:\n{body}"));
+    let field = body
+        .find("ls_release((void*)(v.f_name));")
+        .unwrap_or_else(|| panic!("the owning field is not released:\n{body}"));
+    assert!(
+        hook < field,
+        "the drop hook must run before the owning fields are released:\n{body}"
+    );
+    assert!(
+        main_c.contains("LsUnit lsaca_fn_Holder_drop(LsHolder* p0);"),
+        "the drop hook is not declared"
+    );
+    // The local is released through its live flag at the end of main.
+    assert!(
+        main_c.contains("if (v1_live) {") && main_c.contains("lsaca_release_Holder(v1);"),
+        "the local holder is not released through its live flag:\n{main_c}"
+    );
+}
+
+const ENUM_DROP_HOOK_PROGRAM: &str = r#"
+enum Shape {
+    Circle(i64),
+    Empty,
+}
+
+impl Drop for Shape {
+    fn drop(&mut self) {
+        println!("drop shape");
+    }
+}
+
+fn main() {
+    let circle = Shape::Circle(3);
+    match circle {
+        Shape::Circle(radius) => println!("{}", radius),
+        Shape::Empty => println!("empty"),
+    }
+}
+"#;
+
+#[test]
+fn releases_enums_through_drop_hooks_before_payloads() {
+    let (main_c, _) = generate_source("enum_drop_hook_fixture", ENUM_DROP_HOOK_PROGRAM, true);
+
+    assert!(
+        main_c.contains(
+            "void lsaca_release_Shape(LsShape v) {\n  lsaca_fn_Shape_drop(&v);\n  switch (v.tag) {"
+        ),
+        "the enum drop hook does not run before the payload switch:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("LsUnit lsaca_fn_Shape_drop(LsShape* p0);"),
+        "the enum drop hook is not declared"
+    );
+}
+
+const MOVE_BINDING_PROGRAM: &str = r#"
+struct Holder {
+    name: String,
+}
+
+fn main() {
+    let holder = Holder { name: String::from("h") };
+    let other = holder;
+    println!("{}", other.name);
+}
+"#;
+
+#[test]
+fn moves_owned_bindings_and_clears_the_source() {
+    let (main_c, _) = generate_source("move_binding_fixture", MOVE_BINDING_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // Both owned locals are predeclared zeroed with a live flag.
+    assert!(
+        body.contains("bool v1_live = false;"),
+        "the moved-from local has no live flag:\n{body}"
+    );
+    assert!(
+        body.contains("bool v2_live = false;"),
+        "the moved-to local has no live flag:\n{body}"
+    );
+    // A move transfers the value and clears the source; no deep copy is made.
+    assert!(
+        !body.contains("lsaca_copy_Holder("),
+        "binding by move copied the value:\n{body}"
+    );
+    assert!(
+        body.contains("v1 = ((LsHolder){0});"),
+        "the moved-from local is not cleared:\n{body}"
+    );
+    assert!(
+        body.contains("v1_live = false;"),
+        "the moved-from local keeps its live flag:\n{body}"
+    );
+    // Cleanup is guarded by liveness so the value is released exactly once.
+    assert!(
+        body.contains("if (v2_live) {"),
+        "the moved-to local is not released through its live flag:\n{body}"
+    );
+}
+
+const CLONE_PROGRAM: &str = r#"
+struct Pair {
+    a: i64,
+    b: i64,
+}
+
+fn main() {
+    let pair = Pair { a: 1, b: 2 };
+    let copy = pair.clone();
+    let number = 5;
+    let same = number.clone();
+    let text = String::from("x");
+    let owned = text.clone();
+    println!("{} {} {} {}", pair.a, copy.b, same, owned);
+}
+"#;
+
+#[test]
+fn clones_copy_receivers_by_assignment_and_managed_receivers_by_retain() {
+    let (main_c, _) = generate_source("clone_fixture", CLONE_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // Copy receivers are copied with a plain assignment and no helper call.
+    assert!(
+        !body.contains("lsaca_copy_Pair("),
+        "cloning a Copy struct called the deep copy helper:\n{body}"
+    );
+    assert!(
+        body.contains("v2 = v1;"),
+        "the Copy struct clone is not a plain assignment:\n{body}"
+    );
+    assert!(
+        body.contains("v4 = v3;"),
+        "the Copy scalar clone is not a plain assignment:\n{body}"
+    );
+    // The String clone retains the shared buffer instead of deep copying it.
+    assert!(
+        body.contains("v6 = ((LsString*)ls_retain((void*)(v5)));"),
+        "the String clone does not retain the handle:\n{body}"
+    );
+    assert!(
+        !body.contains("ls_str_clone(v5)"),
+        "the String clone deep copied the bytes:\n{body}"
+    );
+}
+
+const MOVE_OPTION_PROGRAM: &str = r#"
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+impl Drop for Point {
+    fn drop(&mut self) {
+        println!("drop {}", self.x);
+    }
+}
+
+fn main() {
+    let point = Point { x: 7, y: 0 };
+    let option: Option<Point> = Some(point);
+    let value = option.unwrap();
+    println!("{}", value.x);
+}
+"#;
+
+#[test]
+fn moves_the_payload_out_of_a_consumed_option() {
+    let (main_c, _) = generate_source("unwrap_fixture", MOVE_OPTION_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // The option is moved into a shell temp whose tag is checked first, then
+    // the payload is moved straight out without a deep copy.
+    assert!(
+        body.contains("= ((LsOpt_Point){0});"),
+        "the consumed option shell is not zeroed:\n{body}"
+    );
+    assert!(
+        body.contains(").u.some;"),
+        "the payload is not moved out of the shell:\n{body}"
+    );
+    assert!(
+        !body.contains("lsaca_copy_Opt_Point("),
+        "the consumed option was copied:\n{body}"
+    );
+    assert!(
+        !body.contains("lsaca_copy_Point("),
+        "the unwrapped payload was copied:\n{body}"
+    );
+    // The moved payload local is released through its live flag.
+    assert!(
+        body.contains("if (v3_live) {"),
+        "the moved payload is not released through its live flag:\n{body}"
+    );
+}
+
+const CLOSURE_CAPTURE_PROGRAM: &str = r#"
+fn main() {
+    let text = String::from("captured");
+    let show = || {
+        println!("{}", text);
+    };
+    show();
+}
+"#;
+
+#[test]
+fn closure_captures_move_owned_locals_into_the_environment() {
+    let (main_c, _) = generate_source("closure_capture_fixture", CLOSURE_CAPTURE_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // The owned capture is moved into its environment slot and the local is
+    // cleared, so the environment drop function releases it exactly once.
+    assert!(
+        body.contains("->c0 = v1;"),
+        "the capture was not moved into the environment:\n{body}"
+    );
+    assert!(
+        body.contains("v1 = NULL;"),
+        "the moved capture local is not cleared:\n{body}"
+    );
+    assert!(
+        body.contains("v1_live = false;"),
+        "the moved capture local keeps its live flag:\n{body}"
+    );
+    assert!(
+        main_c.contains("void lsaca_env_drop_0(void* self) {"),
+        "the closure environment has no drop function"
+    );
+    assert!(
+        main_c.contains("ls_release((void*)(env1->c0));"),
+        "the closure environment does not release the capture"
+    );
+}
+
+const RETURN_MOVE_PROGRAM: &str = r#"
+fn pick(flag: bool, a: String, b: String) -> String {
+    if flag {
+        a
+    } else {
+        b
+    }
+}
+
+fn main() {
+    let value = pick(true, String::from("A"), String::from("B"));
+    println!("{}", value);
+}
+"#;
+
+#[test]
+fn returns_tail_values_by_moving_them() {
+    let (main_c, _) = generate_source("return_move_fixture", RETURN_MOVE_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // The call result is moved straight into the local's slot and becomes
+    // live there, without an intermediate owned temporary.
+    assert!(
+        body.contains("= lsaca_fn_pick("),
+        "the returned value is not moved into its local:\n{body}"
+    );
+    assert!(
+        body.contains("v1_live = true;"),
+        "the local receiving the returned value is not marked live:\n{body}"
+    );
+
+    // Both tail expressions move their parameter into the result slot and
+    // clear the parameter, so the guarded parameter release is skipped.
+    assert!(
+        main_c.contains("result1 = p1;"),
+        "the then tail does not move its parameter into the result:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("result1 = p2;"),
+        "the else tail does not move its parameter into the result:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("p1 = NULL;"),
+        "the moved tail parameter is not cleared:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("if (p1_live) {"),
+        "the parameter release is not guarded by its live flag:\n{main_c}"
+    );
+}
+
+const MUT_HEAP_REFS_PROGRAM: &str = r#"
+fn append(text: &mut String, names: &mut Vec<String>) {
+    text.push_str("!");
+    names.push(String::from("x"));
+}
+
+fn main() {
+    let mut text = String::from("hi");
+    let mut names: Vec<String> = Vec::new();
+    append(&mut text, &mut names);
+    println!("{} {}", text, names.len());
+}
+"#;
+
+#[test]
+fn mutates_heap_values_through_mutable_references() {
+    let (main_c, _) = generate_source("mut_heap_refs_fixture", MUT_HEAP_REFS_PROGRAM, true);
+
+    assert!(
+        main_c.contains("LsUnit lsaca_fn_append(LsString** p0, LsVec_String* p1);"),
+        "the mutable reference parameters are not emitted as mutable pointers"
+    );
+    // Mutating methods write through the reference without copying or
+    // releasing the referent. The receiver is loaded into a pointer temp that
+    // is dereferenced in place, so the mutation reaches the caller's value.
+    assert!(
+        main_c.contains("= ls_str_push_str((*("),
+        "the String mutation does not write through the reference:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("ls_vec_string_push(&((*("),
+        "the Vec mutation does not write through the reference:\n{main_c}"
+    );
+    // The mutable reference parameters are aliased, not copied: the receiver
+    // temp is initialised from the parameter itself.
+    assert!(
+        main_c.contains("t2 = p0;"),
+        "the String reference parameter is not loaded directly:\n{main_c}"
+    );
+}
+
+const DROP_MATCH_PROGRAM: &str = r#"
+struct Loud {
+    name: String,
+}
+
+impl Drop for Loud {
+    fn drop(&mut self) {
+        println!("drop {}", self.name);
+    }
+}
+
+fn main() {
+    let first = Loud { name: String::from("a") };
+    match first {
+        value => {
+            println!("bound {}", value.name);
+        }
+    }
+    let second = Loud { name: String::from("b") };
+    match second {
+        value if value.name == "zzz" => {
+            println!("never {}", value.name);
+        }
+        other => {
+            println!("fallback {}", other.name);
+        }
+    }
+}
+"#;
+
+#[test]
+fn match_whole_value_bindings_move_from_the_scrutinee() {
+    let (main_c, _) = generate_source("drop_match_fixture", DROP_MATCH_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // A whole-value by-value binding of a non-Copy scrutinee moves the value
+    // out of the owning local: copying would release it twice and run a Drop
+    // hook twice. This mirrors Rust's move semantics for pattern bindings.
+    assert!(
+        !body.contains("lsaca_copy_Loud("),
+        "a whole-value match binding copied the value instead of moving it:\n{body}"
+    );
+    assert!(
+        body.contains("_live = true;"),
+        "the moved binding is not marked live:\n{body}"
+    );
+    assert!(
+        body.contains("_live = false;"),
+        "the moved-from scrutinee is not marked dead:\n{body}"
+    );
+    // The scrutinee value is owned by a local with a live flag, so every exit
+    // (normal match end, guard restore, return, break) drops it exactly once.
+    assert!(
+        body.contains("if (t") && body.contains("lsaca_release_Loud(t"),
+        "the scrutinee release is not guarded by its live flag:\n{body}"
     );
 }

@@ -9,30 +9,31 @@ the result is a normal native executable. CMake is optional: pass `--cmake` to
 build through the emitted CMake project instead.
 
 This documentation set is the reference for the language as of **version
-1.3.0**. It is split into short pages, one per topic, so you can read it
+1.4.0**. It is split into short pages, one per topic, so you can read it
 linearly from [Getting started](language/01-getting-started.md) or jump straight
 to the part you need. Every runnable example on these pages has been executed
-with the 1.3.0 compiler and shows its real output.
+with the 1.4.0 compiler and shows its real output.
 
 ## Why lsaca?
 
 * **Rust's ergonomics, none of Rust's ceremony.** The syntax is deliberately
   familiar: `fn`, `let`, `struct`, `enum`, `impl`, `match`, closures, the same
-  operator set and the same expression-oriented style. Version 1.3 adds
-  references (`&T`, `&mut T`) and a lightweight borrow checker that enforces
-  aliasing, but there are still no lifetimes, no move semantics and no ownership
-  annotations to fight.
+  operator set and the same expression-oriented style. Version 1.4 adds
+  ownership and move semantics, automatically derived `Copy` and `Clone`, the
+  `Drop` trait and mutable references to owned heap types. `Copy` and `Clone`
+  are derived for you and there are still no lifetime annotations to write.
 * **Memory safety without a tracing garbage collector.** Values are managed by
   **ORC**: automatic reference counting plus a trial-deletion (Bacon-Rajan)
-  cycle collector. Acyclic data is freed deterministically when its last handle
-  goes away, cycles are collected automatically, and there is no stop-the-world
+  cycle collector. Ownership decides when a value can be moved and when
+  `Drop` runs; acyclic data is freed deterministically when its last owner is
+  released, cycles are collected automatically, and there is no stop-the-world
   tracing GC.
 * **A small, complete language.** One source file is one compilation unit. The
   items are `fn`, `struct`, `enum`, `impl`, `const` and `type`; the standard
   library is built in: `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`,
   `Rc<T>` and `Box<T>`. Version 1.2 added the postfix `?` operator and the
-  Option/Result combinators, so fallible code reads like Rust without any
-  imports; version 1.3 adds non-owning references and borrowing.
+  Option/Result combinators; 1.3 added non-owning references and borrowing; 1.4
+  adds ownership, moves, `.clone()` and `Drop`.
 * **Predictable native output, built directly.** The compiler emits readable
   C17 plus a small vendored runtime; by default it compiles and links that C
   itself, with no CMake, no Ninja and no extra configuration step. It also
@@ -40,15 +41,15 @@ with the 1.3.0 compiler and shows its real output.
   or embedded in another build, and `--cmake` builds through it when you want
   the platform's CMake pipeline.
 * **Fast builds.** On the reference machine a cold build of a benchmark program
-  takes roughly 1.2-1.7 s (about 4.0 s for the deliberately large `compile_large`
-  program), and a cached rebuild of an unchanged program takes 22-45 ms (0.31 s
-  for `compile_large`). Runtime objects are compiled once per profile and
-  reused.
+  takes about 1.0-1.3 s on the 1.4.0 toolchain (4.03 s for the deliberately large
+  `compile_large` program, which emits about 1.05 MB of C), and a cached rebuild
+  of an unchanged program takes 20-36 ms (0.32 s for `compile_large`). Runtime
+  objects are compiled once per profile and reused.
 * **A useful subset, honestly documented.** Version 1.1.0 added `Box<T>` and
-  format widths/precision; 1.2.0 added `?` and the combinators; 1.3.0 adds
-  references and the borrow checker. Known
-  implementation limitations are listed in
-  [Roadmap and differences from Rust](language/15-roadmap.md) rather than
+  format widths/precision; 1.2.0 added `?` and the combinators; 1.3.0 added
+  references and the borrow checker; 1.4.0 adds ownership, moves, `.clone()` and
+  `Drop`. Known implementation limitations are listed in
+  [Roadmap and differences from Rust](language/16-roadmap.md) rather than
   hidden.
 
 A first taste:
@@ -69,7 +70,12 @@ fn main() {
 ```
 
 That program prints `Some(2) None` then `hello, world`, and is explained step by
-step in [Getting started](language/01-getting-started.md).
+step in [Getting started](language/01-getting-started.md). Because ownership is
+new in 1.4.0, a program that reuses a heap value after giving it away needs an
+explicit `.clone()`; see [Ownership and moves](language/11-ownership-and-moves.md).
+More complete programs live in the repository's `examples/` directory, including
+[`examples/ownership.ls`](../examples/ownership.ls), which demonstrates moves,
+`.clone()` and a `Drop` hook end to end.
 
 ## Documentation map
 
@@ -82,19 +88,20 @@ reference material.
 | [01 Getting started](language/01-getting-started.md) | Requirements, building the compiler, the first program, the direct and CMake backends, the CLI and exit codes. |
 | [02 Program structure](language/02-program-structure.md) | Compilation units, the six item kinds, `main`, nesting and the complete EBNF grammar. |
 | [03 Lexical structure](language/03-lexical-structure.md) | Identifiers, keywords, comments, integer/float/string literals, escapes and booleans. |
-| [04 Types](language/04-types.md) | Primitive and builtin types, tuples, function types, `Self`, type inference and `as` casts. |
-| [05 Memory model](language/05-memory-model.md) | ORC: reference counting, copy-on-write, value semantics, `Box<T>`, `Rc<T>` cycles, the cycle collector and leak tracking. |
-| [06 Variables and mutability](language/06-variables-and-mutability.md) | `let`, `let mut`, shadowing, assignment, compound assignment and `const`. |
+| [04 Types](language/04-types.md) | Primitive and builtin types, `Copy` and move-only types, tuples, function types, `Self`, type inference and `as` casts. |
+| [05 Memory model](language/05-memory-model.md) | Ownership, moves, `Drop`, ORC reference counting, copy-on-write, `Box<T>`, `Rc<T>` cycles, the cycle collector and leak tracking. |
+| [06 Variables and mutability](language/06-variables-and-mutability.md) | `let`, `let mut`, shadowing, assignment (which moves), compound assignment and `const`. |
 | [07 Operators](language/07-operators.md) | The full precedence table, arithmetic (including overflow), bitwise and boolean operators, comparisons, casts and `?`. |
-| [08 Statements and control flow](language/08-statements-and-control-flow.md) | Blocks, `if`/`else`, `loop`, `while`, `for`, ranges, `if let`, `while let` and `return`. |
-| [09 Functions](language/09-functions.md) | Declarations, parameters, recursion, function values, early returns and the restrictions on `main`. |
-| [10 Structs, enums and impl](language/10-structs-enums-and-impl.md) | Data declarations, literals, methods and associated functions, receivers and value semantics. |
-| [11 References and borrowing](language/11-references-and-borrowing.md) | `&T`/`&mut T`, borrow expressions and dereferencing, the aliasing rules, reference parameters and returns, match ergonomics and how references interact with ORC. |
-| [12 Pattern matching](language/12-pattern-matching.md) | All pattern forms including or-patterns and `match` guards, exhaustiveness, refutability and unreachable arms. |
-| [13 Closures](language/13-closures.md) | Closure syntax and types, capture semantics, mutation, `move`, and using `Rc<T>` for shared state. |
-| [14 Standard library](language/14-standard-library.md) | Formatting (widths/precision), `String`, `Vec`, `Option` and `Result` with their combinators, `?`, `Rc`, `Box`, free functions and panics. |
-| [15 Roadmap and differences](language/15-roadmap.md) | How lsaca deliberately differs from Rust, verified limitations of the current release and what comes next. |
-| [16 Benchmarks](language/16-benchmarks.md) | Measured compile times, runtime and memory against C, Rust, Python and Node. |
+| [08 Statements and control flow](language/08-statements-and-control-flow.md) | Blocks, `if`/`else`, `loop`, `while`, `for` (which moves a `Vec`), ranges, `if let`, `while let` and `return`. |
+| [09 Functions](language/09-functions.md) | Declarations, parameters (by value, which moves), recursion, function values, early returns and the restrictions on `main`. |
+| [10 Structs, enums and impl](language/10-structs-enums-and-impl.md) | Data declarations, literals, methods and associated functions, receivers, `Drop`, `.clone()` and value semantics. |
+| [11 Ownership and moves](language/11-ownership-and-moves.md) | `Copy` versus move-only types, consuming contexts, move errors, `Drop`, drop order, `.clone()` semantics and how moves interact with references and ORC. |
+| [12 References and borrowing](language/12-references-and-borrowing.md) | `&T`/`&mut T`, borrow expressions and dereferencing, the aliasing rules, reference parameters and returns, match ergonomics, mutable heap references and how references interact with ORC. |
+| [13 Pattern matching](language/13-pattern-matching.md) | All pattern forms including or-patterns and `match` guards, exhaustiveness, refutability, unreachable arms and moves in patterns. |
+| [14 Closures](language/14-closures.md) | Closure syntax and types, capture by value (copy or move), mutation, `move`, and using `Rc<T>` for shared state. |
+| [15 Standard library](language/15-standard-library.md) | Formatting (widths/precision), `String`, `Vec`, `Option` and `Result` with their combinators, `?`, `Rc`, `Box`, `.clone()`, free functions and panics. |
+| [16 Roadmap and differences](language/16-roadmap.md) | How lsaca deliberately differs from Rust, verified limitations of the current release and what comes next. |
+| [17 Benchmarks](language/17-benchmarks.md) | Measured compile times, runtime and memory against C, Rust, Python and Node. |
 
 ## Building the compiler
 

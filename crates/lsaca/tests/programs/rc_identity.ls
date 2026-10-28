@@ -3,7 +3,7 @@
 // equal, and comparing the handles of a cycle terminates.
 fn main() {
     let a = Rc::new(10);
-    let b = a;
+    let b = a.clone();
     let c = Rc::new(10);
     println!("{}", a == b);
     println!("{}", a == c);

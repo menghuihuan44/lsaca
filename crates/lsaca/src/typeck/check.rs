@@ -114,6 +114,16 @@ pub struct Checker<'a> {
     pub pattern_binding_mode: Option<bool>,
     /// Provenance of reference-valued locals of the function being checked.
     pub ref_local_sources: HashMap<String, Provenance>,
+    /// Drop hook (a method id in `fns`) for every struct, filled in by
+    /// `impl Drop for T` registration. `None` means the type has no user drop
+    /// glue of its own (its fields may still have some).
+    pub drop_structs: Vec<Option<usize>>,
+    /// Drop hook (a method id in `fns`) for every enum, see [Self::drop_structs].
+    pub drop_enums: Vec<Option<usize>>,
+    /// How many compound pattern layers (tuple/struct/variant/or) enclose the
+    /// pattern currently being checked. A by-value binding of a type with drop
+    /// glue below such a layer is E0509.
+    pub pattern_nesting: usize,
 }
 
 impl<'a> Checker<'a> {
@@ -145,6 +155,9 @@ impl<'a> Checker<'a> {
             in_const: false,
             pattern_binding_mode: None,
             ref_local_sources: HashMap::new(),
+            drop_structs: Vec::new(),
+            drop_enums: Vec::new(),
+            pattern_nesting: 0,
         }
     }
 

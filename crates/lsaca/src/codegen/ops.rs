@@ -4,60 +4,12 @@
 
 use crate::codegen::types::TypeNames;
 use crate::codegen::util;
-use crate::hir;
 use crate::types::Ty;
 
 /// True when values of this type own heap resources (and therefore need
 /// copy/release operations).
 pub fn is_managed(ty: &Ty) -> bool {
     !ty.is_bitwise_copy()
-}
-
-/// True when values of this type own no reference counted resources at any
-/// depth, so that copying is a plain C assignment and releasing is a no-op.
-///
-/// This is stricter than [`Ty::is_bitwise_copy`]: user structs and enums made
-/// only of scalars are trivially copyable too, even though they are emitted as
-/// named C structs and get generated debug / equality helpers.
-pub fn is_trivially_copyable(program: &hir::Program, ty: &Ty) -> bool {
-    fn trivial(program: &hir::Program, ty: &Ty, depth: u32) -> bool {
-        if depth > 32 {
-            return false;
-        }
-        match ty {
-            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::Ref { .. } => true,
-            Ty::String | Ty::Vec(_) | Ty::Fn(_, _) | Ty::Rc(_) | Ty::Box(_) => false,
-            Ty::Option(inner) => trivial(program, inner, depth + 1),
-            Ty::Result(ok, error) => {
-                trivial(program, ok, depth + 1) && trivial(program, error, depth + 1)
-            }
-            Ty::Tuple(elements) => elements
-                .iter()
-                .all(|element| trivial(program, element, depth + 1)),
-            Ty::Struct(index) => program
-                .structs
-                .get(*index)
-                .map(|item| {
-                    item.fields
-                        .iter()
-                        .all(|field| trivial(program, &field.ty, depth + 1))
-                })
-                .unwrap_or(false),
-            Ty::Enum(index) => program
-                .enums
-                .get(*index)
-                .map(|item| {
-                    item.variants.iter().all(|variant| {
-                        variant
-                            .fields
-                            .iter()
-                            .all(|field| trivial(program, field, depth + 1))
-                    })
-                })
-                .unwrap_or(false),
-        }
-    }
-    trivial(program, ty, 0)
 }
 
 /// True when the type is the runtime provided frozen instantiation

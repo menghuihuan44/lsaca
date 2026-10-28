@@ -1,6 +1,6 @@
 //! Expressions: places, operators, casts, calls and aggregate literals.
 
-use crate::hir::{HBinaryOp, HExpr, HFieldRef, HUnaryOp};
+use crate::hir::{HBinaryOp, HExpr, HExprKind, HFieldRef, HUnaryOp};
 use crate::span::Span;
 use crate::types::{FloatTy, IntTy, SelfKind, Ty};
 
@@ -129,8 +129,10 @@ impl<'a> Gen<'a> {
         target: &str,
         span: Span,
     ) {
-        let left = self.gen_owned(lhs);
-        let right = self.gen_owned(rhs);
+        // Operands of every binary operator are borrowed: comparisons read
+        // through references and the string operators never take ownership.
+        let left = self.gen_borrowed(lhs);
+        let right = self.gen_borrowed(rhs);
         let operand_ty = lhs.ty.clone();
         let result_ty = ty.clone();
         let expression = self.binop_value(op, &operand_ty, &result_ty, &left, &right, span);
@@ -301,10 +303,30 @@ impl<'a> Gen<'a> {
         let place_ty = place.ty.clone();
         match op {
             None => {
-                let stored = self.gen_owned(value);
-                self.emit_release(&place_ty, &lvalue);
+                // The right-hand side of an assignment is a consuming context:
+                // transfer it into a temporary first so the old place can be
+                // released without observing a partially written value.
+                let stored = if self.is_trivial_copy(&place_ty) {
+                    self.gen_owned(value)
+                } else {
+                    let stored = self.declare_temp(&place_ty);
+                    self.gen_move_into(value, &stored);
+                    stored
+                };
+                if let HExprKind::Local { c_name, .. } = &place.kind {
+                    self.emit_release_guarded(
+                        &place_ty,
+                        &lvalue,
+                        self.live_flag(c_name).as_deref(),
+                    );
+                } else {
+                    self.emit_release(&place_ty, &lvalue);
+                }
                 self.w.line(format!("{} = {};", lvalue, stored));
                 self.mark_moved(&stored);
+                if let HExprKind::Local { c_name, .. } = &place.kind {
+                    self.set_live(c_name, true);
+                }
             }
             Some(binop) => {
                 let old = self.declare_temp(&place_ty);
@@ -349,10 +371,30 @@ impl<'a> Gen<'a> {
     // ----- calls -----------------------------------------------------------
 
     pub(crate) fn gen_call(&mut self, callee: &HExpr, args: &[HExpr], ty: &Ty, target: &str) {
+        // Calling a function value does not consume it: the handle is copied
+        // (retained) and released by the enclosing statement.
         let function = self.gen_owned(callee);
+        let param_types: Vec<Ty> = match &callee.ty {
+            Ty::Fn(params, _) => params.clone(),
+            _ => Vec::new(),
+        };
         let mut argument_values = Vec::with_capacity(args.len());
-        for argument in args {
-            argument_values.push(self.gen_owned(argument));
+        for (index, argument) in args.iter().enumerate() {
+            let param = param_types
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| argument.ty.clone());
+            if param.is_ref() {
+                argument_values.push(self.gen_borrowed(argument));
+            } else if self.is_trivial_copy(&param) {
+                argument_values.push(self.gen_owned(argument));
+            } else {
+                // By-value argument of a managed type: ownership moves into
+                // the callee, so it is transferred into a fresh temporary.
+                let value = self.declare_temp(&param);
+                self.gen_move_into(argument, &value);
+                argument_values.push(value);
+            }
         }
         let mut call = format!("({}).fn_ptr(({}).env", function, function);
         for argument in &argument_values {
@@ -432,17 +474,34 @@ impl<'a> Gen<'a> {
                         arguments.push(copy.clone());
                         moved_values.push(copy);
                     } else {
-                        let value = self.gen_owned(receiver_expr);
+                        // A by-value receiver is consumed: transfer ownership
+                        // into a temporary that the callee takes over.
+                        let value = self.declare_temp(&self_ty);
+                        self.gen_move_into(receiver_expr, &value);
                         arguments.push(value.clone());
                         moved_values.push(value);
                     }
                 }
             }
         }
-        for argument in args {
-            let value = self.gen_owned(argument);
-            arguments.push(value.clone());
-            moved_values.push(value);
+        let receiver_params = usize::from(item.self_kind.is_some());
+        for (index, argument) in args.iter().enumerate() {
+            let param = item
+                .params
+                .get(index + receiver_params)
+                .map(|parameter| parameter.ty.clone())
+                .unwrap_or_else(|| argument.ty.clone());
+            if param.is_ref() {
+                arguments.push(self.gen_borrowed(argument));
+            } else if self.is_trivial_copy(&param) {
+                let value = self.gen_owned(argument);
+                arguments.push(value);
+            } else {
+                let value = self.declare_temp(&param);
+                self.gen_move_into(argument, &value);
+                arguments.push(value.clone());
+                moved_values.push(value);
+            }
         }
         let call = format!("{}({})", item.c_name, arguments.join(", "));
         if ty.is_unit() {
@@ -514,27 +573,15 @@ impl<'a> Gen<'a> {
                 .and_then(|item| item.fields.get(*index))
                 .map(|field| field.name.clone())
                 .unwrap_or_else(|| format!("field{}", index));
-            let value = self.gen_owned(expression);
-            self.w.line(format!(
-                "{}.{} = {};",
-                target,
-                types::field_cname(&name),
-                value
-            ));
-            self.mark_moved(&value);
+            let field = format!("{}.{}", target, types::field_cname(&name));
+            self.gen_move_into(expression, &field);
         }
     }
 
     pub(crate) fn gen_tuple(&mut self, elems: &[HExpr], _ty: &Ty, target: &str) {
         for (index, element) in elems.iter().enumerate() {
-            let value = self.gen_owned(element);
-            self.w.line(format!(
-                "{}.{} = {};",
-                target,
-                types::positional_field(index),
-                value
-            ));
-            self.mark_moved(&value);
+            let field = format!("{}.{}", target, types::positional_field(index));
+            self.gen_move_into(element, &field);
         }
     }
 
@@ -550,10 +597,8 @@ impl<'a> Gen<'a> {
             self.w.line(format!("{}.cap = (size_t){};", target, count));
         }
         for (index, element) in elems.iter().enumerate() {
-            let value = self.gen_owned(element);
-            self.w
-                .line(format!("{}.data[{}] = {};", target, index, value));
-            self.mark_moved(&value);
+            let slot = format!("{}.data[{}]", target, index);
+            self.gen_move_into(element, &slot);
         }
         self.w.line(format!("{}.len = (size_t){};", target, count));
     }
@@ -626,41 +671,39 @@ impl<'a> Gen<'a> {
             variant.tag
         ));
         for (index, argument) in args.iter().enumerate() {
-            let value = self.gen_owned(argument);
-            self.w.line(format!(
-                "{}.{}.{}.{} = {};",
+            let slot = format!(
+                "{}.{}.{}.{}",
                 target,
                 types::UNION_FIELD,
                 types::variant_member(&variant.name),
-                types::positional_field(index),
-                value
-            ));
-            self.mark_moved(&value);
+                types::positional_field(index)
+            );
+            self.gen_move_into(argument, &slot);
         }
     }
 
     pub(crate) fn gen_option_some(&mut self, inner: &HExpr, ty: &Ty, target: &str) {
-        let value = self.gen_owned(inner);
         if ops::is_frozen_shared(ty) {
+            let value = self.gen_owned(inner);
             self.w
                 .line(format!("{} = ls_opt_string_some({});", target, value));
+            self.mark_moved(&value);
         } else {
             self.w
                 .line(format!("{}.{} = (int32_t)1;", target, types::TAG_FIELD));
-            self.w.line(format!(
-                "{}.{}.{} = {};",
+            let slot = format!(
+                "{}.{}.{}",
                 target,
                 types::UNION_FIELD,
-                types::OPTION_SOME_MEMBER,
-                value
-            ));
+                types::OPTION_SOME_MEMBER
+            );
+            self.gen_move_into(inner, &slot);
         }
-        self.mark_moved(&value);
     }
 
     pub(crate) fn gen_result_variant(&mut self, is_ok: bool, inner: &HExpr, ty: &Ty, target: &str) {
-        let value = self.gen_owned(inner);
         if ops::is_frozen_shared(ty) {
+            let value = self.gen_owned(inner);
             let constructor = if is_ok {
                 "ls_res_string_ok"
             } else {
@@ -668,6 +711,7 @@ impl<'a> Gen<'a> {
             };
             self.w
                 .line(format!("{} = {}({});", target, constructor, value));
+            self.mark_moved(&value);
         } else {
             let tag = if is_ok { 0 } else { 1 };
             let member = if is_ok {
@@ -681,15 +725,9 @@ impl<'a> Gen<'a> {
                 types::TAG_FIELD,
                 tag
             ));
-            self.w.line(format!(
-                "{}.{}.{} = {};",
-                target,
-                types::UNION_FIELD,
-                member,
-                value
-            ));
+            let slot = format!("{}.{}.{}", target, types::UNION_FIELD, member);
+            self.gen_move_into(inner, &slot);
         }
-        self.mark_moved(&value);
     }
 }
 

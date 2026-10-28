@@ -1,7 +1,7 @@
 // Shared, mutable heap cells: Rc<T>.
 fn main() {
     let a = Rc::new(10);
-    let b = a;
+    let b = a.clone();
     println!("{} {}", a.get(), b.get());
     println!("strong_count = {}", a.strong_count());
 

@@ -9,6 +9,7 @@ mod exprs;
 mod items;
 mod itype;
 mod lower;
+mod ownership;
 mod patterns;
 mod refs;
 mod tree;
@@ -78,11 +79,12 @@ pub fn check_reporting(
         sort_and_dedup(&mut reported);
         return (Err(reported), warnings);
     }
-    // The borrow checker is a read-only post-lowering pass: it validates the
-    // fully typed HIR and never modifies it.
-    let borrow_diagnostics = crate::borrow::check(&program);
-    if borrow_diagnostics.has_errors() {
-        let mut reported = borrow_diagnostics;
+    // The borrow checker and the move checker are read-only post-lowering
+    // passes: they validate the fully typed HIR and never modify it.
+    let mut post_diagnostics = crate::borrow::check(&program);
+    post_diagnostics.extend(crate::moveck::check(&program));
+    if post_diagnostics.has_errors() {
+        let mut reported = post_diagnostics;
         for diagnostic in warnings.clone().into_vec() {
             reported.push(diagnostic);
         }
@@ -166,7 +168,7 @@ fn program_name(file: &SourceFile) -> String {
 mod tests {
     use super::*;
     use crate::diag::Severity;
-    use crate::hir::{ConstValue, HExpr, HExprKind, HPatKind, HStmt};
+    use crate::hir::{ConstValue, HBuiltinMethod, HExpr, HExprKind, HPatKind, HStmt};
     use crate::types::{FloatTy, IntTy, SelfKind, Ty};
 
     fn parse_source(source: &str) -> (ast::Program, SourceFile, Diagnostics) {
@@ -1377,7 +1379,7 @@ fn main() {
     let chained = Some(3).and_then(|value| {
         if value > 0 { Some(value * 2) } else { None }
     });
-    let filtered = chained.filter(|value| value > 4);
+    let filtered = chained.filter(|value| *value > 4);
     println!("{}", filtered.unwrap_or(0));
 }"#,
         );
@@ -1406,18 +1408,43 @@ fn main() {
             HExprKind::Match { arms, .. } => {
                 assert_eq!(arms.len(), 2);
                 match &arms[0].body.kind {
-                    HExprKind::If {
-                        cond,
-                        then_block,
-                        else_expr,
-                    } => {
-                        assert!(matches!(&cond.kind, HExprKind::Call { .. }));
-                        let then_tail = then_block.tail.as_deref().expect("if needs a then value");
-                        assert!(matches!(&then_tail.kind, HExprKind::OptionSome(_)));
-                        let else_expr = else_expr.as_deref().expect("if needs an else value");
-                        assert!(matches!(&else_expr.kind, HExprKind::OptionNone));
+                    HExprKind::Block(block) => {
+                        assert_eq!(block.stmts.len(), 1);
+                        match &block.stmts[0] {
+                            HStmt::Let {
+                                pat,
+                                init: Some(init),
+                                ..
+                            } => {
+                                assert!(matches!(&pat.kind, HPatKind::Bind { .. }));
+                                assert!(matches!(
+                                    &init.kind,
+                                    HExprKind::Ref { mutable: false, .. }
+                                ));
+                            }
+                            other => panic!("expected the borrow statement, got {:?}", other),
+                        }
+                        let tail = block.tail.as_deref().expect("filter arm needs a value");
+                        match &tail.kind {
+                            HExprKind::If {
+                                cond,
+                                then_block,
+                                else_expr,
+                            } => {
+                                assert!(matches!(&cond.kind, HExprKind::Call { .. }));
+                                let then_tail =
+                                    then_block.tail.as_deref().expect("if needs a then value");
+                                assert!(matches!(&then_tail.kind, HExprKind::OptionSome(_)));
+                                let else_expr =
+                                    else_expr.as_deref().expect("if needs an else value");
+                                assert!(matches!(&else_expr.kind, HExprKind::OptionNone));
+                            }
+                            other => {
+                                panic!("expected a conditional in the filter arm, got {:?}", other)
+                            }
+                        }
                     }
-                    other => panic!("expected a conditional in the filter arm, got {:?}", other),
+                    other => panic!("expected a block in the filter arm, got {:?}", other),
                 }
             }
             other => panic!("expected the filter match, got {:?}", other),
@@ -2229,55 +2256,41 @@ fn main() {
     }
 
     #[test]
-    fn rejects_mutable_references_to_owned_values() {
-        let diagnostics = analyze(
+    fn allows_mutable_references_to_heap_strings() {
+        expect_ok(
             r#"fn main() {
     let mut text = String::from("hi");
     let reference = &mut text;
+    reference.push_str("!");
     println!("{}", reference.len());
 }"#,
         );
-        assert!(
-            has_code(&diagnostics, "E0498"),
-            "{:?}",
-            messages(&diagnostics)
-        );
-        assert!(has_message(&diagnostics, "mutable references to String"));
     }
 
     #[test]
-    fn rejects_mutable_references_to_vectors() {
-        let diagnostics = analyze(
+    fn allows_mutable_references_to_heap_vectors() {
+        expect_ok(
             r#"fn main() {
     let mut values = vec![1, 2];
     let reference = &mut values;
+    reference.push(3);
     println!("{}", reference.len());
 }"#,
         );
-        assert!(
-            has_code(&diagnostics, "E0498"),
-            "{:?}",
-            messages(&diagnostics)
-        );
-        assert!(has_message(&diagnostics, "mutable references to Vec"));
     }
 
     #[test]
-    fn rejects_mutable_reference_parameters_to_owned_values() {
-        let diagnostics = analyze(
+    fn allows_mutable_reference_parameters_to_heap_values() {
+        expect_ok(
             r#"fn trim(value: &mut String) {
-    println!("{}", value.len());
+    value.push_str("!");
 }
 
 fn main() {
     let mut text = String::from("hi");
     trim(&mut text);
+    println!("{}", text);
 }"#,
-        );
-        assert!(
-            has_code(&diagnostics, "E0498"),
-            "{:?}",
-            messages(&diagnostics)
         );
     }
 
@@ -2554,6 +2567,964 @@ fn main() {
     }
 
     // -----------------------------------------------------------------
+    // Version 1.4 ownership: Drop registration
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn records_drop_hook_for_struct() {
+        let program = expect_ok(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        println!("{}", self.value);
+    }
+}
+
+struct Wrapper {
+    inner: Tracked,
+}
+
+struct Boxed {
+    items: Vec<Tracked>,
+}
+
+fn main() {
+    let wrapper = Wrapper {
+        inner: Tracked { value: 1 },
+    };
+    println!("{}", wrapper.inner.value);
+}"#,
+        );
+        let tracked = program
+            .structs
+            .iter()
+            .position(|item| item.name == "Tracked")
+            .expect("Tracked struct is lowered");
+        let wrapper = program
+            .structs
+            .iter()
+            .position(|item| item.name == "Wrapper")
+            .expect("Wrapper struct is lowered");
+        let boxed = program
+            .structs
+            .iter()
+            .position(|item| item.name == "Boxed")
+            .expect("Boxed struct is lowered");
+        let hook = program.drop_structs[tracked].expect("drop hook is recorded");
+        assert_eq!(program.fns[hook].name, "Tracked::drop");
+        assert_eq!(program.fns[hook].self_kind, Some(SelfKind::RefMut));
+        assert!(!program.copy_structs[tracked], "drop type must not be Copy");
+        assert!(!program.is_copy(&Ty::Struct(tracked)));
+        assert!(program.has_drop_glue(&Ty::Struct(tracked)));
+        assert!(program.has_drop_glue(&Ty::Struct(wrapper)));
+        assert!(program.has_drop_glue(&Ty::Struct(boxed)));
+        assert!(!program.copy_structs[wrapper]);
+    }
+
+    #[test]
+    fn records_drop_hook_for_enum() {
+        let program = expect_ok(
+            r#"enum State {
+    Idle,
+    Busy(i64),
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        println!("dropping");
+    }
+}
+
+fn main() {
+    let state = State::Busy(1);
+}"#,
+        );
+        let state = program
+            .enums
+            .iter()
+            .position(|item| item.name == "State")
+            .expect("State enum is lowered");
+        let hook = program.drop_enums[state].expect("drop hook is recorded");
+        assert_eq!(program.fns[hook].name, "State::drop");
+        assert_eq!(program.fns[hook].self_kind, Some(SelfKind::RefMut));
+        assert!(!program.copy_enums[state], "drop enum must not be Copy");
+        assert!(!program.is_copy(&Ty::Enum(state)));
+        assert!(program.has_drop_glue(&Ty::Enum(state)));
+        assert!(program.has_drop_glue(&Ty::Option(Box::new(Ty::Enum(state)))));
+    }
+
+    #[test]
+    fn drop_hook_body_can_mutate_fields_through_mutable_self() {
+        expect_ok(
+            r#"struct Buffer {
+    text: String,
+    count: i64,
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        self.text.push_str("!");
+        self.count = 0;
+        println!("{} {}", self.text.len(), self.count);
+    }
+}
+
+fn main() {
+    let buffer = Buffer {
+        text: String::from("x"),
+        count: 1,
+    };
+}"#,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Version 1.4 ownership: Drop validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rejects_drop_impl_with_wrong_method_name() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn release(&mut self) {}
+}
+
+fn main() {}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "exactly one method named 'drop'"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_drop_impl_with_shared_receiver() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&self) {}
+}
+
+fn main() {}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "'&mut self'"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_drop_impl_with_by_value_receiver() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(self) {}
+}
+
+fn main() {}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "'&mut self'"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_drop_impl_with_extra_parameters() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self, extra: i64) {}
+}
+
+fn main() {}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "'&mut self'"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_drop_impl_with_return_value() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) -> i64 {
+        1
+    }
+}
+
+fn main() {}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "must return unit"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_drop_impls() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+fn main() {}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0119"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "conflicting implementations of trait 'Drop'"
+        ));
+    }
+
+    #[test]
+    fn rejects_copy_and_clone_impls_as_derived() {
+        let diagnostics = expect_errors(
+            r#"struct Point {
+    x: i64,
+}
+
+impl Copy for Point {}
+
+impl Clone for Point {}
+
+fn main() {}"#,
+        );
+        let derived = messages(&diagnostics)
+            .iter()
+            .filter(|message| message.contains("derived automatically"))
+            .count();
+        assert_eq!(derived, 2, "{:?}", messages(&diagnostics));
+    }
+
+    #[test]
+    fn rejects_unknown_trait_impls() {
+        let diagnostics = expect_errors(
+            r#"struct Point {
+    x: i64,
+}
+
+impl Display for Point {}
+
+fn main() {}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "traits are not supported except Drop"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_inherent_methods_named_drop_or_clone() {
+        let diagnostics = expect_errors(
+            r#"struct Thing {
+    value: i64,
+}
+
+impl Thing {
+    fn drop(&mut self) {}
+
+    fn clone(&self) -> Thing {
+        Thing { value: self.value }
+    }
+}
+
+fn main() {}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "reserved for the Drop trait"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "is reserved in version 1.4: clone is derived"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn drop_impl_registers_no_callable_method() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let tracked = Tracked { value: 1 };
+    tracked.drop();
+    println!("{}", tracked.value);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0599"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "no method named drop"));
+    }
+
+    // -----------------------------------------------------------------
+    // Version 1.4 ownership: .clone() resolution
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn derives_clone_for_move_only_values() {
+        expect_ok(
+            r#"struct Pair {
+    left: Vec<i64>,
+    right: String,
+}
+
+fn main() {
+    let pair = Pair {
+        left: vec![1],
+        right: String::from("x"),
+    };
+    let pair_copy = pair.clone();
+    let text = String::from("hi");
+    let text_copy = text.clone();
+    let values = vec![1, 2];
+    let values_copy = values.clone();
+    let number = 7;
+    let number_copy = number.clone();
+    println!(
+        "{} {} {} {} {}",
+        pair_copy.right,
+        text_copy,
+        values_copy.len() + values.len(),
+        number_copy,
+        pair_copy.left.len()
+    );
+}"#,
+        );
+    }
+
+    #[test]
+    fn clone_through_references_strips_all_reference_layers() {
+        let program = expect_ok(
+            r#"fn clone_shared(value: &String) -> String {
+    value.clone()
+}
+
+fn clone_mut(value: &mut String) -> String {
+    value.clone()
+}
+
+fn clone_nested(value: &String) -> String {
+    let nested = &value;
+    nested.clone()
+}
+
+fn main() {
+    let mut text = String::from("hi");
+    let copy = text.clone();
+    let shared = clone_shared(&text);
+    let mutable = clone_mut(&mut text);
+    println!("{} {} {}", copy, shared, mutable);
+}"#,
+        );
+        let shared = find_fn(&program, "clone_shared").expect("clone_shared is lowered");
+        let mutable = find_fn(&program, "clone_mut").expect("clone_mut is lowered");
+        let nested = find_fn(&program, "clone_nested").expect("clone_nested is lowered");
+        assert_eq!(shared.ret, Ty::String);
+        assert_eq!(mutable.ret, Ty::String);
+        assert_eq!(nested.ret, Ty::String);
+        let main = main_fn(&program);
+        let clone_ty = main
+            .body
+            .stmts
+            .iter()
+            .find_map(|statement| match statement {
+                HStmt::Let {
+                    init: Some(init), ..
+                } if matches!(
+                    &init.kind,
+                    HExprKind::BuiltinMethod {
+                        method: HBuiltinMethod::Clone,
+                        ..
+                    }
+                ) =>
+                {
+                    Some(init.ty.clone())
+                }
+                _ => None,
+            })
+            .expect("the nested .clone() call is lowered");
+        assert_eq!(clone_ty, Ty::String);
+    }
+
+    #[test]
+    fn rejects_clone_of_type_with_drop_glue() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let tracked = Tracked { value: 1 };
+    let copy = tracked.clone();
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(
+                &diagnostics,
+                "implements Drop and cannot be cloned in version 1.4; use references instead"
+            ),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_clone_with_arguments() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let text = String::from("hi");
+    let copy = text.clone(1);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0061"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Version 1.4 ownership: E0509 pattern bindings
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rejects_drop_glue_bindings_in_tuple_patterns() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let pair = (Tracked { value: 1 }, Tracked { value: 2 });
+    let (left, right) = pair;
+    println!("{} {}", left.value, right.value);
+}"#,
+        );
+        let count = diagnostics
+            .as_slice()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Some("E0509"))
+            .count();
+        assert_eq!(count, 2, "{:?}", messages(&diagnostics));
+    }
+
+    #[test]
+    fn rejects_drop_glue_bindings_in_struct_patterns() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+struct Holder {
+    tracker: Tracked,
+    count: i64,
+}
+
+fn main() {
+    let holder = Holder {
+        tracker: Tracked { value: 1 },
+        count: 2,
+    };
+    let Holder { tracker, count } = holder;
+    println!("{}", tracker.value + count);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0509"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "implements Drop in version 1.4"));
+    }
+
+    #[test]
+    fn rejects_drop_glue_bindings_in_variant_patterns() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let wrapped = Some(Tracked { value: 1 });
+    match wrapped {
+        Some(inner) => println!("{}", inner.value),
+        None => println!("none"),
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0509"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn allows_top_level_bindings_of_drop_types() {
+        expect_ok(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let tracked = Tracked { value: 1 };
+    let moved = tracked;
+    let rebound = match moved {
+        value => value,
+    };
+    println!("{}", rebound.value);
+}"#,
+        );
+    }
+
+    #[test]
+    fn allows_compound_patterns_without_drop_glue() {
+        expect_ok(
+            r#"struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn main() {
+    let point = Point { x: 1, y: 2 };
+    let Point { x, y } = point;
+    let pair = (x, y);
+    let (a, b) = pair;
+    println!("{} {}", a, b);
+}"#,
+        );
+    }
+
+    #[test]
+    fn allows_top_level_let_binding_of_drop_field_values() {
+        expect_ok(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let tracked = Tracked { value: 1 };
+    let number = tracked.value;
+    println!("{}", number);
+}"#,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Version 1.4 ownership: mutable references to heap values
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn allows_mutable_references_to_heap_rc_and_box_values() {
+        expect_ok(
+            r#"fn main() {
+    let mut shared = Rc::new(1);
+    let reference = &mut shared;
+    *reference = Rc::new(2);
+    let mut boxed = Box::new(3);
+    let boxed_reference = &mut boxed;
+    *boxed_reference = Box::new(4);
+}"#,
+        );
+    }
+
+    #[test]
+    fn rejects_mutable_references_to_non_heap_user_values() {
+        let diagnostics = expect_errors(
+            r#"struct Packet {
+    body: String,
+}
+
+fn touch(packet: &mut Packet) {
+    packet.body.push_str("!");
+}
+
+fn main() {
+    let mut packet = Packet {
+        body: String::from("x"),
+    };
+    touch(&mut packet);
+    println!("{}", packet.body);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "mutable references to"));
+    }
+
+    #[test]
+    fn rejects_storing_mutable_heap_references_in_aggregates() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let mut text = String::from("hi");
+    let pair: (&mut String, i64) = (&mut text, 1);
+    println!("{}", pair.1);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Version 1.4 ownership: post-lowering diagnostics (moveck wiring)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn reports_post_lowering_diagnostics() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let mut x = 1;
+    let a = &mut x;
+    let b = &mut x;
+    *a = 2;
+    *b = 3;
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0499"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn wires_move_errors_into_post_lowering_diagnostics() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let a = String::from("hi");
+    let b = a;
+    println!("{}", a);
+    println!("{}", b);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0382"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "use of moved value: a"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_moving_out_of_fields_after_ownership_change() {
+        let diagnostics = expect_errors(
+            r#"struct Holder {
+    text: String,
+}
+
+fn main() {
+    let holder = Holder { text: String::from("hi") };
+    let text = holder.text;
+    println!("{}", text);
+    println!("{}", holder.text);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0507"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "cannot move out of a field of type String"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_cloning_containers_of_drop_glue_values() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        println!("{}", self.value);
+    }
+}
+
+fn main() {
+    let tracked = Tracked { value: 1 };
+    let items = vec![tracked];
+    let copies = items.clone();
+    println!("{}", copies.len());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(
+                &diagnostics,
+                "implements Drop and cannot be cloned in version 1.4"
+            ),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_if_let_bindings_of_drop_glue_payloads() {
+        let diagnostics = expect_errors(
+            r#"struct Tracked {
+    value: i64,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        println!("{}", self.value);
+    }
+}
+
+fn main() {
+    let opt = Some(Tracked { value: 1 });
+    if let Some(tracked) = opt {
+        println!("{}", tracked.value);
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0509"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "implements Drop in version 1.4"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn filter_borrows_non_copy_payloads() {
+        // Option::filter takes Rust's `FnOnce(&T) -> bool`: the predicate
+        // borrows the payload and the returned `Some` moves it exactly once.
+        let program = expect_ok(
+            r#"fn main() {
+    let name: Option<String> = Some(String::from("lsaca"));
+    match name.filter(|text| text.len() > 2) {
+        Some(text) => println!("kept {}", text),
+        None => println!("dropped"),
+    }
+    let short: Option<String> = Some(String::from("a"));
+    let kept = short.filter(|text| text.len() > 2);
+    println!("{}", kept.is_some());
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let filtered = match &body.stmts[1] {
+            HStmt::Expr(expr) => expr,
+            other => panic!("expected the filter match statement, got {:?}", other),
+        };
+        let comb = match &filtered.kind {
+            HExprKind::Match { scrutinee, .. } => scrutinee,
+            other => panic!("expected the outer match, got {:?}", other),
+        };
+        let arms = match &comb.kind {
+            HExprKind::Match { arms, .. } => arms,
+            other => panic!("expected the filter match, got {:?}", other),
+        };
+        let value_name = match &arms[0].pat.kind {
+            HPatKind::OptionSome(inner) => match &inner.kind {
+                HPatKind::Bind { c_name, .. } => c_name.clone(),
+                other => panic!("expected the payload binding, got {:?}", other),
+            },
+            other => panic!("expected a Some pattern, got {:?}", other),
+        };
+        // The arm body is `{ let reference = &value; if predicate(reference) {
+        // Some(value) } else { None } }`: the borrow is confined to its own
+        // statement so the payload can be moved afterwards.
+        let block = match &arms[0].body.kind {
+            HExprKind::Block(block) => block,
+            other => panic!("expected a block in the filter arm, got {:?}", other),
+        };
+        let (reference_name, borrow_of) = match &block.stmts[0] {
+            HStmt::Let {
+                pat,
+                init: Some(init),
+                ..
+            } => {
+                let reference_name = match &pat.kind {
+                    HPatKind::Bind { c_name, .. } => c_name.clone(),
+                    other => panic!("expected a reference binding, got {:?}", other),
+                };
+                let borrow_of = match &init.kind {
+                    HExprKind::Ref { mutable, expr } => {
+                        assert!(!*mutable, "filter borrows the payload immutably");
+                        match &expr.kind {
+                            HExprKind::Local { c_name, .. } => c_name.clone(),
+                            other => panic!("expected a local borrow, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected a reference initializer, got {:?}", other),
+                };
+                (reference_name, borrow_of)
+            }
+            other => panic!("expected the filter borrow statement, got {:?}", other),
+        };
+        assert_eq!(
+            borrow_of, value_name,
+            "the predicate borrows the matched payload"
+        );
+        let condition_expr = block.tail.as_deref().expect("filter needs a conditional");
+        let (cond, then_block) = match &condition_expr.kind {
+            HExprKind::If {
+                cond, then_block, ..
+            } => (cond, then_block),
+            other => panic!("expected a conditional in the filter arm, got {:?}", other),
+        };
+        let arg = match &cond.kind {
+            HExprKind::Call { args, .. } => &args[0],
+            other => panic!("expected the predicate call, got {:?}", other),
+        };
+        match &arg.kind {
+            HExprKind::Local { c_name, .. } => assert_eq!(
+                *c_name, reference_name,
+                "the predicate reads the borrowed payload"
+            ),
+            other => panic!(
+                "expected the predicate to read the reference binding, got {:?}",
+                other
+            ),
+        }
+        let keep = then_block
+            .tail
+            .as_deref()
+            .expect("filter needs a then value");
+        match &keep.kind {
+            HExprKind::OptionSome(inner) => match &inner.kind {
+                HExprKind::Local { c_name, .. } => assert_eq!(
+                    *c_name, value_name,
+                    "the kept payload is the moved match binding"
+                ),
+                other => panic!("expected the kept payload local, got {:?}", other),
+            },
+            other => panic!("expected Some in the filter success path, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chains_non_copy_payloads_without_moves() {
+        expect_ok(
+            r#"fn main() {
+    let name: Option<String> = Some(String::from("lsaca"));
+    let upper = name.map(|text| text.len());
+    println!("{}", upper.unwrap());
+    let back: Option<String> = Some(String::from("x")).and_then(|text| Some(text));
+    println!("{}", back.unwrap());
+    let result: Result<String, String> = Ok(String::from("pos"));
+    let mapped = result.map(|text| text.len());
+    println!("{}", mapped.unwrap());
+    let failed: Result<String, String> = Err(String::from("bad"));
+    let recovered = failed.map_err(|message| message.len());
+    println!("{}", recovered.is_err());
+    let chained: Result<String, String> = Ok(String::from("v"));
+    let next = chained.and_then(|value| Ok(value));
+    println!("{}", next.unwrap());
+    let optional: Option<String> = Some(String::from("z"));
+    let converted = optional.ok_or(String::from("missing"));
+    println!("{}", converted.unwrap());
+    let defaulted: Option<String> = None;
+    let total = defaulted.map_or(String::from("none"), |value| value);
+    println!("{}", total);
+}"#,
+        );
+    }
+
+    // -----------------------------------------------------------------
     // End-to-end fixture corpus
     // -----------------------------------------------------------------
 
@@ -2571,6 +3542,7 @@ fn main() {
             "expected the e2e fixture corpus, found {} files",
             paths.len()
         );
+        let mut failures: Vec<String> = Vec::new();
         for path in paths {
             let name = path
                 .file_name()
@@ -2592,18 +3564,95 @@ fn main() {
             }
             let mut parse_messages = messages(&lex_diagnostics);
             parse_messages.extend(messages(&parse_diagnostics));
-            assert!(
-                !rejected_at_parse,
-                "{} should parse cleanly: {:?}",
-                name, parse_messages
-            );
+            if rejected_at_parse {
+                failures.push(format!(
+                    "{} should parse cleanly: {:?}",
+                    name, parse_messages
+                ));
+                continue;
+            }
             if let Err(diagnostics) = check(&program, &file) {
-                panic!(
+                failures.push(format!(
                     "{} should type check, got: {:?}",
                     name,
                     messages(&diagnostics)
-                );
+                ));
             }
         }
+        // Report every stale fixture at once so the fixture migration (owned by
+        // the Lead) can be done in one pass instead of one panic at a time.
+        assert!(
+            failures.is_empty(),
+            "{} fixture(s) do not satisfy the version 1.4 static rules:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Logical operators
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn logical_operators_lower_to_short_circuit_conditionals() {
+        // a || b must lower to `if a { true } else { b }` and a && b to
+        // `if a { b } else { false }`. Swapping the branches silently turns
+        // || into its negation, so pin the lowered shape here.
+        let program =
+            expect_ok("fn main() { let a = true; let b = false; let c = a || b; let d = a && b; }");
+        let body = &main_fn(&program).body;
+        let mut lowered = Vec::new();
+        for stmt in &body.stmts {
+            if let HStmt::Let {
+                init: Some(init), ..
+            } = stmt
+                && let HExprKind::If {
+                    cond,
+                    then_block,
+                    else_expr,
+                } = &init.kind
+            {
+                lowered.push((cond, then_block, else_expr.as_deref()));
+            }
+        }
+        assert_eq!(
+            lowered.len(),
+            2,
+            "both logical operators must lower to conditionals"
+        );
+        let (or_cond, or_then, or_else) = &lowered[0];
+        assert!(
+            matches!(or_cond.kind, HExprKind::Local { .. }),
+            "the left operand is the condition"
+        );
+        let or_taken = or_then.tail.as_deref().expect("|| needs a taken value");
+        assert!(
+            matches!(or_taken.kind, HExprKind::Lit(crate::hir::HLit::Bool(true))),
+            "|| must yield true when the left operand is true, got {:?}",
+            or_taken.kind
+        );
+        let or_skipped = or_else.expect("|| needs a skipped value");
+        assert!(
+            matches!(or_skipped.kind, HExprKind::Local { .. }),
+            "|| evaluates the right operand only when the left operand is false"
+        );
+        let (and_cond, and_then, and_else) = &lowered[1];
+        assert!(
+            matches!(and_cond.kind, HExprKind::Local { .. }),
+            "the left operand is the condition"
+        );
+        let and_taken = and_then.tail.as_deref().expect("&& needs a taken value");
+        assert!(
+            matches!(and_taken.kind, HExprKind::Local { .. }),
+            "&& evaluates the right operand only when the left operand is true"
+        );
+        let and_skipped = and_else.expect("&& needs a skipped value");
+        assert!(
+            matches!(
+                and_skipped.kind,
+                HExprKind::Lit(crate::hir::HLit::Bool(false))
+            ),
+            "&& must yield false when the left operand is false"
+        );
     }
 }

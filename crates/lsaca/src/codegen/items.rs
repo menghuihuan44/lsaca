@@ -562,14 +562,22 @@ impl<'a> Gen<'a> {
         let receiver_is_borrowed =
             matches!(self_kind, Some(SelfKind::Ref) | Some(SelfKind::RefMut));
         for (index, param) in params.iter().enumerate() {
-            if !(receiver_is_borrowed && index == 0)
-                && let Some(frame) = self.frames.last_mut()
-            {
-                frame.vars.push(BoundVar {
-                    c_name: param.c_name.clone(),
-                    ty: param.ty.clone(),
-                    owned: true,
-                });
+            if !(receiver_is_borrowed && index == 0) {
+                let live = if self.is_trivial_copy(&param.ty) {
+                    None
+                } else {
+                    let flag = format!("{}_live", param.c_name);
+                    self.w.line(format!("bool {} = true;", flag));
+                    Some(flag)
+                };
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.vars.push(BoundVar {
+                        c_name: param.c_name.clone(),
+                        ty: param.ty.clone(),
+                        owned: true,
+                        live,
+                    });
+                }
             }
             self.w.line(format!("(void){};", param.c_name));
         }
@@ -591,7 +599,7 @@ impl<'a> Gen<'a> {
         }
         let result = self.new_plain(return_type, "result");
         match &body.tail {
-            Some(tail) => self.gen_into(tail, &result),
+            Some(tail) => self.gen_move_into(tail, &result),
             None => {
                 let zero = self.zero_expr(return_type);
                 self.w.line(format!("{} = {};", result, zero));

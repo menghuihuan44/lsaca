@@ -8,7 +8,7 @@ fn main() {
     println!("{}", items[0]);
     println!("{}", items.pop().unwrap());
     items.reverse();
-    for item in items {
+    for item in items.clone() {
         println!("{}", item);
     }
     println!("{}", items.len());

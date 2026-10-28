@@ -170,8 +170,10 @@ impl<'a> Checker<'a> {
         expr
     }
 
-    /// Whether a value of this type can be the pointee of a mutable reference.
-    /// Mutable references are restricted to plain value types in v1.3.
+    /// Whether a value of this type is a plain value type (no heap ownership,
+    /// no references, no function values). Version 1.4 additionally allows
+    /// mutable references to owned heap types; see
+    /// [Self::is_mutable_reference_target] for the full answer.
     pub fn is_plain_value_type(&mut self, ty: &ITy) -> bool {
         self.is_plain_value_type_at(ty, 0)
     }
@@ -223,7 +225,7 @@ impl<'a> Checker<'a> {
             let described = self.describe_resolved(ty);
             self.error_code(
                 format!(
-                    "references cannot be stored in this type in v1.3 (found {})",
+                    "references cannot be stored in this type in version 1.4 (found {})",
                     described
                 ),
                 span,
@@ -242,11 +244,11 @@ impl<'a> Checker<'a> {
         match resolved {
             ITy::Ref { mutable, inner } => {
                 let mut valid = true;
-                if mutable && !self.is_plain_value_type(&inner) {
+                if mutable && !self.is_mutable_reference_target(&inner) {
                     let described = self.describe_resolved(&inner);
                     self.error_code(
                         format!(
-                            "mutable references to {} are not supported in v1.3; take &{} or restructure the code",
+                            "mutable references to {} are not supported in version 1.4; take &{} or restructure the code",
                             described, described
                         ),
                         span,
@@ -379,11 +381,11 @@ impl<'a> Checker<'a> {
         }
         if mutable {
             let _ = self.require_mutable_place(&inner_expr, span, "borrow this value as mutable");
-            if !self.is_plain_value_type(&inner_ty) {
+            if !self.is_mutable_reference_target(&inner_ty) {
                 let described = self.describe_resolved(&inner_ty);
                 self.error_code(
                     format!(
-                        "mutable references to {} are not supported in v1.3; take &{} or restructure the code",
+                        "mutable references to {} are not supported in version 1.4; take &{} or restructure the code",
                         described, described
                     ),
                     span,

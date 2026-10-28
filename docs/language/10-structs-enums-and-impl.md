@@ -166,9 +166,10 @@ lsaca: example-05.ls: could not compile example-05.ls due to previous error(s)
 
 ### Value semantics
 
-Assigning a struct or passing it to a function copies the struct value. String
-and `Vec` fields are copy-on-write, so a copied struct that is then modified does
-not disturb the original:
+Assigning a struct or passing it to a function **moves** the struct value by
+default. Calling `.clone()` keeps the original and produces an independent copy;
+`String` and `Vec` fields share their buffers until one side writes
+(copy-on-write):
 
 ```ls
 struct Profile {
@@ -178,7 +179,7 @@ struct Profile {
 
 fn main() {
     let original = Profile { name: String::from("ana"), visits: 1 };
-    let mut copy = original;
+    let mut copy = original.clone();
     copy.name.push_str("!");
     copy.visits += 1;
     println!("{} {}", original.name, original.visits);
@@ -222,7 +223,7 @@ lsaca: example-07.ls: could not compile example-07.ls due to previous error(s)
 An enum declares alternatives (variants). A variant is either a unit name or a
 tuple variant with a parenthesized payload. Every variant must be usable as a
 value of the enum type; pattern matching on enums is the main way to take them
-apart — see [Pattern matching](12-pattern-matching.md).
+apart — see [Pattern matching](13-pattern-matching.md).
 
 ```ls
 enum Shape {
@@ -416,7 +417,7 @@ Output:
 
 Struct and enum fields cannot themselves be references; a reference is a
 non-owning view and may only live in a local, a parameter or a return value
-(see [References and borrowing](11-references-and-borrowing.md)). Storing one
+(see [References and borrowing](12-references-and-borrowing.md)). Storing one
 in a field is an `E0498` error.
 
 `Self` is a type name usable inside `impl` blocks — in `-> Self` return types and
@@ -551,6 +552,48 @@ Output:
 9
 ```
 
+### Drop hooks
+
+`impl Drop for T` declares the destructor hook for a struct or enum. It is the
+only trait a program can implement in 1.4.0; the hook runs when a value is
+released:
+
+```ls
+struct Resource {
+    name: String,
+}
+
+impl Drop for Resource {
+    fn drop(&mut self) {
+        println!("releasing {}", self.name);
+    }
+}
+
+fn main() {
+    let first = Resource { name: String::from("first") };
+    println!("before end");
+}
+```
+
+Output:
+
+```text
+before end
+releasing first
+```
+
+The compiler validates the impl: exactly one `fn drop(&mut self)` with no other
+parameters and a unit return type, at most one `Drop` impl per type (`E0119`),
+and no inherent method named `drop`. A type that implements `Drop` is never
+`Copy` and cannot be cloned (`E0277`); passing it by value moves it and the new
+owner releases it. The hook runs before the fields are released, fields are
+released in declaration order, locals in reverse declaration order and
+parameters in reverse order, and an overwritten binding is released immediately.
+No hooks run after a panic or `exit()`; values still alive when `main` returns
+are released normally. See [Ownership and
+moves](11-ownership-and-moves.md#the-drop-trait) and [Memory
+model](05-memory-model.md#drop).
+
 ## Errors when building values
 
 The compiler checks field names and arity at construction time:
@@ -570,12 +613,12 @@ fn main() {
 Error:
 ```text
 error[E0063]: missing field y in initializer of Point
-  --> example-18.ls:7:13
+  --> example-19.ls:7:13
    |
  7 |     let p = Point { x: 1 };
    |             ^^^^^^^^^^^^^^
 
-lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
+lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -593,12 +636,12 @@ fn main() {
 Error:
 ```text
 error[E0560]: struct Point has no field named z; did you mean x?
-  --> example-19.ls:7:33
+  --> example-20.ls:7:33
    |
  7 |     let p = Point { x: 1, y: 2, z: 3 };
    |                                 ^
 
-lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
+lsaca: example-20.ls: could not compile example-20.ls due to previous error(s)
 ```
 
 Accessing a field that does not exist and calling a method that does not exist
@@ -619,12 +662,12 @@ fn main() {
 Error:
 ```text
 error[E0609]: no field z on type Point; did you mean x?
-  --> example-20.ls:8:20
+  --> example-21.ls:8:20
    |
  8 |     println!("{}", p.z);
    |                    ^^^
 
-lsaca: example-20.ls: could not compile example-20.ls due to previous error(s)
+lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -642,12 +685,12 @@ fn main() {
 Error:
 ```text
 error[E0599]: no method named frobnicate found for type Point in the current scope
-  --> example-21.ls:8:22
+  --> example-22.ls:8:22
    |
  8 |     println!("{}", p.frobnicate());
    |                      ^^^^^^^^^^
 
-lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
+lsaca: example-22.ls: could not compile example-22.ls due to previous error(s)
 ```
 
 Declaring the same field twice is rejected as well:
@@ -666,13 +709,13 @@ fn main() {
 Error:
 ```text
 error[E0124]: field 'x' is already declared
-  --> example-22.ls:3:5
+  --> example-23.ls:3:5
    |
  3 |     x: String,
    |     ^
-   = note: example-22.ls:2:5: previous declaration of 'x' here
+   = note: example-23.ls:2:5: previous declaration of 'x' here
 
-lsaca: example-22.ls: could not compile example-22.ls due to previous error(s)
+lsaca: example-23.ls: could not compile example-23.ls due to previous error(s)
 ```
 
 ## Printing and equality
@@ -684,9 +727,9 @@ in Debug; a top-level `String` prints unquoted. Width, fill and alignment apply
 to the whole structural form (so `{:30}` pads a struct or enum as a unit), while
 the `+`/\`0\` sign flags and precision are only accepted for numbers and strings
 and are rejected for structs and enums with `E0001` — see
-[Standard library](14-standard-library.md#formatting-and-printing).
+[Standard library](15-standard-library.md#formatting-and-printing).
 
-Equality (`==`) is not implemented for user structs or enums in 1.3.0: the
+Equality (`==`) is not implemented for user structs or enums in 1.4.0: the
 compiler reports `E0369`. Compare the fields you care about, or want to compare,
 with a `match` expression:
 
@@ -706,12 +749,12 @@ fn main() {
 Error:
 ```text
 error[E0369]: binary operation == cannot be applied to type Point
-  --> example-23.ls:9:20
+  --> example-24.ls:9:20
    |
  9 |     println!("{}", a == b);
    |                    ^^^^^^
 
-lsaca: example-23.ls: could not compile example-23.ls due to previous error(s)
+lsaca: example-24.ls: could not compile example-24.ls due to previous error(s)
 ```
 
 To compare points, compare the fields explicitly:
@@ -742,9 +785,9 @@ true false
 ## What next
 
 * The pattern syntax for destructuring structs and enums:
-  [Pattern matching](12-pattern-matching.md).
+  [Pattern matching](13-pattern-matching.md).
 * Receiver semantics and copy-on-write effects:
   [Memory model](05-memory-model.md#value-semantics-for-aggregates).
 * Reference receivers, match ergonomics and borrowing rules:
-  [References and borrowing](11-references-and-borrowing.md).
+  [References and borrowing](12-references-and-borrowing.md).
 * Structs and enums as type expressions: [Types](04-types.md).

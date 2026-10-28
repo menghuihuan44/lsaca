@@ -3,7 +3,7 @@
 lsaca is expression-oriented: blocks, `if`/`else`, `match` and loops are
 expressions, and some of them produce a value you can bind. This page covers
 every statement form and every loop in the language. Pattern matching gets its
-own page — [Pattern matching](12-pattern-matching.md).
+own page — [Pattern matching](13-pattern-matching.md).
 
 ## Blocks
 
@@ -271,7 +271,7 @@ done -2
 
 `loop` repeats its block forever. Leave it with `break` (optionally from inside a
 nested `if`). `continue` skips to the next iteration. A loop has type `()`:
-`break` cannot carry a value in 1.3.0.
+`break` cannot carry a value in 1.4.0.
 
 ```ls
 fn main() {
@@ -325,7 +325,7 @@ lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 * `start..=end` — from `start` up to and including `end`.
 
 Both endpoints are `i64` (the default integer type); cast if you computed them in
-another type. The loop variable is a fresh immutable binding, but — a 1.3.0
+another type. The loop variable is a fresh immutable binding, but — a 1.4.0
 leniency — `for mut i in …` is accepted and lets you reassign it inside the body;
 that does not change the iteration.
 
@@ -380,8 +380,10 @@ empty ranges are fine
 
 ### Iterating a Vec
 
-`for` over a `Vec<T>` visits every element. Iteration yields **copies** of the
-elements, so the original vector stays usable and unmodified afterwards:
+`for` over a `Vec<T>` visits every element, but it **consumes the vector**: the
+vector is moved into the loop, so the binding cannot be used afterwards.
+Elements are yielded by value — Copy elements as copies, move-only elements as
+moves out of the vector:
 
 ```ls
 fn main() {
@@ -390,19 +392,19 @@ fn main() {
     for n in numbers {
         total += n;
     }
-    println!("{} {}", total, numbers.len());
+    println!("{}", total);
 }
 ```
 
 Output:
 ```text
-14 5
+14
 ```
 
-Because iteration is by value, iterating a `Vec<String>` gives you copies of the
-strings too (copy-on-write makes that cheap). To walk an index sequence instead,
-iterate a range and index the vector — remember that indexing is bounds checked
-and panics on a bad index:
+Because the vector is consumed, walking a `Vec<String>` yields owned `String`
+values. To keep using the vector afterwards, iterate a range and index it
+instead — indexing in a borrowed context such as `println!` reads the element
+without moving it, so the vector stays usable. Remember that indexing is bounds checked and panics on a bad index:
 
 ```ls
 fn main() {
@@ -419,7 +421,7 @@ Output:
 1: b
 ```
 
-The `mut` on a loop variable is accepted in 1.3.0; the assignment does not affect
+The `mut` on a loop variable is accepted in 1.4.0; the assignment does not affect
 the sequence of values:
 
 ```ls
@@ -442,7 +444,7 @@ Output:
 
 `break` and `continue` are valid only inside `loop`, `while` or `for`. `break`
 leaves the innermost loop, `continue` starts the next iteration of the innermost
-loop. There are no labels in 1.3.0, so to leave nested loops use a flag or a
+loop. There are no labels in 1.4.0, so to leave nested loops use a flag or a
 function with `return`.
 
 Outside a loop, `continue` (and `break`) is a compile error:
@@ -545,7 +547,7 @@ on `main` — see [Functions](09-functions.md).
 ## What next
 
 * Match expressions, exhaustiveness and pattern syntax:
-  [Pattern matching](12-pattern-matching.md).
+  [Pattern matching](13-pattern-matching.md).
 * The operators used in these conditions: [Operators](07-operators.md).
 * Closures, which appear wherever a function value is expected:
-  [Closures](13-closures.md).
+  [Closures](14-closures.md).

@@ -36,6 +36,16 @@ pub struct Program {
     pub closures: Vec<HClosure>,
     /// Index of the user entry point: fn main().
     pub main_fn: FnId,
+    /// Whether each struct is a Copy type (all fields are Copy and the
+    /// struct does not implement Drop).
+    pub copy_structs: Vec<bool>,
+    /// Whether each enum is a Copy type (all payloads are Copy and the enum
+    /// does not implement Drop).
+    pub copy_enums: Vec<bool>,
+    /// The Drop::drop hook of each struct, if it implements the trait.
+    pub drop_structs: Vec<Option<FnId>>,
+    /// The Drop::drop hook of each enum, if it implements the trait.
+    pub drop_enums: Vec<Option<FnId>>,
 }
 
 impl Program {
@@ -73,6 +83,15 @@ impl Program {
                     .join(", ");
                 format!("fn({}) -> {}", params, self.type_name(ret))
             }
+            Ty::Rc(inner) => format!("Rc<{}>", self.type_name(inner)),
+            Ty::Box(inner) => format!("Box<{}>", self.type_name(inner)),
+            Ty::Ref { mutable, inner } => {
+                if *mutable {
+                    format!("&mut {}", self.type_name(inner))
+                } else {
+                    format!("&{}", self.type_name(inner))
+                }
+            }
             other => format!("{}", other),
         }
     }
@@ -97,6 +116,156 @@ impl Program {
             .and_then(|item| item.variants.get(variant))
             .map(|item| item.name.as_str())
             .unwrap_or("<invalid variant>")
+    }
+
+    /// Fill in the Copy / Drop classification of the user types.
+    ///
+    /// drop_structs and drop_enums hold the Drop::drop hook of every struct
+    /// and enum, if the type implements the trait. Types passed as None are
+    /// classified purely from their fields.
+    pub fn classify_types(
+        &mut self,
+        drop_structs: Vec<Option<FnId>>,
+        drop_enums: Vec<Option<FnId>>,
+    ) {
+        self.drop_structs = drop_structs;
+        self.drop_structs.resize(self.structs.len(), None);
+        self.drop_enums = drop_enums;
+        self.drop_enums.resize(self.enums.len(), None);
+        self.copy_structs = vec![false; self.structs.len()];
+        self.copy_enums = vec![false; self.enums.len()];
+        // A struct cannot contain itself by value, but it can contain a user
+        // type declared later, so iterate until the classification settles.
+        loop {
+            let mut changed = false;
+            for id in 0..self.structs.len() {
+                if self.copy_structs[id] || self.drop_structs[id].is_some() {
+                    continue;
+                }
+                let fields = self.structs[id]
+                    .fields
+                    .iter()
+                    .map(|field| field.ty.clone())
+                    .collect::<Vec<_>>();
+                if fields.iter().all(|ty| self.is_copy(ty)) {
+                    self.copy_structs[id] = true;
+                    changed = true;
+                }
+            }
+            for id in 0..self.enums.len() {
+                if self.copy_enums[id] || self.drop_enums[id].is_some() {
+                    continue;
+                }
+                let payloads = self.enums[id]
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter().cloned())
+                    .collect::<Vec<_>>();
+                if payloads.iter().all(|ty| self.is_copy(ty)) {
+                    self.copy_enums[id] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// Whether values of ty are implicitly copied (no move, no drop flag).
+    pub fn is_copy(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::Ref { .. } => true,
+            Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) => false,
+            Ty::Option(inner) => self.is_copy(inner),
+            Ty::Result(ok, err) => self.is_copy(ok) && self.is_copy(err),
+            Ty::Tuple(elems) => elems.iter().all(|elem| self.is_copy(elem)),
+            Ty::Struct(id) => self.copy_structs.get(*id).copied().unwrap_or(false),
+            Ty::Enum(id) => self.copy_enums.get(*id).copied().unwrap_or(false),
+        }
+    }
+
+    /// The user drop hook of ty, if the type implements Drop itself.
+    pub fn drop_hook(&self, ty: &Ty) -> Option<FnId> {
+        match ty {
+            Ty::Struct(id) => self.drop_structs.get(*id).copied().flatten(),
+            Ty::Enum(id) => self.drop_enums.get(*id).copied().flatten(),
+            _ => None,
+        }
+    }
+
+    /// Whether dropping a copy of ty would run a drop hook or release an owned
+    /// payload a second time. Such values must be moved, not copied: .clone()
+    /// is rejected for them.
+    pub fn has_drop_glue(&self, ty: &Ty) -> bool {
+        let mut structs = vec![false; self.structs.len()];
+        let mut enums = vec![false; self.enums.len()];
+        self.has_drop_glue_guarded(ty, &mut structs, &mut enums)
+    }
+
+    /// Recursive worker for has_drop_glue. User types can be recursive through
+    /// heap indirection (for example struct Node { next: Option<Box<Node>> }),
+    /// so every struct/enum id is visited at most once; a cycle that does not
+    /// contain a Drop hook contributes no glue.
+    fn has_drop_glue_guarded(&self, ty: &Ty, structs: &mut [bool], enums: &mut [bool]) -> bool {
+        match ty {
+            Ty::Struct(id) => {
+                if self.drop_structs.get(*id).copied().flatten().is_some() {
+                    return true;
+                }
+                if structs.get(*id).copied().unwrap_or(true) {
+                    return false;
+                }
+                structs[*id] = true;
+                self.structs
+                    .get(*id)
+                    .map(|item| {
+                        item.fields
+                            .iter()
+                            .any(|field| self.has_drop_glue_guarded(&field.ty, structs, enums))
+                    })
+                    .unwrap_or(false)
+            }
+            Ty::Enum(id) => {
+                if self.drop_enums.get(*id).copied().flatten().is_some() {
+                    return true;
+                }
+                if enums.get(*id).copied().unwrap_or(true) {
+                    return false;
+                }
+                enums[*id] = true;
+                self.enums
+                    .get(*id)
+                    .map(|item| {
+                        item.variants.iter().any(|variant| {
+                            variant
+                                .fields
+                                .iter()
+                                .any(|ty| self.has_drop_glue_guarded(ty, structs, enums))
+                        })
+                    })
+                    .unwrap_or(false)
+            }
+            // A deep copy would duplicate the owned payload, so the glue
+            // propagates through these indirections.
+            Ty::Vec(inner) | Ty::Box(inner) => self.has_drop_glue_guarded(inner, structs, enums),
+            Ty::Option(inner) => self.has_drop_glue_guarded(inner, structs, enums),
+            Ty::Result(ok, err) => {
+                self.has_drop_glue_guarded(ok, structs, enums)
+                    || self.has_drop_glue_guarded(err, structs, enums)
+            }
+            Ty::Tuple(elems) => elems
+                .iter()
+                .any(|elem| self.has_drop_glue_guarded(elem, structs, enums)),
+            Ty::Unit
+            | Ty::Bool
+            | Ty::Int(_)
+            | Ty::Float(_)
+            | Ty::String
+            | Ty::Rc(_)
+            | Ty::Fn(_, _)
+            | Ty::Ref { .. } => false,
+        }
     }
 }
 
@@ -527,6 +696,8 @@ pub enum HBuiltinMethod {
     // Box
     BoxGet,
     BoxSet,
+    // Auto-derived Clone
+    Clone,
 }
 
 impl HBuiltinMethod {
@@ -580,6 +751,7 @@ impl HBuiltinMethod {
             RcStrongCount => "strong_count",
             BoxGet => "get",
             BoxSet => "set",
+            Clone => "clone",
         }
     }
 }

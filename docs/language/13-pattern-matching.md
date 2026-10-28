@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-130), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-140), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 1.3.0 are:
+The pattern forms available in 1.4.0 are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -142,11 +142,77 @@ on
 5
 ```
 
+### Moves in patterns
+
+Patterns follow the ownership rules of the value they match. Matching a
+move-only value **consumes** it: an identifier pattern binds the whole value, and
+the scrutinee cannot be used after the `match`. A `_` wildcard also consumes the
+value; `let _ = value;` is the exception — it does not move. Matching a reference
+(`match &value`) leaves the original usable.
+
+```ls
+fn main() {
+    let text = String::from("hi");
+    match text {
+        value => println!("{}", value),
+    }
+
+    let number = 7;
+    match number {                       // Copy: `number` is still usable
+        value => println!("{}", value),
+    }
+    println!("{}", number);
+}
+```
+
+Output:
+
+```text
+hi
+7
+7
+```
+
+A pattern that binds a type with `Drop` glue by value is rejected (`E0509`) —
+match through a reference instead:
+
+```ls,compile-fail
+struct Guard {
+    name: String,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        println!("drop {}", self.name);
+    }
+}
+
+fn main() {
+    let guard = Guard { name: String::from("g") };
+    if let Some(value) = Some(guard) {
+        println!("{}", value.name);
+    }
+}
+```
+
+Error:
+
+```text
+error[E0509]: cannot move out of a value of type Guard in a pattern because it implements Drop in version 1.4; use references instead
+   --> example-06.ls:13:17
+    |
+ 13 |     if let Some(value) = Some(guard) {
+    |                 ^^^^^
+    = note: by-value bindings of types with drop glue are only allowed with a simple identifier binding; match or borrow through a reference instead
+
+lsaca: example-06.ls: could not compile example-06.ls due to previous error(s)
+```
+
 ### Tuple patterns
 
 Tuple patterns match the tuple's arity and bind each component. All tuple
 patterns must be **flat**: nested tuple values and nested tuple patterns are a
-known codegen limitation in 1.3.0 (see [Roadmap](15-roadmap.md)).
+known codegen limitation in 1.4.0 (see [Roadmap](16-roadmap.md)).
 
 ```ls
 fn main() {
@@ -184,12 +250,12 @@ struct Point {
 fn main() {
     let p = Point { x: 3, y: 4, label: String::from("corner") };
 
-    match p {
-        Point { x, y, .. } => println!("{} {}", x, y),
+    match &p {
+        Point { x, y, .. } => println!("{} {}", *x, *y),
     }
 
-    match p {
-        Point { label, .. } => println!("{}", label),
+    match &p {
+        Point { label, .. } => println!("{}", *label),
     }
 }
 ```
@@ -366,18 +432,18 @@ fn main() {
 Error:
 ```text
 error[E0408]: variable x is not bound in all patterns of this or-pattern
-  --> example-12.ls:8:9
+  --> example-14.ls:8:9
    |
  8 |         E::A(x) | E::B(y) => x,
    |         ^^^^^^^^^^^^^^^^^
 
 error[E0408]: variable y is not bound in all patterns of this or-pattern
-  --> example-12.ls:8:9
+  --> example-14.ls:8:9
    |
  8 |         E::A(x) | E::B(y) => x,
    |         ^^^^^^^^^^^^^^^^^
 
-lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
 Or-patterns also nest inside other patterns: a struct field or a tuple component
@@ -561,13 +627,13 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: 0 not covered
-  --> example-19.ls:3:5
+  --> example-21.ls:3:5
    |
  3 |     match n {
    |     ^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
+lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
 ```
 
 The guard itself is an ordinary expression, so it must have type `bool`. An
@@ -587,13 +653,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-20.ls:4:14
+  --> example-22.ls:4:14
    |
  4 |         n if n => println!("guard"),
    |              ^
    = note: expected bool, found {integer}
 
-lsaca: example-20.ls: could not compile example-20.ls due to previous error(s)
+lsaca: example-22.ls: could not compile example-22.ls due to previous error(s)
 ```
 
 ### Nested patterns
@@ -693,11 +759,11 @@ Output:
 7
 ```
 
-Bindings from a `&mut` *aggregate* pattern are writable in version 1.3.0: a struct
+Bindings from a `&mut` *aggregate* pattern are writable in version 1.4.0: a struct
 pattern with several bindings behaves like a single binding, and assignments such as
 `match &mut maybe { Some(value) => { *value = 9; } ... }` compile and update the
 referent (see [References and
-borrowing](11-references-and-borrowing.md)).
+borrowing](12-references-and-borrowing.md)).
 
 One more receiver rule to remember: inside an `&self` method, `match self` follows the
 same ergonomics as any other reference-typed scrutinee, so the patterns bind references
@@ -748,13 +814,13 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: 2 not covered
-  --> example-25.ls:3:16
+  --> example-27.ls:3:16
    |
  3 |     let text = match n {
    |                ^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-25.ls: could not compile example-25.ls due to previous error(s)
+lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -769,13 +835,13 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: None not covered
-  --> example-26.ls:3:5
+  --> example-28.ls:3:5
    |
  3 |     match maybe {
    |     ^^^^^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-26.ls: could not compile example-26.ls due to previous error(s)
+lsaca: example-28.ls: could not compile example-28.ls due to previous error(s)
 ```
 
 A wildcard `_` or a binding covers everything and silences the exhaustiveness
@@ -800,13 +866,13 @@ fn main() {
 Error:
 ```text
 error[E0005]: refutable pattern in local binding: patterns in this position must be irrefutable
-  --> example-27.ls:3:9
+  --> example-29.ls:3:9
    |
  3 |     let Some(value) = maybe;
    |         ^^^^^^^^^^^
    = note: only wildcards, bindings and single-variant destructuring are allowed here
 
-lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
+lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
 ```
 
 The irrefutable forms `if let` and `while let` are described in
@@ -834,10 +900,10 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 1.3.0
+## Known limitations in 1.4.0
 
 Or-patterns, match guards and string-literal patterns are fully supported. The
-pattern restrictions that remain in 1.3.0 are:
+pattern restrictions that remain in 1.4.0 are:
 
 * **Nested tuples** — tuple patterns inside tuple patterns still produce invalid
   C in the generated project; keep tuple patterns flat and destructure nested
@@ -851,7 +917,7 @@ pattern restrictions that remain in 1.3.0 are:
   through `*binding`. There are no range or slice patterns at all, for strings
   or integers.
 
-The nested-tuple gap is listed again in [Roadmap](15-roadmap.md) together with
+The nested-tuple gap is listed again in [Roadmap](16-roadmap.md) together with
 the other known limitations of the release.
 
 ## What next
@@ -861,5 +927,5 @@ the other known limitations of the release.
 * Declaring the types you match on:
   [Structs, enums and impl](10-structs-enums-and-impl.md).
 * Borrowing rules behind match ergonomics: [References and
-  borrowing](11-references-and-borrowing.md).
-* `Option` and `Result` API: [Standard library](14-standard-library.md#option).
+  borrowing](12-references-and-borrowing.md).
+* `Option` and `Result` API: [Standard library](15-standard-library.md#option).

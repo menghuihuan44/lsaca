@@ -257,8 +257,15 @@ impl<'a> Gen<'a> {
             HBuiltinMethod::VecPush => {
                 let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
-                    let value = self.gen_owned(arg);
-                    if ops::is_frozen_shared(&receiver.ty) {
+                    // The element argument is consumed by the vector: managed
+                    // values are moved instead of copied.
+                    let frozen = ops::is_frozen_shared(&receiver.ty);
+                    let value = if frozen {
+                        self.gen_owned(arg)
+                    } else {
+                        self.gen_owned_move(arg)
+                    };
+                    if frozen {
                         self.line(format!("ls_vec_string_push(&({}), {});", place, value));
                     } else {
                         // Fast path: append into spare capacity directly.
@@ -322,7 +329,11 @@ impl<'a> Gen<'a> {
                 let place = self.place_through_reference(receiver);
                 if let (Some(index), Some(value)) = (args.first(), args.get(1)) {
                     let index_value = self.gen_owned(index);
-                    let element_value = self.gen_owned(value);
+                    let element_value = if ops::is_frozen_shared(&receiver.ty) {
+                        self.gen_owned(value)
+                    } else {
+                        self.gen_owned_move(value)
+                    };
                     self.line(format!(
                         "if ((int64_t)({}) < 0 || (uint64_t)({}) > (uint64_t)({}).len) {{ ls_panic_bounds({}, (int64_t)({}).len, (int64_t)({})); }}",
                         index_value, index_value, place, loc, place, index_value
@@ -408,8 +419,15 @@ impl<'a> Gen<'a> {
             HBuiltinMethod::VecExtend => {
                 let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
-                    let other = self.gen_owned(arg);
-                    if ops::is_frozen_shared(&receiver.ty) {
+                    // The iterable argument is consumed: its elements are
+                    // transferred into the receiver.
+                    let frozen = ops::is_frozen_shared(&receiver.ty);
+                    let other = if frozen {
+                        self.gen_owned(arg)
+                    } else {
+                        self.gen_owned_move(arg)
+                    };
+                    if frozen {
                         self.line(format!("ls_vec_string_extend(&({}), &({}));", place, other));
                     } else {
                         let element = vec_element(&receiver.ty);
@@ -424,19 +442,17 @@ impl<'a> Gen<'a> {
                             index, index, other, index
                         ));
                         self.w.indent();
-                        let names = self.names;
-                        let value = ops::copy_expr(
-                            names,
-                            &element,
-                            &format!("({}).data[{}]", other, index),
-                        );
                         self.line(format!(
-                            "({}).data[({}).len + {}] = {};",
-                            place, place, index, value
+                            "({}).data[({}).len + {}] = ({}).data[{}];",
+                            place, place, index, other, index
                         ));
                         self.w.dedent();
                         self.line("}");
                         self.line(format!("({}).len += ({}).len;", place, other));
+                        // The elements were transferred out of the source
+                        // vector; emptying it makes releasing the shell free
+                        // only the element buffer.
+                        self.line(format!("({}).len = 0;", other));
                     }
                 }
                 self.assign_unit(target);
@@ -476,78 +492,154 @@ impl<'a> Gen<'a> {
                 ));
             }
             HBuiltinMethod::OptUnwrap => {
-                let place = self.place_through_reference(receiver);
                 let payload_ty = option_payload(&receiver.ty);
-                self.line(format!("if (({}).{} != 1) {{", place, types::TAG_FIELD));
-                self.w.indent();
-                self.line(format!(
-                    "ls_panic_cstr({}, {});",
-                    loc,
-                    util::c_string_literal(OPTION_UNWRAP_PANIC)
-                ));
-                self.w.dedent();
-                self.line("}");
-                let names = self.names;
-                let value = ops::copy_expr(
-                    names,
-                    &payload_ty,
-                    &format!(
-                        "({}).{}.{}",
-                        place,
+                if ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref() {
+                    let place = self.place_through_reference(receiver);
+                    self.line(format!("if (({}).{} != 1) {{", place, types::TAG_FIELD));
+                    self.w.indent();
+                    self.line(format!(
+                        "ls_panic_cstr({}, {});",
+                        loc,
+                        util::c_string_literal(OPTION_UNWRAP_PANIC)
+                    ));
+                    self.w.dedent();
+                    self.line("}");
+                    let names = self.names;
+                    let value = ops::copy_expr(
+                        names,
+                        &payload_ty,
+                        &format!(
+                            "({}).{}.{}",
+                            place,
+                            types::UNION_FIELD,
+                            types::OPTION_SOME_MEMBER
+                        ),
+                    );
+                    self.line(format!("{} = {};", target, value));
+                } else {
+                    // unwrap consumes its receiver: move the option into a
+                    // temporary shell and take the payload out of it.
+                    let shell = self.gen_owned_move(receiver);
+                    self.line(format!("if (({}).{} != 1) {{", shell, types::TAG_FIELD));
+                    self.w.indent();
+                    self.line(format!(
+                        "ls_panic_cstr({}, {});",
+                        loc,
+                        util::c_string_literal(OPTION_UNWRAP_PANIC)
+                    ));
+                    self.w.dedent();
+                    self.line("}");
+                    self.line(format!(
+                        "{} = ({}).{}.{};",
+                        target,
+                        shell,
                         types::UNION_FIELD,
                         types::OPTION_SOME_MEMBER
-                    ),
-                );
-                self.line(format!("{} = {};", target, value));
+                    ));
+                    self.mark_moved(&shell);
+                }
+                let _ = payload_ty;
             }
             HBuiltinMethod::OptUnwrapOr => {
-                let place = self.place_through_reference(receiver);
                 let payload_ty = option_payload(&receiver.ty);
                 if let Some(default) = args.first() {
+                    let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                    // The receiver is consumed unless it is a shared runtime
+                    // type or reached through a reference.
+                    let shell = if frozen {
+                        None
+                    } else {
+                        Some(self.gen_owned_move(receiver))
+                    };
                     let default_value = self.gen_owned(default);
                     self.line(format!("{} = {};", target, default_value));
                     self.mark_moved(&default_value);
-                    self.line(format!("if (({}).{} == 1) {{", place, types::TAG_FIELD));
-                    self.w.indent();
-                    self.emit_release(&payload_ty, target);
-                    let names = self.names;
-                    let value = ops::copy_expr(
-                        names,
-                        &payload_ty,
-                        &format!(
-                            "({}).{}.{}",
-                            place,
-                            types::UNION_FIELD,
-                            types::OPTION_SOME_MEMBER
-                        ),
-                    );
-                    self.line(format!("{} = {};", target, value));
-                    self.w.dedent();
-                    self.line("}");
+                    match &shell {
+                        Some(shell) => {
+                            self.line(format!("if (({}).{} == 1) {{", shell, types::TAG_FIELD));
+                            self.w.indent();
+                            self.emit_release(&payload_ty, target);
+                            self.line(format!(
+                                "{} = ({}).{}.{};",
+                                target,
+                                shell,
+                                types::UNION_FIELD,
+                                types::OPTION_SOME_MEMBER
+                            ));
+                            self.w.dedent();
+                            self.line("}");
+                            self.mark_moved(shell);
+                        }
+                        None => {
+                            let place = self.place_through_reference(receiver);
+                            self.line(format!("if (({}).{} == 1) {{", place, types::TAG_FIELD));
+                            self.w.indent();
+                            self.emit_release(&payload_ty, target);
+                            let names = self.names;
+                            let value = ops::copy_expr(
+                                names,
+                                &payload_ty,
+                                &format!(
+                                    "({}).{}.{}",
+                                    place,
+                                    types::UNION_FIELD,
+                                    types::OPTION_SOME_MEMBER
+                                ),
+                            );
+                            self.line(format!("{} = {};", target, value));
+                            self.w.dedent();
+                            self.line("}");
+                        }
+                    }
                 }
             }
             HBuiltinMethod::OptExpect => {
-                let place = self.place_through_reference(receiver);
                 let payload_ty = option_payload(&receiver.ty);
                 if let Some(message) = args.first() {
+                    let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                    let shell = if frozen {
+                        None
+                    } else {
+                        Some(self.gen_owned_move(receiver))
+                    };
                     let message_value = self.gen_owned(message);
-                    self.line(format!("if (({}).{} != 1) {{", place, types::TAG_FIELD));
-                    self.w.indent();
-                    self.line(format!("ls_panic_at({}, {});", loc, message_value));
-                    self.w.dedent();
-                    self.line("}");
-                    let names = self.names;
-                    let value = ops::copy_expr(
-                        names,
-                        &payload_ty,
-                        &format!(
-                            "({}).{}.{}",
-                            place,
-                            types::UNION_FIELD,
-                            types::OPTION_SOME_MEMBER
-                        ),
-                    );
-                    self.line(format!("{} = {};", target, value));
+                    match &shell {
+                        Some(shell) => {
+                            self.line(format!("if (({}).{} != 1) {{", shell, types::TAG_FIELD));
+                            self.w.indent();
+                            self.line(format!("ls_panic_at({}, {});", loc, message_value));
+                            self.w.dedent();
+                            self.line("}");
+                            self.line(format!(
+                                "{} = ({}).{}.{};",
+                                target,
+                                shell,
+                                types::UNION_FIELD,
+                                types::OPTION_SOME_MEMBER
+                            ));
+                            self.mark_moved(shell);
+                        }
+                        None => {
+                            let place = self.place_through_reference(receiver);
+                            self.line(format!("if (({}).{} != 1) {{", place, types::TAG_FIELD));
+                            self.w.indent();
+                            self.line(format!("ls_panic_at({}, {});", loc, message_value));
+                            self.w.dedent();
+                            self.line("}");
+                            let names = self.names;
+                            let value = ops::copy_expr(
+                                names,
+                                &payload_ty,
+                                &format!(
+                                    "({}).{}.{}",
+                                    place,
+                                    types::UNION_FIELD,
+                                    types::OPTION_SOME_MEMBER
+                                ),
+                            );
+                            self.line(format!("{} = {};", target, value));
+                        }
+                    }
                 }
             }
 
@@ -571,77 +663,190 @@ impl<'a> Gen<'a> {
                 ));
             }
             HBuiltinMethod::ResUnwrap => {
-                let place = self.place_through_reference(receiver);
                 let ok_ty = result_ok_type(&receiver.ty);
-                self.line(format!("if (({}).{} != 0) {{", place, types::TAG_FIELD));
-                self.w.indent();
-                self.line(format!(
-                    "ls_panic_cstr({}, {});",
-                    loc,
-                    util::c_string_literal(RESULT_UNWRAP_PANIC)
-                ));
-                self.w.dedent();
-                self.line("}");
-                let names = self.names;
-                let value = ops::copy_expr(
-                    names,
-                    &ok_ty,
-                    &format!(
-                        "({}).{}.{}",
-                        place,
-                        types::UNION_FIELD,
-                        types::RESULT_OK_MEMBER
-                    ),
-                );
-                self.line(format!("{} = {};", target, value));
+                let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                // The receiver is consumed: the payload is transferred into
+                // the target and the cell shell is not released again.
+                let shell = if frozen {
+                    None
+                } else {
+                    Some(self.gen_owned_move(receiver))
+                };
+                match &shell {
+                    Some(shell) => {
+                        self.line(format!("if (({}).{} != 0) {{", shell, types::TAG_FIELD));
+                        self.w.indent();
+                        self.line(format!(
+                            "ls_panic_cstr({}, {});",
+                            loc,
+                            util::c_string_literal(RESULT_UNWRAP_PANIC)
+                        ));
+                        self.w.dedent();
+                        self.line("}");
+                        self.line(format!(
+                            "{} = ({}).{}.{};",
+                            target,
+                            shell,
+                            types::UNION_FIELD,
+                            types::RESULT_OK_MEMBER
+                        ));
+                        self.mark_moved(shell);
+                    }
+                    None => {
+                        let place = self.place_through_reference(receiver);
+                        self.line(format!("if (({}).{} != 0) {{", place, types::TAG_FIELD));
+                        self.w.indent();
+                        self.line(format!(
+                            "ls_panic_cstr({}, {});",
+                            loc,
+                            util::c_string_literal(RESULT_UNWRAP_PANIC)
+                        ));
+                        self.w.dedent();
+                        self.line("}");
+                        let names = self.names;
+                        let value = ops::copy_expr(
+                            names,
+                            &ok_ty,
+                            &format!(
+                                "({}).{}.{}",
+                                place,
+                                types::UNION_FIELD,
+                                types::RESULT_OK_MEMBER
+                            ),
+                        );
+                        self.line(format!("{} = {};", target, value));
+                    }
+                }
             }
             HBuiltinMethod::ResUnwrapOr => {
-                let place = self.place_through_reference(receiver);
                 let ok_ty = result_ok_type(&receiver.ty);
+                let err_ty = result_err_type(&receiver.ty);
                 if let Some(default) = args.first() {
+                    let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                    let shell = if frozen {
+                        None
+                    } else {
+                        Some(self.gen_owned_move(receiver))
+                    };
                     let default_value = self.gen_owned(default);
                     self.line(format!("{} = {};", target, default_value));
                     self.mark_moved(&default_value);
-                    self.line(format!("if (({}).{} == 0) {{", place, types::TAG_FIELD));
-                    self.w.indent();
-                    self.emit_release(&ok_ty, target);
-                    let names = self.names;
-                    let value = ops::copy_expr(
-                        names,
-                        &ok_ty,
-                        &format!(
-                            "({}).{}.{}",
-                            place,
-                            types::UNION_FIELD,
-                            types::RESULT_OK_MEMBER
-                        ),
-                    );
-                    self.line(format!("{} = {};", target, value));
-                    self.w.dedent();
-                    self.line("}");
+                    match &shell {
+                        Some(shell) => {
+                            self.line(format!("if (({}).{} == 0) {{", shell, types::TAG_FIELD));
+                            self.w.indent();
+                            self.emit_release(&ok_ty, target);
+                            self.line(format!(
+                                "{} = ({}).{}.{};",
+                                target,
+                                shell,
+                                types::UNION_FIELD,
+                                types::RESULT_OK_MEMBER
+                            ));
+                            self.w.dedent();
+                            self.line("} else {");
+                            self.w.indent();
+                            // The clone consumed an Err payload that is not
+                            // transferred anywhere, so it has to be released
+                            // here; the shell itself is stack allocated and
+                            // marked moved below.
+                            self.emit_release(
+                                &err_ty,
+                                &format!(
+                                    "({}).{}.{}",
+                                    shell,
+                                    types::UNION_FIELD,
+                                    types::RESULT_ERR_MEMBER
+                                ),
+                            );
+                            self.w.dedent();
+                            self.line("}");
+                            self.mark_moved(shell);
+                        }
+                        None => {
+                            let place = self.place_through_reference(receiver);
+                            self.line(format!("if (({}).{} == 0) {{", place, types::TAG_FIELD));
+                            self.w.indent();
+                            self.emit_release(&ok_ty, target);
+                            let names = self.names;
+                            let value = ops::copy_expr(
+                                names,
+                                &ok_ty,
+                                &format!(
+                                    "({}).{}.{}",
+                                    place,
+                                    types::UNION_FIELD,
+                                    types::RESULT_OK_MEMBER
+                                ),
+                            );
+                            self.line(format!("{} = {};", target, value));
+                            self.w.dedent();
+                            self.line("}");
+                        }
+                    }
                 }
             }
             HBuiltinMethod::ResExpect => {
-                let place = self.place_through_reference(receiver);
                 let ok_ty = result_ok_type(&receiver.ty);
                 if let Some(message) = args.first() {
+                    let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                    let shell = if frozen {
+                        None
+                    } else {
+                        Some(self.gen_owned_move(receiver))
+                    };
                     let message_value = self.gen_owned(message);
-                    self.line(format!("if (({}).{} != 0) {{", place, types::TAG_FIELD));
-                    self.w.indent();
-                    self.line(format!("ls_panic_at({}, {});", loc, message_value));
-                    self.w.dedent();
-                    self.line("}");
-                    let names = self.names;
-                    let value = ops::copy_expr(
-                        names,
-                        &ok_ty,
-                        &format!(
-                            "({}).{}.{}",
-                            place,
-                            types::UNION_FIELD,
-                            types::RESULT_OK_MEMBER
-                        ),
-                    );
+                    match &shell {
+                        Some(shell) => {
+                            self.line(format!("if (({}).{} != 0) {{", shell, types::TAG_FIELD));
+                            self.w.indent();
+                            self.line(format!("ls_panic_at({}, {});", loc, message_value));
+                            self.w.dedent();
+                            self.line("}");
+                            self.line(format!(
+                                "{} = ({}).{}.{};",
+                                target,
+                                shell,
+                                types::UNION_FIELD,
+                                types::RESULT_OK_MEMBER
+                            ));
+                            self.mark_moved(shell);
+                        }
+                        None => {
+                            let place = self.place_through_reference(receiver);
+                            self.line(format!("if (({}).{} != 0) {{", place, types::TAG_FIELD));
+                            self.w.indent();
+                            self.line(format!("ls_panic_at({}, {});", loc, message_value));
+                            self.w.dedent();
+                            self.line("}");
+                            let names = self.names;
+                            let value = ops::copy_expr(
+                                names,
+                                &ok_ty,
+                                &format!(
+                                    "({}).{}.{}",
+                                    place,
+                                    types::UNION_FIELD,
+                                    types::RESULT_OK_MEMBER
+                                ),
+                            );
+                            self.line(format!("{} = {};", target, value));
+                        }
+                    }
+                }
+            }
+            HBuiltinMethod::Clone => {
+                // .clone() reads the receiver and produces a new owned value;
+                // the receiver stays live. Reference layers are transparent.
+                let mut value_ty = receiver.ty.clone();
+                while let Ty::Ref { inner, .. } = value_ty {
+                    value_ty = (*inner).clone();
+                }
+                let place = self.place_through_reference(receiver);
+                if self.is_trivial_copy(&value_ty) {
+                    self.line(format!("{} = {};", target, place));
+                } else {
+                    let value = ops::copy_expr(self.names, &value_ty, &place);
                     self.line(format!("{} = {};", target, value));
                 }
             }
@@ -691,7 +896,7 @@ impl<'a> Gen<'a> {
                     let suffix = self.names.mangle(inner);
                     // The cell takes ownership of the new payload, so the
                     // generated code must not release the argument again.
-                    let value = self.gen_owned(arg);
+                    let value = self.gen_owned_move(arg);
                     self.line(format!("lsaca_rc_set_{}({}, {});", suffix, place, value));
                     self.mark_moved(&value);
                     self.assign_unit(target);
@@ -729,7 +934,7 @@ impl<'a> Gen<'a> {
                     let suffix = self.names.mangle(inner);
                     // The cell takes ownership of the new payload, so the
                     // generated code must not release the argument again.
-                    let value = self.gen_owned(arg);
+                    let value = self.gen_owned_move(arg);
                     self.line(format!("lsaca_box_set_{}({}, {});", suffix, place, value));
                     self.mark_moved(&value);
                     self.assign_unit(target);
@@ -787,7 +992,7 @@ impl<'a> Gen<'a> {
                     // The new cell owns the payload: transfer ownership
                     // instead of releasing the argument at the end of the
                     // statement.
-                    let value = self.gen_owned(arg);
+                    let value = self.gen_owned_move(arg);
                     self.mark_moved(&value);
                     let suffix = self.names.mangle(inner);
                     let ctype = self.ctype(ty);
@@ -802,7 +1007,7 @@ impl<'a> Gen<'a> {
                     // The new cell owns the payload: transfer ownership
                     // instead of releasing the argument at the end of the
                     // statement.
-                    let value = self.gen_owned(arg);
+                    let value = self.gen_owned_move(arg);
                     self.mark_moved(&value);
                     let suffix = self.names.mangle(inner);
                     let ctype = self.ctype(ty);
@@ -1213,7 +1418,11 @@ impl<'a> Gen<'a> {
                     ));
                 }
                 HFormatPartKind::Arg { expr, spec } => {
-                    let value = self.gen_owned(expr);
+                    // Format arguments are a borrowed context: places are read
+                    // without transferring ownership, non-places are
+                    // materialised into owned temporaries released with the
+                    // enclosing statement.
+                    let value = self.gen_borrowed(expr);
                     if spec.is_plain() {
                         self.append_display(accumulator, &expr.ty, &value);
                     } else {
@@ -1394,8 +1603,10 @@ impl<'a> Gen<'a> {
     }
 
     fn gen_assert(&mut self, call: &HMacroCall, loc: &str, target: &str) {
+        // The condition is a borrowed context: the assertion helper only
+        // reads it.
         let condition = match call.args.first() {
-            Some(argument) => self.gen_owned(argument),
+            Some(argument) => self.gen_borrowed(argument),
             None => return,
         };
         self.line(format!("if (!({})) {{", condition));
@@ -1422,8 +1633,10 @@ impl<'a> Gen<'a> {
         if call.args.len() < 2 {
             return;
         }
-        let left = self.gen_owned(&call.args[0]);
-        let right = self.gen_owned(&call.args[1]);
+        // The operands are a borrowed context: they are only compared and
+        // debug-printed, never released by the helpers.
+        let left = self.gen_borrowed(&call.args[0]);
+        let right = self.gen_borrowed(&call.args[1]);
         let names = self.names;
         let equals = ops::eq_expr(names, &call.args[0].ty, &left, &right);
         self.line(format!("if (!({})) {{", equals));

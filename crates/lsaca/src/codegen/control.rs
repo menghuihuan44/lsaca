@@ -1,149 +1,11 @@
 //! Statements and control flow: blocks, patterns, branching and loops.
 
-use crate::hir::{HBlock, HExpr, HExprKind, HFormatPartKind, HLit, HPat, HPatKind, HStmt};
+use crate::hir::{HBlock, HExpr, HLit, HPat, HPatKind, HStmt};
 use crate::types::Ty;
 
 use super::emit::{BoundVar, Gen, LoopCtx};
 use super::types;
 use super::util;
-
-// ----- read-only HIR helpers ----------------------------------------------
-
-/// True when the block mentions the local variable `name` anywhere.
-fn block_mentions_local(block: &HBlock, name: &str) -> bool {
-    block
-        .stmts
-        .iter()
-        .any(|statement| statement_mentions_local(statement, name))
-        || block
-            .tail
-            .as_deref()
-            .map(|tail| expr_mentions_local(tail, name))
-            .unwrap_or(false)
-}
-
-fn statement_mentions_local(statement: &HStmt, name: &str) -> bool {
-    match statement {
-        HStmt::Let { init, .. } => init
-            .as_ref()
-            .map(|init| expr_mentions_local(init, name))
-            .unwrap_or(false),
-        HStmt::Expr(expression) => expr_mentions_local(expression, name),
-    }
-}
-
-fn expr_mentions_local(expression: &HExpr, name: &str) -> bool {
-    match &expression.kind {
-        HExprKind::Lit(_)
-        | HExprKind::Capture { .. }
-        | HExprKind::ConstRef { .. }
-        | HExprKind::FnRef { .. }
-        | HExprKind::OptionNone
-        | HExprKind::Break
-        | HExprKind::Continue => false,
-        HExprKind::Local { c_name, .. } => c_name == name,
-        HExprKind::Closure { captures, .. } => captures
-            .iter()
-            .any(|capture| expr_mentions_local(capture, name)),
-        HExprKind::Call { callee, args } => {
-            expr_mentions_local(callee, name)
-                || args.iter().any(|arg| expr_mentions_local(arg, name))
-        }
-        HExprKind::DirectCall { receiver, args, .. } => {
-            receiver
-                .as_deref()
-                .map(|receiver| expr_mentions_local(receiver, name))
-                .unwrap_or(false)
-                || args.iter().any(|arg| expr_mentions_local(arg, name))
-        }
-        HExprKind::BuiltinMethod { receiver, args, .. } => {
-            expr_mentions_local(receiver, name)
-                || args.iter().any(|arg| expr_mentions_local(arg, name))
-        }
-        HExprKind::BuiltinAssoc { args, .. } | HExprKind::BuiltinCall { args, .. } => {
-            args.iter().any(|arg| expr_mentions_local(arg, name))
-        }
-        HExprKind::Field { base, .. } => expr_mentions_local(base, name),
-        HExprKind::Index { base, index } => {
-            expr_mentions_local(base, name) || expr_mentions_local(index, name)
-        }
-        HExprKind::Unary { expr, .. }
-        | HExprKind::Ref { expr, .. }
-        | HExprKind::Deref { expr }
-        | HExprKind::Cast { expr }
-        | HExprKind::OptionSome(expr)
-        | HExprKind::ResultOk(expr)
-        | HExprKind::ResultErr(expr) => expr_mentions_local(expr, name),
-        HExprKind::Binary { lhs, rhs, .. } => {
-            expr_mentions_local(lhs, name) || expr_mentions_local(rhs, name)
-        }
-        HExprKind::Assign { target, value, .. } => {
-            expr_mentions_local(target, name) || expr_mentions_local(value, name)
-        }
-        HExprKind::Block(block) => block_mentions_local(block, name),
-        HExprKind::If {
-            cond,
-            then_block,
-            else_expr,
-        } => {
-            expr_mentions_local(cond, name)
-                || block_mentions_local(then_block, name)
-                || else_expr
-                    .as_deref()
-                    .map(|otherwise| expr_mentions_local(otherwise, name))
-                    .unwrap_or(false)
-        }
-        HExprKind::Match { scrutinee, arms } => {
-            expr_mentions_local(scrutinee, name)
-                || arms.iter().any(|arm| {
-                    arm.guard
-                        .as_ref()
-                        .map(|guard| expr_mentions_local(guard, name))
-                        .unwrap_or(false)
-                        || expr_mentions_local(&arm.body, name)
-                })
-        }
-        HExprKind::Loop { body } => block_mentions_local(body, name),
-        HExprKind::While { cond, body } => {
-            expr_mentions_local(cond, name) || block_mentions_local(body, name)
-        }
-        HExprKind::ForRange {
-            start, end, body, ..
-        } => {
-            expr_mentions_local(start, name)
-                || expr_mentions_local(end, name)
-                || block_mentions_local(body, name)
-        }
-        HExprKind::ForVec { vec, body, .. } => {
-            expr_mentions_local(vec, name) || block_mentions_local(body, name)
-        }
-        HExprKind::StructLit { fields, .. } => fields
-            .iter()
-            .any(|(_, value)| expr_mentions_local(value, name)),
-        HExprKind::Tuple(elements) | HExprKind::VecLit { elems: elements } => elements
-            .iter()
-            .any(|element| expr_mentions_local(element, name)),
-        HExprKind::VecRepeat { value, count } => {
-            expr_mentions_local(value, name) || expr_mentions_local(count, name)
-        }
-        HExprKind::EnumLit { args, .. } => args.iter().any(|arg| expr_mentions_local(arg, name)),
-        HExprKind::Format { parts } => parts.iter().any(|part| match &part.kind {
-            HFormatPartKind::Literal(_) => false,
-            HFormatPartKind::Arg { expr, .. } => expr_mentions_local(expr, name),
-        }),
-        HExprKind::Macro(call) => {
-            call.args.iter().any(|arg| expr_mentions_local(arg, name))
-                || call.parts.iter().any(|part| match &part.kind {
-                    HFormatPartKind::Literal(_) => false,
-                    HFormatPartKind::Arg { expr, .. } => expr_mentions_local(expr, name),
-                })
-        }
-        HExprKind::Return(value) => value
-            .as_deref()
-            .map(|value| expr_mentions_local(value, name))
-            .unwrap_or(false),
-    }
-}
 
 impl<'a> Gen<'a> {
     // ----- statements ------------------------------------------------------
@@ -172,8 +34,16 @@ impl<'a> Gen<'a> {
             }
             HStmt::Expr(expression) => {
                 let ty = expression.ty.clone();
-                let target = self.declare_temp(&ty);
-                self.gen_into(expression, &target);
+                // A discarded expression statement consumes its value: the
+                // value is transferred out of any owned place and the
+                // temporary is released (dropped) at the end of the statement.
+                let target = if self.is_trivial_copy(&ty) {
+                    let target = self.declare_temp(&ty);
+                    self.gen_into(expression, &target);
+                    target
+                } else {
+                    self.gen_owned_move(expression)
+                };
                 self.w.line(format!("(void){};", target));
             }
         }
@@ -200,8 +70,17 @@ impl<'a> Gen<'a> {
             return false;
         }
         let name = c_name.clone();
-        self.emit_release(&pat.ty, &name);
-        self.gen_into(init, &name);
+        if self.is_trivial_copy(&pat.ty) {
+            self.emit_release(&pat.ty, &name);
+            self.gen_into(init, &name);
+        } else {
+            // A plain let initialiser is a consuming context: release a
+            // previous value first, transfer the initialiser into the binding
+            // and mark the binding live for cleanup.
+            self.emit_release_guarded(&pat.ty, &name, self.live_flag(&name).as_deref());
+            self.gen_move_into(init, &name);
+            self.set_live(&name, true);
+        }
         true
     }
 
@@ -228,14 +107,24 @@ impl<'a> Gen<'a> {
                     return;
                 }
                 let ctype = self.ctype(&pat.ty);
-                let zero = self.zero_expr(&pat.ty);
+                // Predeclared bindings must start at a cheap zero value: writing the
+                // real initialiser cannot leak a heap allocation made for the placeholder.
+                let zero = self.raw_zero_expr(&pat.ty);
                 self.w.line(format!("{} {} = {};", ctype, name, zero));
                 self.w.line(format!("(void){};", name));
+                let live = if self.is_trivial_copy(&pat.ty) {
+                    None
+                } else {
+                    let flag = format!("{}_live", name);
+                    self.w.line(format!("bool {} = false;", flag));
+                    Some(flag)
+                };
                 if let Some(frame) = self.frames.last_mut() {
                     frame.vars.push(BoundVar {
                         c_name: name,
                         ty: pat.ty.clone(),
                         owned: true,
+                        live,
                     });
                 }
             }
@@ -314,8 +203,13 @@ impl<'a> Gen<'a> {
                         source
                     ));
                 } else {
-                    self.emit_release(&pat.ty, c_name);
+                    // Pattern bindings read their value out of the scrutinee
+                    // temporary: copy Copy values and retain managed ones.
+                    self.emit_release_guarded(&pat.ty, c_name, self.live_flag(c_name).as_deref());
                     self.emit_copy_into(c_name, &pat.ty, source);
+                    if !self.is_trivial_copy(&pat.ty) {
+                        self.set_live(c_name, true);
+                    }
                 }
             }
             HPatKind::Tuple(parts) => {
@@ -419,7 +313,7 @@ impl<'a> Gen<'a> {
         self.gen_stmts(&block.stmts);
         if !self.block_terminated {
             match &block.tail {
-                Some(tail) => self.gen_into(tail, target),
+                Some(tail) => self.gen_move_into(tail, target),
                 None => {
                     let zero = self.zero_expr(&Ty::Unit);
                     self.w.line(format!("{} = {};", target, zero));
@@ -455,7 +349,7 @@ impl<'a> Gen<'a> {
         self.gen_stmts(&then_block.stmts);
         if !self.block_terminated {
             match &then_block.tail {
-                Some(tail) => self.gen_into(tail, target),
+                Some(tail) => self.gen_move_into(tail, target),
                 None => {
                     let zero = self.zero_expr(ty);
                     self.w.line(format!("{} = {};", target, zero));
@@ -477,7 +371,7 @@ impl<'a> Gen<'a> {
             self.w.indent();
             let frame = self.frames.len();
             self.push_frame();
-            self.gen_into(other, target);
+            self.gen_move_into(other, target);
             else_terminated = self.block_terminated;
             else_fn_terminated = self.fn_terminated;
             self.frame_cleanup(frame);
@@ -498,8 +392,38 @@ impl<'a> Gen<'a> {
     ) {
         let frame = self.frames.len();
         self.push_frame();
-        let scrutinee_value = self.declare_temp(&scrutinee.ty);
-        self.gen_into(scrutinee, &scrutinee_value);
+        // The scrutinee of a match or if let is a consuming context: the
+        // value is transferred into a local that owns it for the arms.
+        //
+        // The owning local carries a liveness flag instead of being a plain
+        // temporary: a whole-value binding moves the value out of it (setting
+        // the flag to false), and a guard that rejects an arm moves the value
+        // back (setting the flag to true again). The flag is honoured by both
+        // the normal scope exit and the jump-statement cleanups, so the value
+        // is always dropped exactly once.
+        let scrutinee_value = self.fresh("t");
+        let scrutinee_ctype = self.ctype(&scrutinee.ty);
+        let scrutinee_zero = self.raw_zero_expr(&scrutinee.ty);
+        self.w.line(format!(
+            "{} {} = {};",
+            scrutinee_ctype, scrutinee_value, scrutinee_zero
+        ));
+        let scrutinee_live = if self.is_trivial_copy(&scrutinee.ty) {
+            None
+        } else {
+            let flag = format!("{}_live", scrutinee_value);
+            self.w.line(format!("bool {} = true;", flag));
+            Some(flag)
+        };
+        if let Some(frame) = self.frames.last_mut() {
+            frame.vars.push(BoundVar {
+                c_name: scrutinee_value.clone(),
+                ty: scrutinee.ty.clone(),
+                owned: true,
+                live: scrutinee_live,
+            });
+        }
+        self.gen_move_into(scrutinee, &scrutinee_value);
         // Match ergonomics: when the scrutinee is a reference the tests and
         // bindings read through the pointer, and every binding becomes the
         // address of the matched place (see bind_pattern_mode). Nested
@@ -537,7 +461,30 @@ impl<'a> Gen<'a> {
             self.gen_match_tests(&arm.pat, &source, &matched);
             self.w.line(format!("if ({}) {{", matched));
             self.w.indent();
-            self.bind_pattern_mode(&arm.pat, &source, ref_mode);
+            // A whole-value binding of a non-Copy scrutinee moves the value out
+            // of the owning local above. Copying instead would release the value
+            // twice (and run a Drop hook twice) because the scrutinee local is
+            // released at the end of the match. This mirrors Rust: a by-value
+            // binding in a pattern moves, it does not clone.
+            let moved_whole = match &arm.pat.kind {
+                HPatKind::Bind { c_name, .. }
+                    if !ref_mode && !self.is_trivial_copy(&arm.pat.ty) =>
+                {
+                    self.w.line(format!("{} = {};", c_name, source));
+                    self.w.line(format!(
+                        "{} = {};",
+                        source,
+                        self.raw_zero_expr(&scrutinee_ty)
+                    ));
+                    self.set_live(c_name, true);
+                    self.set_live(&scrutinee_value, false);
+                    Some(c_name.clone())
+                }
+                _ => None,
+            };
+            if moved_whole.is_none() {
+                self.bind_pattern_mode(&arm.pat, &source, ref_mode);
+            }
             let guard_frame = self.frames.len();
             self.push_frame();
             match &arm.guard {
@@ -548,11 +495,30 @@ impl<'a> Gen<'a> {
             self.w.indent();
             let body_frame = self.frames.len();
             self.push_frame();
-            self.gen_into(&arm.body, target);
+            self.gen_move_into(&arm.body, target);
             self.frame_cleanup(body_frame);
             self.pop_frame();
             self.w.dedent();
             self.w.line("}");
+            if let Some(c_name) = &moved_whole
+                && arm.guard.is_some()
+            {
+                // The guard rejected the arm: give the value back to the
+                // scrutinee local so the remaining arms can still match it.
+                // The binding is cleared and therefore not dropped.
+                self.w.line(format!("if (!{}) {{", pass));
+                self.w.indent();
+                self.w.line(format!("{} = {};", source, c_name));
+                self.w.line(format!(
+                    "{} = {};",
+                    c_name,
+                    self.raw_zero_expr(&scrutinee_ty)
+                ));
+                self.set_live(c_name, false);
+                self.set_live(&scrutinee_value, true);
+                self.w.dedent();
+                self.w.line("}");
+            }
             self.frame_cleanup(guard_frame);
             self.pop_frame();
             self.w.dedent();
@@ -867,7 +833,7 @@ impl<'a> Gen<'a> {
             format!("{} >= (int64_t)({})", index, end_value)
         };
         self.w.line(format!("if ({}) break;", stop));
-        self.gen_loop_body(body, Some((pat, index.as_str())), &continue_label);
+        self.gen_loop_body(body, Some((pat, index.as_str(), false)), &continue_label);
         if inclusive {
             self.w.line(format!("if ({} == INT64_MAX) break;", index));
         }
@@ -899,19 +865,12 @@ impl<'a> Gen<'a> {
         let continue_label = self.fresh_label("for_next");
         let zero = self.zero_expr(ty);
         self.w.line(format!("{} = {};", target, zero));
-        // A loop over a local vector that its body never mentions can iterate
-        // the vector in place: nothing can observe or mutate it during the
-        // loop, so the owned snapshot (a full deep copy) is not needed.
-        let direct = match &vec.kind {
-            HExprKind::Local { c_name, .. } if !block_mentions_local(body, c_name) => {
-                Some(self.local_lvalue(c_name))
-            }
-            _ => None,
-        };
-        let vec_value = match direct {
-            Some(place) => place,
-            None => self.gen_owned(vec),
-        };
+        // The iterable is consumed: the vector is moved into an owned
+        // temporary and each non-Copy element is transferred out of it into
+        // the loop binding. When the loop ends the shell is emptied so that
+        // releasing it only frees the element buffer.
+        let vec_value = self.declare_temp(&vec.ty);
+        self.gen_move_into(vec, &vec_value);
         let index = self.new_plain_of("size_t", "i");
         self.w.line(format!("{} = 0;", index));
         self.loops.push(LoopCtx {
@@ -926,7 +885,7 @@ impl<'a> Gen<'a> {
         self.w
             .line(format!("if ({} >= ({}).len) break;", index, vec_value));
         let element = format!("({}).data[{}]", vec_value, index);
-        self.gen_loop_body(body, Some((pat, element.as_str())), &continue_label);
+        self.gen_loop_body(body, Some((pat, element.as_str(), true)), &continue_label);
         self.w.line(format!("{} += 1;", index));
         self.w.dedent();
         self.w.line("}");
@@ -938,23 +897,57 @@ impl<'a> Gen<'a> {
         self.loops.pop();
         if used_break {
             self.w.line(format!("{}:;", break_label));
+            // A break leaves the elements after the current index untransferred
+            // in the consumed vector. Release them here so that they are
+            // dropped exactly once; transferred slots were already zeroed, so
+            // start after the current element. When the loop finishes normally
+            // the index equals the length and the loop body executes zero
+            // times.
+            let element_ty = match &vec.ty {
+                Ty::Vec(inner) => (**inner).clone(),
+                _ => Ty::Unit,
+            };
+            if !self.is_trivial_copy(&element_ty) {
+                let counter = self.fresh("k");
+                self.w.line(format!(
+                    "for (size_t {} = {} + 1; {} < ({}).len; {} += 1) {{",
+                    counter, index, counter, vec_value, counter
+                ));
+                self.w.indent();
+                let slot = format!("({}).data[{}]", vec_value, counter);
+                self.emit_release(&element_ty, &slot);
+                let zero = self.raw_zero_expr(&element_ty);
+                self.w.line(format!("{} = {};", slot, zero));
+                self.w.dedent();
+                self.w.line("}");
+            }
         }
+        self.w.line(format!("({}).len = 0;", vec_value));
         self.block_terminated = false;
         self.fn_terminated = false;
     }
 
     /// Emit the `{ ... }` block of a loop body, binding the loop pattern (if
     /// any) to `pat_source` before the statements.
-    fn gen_loop_body(&mut self, body: &HBlock, pat: Option<(&HPat, &str)>, continue_label: &str) {
+    fn gen_loop_body(
+        &mut self,
+        body: &HBlock,
+        pat: Option<(&HPat, &str, bool)>,
+        continue_label: &str,
+    ) {
         self.w.line("{");
         self.w.indent();
         let body_frame = self.frames.len();
         self.push_frame();
         self.predeclare_block(body);
-        if let Some((pattern, source)) = pat {
+        if let Some((pattern, source, owned_transfer)) = pat {
             self.predeclare_pattern(pattern);
             let source = source.to_string();
-            self.bind_pattern(pattern, &source);
+            if owned_transfer && !self.is_trivial_copy(&pattern.ty) {
+                self.bind_owned_pattern(pattern, &source);
+            } else {
+                self.bind_pattern(pattern, &source);
+            }
         }
         self.gen_stmts(&body.stmts);
         if !self.block_terminated
@@ -963,7 +956,7 @@ impl<'a> Gen<'a> {
         {
             let tail_ty = tail.ty.clone();
             let discard = self.declare_temp(&tail_ty);
-            self.gen_into(tail, &discard);
+            self.gen_move_into(tail, &discard);
             self.w.line(format!("(void){};", discard));
         }
         let uses_continue = self
@@ -978,6 +971,29 @@ impl<'a> Gen<'a> {
         self.pop_frame();
         self.w.dedent();
         self.w.line("}");
+    }
+
+    /// Bind a pattern to a place whose value is transferred out of an owned
+    /// aggregate (the element of a consumed for-loop vector).
+    ///
+    /// A plain binding takes ownership of the selected value and the place is
+    /// zeroed so that releasing the aggregate cannot release it a second time.
+    /// Structural patterns copy their parts out of the place and then release
+    /// the whole value (the parts retain their own references).
+    fn bind_owned_pattern(&mut self, pat: &HPat, source: &str) {
+        if let HPatKind::Bind { c_name, .. } = &pat.kind {
+            let name = c_name.clone();
+            self.emit_release_guarded(&pat.ty, &name, self.live_flag(&name).as_deref());
+            self.w.line(format!("{} = {};", name, source));
+            let zero = self.raw_zero_expr(&pat.ty);
+            self.w.line(format!("{} = {};", source, zero));
+            self.set_live(&name, true);
+        } else {
+            self.bind_pattern(pat, source);
+            self.emit_release(&pat.ty, source);
+            let zero = self.raw_zero_expr(&pat.ty);
+            self.w.line(format!("{} = {};", source, zero));
+        }
     }
 
     // ----- jump statements -------------------------------------------------
@@ -1030,7 +1046,7 @@ impl<'a> Gen<'a> {
         let return_ty = self.fn_ret.clone();
         let result = self.new_plain(&return_ty, "r");
         match value {
-            Some(value) => self.gen_into(value, &result),
+            Some(value) => self.gen_move_into(value, &result),
             None => {
                 let zero = self.zero_expr(&return_ty);
                 self.w.line(format!("{} = {};", result, zero));

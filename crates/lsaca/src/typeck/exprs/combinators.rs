@@ -348,12 +348,58 @@ impl<'a> Checker<'a> {
                 }
                 let result_ty = ITy::option(payload.clone());
                 self.apply_hint(&result_ty, hint);
-                let (predicate, _, _) = self.closure_arg(&args[0], &payload, &ITy::Bool);
+                // Rust's Option::filter takes `FnOnce(&T) -> bool`, so the
+                // predicate borrows the payload. Consuming the payload for the
+                // predicate call would move the binding twice (once into the
+                // predicate, once into the returned Some), which the move
+                // checker reports as E0382 for every non-Copy payload.
+                let borrowed = ITy::Ref {
+                    mutable: false,
+                    inner: Box::new(payload.clone()),
+                };
+                let (predicate, _, _) = self.closure_arg(&args[0], &borrowed, &ITy::Bool);
                 let (pat, read) = self.bind_value("value", &payload, span);
-                let condition = call_expr(predicate, vec![read.clone()], &ITy::Bool, span);
+                // Bind the borrow in its own statement so its loan ends at the
+                // predicate call, before the payload is moved into the returned
+                // `Some`. Passing `&value` inline would keep the loan live until
+                // the end of the enclosing statement and the borrow checker would
+                // reject moving the payload afterwards (E0505/E0597).
+                let reference_c_name = self.fresh_local_c_name();
+                let reference_pat = TPat::new(
+                    borrowed.clone(),
+                    TPatKind::Bind {
+                        name: "reference".to_string(),
+                        c_name: reference_c_name.clone(),
+                        mutable: false,
+                    },
+                    span,
+                );
+                let reference_read = TExpr::new(
+                    borrowed.clone(),
+                    TExprKind::Local {
+                        name: "reference".to_string(),
+                        c_name: reference_c_name,
+                        mutable: false,
+                    },
+                    span,
+                );
+                let reference_init = TExpr::new(
+                    borrowed,
+                    TExprKind::Ref {
+                        mutable: false,
+                        expr: Box::new(read.clone()),
+                    },
+                    span,
+                );
+                let borrow_stmt = TStmt::Let {
+                    pat: reference_pat,
+                    init: Some(reference_init),
+                    span,
+                };
+                let condition = call_expr(predicate, vec![reference_read], &ITy::Bool, span);
                 let keep = some_expr(read, &payload, span);
                 let drop = none_expr(&payload, span);
-                let some_body = TExpr::new(
+                let condition_expr = TExpr::new(
                     result_ty.clone(),
                     TExprKind::If {
                         cond: Box::new(condition),
@@ -364,6 +410,15 @@ impl<'a> Checker<'a> {
                         },
                         else_expr: Some(Box::new(drop)),
                     },
+                    span,
+                );
+                let some_body = TExpr::new(
+                    result_ty.clone(),
+                    TExprKind::Block(TBlock {
+                        stmts: vec![borrow_stmt],
+                        tail: Some(Box::new(condition_expr)),
+                        span,
+                    }),
                     span,
                 );
                 let arms = vec![

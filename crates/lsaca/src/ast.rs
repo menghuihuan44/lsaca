@@ -107,6 +107,13 @@ pub struct VariantDef {
     pub span: Span,
 }
 
+/// The trait named in an impl Trait for Type block.
+#[derive(Debug, Clone)]
+pub struct TraitRef {
+    pub name: String,
+    pub span: Span,
+}
+
 /// An impl block. Inline type parameter lists are not supported.
 #[derive(Debug, Clone)]
 pub struct ImplBlock {
@@ -114,6 +121,10 @@ pub struct ImplBlock {
     /// Flattened display name of the implemented type, for messages.
     pub ty_name: String,
     pub ty_span: Span,
+    /// Some for impl Trait for Type blocks. Only the Drop trait is
+    /// meaningful in version 1.4; Copy and Clone are derived automatically
+    /// and must not be implemented explicitly.
+    pub trait_name: Option<TraitRef>,
     pub fns: Vec<FnDecl>,
     pub span: Span,
 }

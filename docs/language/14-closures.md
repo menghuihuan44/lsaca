@@ -3,8 +3,11 @@
 A closure is an anonymous function value written inline with `|params|`. Closures
 have the same type shape as functions — `fn(Args) -> Ret` — and can be bound,
 passed, returned and called wherever a function value is expected. The one
-semantic difference from Rust is that lsaca captures **by value**: a closure
-holds copies of the variables it mentions, not references to them.
+semantic difference from Rust is that lsaca captures **by value**: each variable
+the closure mentions is copied if it is `Copy` and **moved** into the closure
+otherwise, so using a move-only variable after the closure is created is a
+compile error (`E0382`) — clone it first if both are needed. A closure never
+holds references to captured variables.
 
 ## Syntax
 
@@ -42,20 +45,17 @@ body is an expression; use `{ … }` whenever you need several statements.
 
 ## Capture by value
 
-When a closure mentions an outer variable, it captures a **copy** of that
-variable at the moment the closure is created. Later changes to the outer
-variable are not seen by the closure, and changes the closure makes to its copy
-are not seen outside. This is the defining difference from Rust closures:
+When a closure mentions an outer variable, it captures that variable **by
+value** at the moment the closure is created. Copy values are copied, so the
+closure keeps a snapshot; move-only values (`String`, `Vec<T>`, `Rc<T>`, `Box<T>`,
+function values) are **moved** into the closure, so the outer binding cannot be
+used afterwards. This is the same capture rule as Rust, except that lsaca has no
+borrow capture at all: closures never capture a reference.
 
 ```ls
 fn main() {
-    let mut name = String::from("ana");
-    let visit = || {
-        println!("visiting {}", name);
-    };
-
-    name.push_str("!");
-    println!("outer name: {}", name);
+    let name = String::from("ana");
+    let visit = || println!("visiting {}", name);
     visit();
     visit();
 }
@@ -63,13 +63,16 @@ fn main() {
 
 Output:
 ```text
-outer name: ana!
 visiting ana
 visiting ana
 ```
 
-The integer case shows the snapshot rule especially clearly: the closure keeps
-the value the variable had when it was created.
+`name` is moved into the closure when `visit` is created; using `name` after that
+line is a compile error (`E0382`, use of moved value), so clone the value before
+capture when both the closure and the outer scope need it.
+
+Copy values show the snapshot rule directly: the closure keeps the value the
+variable had when it was created.
 
 ```ls
 fn main() {
@@ -88,15 +91,13 @@ Output:
 11 0
 ```
 
-Captured values are ordinary lsaca values. A captured `String` or `Vec` shares
-its buffer until one side writes (copy-on-write), so capture is cheap; a captured
-`Rc` copies the handle and therefore shares the cell.
+Captured values are ordinary lsaca values; a closure owns whatever it captured.
 
 ## The move keyword
 
-lsaca accepts the Rust `move` keyword on closures (`move |x| …`), but because
-capture is already by value it changes nothing. It exists only to let Rust code
-compile unchanged:
+lsaca accepts the Rust `move` keyword on closures (`move |x| …`). Capture is
+already by value, so the keyword changes nothing; it exists only so that Rust
+code that spells `move` compiles unchanged:
 
 ```ls
 fn main() {
@@ -104,7 +105,6 @@ fn main() {
     let show = move || println!("{}", label);
     show();
     show();
-    println!("{}", label);
 }
 ```
 
@@ -112,25 +112,30 @@ Output:
 ```text
 moved
 moved
-moved
 ```
+
+`label` is moved into the closure either way, so the outer binding is unusable
+after the closure is created (without cloning first).
 
 ## Shared state with Rc
 
-Since capture copies handles, an `Rc<T>` captured by a closure is shared with the
-outer scope: mutations through one handle are visible through the other. This is
-the idiomatic way to give a closure mutable shared state:
+A captured `Rc<T>` handle is moved into the closure, and every other handle still
+refers to the same cell, so mutations through the closure are visible outside.
+Clone the outer handle before capture when the surrounding scope also needs to
+read the cell:
 
 ```ls
 fn main() {
     let counter = Rc::new(0);
-    let bump = || counter.set(counter.get() + 1);
+    let handle = counter.clone();
+    let bump = || handle.set(handle.get() + 1);
     bump();
     bump();
     bump();
     println!("{}", counter.get());
 
-    let read = || counter.get();
+    let read_handle = counter.clone();
+    let read = || read_handle.get();
     println!("{}", read());
 }
 ```
@@ -171,9 +176,9 @@ Output:
 7
 ```
 
-Closures that capture values can be returned from functions. The captured copies
-travel with the closure, which is how a function can produce a specialized
-function value:
+Closures that capture values can be returned from functions. The captured values
+travel with the closure (it owns them), which is how a function can produce a
+specialized function value:
 
 ```ls
 fn multiplier(factor: i64) -> fn(i64) -> i64 {
@@ -277,7 +282,7 @@ Function values and closures do not support `==` (`E0369`), and a closure cannot
 call itself — there is no way to name it from inside its own body. To write a
 recursive function value, use a named `fn`.
 
-## Known limitations in 1.3.0
+## Known limitations in 1.4.0
 
 Two restrictions come from the C backend rather than the type checker:
 
@@ -286,11 +291,16 @@ Two restrictions come from the C backend rather than the type checker:
   those positions;
 * closures and function values cannot be compared with `==`.
 
-See [Roadmap](15-roadmap.md) for the full list.
+Closures capture by value only (Copy values are copied, move-only values are
+moved); there is no borrow capture and no `FnMut`/`FnOnce` distinction. A
+closure is an ordinary move-only value, so clone it to keep using it after
+passing it somewhere by value.
+
+See [Roadmap](16-roadmap.md) for the full list.
 
 ## What next
 
 * Functions and higher-order functions: [Functions](09-functions.md).
 * Where function values are used in the standard library:
-  [Standard library](14-standard-library.md).
+  [Standard library](15-standard-library.md).
 * The exact `fn` type syntax: [Types](04-types.md#function-types).

@@ -28,6 +28,11 @@ Rules:
   shared state, see [Memory model](05-memory-model.md)).
 * The initializer may be an arbitrary expression, including a block or an
   `if` expression, and it is evaluated exactly once.
+* For move-only types (`String`, `Vec`, `Rc`, `Box`, function values and the user
+  types that contain them) the initializer is **moved** into the new binding when
+  it names an existing place, so the old binding cannot be used afterwards.
+  `Copy` values are copied instead. Use `.clone()` when both names are needed
+  (see [Ownership and moves](11-ownership-and-moves.md)).
 
 ```ls
 fn main() {
@@ -46,6 +51,52 @@ Output:
 42 3.5 2 many
 ```
 
+A move-only value is moved into its new binding; a `Copy` value is copied and
+the source stays usable:
+
+```ls
+fn main() {
+    let first = String::from("lsaca");
+    let second = first;                 // moves `first`
+    println!("{}", second);
+
+    let number = 7;
+    let copy = number;                  // Copy: `number` is still usable
+    println!("{} {}", number, copy);
+}
+```
+
+Output:
+
+```text
+lsaca
+7 7
+```
+
+Using the moved binding is a compile error:
+
+```ls,compile-fail
+fn main() {
+    let first = String::from("lsaca");
+    let second = first;
+    println!("{} {}", first, second);
+}
+```
+
+Error:
+
+```text
+error[E0382]: use of moved value: first
+  --> example-03.ls:4:23
+   |
+ 4 |     println!("{} {}", first, second);
+   |                       ^^^^^
+   = note: example-03.ls:3:18: value moved here
+   = note: first has type String, which is not Copy, so the value is moved whenever it is used by value; use .clone() to copy it first
+
+lsaca: example-03.ls: could not compile example-03.ls due to previous error(s)
+```
+
 Declaring a binding without an initializer is rejected:
 
 ```ls,compile-fail
@@ -58,12 +109,12 @@ fn main() {
 Error:
 ```text
 error[E0001]: cannot declare a binding without an initializer
-  --> example-02.ls:2:5
+  --> example-04.ls:2:5
    |
  2 |     let x: i64;
    |     ^^^^^^^^^^^
 
-lsaca: example-02.ls: could not compile example-02.ls due to previous error(s)
+lsaca: example-04.ls: could not compile example-04.ls due to previous error(s)
 ```
 
 ## Immutability
@@ -84,12 +135,12 @@ fn main() {
 Error:
 ```text
 error[E0596]: cannot assign to immutable value: the binding has not been declared as mutable
-  --> example-03.ls:3:5
+  --> example-05.ls:3:5
    |
  3 |     count = count + 1;
    |     ^^^^^
 
-lsaca: example-03.ls: could not compile example-03.ls due to previous error(s)
+lsaca: example-05.ls: could not compile example-05.ls due to previous error(s)
 ```
 
 The same program with `let mut count = 1;` compiles and prints `2`:
@@ -127,12 +178,12 @@ fn main() {
 Error:
 ```text
 error[E0596]: cannot assign to immutable value: the binding has not been declared as mutable
-  --> example-05.ls:8:5
+  --> example-07.ls:8:5
    |
  8 |     p.x = 10;
    |     ^^^
 
-lsaca: example-05.ls: could not compile example-05.ls due to previous error(s)
+lsaca: example-07.ls: could not compile example-07.ls due to previous error(s)
 ```
 
 ## Shadowing
@@ -169,9 +220,11 @@ Output:
 outer
 ```
 
-Shadowing is **not** mutation: the old binding is not modified and any other
-alias-like copies (for example a `Vec` snapshot) are unaffected. If you need to
-change a value, use `let mut`, not a shadow.
+Shadowing is **not** mutation: the old binding is not modified. Shadowing a
+move-only value with an unrelated initializer leaves the old value alone; if the
+new initializer uses the old binding, the value is moved into the new binding
+exactly like any other use. If you need to change a value, use `let mut`, not a
+shadow.
 
 ## Reading before declaration
 
@@ -189,12 +242,12 @@ fn main() {
 Error:
 ```text
 error[E0425]: cannot find value later in this scope
-  --> example-07.ls:2:20
+  --> example-09.ls:2:20
    |
  2 |     println!("{}", later);
    |                    ^^^^^
 
-lsaca: example-07.ls: could not compile example-07.ls due to previous error(s)
+lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
 ```
 
 ## Assignment and compound assignment
@@ -203,6 +256,12 @@ Assignment is an expression statement of the form `place = value;`, where `place
 is a mutable binding, a field path rooted in a mutable binding, or an index
 expression rooted in a mutable binding. The value is evaluated first, then stored.
 The assignment expression itself has type `()`.
+
+Assignment also moves. For a move-only type the right-hand side is transferred
+into the place and the place's previous value is released immediately, running
+its `Drop` hook; the right-hand-side binding is unusable afterwards. Compound
+assignment reads and writes the place in one step, so `text += "..."` does not
+move `text`.
 
 Compound assignment combines a binary operator with assignment:
 
@@ -266,6 +325,34 @@ abcd
 6 2
 ```
 
+Overwriting a place releases the old value first:
+
+```ls
+struct Tracked {
+    name: String,
+}
+
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        println!("drop {}", self.name);
+    }
+}
+
+fn main() {
+    let mut slot = Tracked { name: String::from("first") };
+    slot = Tracked { name: String::from("second") };
+    println!("after replace");
+}
+```
+
+Output:
+
+```text
+drop first
+after replace
+drop second
+```
+
 Assignment to a function call or another non-place expression is rejected. The
 following program does not parse, because the left-hand side of `=` must be a
 place:
@@ -283,12 +370,12 @@ fn main() {
 Error:
 ```text
 error[E0596]: cannot assign to this expression: the left-hand side is not a place expression
-  --> example-09.ls:6:5
+  --> example-12.ls:6:5
    |
  6 |     answer() = 1;
    |     ^^^^^^^^
 
-lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
+lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 ```
 
 ## Destructuring bindings
@@ -297,6 +384,11 @@ A `let` pattern can destructure a tuple or a struct into several bindings at
 once. The pattern must be irrefutable: tuples of the right shape and struct
 patterns without `Some`/`Ok`-style alternatives always are. `mut` may be applied
 to individual bindings inside the pattern.
+
+Destructuring a move-only value moves its parts into the new bindings (`Copy`
+parts are copied). A struct or tuple is destructured as a whole, so a `String`
+field moves out cleanly; moving a field out of a value *without* destructuring it
+is still rejected (`E0507`).
 
 ```ls
 struct Point {
@@ -338,7 +430,7 @@ const NAME: Type = constant_expression;
 ```
 
 The type must be a scalar type or `String`. Structs, enums, `Vec`, `Option`,
-`Result`, `Rc` and `Box` cannot be constant types in 1.3.0; a structurally
+`Result`, `Rc` and `Box` cannot be constant types in 1.4.0; a structurally
 constant `Point` value is rejected even if all its fields are literals. The
 initializer must be a constant expression:
 
@@ -386,27 +478,27 @@ fn main() {
 Error:
 ```text
 error: expected ':' after constant name, found =
-  --> example-12.ls:1:13
+  --> example-15.ls:1:13
    |
  1 | const LIMIT = 10;
    |             ^
 
 error: expected type name, found =
-  --> example-12.ls:1:13
+  --> example-15.ls:1:13
    |
  1 | const LIMIT = 10;
    |             ^
 
 error: expected '=' in constant declaration, found integer literal 10
-  --> example-12.ls:1:15
+  --> example-15.ls:1:15
    |
  1 | const LIMIT = 10;
    |               ^^
 
-lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
 ```
 
-Comparison is not constant-foldable in 1.3.0:
+Comparison is not constant-foldable in 1.4.0:
 
 ```ls,compile-fail
 const SMALL: bool = 1 < 2;
@@ -419,12 +511,12 @@ fn main() {
 Error:
 ```text
 error[E0015]: constant initializer must be a constant expression
-  --> example-13.ls:1:21
+  --> example-16.ls:1:21
    |
  1 | const SMALL: bool = 1 < 2;
    |                     ^^^^^
 
-lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
+lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 ```
 
 Constants of a non-scalar type are rejected as well:
@@ -445,18 +537,18 @@ fn main() {
 Error:
 ```text
 error[E0001]: constants of type Point are not supported; constant types must be scalars or String
-  --> example-14.ls:6:15
+  --> example-17.ls:6:15
    |
  6 | const ORIGIN: Point = Point { x: 0, y: 0 };
    |               ^^^^^
 
 error[E0609]: no field x on type ()
-  --> example-14.ls:9:20
+  --> example-17.ls:9:20
    |
  9 |     println!("{}", ORIGIN.x);
    |                    ^^^^^^^^
 
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
 ```
 
 Constants are substituted at compile time: they cost nothing at run time, they
@@ -467,15 +559,18 @@ cell passed around explicitly.
 
 ## Parameters and loop variables
 
-Function parameters are immutable bindings owned by the function body. Writing
-`mut` on a parameter parses but has no effect in 1.3.0: assigning to the
+Function parameters are immutable bindings owned by the function body. A
+move-only argument is moved into the parameter, so the caller cannot use its
+binding afterwards (see [Functions](09-functions.md#calls-and-argument-checking)).
+Writing `mut` on a parameter parses but has no effect in 1.4.0: assigning to the
 parameter is still rejected with `E0596` (see the example in
 [Memory model](05-memory-model.md)). To modify a value, take the value and
-return the new one, or pass an `Rc` cell.
+return the new one, pass an `Rc` cell, or take a mutable reference to a builtin
+heap type (`&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>`).
 
 The variable bound by a `for` loop is a normal, immutable binding, and it may be
 declared `mut`: `for mut i in 0..3` parses and permits reassigning `i` inside the
-loop body. This is a lenient corner of the 1.3.0 parser rather than a design
+loop body. This is a lenient corner of the 1.4.0 parser rather than a design
 feature; iterating with a separate mutable accumulator is clearer (see
 [Statements and control flow](08-statements-and-control-flow.md)).
 

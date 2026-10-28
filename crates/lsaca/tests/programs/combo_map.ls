@@ -6,7 +6,7 @@ fn main() {
     println!("{}", missing.map(|number| number * 2).unwrap_or(-1));
     let fallback = missing.map_or(7, |number| number + 1);
     println!("{}", fallback);
-    let even = value.filter(|number| number % 2 == 0);
+    let even = value.filter(|number| *number % 2 == 0);
     println!("{}", even.is_some());
     let error = missing.ok_or(String::from("nothing"));
     println!("{}", error.is_err());

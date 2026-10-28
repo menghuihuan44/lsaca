@@ -105,13 +105,23 @@ impl<'a> Checker<'a> {
             self.require_bool(&left.ty, lhs.span);
             let right = self.check_expr(rhs, Some(&ITy::bool_()));
             self.require_bool(&right.ty, rhs.span);
+            // Short-circuit lowering: a && b becomes if a { b } else { false }
+            // and a || b becomes if a { true } else { b }. The right hand side
+            // is only evaluated on the branch that needs it.
+            // For || the taken branch yields true; for && the skipped
+            // branch yields false.
+            let literal = matches!(op, AstBinaryOp::Or);
+            let literal_expr = TExpr::new(ITy::bool_(), TExprKind::Lit(TLit::Bool(literal)), span);
+            let (then_expr, else_expr) = if matches!(op, AstBinaryOp::And) {
+                (right, literal_expr)
+            } else {
+                (literal_expr, right)
+            };
             let then_block = TBlock {
                 stmts: Vec::new(),
-                tail: Some(Box::new(right)),
+                tail: Some(Box::new(then_expr)),
                 span: rhs.span,
             };
-            let literal = !matches!(op, AstBinaryOp::And);
-            let else_expr = TExpr::new(ITy::bool_(), TExprKind::Lit(TLit::Bool(literal)), span);
             let ty = ITy::bool_();
             self.apply_hint(&ty, hint);
             return TExpr::new(

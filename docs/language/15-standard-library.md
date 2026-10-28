@@ -284,12 +284,12 @@ an integer in another base — write a helper function if you need one.
 
 | Builtin | Created with | Treated by ORC as |
 | --- | --- | --- |
-| `String` | literal, `String::from` | refcounted handle, copy-on-write |
-| `Vec<T>` | `vec![…]`, `Vec::new()` | refcounted handle, copy-on-write |
+| `String` | literal, `String::from` | move-only refcounted buffer, copy-on-write |
+| `Vec<T>` | `vec![…]`, `Vec::new()` | move-only refcounted buffer, copy-on-write |
 | `Option<T>` | `Some(v)`, `None` | handle if `T` is a handle |
 | `Result<T, E>` | `Ok(v)`, `Err(e)` | handle if payload is a handle |
 | `Rc<T>` | `Rc::new(v)` | refcounted shared cell |
-| `Box<T>` | `Box::new(v)` | refcounted owned box, deep-copied on assignment |
+| `Box<T>` | `Box::new(v)` | move-only refcounted owned box; `.clone()` deep-copies |
 
 ## String
 
@@ -471,7 +471,13 @@ fn main() {
     println!("{:?}", numbers);
 
     numbers.reverse();
-    numbers.extend(vec![100, 200]);
+    for extra in 0..2 {
+        numbers.push(100 * (extra + 1));
+    }
+    println!("{:?}", numbers);
+
+    let more = vec![7, 8];
+    numbers.extend(more);
     println!("{:?}", numbers);
 
     numbers[0] = 99;
@@ -491,8 +497,9 @@ Some(30) [10, 15, 20]
 10
 [15, 20]
 [20, 15, 100, 200]
+[20, 15, 100, 200, 7, 8]
 99
-4 false
+6 false
 0 []
 ```
 
@@ -570,7 +577,7 @@ fn main() {
     println!("{:?}", some.map(|n| n * 2));
     println!("{}", none.map(|n| n * 2).unwrap_or(-1));
     println!("{}", none.map_or(7, |n| n + 1));
-    println!("{} {}", some.filter(|n| n > 10).is_some(), some.filter(|n| n > 100).is_none());
+    println!("{} {}", some.filter(|n| *n > 10).is_some(), some.filter(|n| *n > 100).is_none());
 
     match none.ok_or(String::from("missing")) {
         Ok(value) => println!("ok {}", value),
@@ -601,11 +608,16 @@ example `some.map(double)`.
 
 Printing an `Option` shows its structure: `Some(42)` or `None`. Access the
 payload with `match`/`if let`/`unwrap`; there is no `==` for `Option`.
+`unwrap`, `expect` and `unwrap_or` consume the `Option`, so clone it first if
+the payload is move-only and the original is needed afterwards.
 
 ## Result
 
 `Result<T, E>` is `Ok(value)` or `Err(error)`. It is used by `parse_i64`,
-`parse_f64`, `read_file` and `write_file`.
+`parse_f64`, `read_file` and `write_file`. A `Result` holding a move-only
+payload (`String`, `Vec`, `Rc`, `Box`) is move-only too; `.clone()` produces an
+independent copy of both variants, so `good.clone().unwrap()` and
+`bad.clone().unwrap_or(0)` consume the clone and leave the original usable.
 
 | Method | Description |
 | --- | --- |
@@ -624,17 +636,24 @@ fn main() {
     let good: Result<i64, String> = Ok(10);
     let bad: Result<i64, String> = Err(String::from("boom"));
     println!("{} {} {} {}", good.is_ok(), good.is_err(), bad.is_ok(), bad.is_err());
-    println!("{} {}", good.unwrap(), bad.unwrap_or(0));
-    println!("{}", good.expect("must be ok"));
-    println!("{:?}", bad.ok());
-    println!("{:?}", bad.err());
+    println!("{}", good.unwrap());
+
+    let bad_default: Result<i64, String> = Err(String::from("boom"));
+    println!("{}", bad_default.unwrap_or(0));
+
+    let good_expect: Result<i64, String> = Ok(10);
+    println!("{}", good_expect.expect("must be ok"));
+
+    println!("{:?}", bad.clone().ok());
+    println!("{:?}", bad.clone().err());
 }
 ```
 
 Output:
 ```text
 true false false true
-10 0
+10
+0
 10
 None
 Some("boom")
@@ -654,10 +673,10 @@ fn main() {
     let good: Result<i64, String> = Ok(5);
     let bad: Result<i64, String> = Err(String::from("boom"));
 
-    println!("{}", good.map(double).unwrap());
-    println!("{:?}", bad.map_err(|e| e + "!"));
-    println!("{:?}", good.and_then(|n| if n > 0 { Ok(n + 1) } else { Err(String::from("negative")) }));
-    println!("{:?}", bad.map(double));
+    println!("{}", good.clone().map(double).unwrap());
+    println!("{:?}", bad.clone().map_err(|e| e + "!"));
+    println!("{:?}", good.clone().and_then(|n| if n > 0 { Ok(n + 1) } else { Err(String::from("negative")) }));
+    println!("{:?}", bad.clone().map(double));
 }
 ```
 
@@ -738,7 +757,7 @@ fn pick(values: Vec<i64>, counter: Rc<i64>) -> Option<i64> {
 fn main() {
     let counter = Rc::new(0);
     let empty: Vec<i64> = Vec::new();
-    println!("{:?}", pick(empty, counter));
+    println!("{:?}", pick(empty, counter.clone()));
     println!("{}", counter.get());
 }
 ```
@@ -966,7 +985,7 @@ for the full model and the cycle collector.
 ```ls
 fn main() {
     let a = Rc::new(5);
-    let b = a;
+    let b = a.clone();
     println!("{} {} {}", a.get(), b.get(), a.strong_count());
     b.set(9);
     println!("{} {} {}", a.get(), b.get(), a == b);
@@ -980,7 +999,7 @@ Output:
 ```text
 5 5 2
 9 9 true
-false 3
+false 2
 ```
 
 `Rc` display shows the wrapper: `Rc(9)`.
@@ -1004,7 +1023,7 @@ fn main() {
     let copy = Box::new(20);
     println!("{} {}", boxed.get(), boxed == copy);
 
-    let mut changed = boxed;
+    let mut changed = boxed.clone();
     changed.set(30);
     println!("{} {}", boxed.get(), changed.get());
 
@@ -1032,7 +1051,7 @@ fn sum(node: Option<Box<Node>>) -> i64 {
     match node {
         Some(boxed) => {
             let inner = boxed.get();
-            inner.value + sum(inner.next)
+            inner.value + sum(inner.next.clone())
         }
         None => 0,
     }
@@ -1052,8 +1071,8 @@ Output:
 15
 ```
 
-Copying a `Box` deep-copies the payload, so a box stored in a struct field is
-independent after a struct copy. Boxes compose with `Vec` and `Rc`:
+Cloning a `Box` deep-copies the payload, so a box stored in a struct field is
+independent after the struct is cloned. Boxes compose with `Vec` and `Rc`:
 `Vec<Box<String>>`, `Rc<Box<Node>>` and `Box<Vec<i64>>` all work.
 
 ## Free functions
@@ -1329,4 +1348,4 @@ the compiler is invoked with `LSACA_DEBUG_RC=1`; see
 * How the refcounting and copy-on-write behave:
   [Memory model](05-memory-model.md).
 * Formatting inside user types: [Structs, enums and impl](10-structs-enums-and-impl.md#printing-and-equality).
-* Every known gap of this library: [Roadmap](15-roadmap.md).
+* Every known gap of this library: [Roadmap](16-roadmap.md).

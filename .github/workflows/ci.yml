@@ -313,16 +313,24 @@ jobs:
           fi
           cmake -S "$workdir/hello" -B "$workdir/hello/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build "$workdir/hello/build"
-      # Borrowed places and reference-counted cells exercise const-qualified
-      # accessors and ORC drops, so a discarded-qualifier or unused-variable
-      # regression in generated C fails here even without the borrow fixtures
-      # being part of the compiler's own unit tests.
-      - name: Emit, compile and run the borrowing and ORC fixtures
+      # Borrowed places, reference-counted cells, move flags, Drop hooks and
+      # clone helpers exercise const-qualified accessors, ORC drops and the
+      # ownership protocol, so a discarded-qualifier, unused-variable or
+      # missing-helper regression in generated C fails here even when the
+      # compiler's own unit tests do not cover the corresponding fixture.
+      - name: Emit, compile and run the borrowing, ORC and ownership fixtures
         run: |
           set -euo pipefail
           workdir="$(mktemp -d)"
           shopt -s nullglob
-          fixtures=(crates/lsaca/tests/programs/refs_*.ls crates/lsaca/tests/programs/rc_*.ls)
+          fixtures=(crates/lsaca/tests/programs/refs_*.ls crates/lsaca/tests/programs/rc_*.ls
+                    crates/lsaca/tests/programs/box_*.ls crates/lsaca/tests/programs/drop_*.ls
+                    crates/lsaca/tests/programs/clone_*.ls crates/lsaca/tests/programs/move_*.ls
+                    crates/lsaca/tests/programs/for_vec_move.ls
+                    crates/lsaca/tests/programs/closure_capture_move.ls
+                    crates/lsaca/tests/programs/logical_ops.ls
+                    crates/lsaca/tests/programs/vec_extend.ls
+                    crates/lsaca/tests/programs/result_clone.ls)
           for fixture in "${fixtures[@]}"; do
             name="$(basename "$fixture" .ls)"
             out="$workdir/$name"

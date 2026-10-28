@@ -9,15 +9,15 @@ fn main() {
     let a = Rc::new(Node { value: 1, next: None });
     let b = Rc::new(Node { value: 2, next: None });
 
-    let a2 = a;
-    let b2 = b;
+    let a2 = a.clone();
+    let b2 = b.clone();
 
     // a -> b -> a
     b.set(Node { value: 2, next: Some(a2) });
     a.set(Node { value: 1, next: Some(b2) });
 
     println!("{}", a.get().value);
-    if let Some(next) = a.get().next {
+    if let Some(next) = a.get().next.clone() {
         println!("{}", next.get().value);
     }
     println!("done");

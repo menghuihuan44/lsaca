@@ -1,11 +1,10 @@
 //! The NLL-lite borrow checker for references.
 //!
 //! lsaca manages memory with ORC (ownership plus reference counting): every
-//! owned value is reference counted, values are freely copyable and no value
-//! is ever moved out from under its owner. The borrow checker therefore does
-//! *not* have to prove memory safety - the runtime owns every string, vector
-//! and aggregate. What it proves instead is the aliasing discipline that makes
-//! references sound and predictable:
+//! owned value is reference counted, so the borrow checker does *not* have to
+//! prove memory safety - the runtime owns every string, vector and aggregate.
+//! What it proves instead is the aliasing discipline that makes references
+//! sound and predictable:
 //!
 //! * a shared borrow may coexist with any number of other shared borrows;
 //! * a mutable borrow is exclusive: no other borrow and no direct access to
@@ -13,9 +12,17 @@
 //! * writes through a mutable reference are exclusive: a reference derived
 //!   from it may not be live at the same time;
 //! * a reference may never outlive the value it points at;
+//! * a borrowed value may not be moved while the loan is live;
 //! * a function may not return a reference to one of its own locals, and a
 //!   reference returned from a call is attributed to the parameter the return
 //!   lifetime was elided from.
+//!
+//! Since v1.4 ownership is Rust-like: Copy values copy implicitly, every other
+//! owned value is moved by a consuming use, and a moved value is dead. The move
+//! checker (`moveck.rs`) owns most move rules; the rule that needs the loan
+//! table is E0505: moving a value while a borrow of it is live is rejected
+//! here. The ORC runtime could copy the handle, but the source binding would be
+//! dead while the reference still points into it.
 //!
 //! The analysis is a single forward pass over the HIR per function and per
 //! closure. Every borrow expression creates a loan over a Target: a local, a
@@ -36,16 +43,16 @@
 //!
 //! The reported codes follow rustc: E0499 (two mutable borrows), E0502
 //! (mutable borrow while a shared borrow is live, or a read through a mutable
-//! borrow), E0506 (assignment to a borrowed value), E0515 (returned reference
-//! to a local or to the wrong parameter) and E0597 (borrow outlives its
-//! referent).
+//! borrow), E0505 (move of a borrowed value), E0506 (assignment to a borrowed
+//! value), E0515 (returned reference to a local or to the wrong parameter) and
+//! E0597 (borrow outlives its referent).
 
 use std::collections::HashMap;
 
 use crate::diag::{Diagnostic, Diagnostics, sort_and_dedup};
 use crate::hir::{
-    HArm, HBlock, HBuiltinMethod, HClosure, HExpr, HExprKind, HFieldRef, HFn, HFormatPartKind,
-    HPat, HPatKind, HStmt, Program,
+    HArm, HBlock, HBuiltinAssoc, HBuiltinMethod, HClosure, HExpr, HExprKind, HFieldRef, HFn,
+    HFormatPartKind, HPat, HPatKind, HStmt, Program,
 };
 use crate::span::Span;
 use crate::types::{SelfKind, Ty};
@@ -137,6 +144,18 @@ struct Read {
     span: Span,
 }
 
+/// One consuming use (move) of a local.
+///
+/// Only whole-local moves are recorded: moving out of a field, an index, a
+/// dereference or a closure capture is E0507, which belongs to the move
+/// checker.
+#[derive(Clone, Debug)]
+struct Move {
+    target: Target,
+    idx: usize,
+    span: Span,
+}
+
 /// What a reference value points at.
 #[derive(Clone, Debug)]
 struct Provenance {
@@ -173,6 +192,8 @@ struct FnChecker<'a> {
     loans: Vec<Loan>,
     mutations: Vec<Mutation>,
     reads: Vec<Read>,
+    /// Consuming uses (moves) of locals, for E0505.
+    moves: Vec<Move>,
     last_use: HashMap<NameId, usize>,
     provenance: HashMap<NameId, Provenance>,
     /// Loan of every reference-typed local.
@@ -226,6 +247,7 @@ impl<'a> FnChecker<'a> {
             loans: Vec::new(),
             mutations: Vec::new(),
             reads: Vec::new(),
+            moves: Vec::new(),
             last_use: HashMap::new(),
             provenance: HashMap::new(),
             ref_loan: HashMap::new(),
@@ -492,6 +514,7 @@ impl<'a> FnChecker<'a> {
         diagnostics.extend(self.scope_diagnostics());
         diagnostics.extend(self.pair_diagnostics());
         diagnostics.extend(self.mutation_diagnostics());
+        diagnostics.extend(self.move_diagnostics());
         diagnostics.extend(self.read_diagnostics());
         for diagnostic in diagnostics {
             self.diagnostics.push(diagnostic);
@@ -692,6 +715,63 @@ impl<'a> FnChecker<'a> {
                 )
                 .with_code("E0506")
                 .with_label(loan.span, label),
+            );
+        }
+        diagnostics
+    }
+
+    /// E0505: a consuming use (move) of a place while a borrow of it is live.
+    ///
+    /// A move is stronger than a write: the source binding is dead afterwards,
+    /// so a live loan on the moved place would point into a value the program
+    /// no longer owns. Only whole-local moves are recorded; moves out of a
+    /// projection are E0507 and are reported by the move checker.
+    fn move_diagnostics(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for move_event in &self.moves {
+            if matches!(move_event.target, Target::Opaque) {
+                continue;
+            }
+            let mut conflict: Option<LoanId> = None;
+            for (index, loan) in self.loans.iter().enumerate() {
+                if !targets_overlap(&move_event.target, &loan.target) {
+                    continue;
+                }
+                if move_event.idx < loan.start || move_event.idx > loan.end {
+                    continue;
+                }
+                // A borrow created after the move in the same statement shares
+                // the event index with the move; source order tells the two
+                // apart. That case is a use of a moved value (E0382), not a
+                // move while borrowed.
+                if move_event.idx == loan.start && loan.span.start > move_event.span.start {
+                    continue;
+                }
+                conflict = Some(index);
+                break;
+            }
+            let Some(loan_id) = conflict else {
+                continue;
+            };
+            let loan = &self.loans[loan_id];
+            let name = self.describe_target(&move_event.target);
+            let label = if loan.mutable {
+                "mutable borrow occurs here"
+            } else {
+                "shared borrow occurs here"
+            };
+            diagnostics.push(
+                Diagnostic::error(
+                    format!("cannot move out of {} because it is borrowed", name),
+                    move_event.span,
+                )
+                .with_code("E0505")
+                .with_label(loan.span, label)
+                .with_note(
+                    "a move would leave the reference pointing at a value the \
+                     program no longer owns; clone the value instead of moving it"
+                        .to_string(),
+                ),
             );
         }
         diagnostics
@@ -1096,7 +1176,7 @@ impl<'a> FnChecker<'a> {
         if let Some(tail) = &block.tail {
             let _start = self.tick();
             let pending = self.loans.len();
-            self.walk_expr(tail);
+            self.walk_consumed(tail);
             let end = self.tick();
             self.finalize_inline(pending, end);
         }
@@ -1110,7 +1190,14 @@ impl<'a> FnChecker<'a> {
         match stmt {
             HStmt::Let { pat, init, span } => {
                 if let Some(init) = init {
-                    self.walk_expr(init);
+                    // A single identifier binding takes ownership of the
+                    // initializer; a compound pattern only reads it (its
+                    // bindings copy or retain the value).
+                    if matches!(&pat.kind, HPatKind::Bind { .. }) {
+                        self.walk_consumed(init);
+                    } else {
+                        self.walk_expr(init);
+                    }
                 }
                 // Bindings the initializer produces start existing after it is
                 // evaluated; without the extra tick a reference copied out of
@@ -1119,7 +1206,8 @@ impl<'a> FnChecker<'a> {
                 let _ = self.tick();
                 self.declare_let(pat, init.as_ref(), *span);
             }
-            HStmt::Expr(expr) => self.walk_expr(expr),
+            // A discarded expression statement moves the value and drops it.
+            HStmt::Expr(expr) => self.walk_consumed(expr),
         }
         let end = self.tick();
         self.finalize_inline(pending, end);
@@ -1296,6 +1384,37 @@ impl<'a> FnChecker<'a> {
         self.ref_loan.insert(id, loan);
     }
 
+    /// Walk a consuming context: a single binding, an argument, a payload, a
+    /// field initializer, a return value, a block tail or a discarded
+    /// statement.
+    ///
+    /// Copy values are read with the old copy semantics; a non-Copy place that
+    /// is exactly a local is moved and recorded for E0505. Anything else is an
+    /// rvalue: constructing it does not move a place, and moves out of a
+    /// projection, a dereference or a closure capture are E0507 and belong to
+    /// the move checker.
+    fn walk_consumed(&mut self, expr: &HExpr) {
+        if self.program.is_copy(&expr.ty) {
+            self.walk_expr(expr);
+            return;
+        }
+        let target = match &expr.kind {
+            HExprKind::Local { c_name, .. } => self.lookup(c_name).map(|id| self.place_root(id)),
+            _ => None,
+        };
+        match target {
+            Some(target) => {
+                self.walk_place(expr);
+                self.moves.push(Move {
+                    target,
+                    idx: self.idx,
+                    span: expr.span,
+                });
+            }
+            None => self.walk_expr(expr),
+        }
+    }
+
     fn walk_expr(&mut self, expr: &HExpr) {
         match &expr.kind {
             HExprKind::Lit(_) | HExprKind::ConstRef { .. } | HExprKind::FnRef { .. } => {}
@@ -1324,14 +1443,18 @@ impl<'a> FnChecker<'a> {
                 });
             }
             HExprKind::Closure { captures, .. } => {
+                // Closures capture by value: Copy captures are copied, every
+                // other capture moves into the closure environment.
                 for capture in captures {
-                    self.walk_expr(capture);
+                    self.walk_consumed(capture);
                 }
             }
             HExprKind::Call { callee, args } => {
+                // Calling a closure copies the function value, but arguments
+                // are passed by value and therefore move.
                 self.walk_expr(callee);
                 for arg in args {
-                    self.walk_expr(arg);
+                    self.walk_consumed(arg);
                 }
             }
             HExprKind::DirectCall {
@@ -1340,13 +1463,18 @@ impl<'a> FnChecker<'a> {
                 args,
             } => {
                 if let Some(receiver) = receiver {
-                    self.walk_place(receiver);
-                    if self.method_takes_mut_receiver(*fn_id) {
-                        self.record_mutation(receiver);
+                    if self.method_takes_value_receiver(*fn_id) {
+                        // A by-value self receiver is moved into the callee.
+                        self.walk_consumed(receiver);
+                    } else {
+                        self.walk_place(receiver);
+                        if self.method_takes_mut_receiver(*fn_id) {
+                            self.record_mutation(receiver);
+                        }
                     }
                 }
                 for arg in args {
-                    self.walk_expr(arg);
+                    self.walk_consumed(arg);
                 }
             }
             HExprKind::BuiltinMethod {
@@ -1354,19 +1482,37 @@ impl<'a> FnChecker<'a> {
                 method,
                 args,
             } => {
-                if builtin_method_mutates(*method) {
+                if builtin_method_consumes_receiver(*method) {
+                    self.walk_consumed(receiver);
+                } else if builtin_method_mutates(*method) {
                     self.walk_place(receiver);
                     self.record_mutation(receiver);
                 } else {
                     self.walk_expr(receiver);
                 }
-                for arg in args {
-                    self.walk_expr(arg);
+                for (index, arg) in args.iter().enumerate() {
+                    if builtin_method_arg_moves(*method, index) {
+                        self.walk_consumed(arg);
+                    } else {
+                        self.walk_expr(arg);
+                    }
                 }
             }
-            HExprKind::BuiltinAssoc { args, .. } | HExprKind::BuiltinCall { args, .. } => {
+            HExprKind::BuiltinAssoc { func, args, .. } => {
+                // String::from clones its argument (documented copy
+                // semantics); every other builtin constructor moves its
+                // payload.
                 for arg in args {
-                    self.walk_expr(arg);
+                    if builtin_assoc_arg_moves(*func) {
+                        self.walk_consumed(arg);
+                    } else {
+                        self.walk_expr(arg);
+                    }
+                }
+            }
+            HExprKind::BuiltinCall { args, .. } => {
+                for arg in args {
+                    self.walk_consumed(arg);
                 }
             }
             HExprKind::Field { base, .. } => self.walk_expr(base),
@@ -1379,9 +1525,14 @@ impl<'a> FnChecker<'a> {
                 self.walk_expr(lhs);
                 self.walk_expr(rhs);
             }
-            HExprKind::Assign { target, value, .. } => {
+            HExprKind::Assign { target, op, value } => {
                 self.walk_place(target);
-                self.walk_expr(value);
+                if op.is_none() {
+                    // A plain assignment moves the value into the place.
+                    self.walk_consumed(value);
+                } else {
+                    self.walk_expr(value);
+                }
                 if let HExprKind::Local { c_name, .. } = &target.kind
                     && target.ty.is_ref()
                     && let Some(id) = self.lookup(c_name)
@@ -1428,31 +1579,35 @@ impl<'a> FnChecker<'a> {
                 self.walk_for(pat, body);
             }
             HExprKind::ForVec { pat, vec, body } => {
-                self.walk_expr(vec);
+                // `for x in <vec>` moves the vector into the loop.
+                self.walk_consumed(vec);
                 self.walk_for(pat, body);
             }
             HExprKind::StructLit { fields, .. } => {
                 for (_, value) in fields {
-                    self.walk_expr(value);
+                    self.walk_consumed(value);
                 }
             }
             HExprKind::Tuple(elements) | HExprKind::VecLit { elems: elements } => {
                 for element in elements {
-                    self.walk_expr(element);
+                    self.walk_consumed(element);
                 }
             }
             HExprKind::VecRepeat { value, count } => {
-                self.walk_expr(value);
+                self.walk_consumed(value);
                 self.walk_expr(count);
             }
             HExprKind::EnumLit { args, .. } => {
                 for arg in args {
-                    self.walk_expr(arg);
+                    self.walk_consumed(arg);
                 }
             }
             HExprKind::OptionSome(inner)
             | HExprKind::ResultOk(inner)
-            | HExprKind::ResultErr(inner) => self.walk_expr(inner),
+            | HExprKind::ResultErr(inner) => {
+                // Constructors move their payload into the new value.
+                self.walk_consumed(inner);
+            }
             HExprKind::Format { parts } => {
                 for part in parts {
                     if let HFormatPartKind::Arg { expr, .. } = &part.kind {
@@ -1471,7 +1626,7 @@ impl<'a> FnChecker<'a> {
                 }
             }
             HExprKind::Return(Some(value)) => {
-                self.walk_expr(value);
+                self.walk_consumed(value);
                 self.check_escape(value);
             }
             HExprKind::Return(None) => {}
@@ -1517,7 +1672,12 @@ impl<'a> FnChecker<'a> {
     }
 
     fn walk_match(&mut self, scrutinee: &HExpr, arms: &[HArm]) {
-        self.walk_expr(scrutinee);
+        if self.program.is_copy(&scrutinee.ty) {
+            self.walk_expr(scrutinee);
+        } else {
+            // A non-Copy scrutinee is consumed into the match temporary.
+            self.walk_consumed(scrutinee);
+        }
         let base = if scrutinee.ty.is_ref() {
             Some(self.provenance_value(scrutinee))
         } else {
@@ -1540,6 +1700,14 @@ impl<'a> FnChecker<'a> {
             .fns
             .get(fn_id)
             .map(|function| function.self_kind == Some(SelfKind::RefMut))
+            .unwrap_or(false)
+    }
+
+    fn method_takes_value_receiver(&self, fn_id: usize) -> bool {
+        self.program
+            .fns
+            .get(fn_id)
+            .map(|function| function.self_kind == Some(SelfKind::Value))
             .unwrap_or(false)
     }
 
@@ -1602,6 +1770,40 @@ fn builtin_method_mutates(method: HBuiltinMethod) -> bool {
             | HBuiltinMethod::RcSet
             | HBuiltinMethod::BoxSet
     )
+}
+
+/// Builtin methods whose receiver is consumed by the call.
+fn builtin_method_consumes_receiver(method: HBuiltinMethod) -> bool {
+    matches!(
+        method,
+        HBuiltinMethod::OptUnwrap
+            | HBuiltinMethod::OptUnwrapOr
+            | HBuiltinMethod::OptExpect
+            | HBuiltinMethod::ResUnwrap
+            | HBuiltinMethod::ResUnwrapOr
+            | HBuiltinMethod::ResExpect
+    )
+}
+
+/// Builtin method arguments that are moved into the callee by value.
+fn builtin_method_arg_moves(method: HBuiltinMethod, index: usize) -> bool {
+    match method {
+        HBuiltinMethod::VecPush
+        | HBuiltinMethod::VecExtend
+        | HBuiltinMethod::RcSet
+        | HBuiltinMethod::BoxSet
+        | HBuiltinMethod::OptUnwrapOr
+        | HBuiltinMethod::ResUnwrapOr => true,
+        HBuiltinMethod::VecInsert => index == 1,
+        _ => false,
+    }
+}
+
+/// Builtin constructor payload arguments that are moved into the new value.
+fn builtin_assoc_arg_moves(func: HBuiltinAssoc) -> bool {
+    // String::from clones its argument, so it keeps the documented copy
+    // semantics instead of moving it.
+    !matches!(func, HBuiltinAssoc::StringFrom)
 }
 
 #[cfg(test)]
@@ -2195,6 +2397,232 @@ mod tests {
                  bump(&mut x);
              }",
             "E0502",
+        );
+    }
+
+    // -- moves of borrowed values (v1.4, E0505) --------------------------
+
+    #[test]
+    fn shared_borrow_then_move_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let r = &s;
+                 let gone = s;
+                 let n = r.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn mutable_borrow_then_move_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let mut s = String::from(\"hi\");
+                 let r = &mut s;
+                 let gone = s;
+                 let n = r.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn moving_into_call_while_borrowed_is_rejected() {
+        expect_rejected(
+            "fn take(s: String) {}
+             fn main() {
+                 let s = String::from(\"hi\");
+                 let r = &s;
+                 take(s);
+                 let n = r.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn assignment_moves_borrowed_value_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let mut t = String::from(\"x\");
+                 let r = &s;
+                 t = s;
+                 let n = r.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn constructor_payload_move_while_borrowed_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let r = &s;
+                 let o = Some(s);
+                 let n = r.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn for_loop_moves_borrowed_vector_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let v: Vec<i64> = Vec::new();
+                 let r = &v;
+                 for item in v {
+                     println!(\"{}\", item);
+                 }
+                 let n = r.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn closure_capture_moves_borrowed_value_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let r = &s;
+                 let f = || {
+                     println!(\"{}\", s);
+                 };
+                 f();
+                 let n = r.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn move_is_labelled_at_the_borrow() {
+        let source = "fn main() {
+                          let s = String::from(\"hi\");
+                          let r = &s;
+                          let gone = s;
+                          let n = r.len();
+                      }";
+        let diagnostics = match check_source(source) {
+            Ok(program) => check(&program),
+            Err(diagnostics) => diagnostics,
+        };
+        let diagnostic = diagnostics
+            .as_slice()
+            .iter()
+            .find(|diagnostic| diagnostic.code == Some("E0505"))
+            .expect("expected an E0505 diagnostic");
+        assert!(
+            diagnostic.labels.iter().any(|label| label
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("borrow"))),
+            "expected a label at the borrow location",
+        );
+    }
+
+    #[test]
+    fn move_after_borrow_ends_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let r = &s;
+                 let n = r.len();
+                 let gone = s;
+             }",
+        );
+    }
+
+    #[test]
+    fn move_after_mutable_borrow_ends_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let mut s = String::from(\"hi\");
+                 let r = &mut s;
+                 let n = r.len();
+                 let gone = s;
+             }",
+        );
+    }
+
+    #[test]
+    fn move_then_borrow_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let gone = s;
+                 let r = &gone;
+                 let n = r.len();
+             }",
+        );
+    }
+
+    #[test]
+    fn copy_value_read_while_borrowed_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let mut x = 1;
+                 let r = &x;
+                 let y = x;
+                 let z = *r + y;
+                 let w = z;
+             }",
+        );
+    }
+
+    #[test]
+    fn returning_a_local_moves_it() {
+        expect_accepted(
+            "fn give() -> String {
+                 let s = String::from(\"hi\");
+                 let r = &s;
+                 let n = r.len();
+                 s
+             }
+             fn main() {
+                 let t = give();
+             }",
+        );
+    }
+
+    #[test]
+    fn clone_does_not_move_the_receiver() {
+        expect_accepted(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let r = &s;
+                 let c = s.clone();
+                 let n = r.len();
+                 let m = c.len();
+             }",
+        );
+    }
+
+    #[test]
+    fn format_arguments_do_not_move() {
+        expect_accepted(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let r = &s;
+                 println!(\"{}\", s);
+                 let n = r.len();
+             }",
+        );
+    }
+
+    #[test]
+    fn borrowed_receiver_does_not_move() {
+        expect_accepted(
+            "fn main() {
+                 let s = String::from(\"hi\");
+                 let n = s.len();
+                 let gone = s;
+             }",
         );
     }
 }

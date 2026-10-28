@@ -82,7 +82,15 @@ impl<'a> Checker<'a> {
                 pointee
             }
         };
-        match &pat.kind {
+        // Track compound pattern layers: a by-value binding of a type with drop
+        // glue below one of them is rejected with E0509 in
+        // check_binding_pattern. Top-level identifier bindings (let x = ..., a
+        // lone match arm binding, a closure parameter) stay allowed.
+        let compound = !matches!(&pat.kind, PatternKind::Wild | PatternKind::Binding { .. });
+        if compound {
+            self.pattern_nesting += 1;
+        }
+        let checked = match &pat.kind {
             PatternKind::Wild => TPat::new(expected, TPatKind::Wild, pat.span),
             PatternKind::Binding { name, mutable } => {
                 self.check_binding_pattern(name, *mutable, &expected, pat.span, overrides)
@@ -100,7 +108,11 @@ impl<'a> Checker<'a> {
                 self.check_path_pattern(path, args, &expected, pat.span, overrides)
             }
             PatternKind::Or(alts) => self.check_or_pattern(alts, &expected, pat.span),
+        };
+        if compound {
+            self.pattern_nesting -= 1;
         }
+        checked
     }
 
     fn check_binding_pattern(
@@ -147,6 +159,25 @@ impl<'a> Checker<'a> {
         // name is in scope.
         if let Some(&const_id) = self.const_by_name.get(name) {
             return self.check_const_pattern(const_id, &pointee, span);
+        }
+        // Moving a value with drop glue out of a compound pattern is E0509: the
+        // original aggregate still owns the value and would run its destructor.
+        if self.pattern_nesting > 0 && self.has_drop_glue(&binding_ty) {
+            let described = self.describe_resolved(&binding_ty);
+            let diag = Diagnostic::error(
+                format!(
+                    "cannot move out of a value of type {} in a pattern because it implements Drop in version 1.4; use references instead",
+                    described
+                ),
+                span,
+            )
+            .with_code("E0509")
+            .with_span_label(span)
+            .with_note(
+                "by-value bindings of types with drop glue are only allowed with a simple identifier binding; match or borrow through a reference instead"
+                    .to_string(),
+            );
+            self.diagnostics.push(diag);
         }
         if let Some(overrides) = overrides
             && let Some(info) = overrides.get(name)

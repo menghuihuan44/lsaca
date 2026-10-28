@@ -136,9 +136,10 @@ runaway recursion crashes the process.
 
 A function name used as a value has the type `fn(ArgTypes) -> ReturnType`. Such
 values are first-class: they can be bound to a variable, passed to another
-function, returned from a function, and called. They are ordinary lsaca values
-(refcounted, copied on assignment). A closure with no captures can be used
-wherever a `fn` value is expected (`[Closures](13-closures.md)`).
+function, returned from a function, and called. A `fn` value is **move-only** in
+1.4.0: binding, passing or returning it moves it, and `.clone()` keeps a second
+usable handle. A closure with no captures can be used wherever a `fn` value is
+expected ([Closures](14-closures.md)).
 
 ```ls
 fn inc(n: i64) -> i64 {
@@ -186,7 +187,7 @@ Output:
 8 13
 ```
 
-Two limitations apply in 1.3.0:
+Two limitations apply in 1.4.0:
 
 * function values **cannot be stored in struct fields or in a `Vec`** — the C
   backend does not generate a valid representation for them there; using them
@@ -218,10 +219,38 @@ lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
 
 ## Calls and argument checking
 
-A call passes each argument by value: the callee receives copies (handles are
-copied, scalars are copied). Arguments must match the parameter count and types
-exactly — there are no default arguments, no variadic functions, no implicit
-conversions and no overloading.
+A call passes each argument by value. `Copy` arguments are copied; move-only
+arguments (`String`, `Vec`, `Rc`, `Box`, function values and the user types that
+contain them) are **moved** into the parameter, so the caller's binding cannot be
+used after the call (see [Ownership and moves](11-ownership-and-moves.md)). Pass
+a reference or `.clone()` the argument when the caller still needs it. A
+move-only return value — and a tail expression — moves ownership out of the
+callee to the caller the same way. Arguments must match the parameter count and
+types exactly — there are no default arguments, no variadic functions, no
+implicit conversions and no overloading.
+
+```ls
+fn take(text: String) -> i64 {
+    text.len()
+}
+
+fn peek(text: &String) -> i64 {
+    text.len()
+}
+
+fn main() {
+    let owned = String::from("lsaca");
+    println!("{}", peek(&owned));
+    println!("{}", take(owned));   // moves `owned`
+}
+```
+
+Output:
+
+```text
+5
+5
+```
 
 ```ls,compile-fail
 fn add(a: i64, b: i64) -> i64 {
@@ -236,12 +265,12 @@ fn main() {
 Error:
 ```text
 error[E0061]: this function takes 2 argument(s) but 1 were supplied
-  --> example-09.ls:6:20
+  --> example-10.ls:6:20
    |
  6 |     println!("{}", add(1));
    |                    ^^^^^^
 
-lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
+lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -257,13 +286,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-10.ls:6:27
+  --> example-11.ls:6:27
    |
  6 |     println!("{}", add(1, 2.5));
    |                           ^^^
    = note: expected i64, found {float}
 
-lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
+lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 ```
 
 Calling something that is not a function is a compile error as well:
@@ -278,12 +307,12 @@ fn main() {
 Error:
 ```text
 error[E0618]: call expression requires a function, found {integer}
-  --> example-11.ls:3:20
+  --> example-12.ls:3:20
    |
  3 |     println!("{}", n());
    |                    ^^^
 
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 ```
 
 Similarly, two functions with the same name are rejected even when their
@@ -301,13 +330,13 @@ fn main() {
 Error:
 ```text
 error[E0428]: the name 'double' is defined multiple times
-  --> example-12.ls:2:4
+  --> example-13.ls:2:4
    |
  2 | fn double(f: f64) -> f64 { f * 2.0 }
    |    ^^^^^^
-   = note: example-12.ls:1:4: previous definition of 'double' here
+   = note: example-13.ls:1:4: previous definition of 'double' here
 
-lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
 ```
 
 ## Reference parameters and returns
@@ -410,13 +439,13 @@ fn main() {
 Error:
 ```text
 error[E0106]: missing lifetime specifier
-  --> example-16.ls:1:41
+  --> example-17.ls:1:41
    |
  1 | fn choose(first: &i64, second: &i64) -> &i64 {
    |                                         ^
    = note: this function's return type contains a borrowed value, but the signature does not say which parameter it is borrowed from
 
-lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
+lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
 ```
 
 At calls, returns and `let` bindings, a few reference coercions happen
@@ -429,7 +458,7 @@ implicitly:
 Methods with `&self`/`&mut self` receivers are covered in [Structs, enums and
 impl](10-structs-enums-and-impl.md#methods-and-associated-functions-with-impl);
 the full borrowing rules are in [References and
-borrowing](11-references-and-borrowing.md).
+borrowing](12-references-and-borrowing.md).
 
 ## Nested functions
 
@@ -473,8 +502,8 @@ those restrictions: it can call anything and declare nested items.
 
 ## What next
 
-* Closures and capture-by-value: [Closures](13-closures.md).
+* Closures and capture-by-value: [Closures](14-closures.md).
 * The full function-value type syntax: [Types](04-types.md#function-types).
 * Borrowing in parameters and return values: [References and
-  borrowing](11-references-and-borrowing.md).
+  borrowing](12-references-and-borrowing.md).
 * Recursion and control flow: [Statements and control flow](08-statements-and-control-flow.md).

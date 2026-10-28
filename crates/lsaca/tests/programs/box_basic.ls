@@ -1,4 +1,4 @@
-// Box<T> is an owned heap indirection with value semantics: every copy
+// Box<T> is an owned heap indirection with value semantics: cloning a box
 // deep-copies the payload, so a box can be used to build recursive types.
 struct Node {
     value: i64,
@@ -13,9 +13,9 @@ fn main() {
     let a = Box::new(10);
     println!("{}", a.get());
 
-    // Copying a box deep-copies its payload: mutating the copy leaves the
+    // Cloning a box deep-copies its payload: mutating the clone leaves the
     // original untouched.
-    let mut b = a;
+    let mut b = a.clone();
     b.set(20);
     println!("{} {}", b.get(), a.get());
     println!("{}", b == Box::new(20));
@@ -24,7 +24,7 @@ fn main() {
         value: 1,
         next: Some(Box::new(Node { value: 2, next: None })),
     };
-    let second = head.next.unwrap().get();
+    let second = head.next.clone().unwrap().get();
     println!("{}", second.value);
     println!("{}", make(7).get());
 

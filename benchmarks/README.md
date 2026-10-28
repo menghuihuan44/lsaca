@@ -1,7 +1,7 @@
 # lsaca cross-language benchmarks
 
 This directory holds the benchmark programs and the measurement harness used for the
-"Benchmarks" page of the language manual (docs/language/16-benchmarks.md).
+"Benchmarks" page of the language manual (docs/language/17-benchmarks.md).
 
 The goal is a *small* but honest comparison: the same workloads implemented
 idiomatically in lsaca, C, Rust, Python and Node.js, with every run validated against an
@@ -67,8 +67,8 @@ fails; fallback results are labelled in the JSON and in the markdown tables.
 | vec_memory | allocation / peak memory | 1,000,000 Point{x=i, y=2*i} records, checksum of x+y | checksum=1499998500000 |
 | sort_i64 | sorting / indexed writes | in-language iterative quicksort of 200,000 pseudo-random i64 values; checksum is first,last,sum | checksum=21749,2147481261,214813518297651 |
 | matrix_multiply | nested loops / arithmetic | naive triple-loop multiply of two 160x160 i64 matrices; checksum is the sum of the result | checksum=1018924712000 |
-| binary_trees | recursive allocation / pointer chasing | perfect binary tree of depth 16 (131,071 nodes), recursive build and sum | checksum=2147450880 |
-| binary_trees_refs | borrowed traversal (1.3 references) | the same tree as binary_trees, but summed through borrowed references (&Option<Box<Node>>) instead of by value, so the traversal does not copy the tree; checksum matches binary_trees | checksum=2147450880 |
+| binary_trees | recursive allocation / pointer chasing | perfect binary tree of depth 16 (131,071 nodes), recursive build and sum; the lsaca traversal takes its input by value and clones the child subtrees explicitly | checksum=2147450880 |
+| binary_trees_refs | borrowed traversal (references) | the same tree as binary_trees, but summed through borrowed references (&Option<Box<Node>>) instead of by value, so the traversal copies nothing; checksum matches binary_trees | checksum=2147450880 |
 | string_split | string splitting / parsing | build a 194,500-byte comma-separated numeric string, split it, parse every token and sum | checksum=194500,50000,24975000 |
 | sieve | array marking / branches | sieve of Eratosthenes, count primes below 2,000,000 | checksum=148933 |
 | mandelbrot | floating point math | 600x400 Mandelbrot grid, 100 iterations max, sum of iteration counts | checksum=6282265 |
@@ -117,14 +117,17 @@ equivalent for a construct, the program uses that language's normal idiom, and t
 page describes the differences:
 
 - lsaca: Vec<...> with Vec::with_capacity and push; strings are built with
-  push_str(format!("{},", v)). An lsaca Vec/Box is still a value type: copying one
-  deep-copies its payload. 1.2 removed the accidental copies in the common paths (binding a
-  Vec::with_capacity temporary and iterating with `for` no longer duplicate the buffer),
-  which is why vec_memory is at parity with C. Since 1.3 the language has references
-  (`&T` / `&mut T`) with borrow checking, and binary_trees_refs uses
-  `&Option<Box<Node>>` to traverse the tree without copying it, while binary_trees
-  (traversal by value) still pays the copying cost. lsaca has no sort method on Vec and no
-  generics, which is why the workloads stay simple.
+  push_str(format!("{},", v)). Since 1.4 values move by default: Vec, Box, String, Rc and
+  user types that contain them (directly or through a field) are move-only, implicit
+  copying is limited to Copy types (integers, floats, bool, and aggregates of Copy parts),
+  and a copy has to be requested explicitly with .clone(). 1.2 removed the accidental copies
+  in the common paths (binding a Vec::with_capacity temporary and iterating with `for`
+  no longer duplicate the buffer), which is why vec_memory is at parity with C. The language
+  has had references (`&T` / `&mut T`) with borrow checking since 1.3; 1.4 adds ownership
+  and move semantics on top. binary_trees_refs uses `&Option<Box<Node>>` to traverse the
+  tree without copying it, while binary_trees (traversal by value) asks for the deep copy it
+  measures explicitly with .clone(). lsaca has no sort method on Vec and no generics, which
+  is why the workloads stay simple.
 - C: a manually resized char buffer for string_build, a malloc'ed array of structs for
   vec_memory.
 - Rust: String::with_capacity plus push, Vec::with_capacity plus push, to_string().
@@ -141,13 +144,14 @@ The newer workloads add these language-specific choices, all described on the do
 - matrix_multiply: every language uses one flat row-major array plus index arithmetic
   (no nested vectors/objects), which is the natural representation in lsaca and keeps the
   triple loop identical everywhere.
-- binary_trees: lsaca uses Option<Box<Node>> (a Box deep-copies its payload on copy), C
-  uses malloc/free pointers, Rust uses Box, Python a __slots__ class and Node.js plain
-  objects. The lsaca row therefore also pays for the boxed nodes being copied - that is
-  the measured cost of value semantics, not a compiler bug. binary_trees_refs starts from
-  the same tree but sums it through a borrowed `&Option<Box<Node>>` parameter, the shape
-  a Rust user would write; the difference between the two lsaca rows is what 1.3
-  reference support buys.
+- binary_trees: lsaca uses Option<Box<Node>>, C uses malloc/free pointers, Rust uses Box,
+  Python a __slots__ class and Node.js plain objects. The lsaca traversal takes the subtree
+  by value, and since 1.4 that means it consumes it: sum_tree clones the two child subtrees
+  with .clone() at every level, so the row pays for the boxed nodes being copied - that is
+  the measured cost of the by-value traversal, not a compiler bug. binary_trees_refs starts
+  from the same tree but sums it through a borrowed `&Option<Box<Node>>` parameter, the
+  shape a Rust user would write; the difference between the two lsaca rows is what
+  references buy (the ownership difference is explicit since 1.4).
 - string_split: C scans the buffer and parses with strtoll, Rust/Python/Node split and
   parse, lsaca uses String::split plus parse_i64.
 - sieve: every language marks a flat flag array with 64-bit-wide slots (Node.js
@@ -158,9 +162,13 @@ The newer workloads add these language-specific choices, all described on the do
 
 A contiguous array of values (C, Rust, lsaca) and a per-element object (Python, Node.js)
 are both the natural representation in their language; the compiler/VM overhead that
-follows from each choice is part of what the numbers show. Where lsaca still copies
-(explicit Vec/Box copies, recursive Box payloads) that cost is part of the measurement
-too; the docs page explains the measured effect.
+follows from each choice is part of what the numbers show. Since 1.4 an lsaca program
+copies only where it asks for a copy: the explicit .clone() in binary_trees is the only
+deep copy in these sources. Aggregate literals (struct, tuple, vector, Some/Ok/Err) move
+their operands into place, and every other pass, traversal, call and return moves or
+borrows a value instead of deep-copying it, so the other rows no longer carry the
+implicit-copy overhead that 1.3's value semantics had; the docs page explains the measured
+effect.
 
 ## lsaca build modes (important)
 
@@ -210,7 +218,7 @@ A compile-only workload shows up only in the compile-time table, with its name m
 "(compile-only)"; there is no runtime or peak-memory entry for it.
 
 benchmarks/results/latest.json and latest.md are regenerated by every run. The manual page
-[docs/language/16-benchmarks.md](../docs/language/16-benchmarks.md) quotes the numbers
+[docs/language/17-benchmarks.md](../docs/language/17-benchmarks.md) quotes the numbers
 measured on the reference machine; those tables are generated from
 benchmarks/results/latest.md, and the page explains how to reproduce them. The recorded
 run used the `official` build mode (the normal `lsaca build -r` path, not the fallback);

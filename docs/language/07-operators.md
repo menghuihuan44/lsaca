@@ -33,7 +33,7 @@ The postfix `?` operator is at the same (tightest) level as calls and field
 access: it applies to the value to its left, so `half(n)? + 1` is
 `(half(n)?) + 1`. When it propagates `None`/`Err` it returns from the enclosing
 function immediately, so nothing to its right is evaluated. See
-[Error propagation with `?`](14-standard-library.md#error-propagation-with-).
+[Error propagation with `?`](15-standard-library.md#error-propagation-with-).
 
 ```ls
 fn main() {
@@ -205,7 +205,8 @@ itself, and `0.0 == -0.0` is true.
 of `+` may be a `String` or a string literal. Comparisons `==`, `!=`, `<`, `<=`,
 `>`, `>=` compare the UTF-8 bytes lexicographically, which for valid UTF-8 is
 the same as comparing by code point; this makes the usual sorting operators
-available.
+available. Comparisons borrow both operands, so `==` and the ordering operators
+do not move the values being compared; both stay usable afterwards.
 
 ```ls
 fn main() {
@@ -232,10 +233,10 @@ abcdef!
 true true true
 ```
 
-Concatenation copies a handle, not the characters: the left operand remains
-usable afterwards, as the example shows. `+=` on a `String` follows
-copy-on-write, so it mutates in place when the buffer is unique and clones first
-otherwise (see [Memory model](05-memory-model.md)).
+Concatenation does not consume its operands: `+` borrows both sides, so the left
+operand stays usable afterwards (and a cloned handle shares the buffer until it is
+written, copy-on-write). `+=` mutates the string in place when its buffer is
+unique and clones first otherwise (see [Memory model](05-memory-model.md)).
 
 ## Boolean operators
 
@@ -252,10 +253,10 @@ fn step(counter: Rc<i64>) -> bool {
 
 fn main() {
     let counter = Rc::new(0);
-    let a = step(counter) && step(counter);
+    let a = step(counter.clone()) && step(counter.clone());
     println!("{} {}", a, counter.get());
 
-    let b = step(counter) || step(counter);
+    let b = step(counter.clone()) || step(counter.clone());
     println!("{} {}", b, counter.get());
 }
 ```
@@ -263,7 +264,7 @@ fn main() {
 Output:
 ```text
 true 2
-true 4
+true 3
 ```
 
 The first expression evaluates both calls (the left side is true, so the right
@@ -349,14 +350,14 @@ type:
   same cell;
 * `Box<T>` compares by payload, structurally;
 * tuples, structs, enums, `Vec<T>`, `Option<T>` and `Result<T, E>` do **not**
-  support `==` in 1.3.0, and the compiler reports `E0369`. Compare them by
-  pattern matching instead;
+  support `==` in version 1.4.0, and the compiler reports `E0369`. Compare them
+  by pattern matching instead;
 * `()` does not support `==` either.
 
 ```ls
 fn main() {
     let a = Rc::new(5);
-    let alias = a;
+    let alias = a.clone();
     let other = Rc::new(5);
     println!("{} {}", a == alias, a == other);
 
@@ -438,7 +439,7 @@ Output:
 
 This is a short summary; the full aliasing rules, reference parameters,
 elision and match ergonomics are on [References and
-borrowing](11-references-and-borrowing.md).
+borrowing](12-references-and-borrowing.md).
 
 ```ls,compile-fail
 fn main() {
@@ -492,6 +493,6 @@ Output:
   [Statements and control flow](08-statements-and-control-flow.md).
 * The complete type rules behind the operators: [Types](04-types.md).
 * Borrowing, dereferencing and the aliasing rules behind `&`, `&mut` and `*`:
-  [References and borrowing](11-references-and-borrowing.md).
+  [References and borrowing](12-references-and-borrowing.md).
 * Operator behavior of floats and strings in the built-in API:
-  [Standard library](14-standard-library.md).
+  [Standard library](15-standard-library.md).

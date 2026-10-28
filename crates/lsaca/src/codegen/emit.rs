@@ -11,8 +11,21 @@
 //!   the temporary name; temporaries are released at the end of the HIR
 //!   statement in which they were created, unless they were moved;
 //! * `gen_place(expr)` returns the C lvalue of a place expression;
-//! * pattern bindings copy (retain) values so that the source value can be
-//!   released independently.
+//! * since v1.4 `program.is_copy(ty)` decides between a shallow C copy
+//!   (Copy types: no cleanup) and managed ownership. Every managed variable
+//!   carries a trailing `bool <c_name>_live` flag; moving the value out
+//!   clears both the variable and the flag, and every release is guarded by
+//!   the flag;
+//! * consuming contexts use `gen_move_into`, which transfers a movable place
+//!   (local/capture) and copies a non-movable one (`Field`/`Index`/`Deref`
+//!   are rejected by the move checker as E0507, so only a defensive copy is
+//!   emitted for them);
+//! * borrowed contexts (format/assert/equality operands, `&` expressions)
+//!   read places without taking ownership via `gen_borrowed`; non-place
+//!   subexpressions become an owned temporary that is released once at the end
+//!   of the enclosing statement;
+//! * pattern bindings move out of the scrutinee temporary (copying a Copy
+//!   value) so that the temporary never releases the transferred value.
 
 use crate::hir::{self, HExpr, HExprKind, HLit};
 use crate::span::Span;
@@ -31,6 +44,13 @@ pub(crate) struct BoundVar {
     pub c_name: String,
     pub ty: Ty,
     pub owned: bool,
+    /// C `bool` flag that stays true while this variable holds a live owned
+    /// value. `None` for Copy values, which never need a release.
+    ///
+    /// A move clears the C variable together with the flag, so every release
+    /// path can be guarded by the flag and a moved-from variable can never be
+    /// released twice.
+    pub live: Option<String>,
 }
 
 /// A compiler temporary holding an owned value. Released at the end of the
@@ -195,6 +215,26 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Liveness flag of a local binding, if it owns a non-Copy value.
+    pub(crate) fn live_flag(&self, c_name: &str) -> Option<String> {
+        for frame in self.frames.iter().rev() {
+            for var in frame.vars.iter().rev() {
+                if var.c_name == c_name {
+                    return var.live.clone();
+                }
+            }
+        }
+        None
+    }
+
+    /// Set the liveness flag of a local binding, if it has one.
+    pub(crate) fn set_live(&mut self, c_name: &str, live: bool) {
+        if let Some(flag) = self.live_flag(c_name) {
+            let value = if live { "true" } else { "false" };
+            self.w.line(format!("{} = {};", flag, value));
+        }
+    }
+
     pub(crate) fn push_frame(&mut self) {
         self.frames.push(Frame::default());
     }
@@ -221,11 +261,17 @@ impl<'a> Gen<'a> {
         }
         let vars: Vec<BoundVar> = std::mem::take(&mut self.frames[index].vars);
         for var in vars.iter().rev() {
-            if !var.owned {
-                continue;
-            }
-            self.emit_release(&var.ty, &var.c_name);
+            self.release_bound(var);
         }
+    }
+
+    /// Release the value owned by one bound variable, honouring its liveness
+    /// flag so that a moved-from variable is skipped.
+    fn release_bound(&mut self, var: &BoundVar) {
+        if !var.owned {
+            return;
+        }
+        self.emit_release_guarded(&var.ty, &var.c_name, var.live.as_deref());
     }
 
     /// Emit the releases of one frame without consuming its bookkeeping.
@@ -247,10 +293,7 @@ impl<'a> Gen<'a> {
         }
         let vars = self.frames[index].vars.clone();
         for var in vars.iter().rev() {
-            if !var.owned {
-                continue;
-            }
-            self.emit_release(&var.ty, &var.c_name);
+            self.release_bound(var);
         }
     }
 
@@ -278,6 +321,27 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Release an owned value, guarded by its C liveness flag when it has one.
+    ///
+    /// Moved-from variables are cleared and their flag set to false, so the
+    /// guarded release is a no-op for them.
+    pub(crate) fn emit_release_guarded(&mut self, ty: &Ty, expr: &str, flag: Option<&str>) {
+        if self.is_trivial_copy(ty) {
+            return;
+        }
+        let Some(stmt) = ops::release_stmt(self.names, ty, expr) else {
+            return;
+        };
+        match flag {
+            Some(flag) => {
+                self.w.line(format!("if ({}) {{", flag));
+                self.w.line(stmt);
+                self.w.line("}");
+            }
+            None => self.w.line(stmt),
+        }
+    }
+
     /// `target = <copy of src>`; target and src must not alias.
     pub(crate) fn emit_copy_into(&mut self, target: &str, ty: &Ty, src: &str) {
         if self.is_trivial_copy(ty) {
@@ -288,18 +352,86 @@ impl<'a> Gen<'a> {
         self.w.line(format!("{} = {};", target, value));
     }
 
-    /// True when values of this type own no reference counted resources at
-    /// any depth, so that copying is a plain C assignment and releasing is a
-    /// no-op. See [`ops::is_trivially_copyable`].
+    /// True when values of this type are Copy: copying is a plain C
+    /// assignment and releasing is a no-op. See [`hir::Program::is_copy`].
     pub(crate) fn is_trivial_copy(&self, ty: &Ty) -> bool {
-        ops::is_trivially_copyable(self.program, ty)
+        self.program.is_copy(ty)
     }
 
     /// Materialise `expr` into a fresh owned temporary and return its name.
+    ///
+    /// This is the copying/materialising form: a place expression is copied
+    /// (retained) into the temporary. Use [`Gen::gen_owned_move`] in
+    /// consuming contexts.
     pub(crate) fn gen_owned(&mut self, expr: &HExpr) -> String {
         let target = self.declare_temp(&expr.ty);
         self.gen_into(expr, &target);
         target
+    }
+
+    /// Materialise `expr` into a fresh owned temporary by moving its value.
+    ///
+    /// The temporary is released at the end of the current HIR statement
+    /// unless it is moved on; in a discarded statement that is exactly the
+    /// "move out and drop" semantics of a value expression.
+    pub(crate) fn gen_owned_move(&mut self, expr: &HExpr) -> String {
+        let target = self.declare_temp(&expr.ty);
+        self.gen_move_into(expr, &target);
+        target
+    }
+
+    /// Move `expr` into the owned lvalue `target`.
+    ///
+    /// Copy values are copied. Owned non-Copy locals and closure captures are
+    /// transferred: the value is assigned to `target`, the source is cleared
+    /// to its raw zero value and its liveness flag is cleared. Places that may
+    /// not be moved out of (`Field`/`Index`/`Deref`) are copied defensively;
+    /// the move checker rejects those moves with E0507 before codegen.
+    pub(crate) fn gen_move_into(&mut self, expr: &HExpr, target: &str) {
+        if self.is_trivial_copy(&expr.ty) {
+            self.gen_into(expr, target);
+            return;
+        }
+        match &expr.kind {
+            HExprKind::Local { c_name, .. } => {
+                let source = self.local_lvalue(c_name);
+                self.w.line(format!("{} = {};", target, source));
+                let zero = self.raw_zero_expr(&expr.ty);
+                self.w.line(format!("{} = {};", source, zero));
+                self.set_live(c_name, false);
+            }
+            HExprKind::Capture { .. } => {
+                let source = self.gen_place(expr);
+                self.emit_copy_into(target, &expr.ty, &source);
+            }
+            HExprKind::Field { .. } | HExprKind::Index { .. } => {
+                let place = self.gen_place(expr);
+                self.emit_copy_into(target, &expr.ty, &place);
+            }
+            HExprKind::Deref { .. } => {
+                let place = self.gen_place(expr);
+                let source = if self.is_pointer_type(&expr.ty) {
+                    format!("(({})({}))", self.ctype(&expr.ty), place)
+                } else {
+                    place
+                };
+                self.emit_copy_into(target, &expr.ty, &source);
+            }
+            _ => self.gen_into(expr, target),
+        }
+    }
+
+    /// Read `expr` in a borrowed context without taking ownership.
+    ///
+    /// Place expressions are read through their C lvalue; the display, debug
+    /// and equality helpers take shallow values and never release, so no
+    /// retain is needed. Any other expression is materialised into an owned
+    /// temporary, which the statement cleanup releases exactly once.
+    pub(crate) fn gen_borrowed(&mut self, expr: &HExpr) -> String {
+        if expr.is_place() {
+            return self.gen_place(expr);
+        }
+        self.gen_owned(expr)
     }
 
     /// The C expression that reads a local binding.
@@ -629,20 +761,17 @@ impl<'a> Gen<'a> {
     }
 
     fn gen_closure(&mut self, closure_id: usize, captures: &[HExpr], ty: &Ty, target: &str) {
-        let mut values = Vec::with_capacity(captures.len());
-        for capture in captures {
-            values.push(self.gen_owned(capture));
-        }
         let ctype = format!("LsEnv_{}", closure_id);
         let env_name = self.fresh("env");
         self.w.line(format!(
             "{}* {} = ({}*)ls_alloc_managed(sizeof({}), lsaca_env_drop_{}, lsaca_trace_env_{});",
             ctype, env_name, ctype, ctype, closure_id, closure_id
         ));
-        for (index, value) in values.iter().enumerate() {
-            self.w
-                .line(format!("{}->c{} = {};", env_name, index, value));
-            self.mark_moved(value);
+        for (index, capture) in captures.iter().enumerate() {
+            // Copy captures are copied by value; managed captures are moved
+            // into the environment (the captured place is cleared).
+            let slot = format!("{}->c{}", env_name, index);
+            self.gen_move_into(capture, &slot);
         }
         let fn_ctype = self.ctype(ty);
         self.w.line(format!(

@@ -591,6 +591,118 @@ fn cases() -> Vec<Case> {
             exit: 0,
             stderr_contains: &[],
         },
+        Case {
+            name: "refs_mut_heap",
+            source: include_str!("programs/refs_mut_heap.ls"),
+            args: &[],
+            stdout: "hi!\n[1, 2, 3, 4]\n6\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "drop_basic",
+            source: include_str!("programs/drop_basic.ls"),
+            args: &[],
+            stdout: "start\nin block\ndrop inner\nend\ndrop boxed\ndrop v0\ndrop v1\ndrop pair\ndrop first\ndrop second\ndrop outer\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "drop_move",
+            source: include_str!("programs/drop_move.ls"),
+            args: &[],
+            stdout: "took first\ndrop first\nafter take\nmoved to second\nend\ndrop second\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "clone_basic",
+            source: include_str!("programs/clone_basic.ls"),
+            args: &[],
+            stdout: "lsaca lsaca\n[1, 2, 3, 4] [1, 2, 3]\nfirst [7, 8]\nsecond [7, 8, 9]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "clone_vec",
+            source: include_str!("programs/clone_vec.ls"),
+            args: &[],
+            stdout: "2 2\n[\"alpha\", \"beta\"]\n[\"alpha\", \"beta\"] [\"changed\", \"beta\", \"gamma\"]\n[[1, 2, 9], [3]] [[1, 2], [3]]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "move_into_fn",
+            source: include_str!("programs/move_into_fn.ls"),
+            args: &[],
+            stdout: "consume first [1, 2, 3]\ndone\nconsume second [4]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "move_return",
+            source: include_str!("programs/move_return.ls"),
+            args: &[],
+            stdout: "kept [1, 2]\nlsaca\ncreated\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "for_vec_move",
+            source: include_str!("programs/for_vec_move.ls"),
+            args: &[],
+            stdout: "item a\ndrop a\nitem b\ndrop b\ndone\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "closure_capture_move",
+            source: include_str!("programs/closure_capture_move.ls"),
+            args: &[],
+            stdout: "captured lsaca env\ncaptured lsaca env\ncount 3\ndone\ndrop env\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "rc_box_clone",
+            source: include_str!("programs/rc_box_clone.ls"),
+            args: &[],
+            stdout: "true\n20 20\nstrong_count = 2\nchanged hi\nw w 5\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "drop_match",
+            source: include_str!("programs/drop_match.ls"),
+            args: &[],
+            stdout: "plain\nbound a\ndrop a\nguard\nguard passed b\ndrop b\nguard_fail\nfallback c\ndrop c\nwildcard\nignored\ndrop d\noption\noption bound e\ndrop e\ndone\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "logical_ops",
+            source: include_str!("programs/logical_ops.ls"),
+            args: &[],
+            stdout: "true\nfalse\ntrue\nfalse\ntrue counter = 0\nfalse counter = 0\nbranch\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "vec_extend",
+            source: include_str!("programs/vec_extend.ls"),
+            args: &[],
+            stdout: "[1, 2, 3, 100, 200]\n5\n[1.5, 2.5, 3.5]\n[true, false, true]\n[\"alpha\", \"beta\"]\n[\"alpha\", \"beta\", \"gamma\"]\n3\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "result_clone",
+            source: include_str!("programs/result_clone.ls"),
+            args: &[],
+            stdout: "21\n21\n21\n-1\ntrue\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
     ]
 }
 
@@ -685,10 +797,6 @@ fn frontend_rejects_invalid_programs() {
             include_str!("programs/bad_ref_local_lifetime.ls"),
         ),
         ("bad_ref_store", include_str!("programs/bad_ref_store.ls")),
-        (
-            "bad_ref_mut_string",
-            include_str!("programs/bad_ref_mut_string.ls"),
-        ),
         (
             "bad_ref_temporary",
             include_str!("programs/bad_ref_temporary.ls"),
@@ -893,14 +1001,6 @@ fn borrow_errors_are_reported() {
             &["error[E0498]", "references cannot be stored"],
         ),
         (
-            "bad_ref_mut_string",
-            include_str!("programs/bad_ref_mut_string.ls"),
-            &[
-                "error[E0498]",
-                "mutable references to String are not supported",
-            ],
-        ),
-        (
             "bad_ref_temporary",
             include_str!("programs/bad_ref_temporary.ls"),
             &[
@@ -946,6 +1046,66 @@ fn borrow_errors_are_reported() {
                 "error[E0515]",
                 "cannot return a reference to local variable x",
             ],
+        ),
+    ];
+    let mut problems: Vec<String> = Vec::new();
+    for (name, source, expected) in programs {
+        let frontend = Frontend::new(format!("{}.ls", name), *source);
+        let diagnostics = match frontend.check() {
+            Ok(_) => {
+                problems.push(format!(
+                    "{}: expected a compile error, but the program was accepted",
+                    name
+                ));
+                continue;
+            }
+            Err(diagnostics) => diagnostics,
+        };
+        let rendered = diagnostics.render(frontend.file());
+        for needle in *expected {
+            if !rendered.contains(needle) {
+                problems.push(format!(
+                    "{}: diagnostics do not mention {:?}:\n{}",
+                    name, needle, rendered
+                ));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        panic!("{}", problems.join("\n\n"));
+    }
+}
+
+/// Ownership diagnostics are targeted: moves of moved values, out of
+/// projections and out of Drop types, moves while borrowed, and clones of Drop
+/// types all name an error code and explain the violated ownership rule.
+#[test]
+fn move_errors_are_reported() {
+    let programs: &[(&str, &str, &[&str])] = &[
+        (
+            "bad_use_after_move",
+            include_str!("programs/bad_use_after_move.ls"),
+            &["error[E0382]", "use of moved value"],
+        ),
+        (
+            "bad_move_out_of_field",
+            include_str!("programs/bad_move_out_of_field.ls"),
+            &["error[E0507]", "cannot move out of a field"],
+        ),
+        (
+            "bad_move_out_of_drop_type",
+            include_str!("programs/bad_move_out_of_drop_type.ls"),
+            &["error[E0509]", "implements Drop"],
+        ),
+        (
+            "bad_move_while_borrowed",
+            include_str!("programs/bad_move_while_borrowed.ls"),
+            &["error[E0505]", "because it is borrowed"],
+        ),
+        (
+            "bad_clone_drop_type",
+            include_str!("programs/bad_clone_drop_type.ls"),
+            &["error[E0277]", "cannot be cloned"],
         ),
     ];
     let mut problems: Vec<String> = Vec::new();

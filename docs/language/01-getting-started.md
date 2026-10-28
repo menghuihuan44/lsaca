@@ -36,7 +36,7 @@ cargo build --release
 Expected output:
 
 ```text
-lsaca 1.3.0
+lsaca 1.4.0
 ```
 
 The compiler is a single binary at `target/release/lsaca` (`lsaca.exe` on
@@ -94,7 +94,7 @@ without lsaca.
 ## A slightly larger tour
 
 The following program uses a struct, an `impl` block, a `Box<T>`, an `Rc<T>`
-cell, the `?` operator and a format specifier, all verified to work in 1.3.0:
+cell, the `?` operator and a format specifier, all verified to work in 1.4.0:
 
 ```ls
 struct Point {
@@ -145,7 +145,7 @@ fn main() {
     println!("{}", boxed.get());
 
     let counter = Rc::new(0);
-    let shared = counter;
+    let shared = counter.clone();
     shared.set(counter.get() + 1);
     println!("counter = {}", counter.get());
 
@@ -165,6 +165,12 @@ quarter = Some(3)
 area = 12.00
 [     right]
 ```
+
+The tour already uses v1.4 ownership: `Box`, `Rc`, `String` and `Vec` are
+move-only, so `let shared = counter.clone()` keeps the counter usable and
+`boxed.get()` reads an owned copy of the payload. Binding or passing one of those
+values by value moves it; `.clone()` makes an independent second value. See
+[Ownership and moves](11-ownership-and-moves.md).
 
 ## How compilation works
 
@@ -278,10 +284,10 @@ Options:
 | `--cmake` | Build through the generated CMake project instead of the built-in direct C compiler backend. Requires CMake 3.16+ and a generator (Ninja or MinGW Makefiles). |
 | `-h`, `--help` | Print the help text. |
 
-The complete help text of version 1.3.0:
+The complete help text of version 1.4.0:
 
 ```console
-lsaca 1.3.0 - a small statically typed language with an ORC memory model
+lsaca 1.4.0 - a small statically typed language with an ORC memory model
 
 USAGE:
     lsaca <COMMAND> [OPTIONS]
@@ -390,7 +396,7 @@ for the chosen profile.
 On this project's development machine, a cold release build of a small program
 like `hello.ls` takes roughly 1-2 s and a cached rebuild a few tens of
 milliseconds; timings vary with the C compiler and the machine. See
-[Benchmarks](16-benchmarks.md) for the measured numbers.
+[Benchmarks](17-benchmarks.md) for the measured numbers.
 
 Environment variables understood by the compiler and the generated runtime:
 
@@ -432,8 +438,8 @@ Environment variables understood by the compiler and the generated runtime:
 * Learn the shape of a program: [Program structure](02-program-structure.md).
 * See every literal and token: [Lexical structure](03-lexical-structure.md).
 * Borrow values without giving up ownership: [References and
-  borrowing](11-references-and-borrowing.md).
+  borrowing](12-references-and-borrowing.md).
 * Understand the memory model before writing large programs:
   [Memory model: ORC](05-memory-model.md).
-* Browse the built-in API: [Standard library](14-standard-library.md).
-* Compare with Rust and see the roadmap: [Roadmap](15-roadmap.md).
+* Browse the built-in API: [Standard library](15-standard-library.md).
+* Compare with Rust and see the roadmap: [Roadmap](16-roadmap.md).

@@ -10,7 +10,7 @@ use super::itype::ITy;
 use super::tree::TBlock;
 use crate::ast::{
     self, Block, EnumDecl, Expr, ExprKind, FieldDef, FnDecl, ImplBlock, Item, LetStmt, Program,
-    Stmt, StructDecl, TypeAliasDecl, TypeExpr, VariantDef, VecLit,
+    Stmt, StructDecl, TraitRef, TypeAliasDecl, TypeExpr, VariantDef, VecLit,
 };
 use crate::diag::Diagnostic;
 use crate::span::Span;
@@ -380,6 +380,8 @@ impl<'a> Checker<'a> {
             fields: Vec::new(),
             fields_resolved: false,
         });
+        // One drop-hook slot per struct, filled in by register_drop_impl.
+        self.drop_structs.push(None);
         self.struct_by_name.insert(decl.name.clone(), id);
     }
 
@@ -396,6 +398,8 @@ impl<'a> Checker<'a> {
             variants: Vec::new(),
             variants_resolved: false,
         });
+        // One drop-hook slot per enum, filled in by register_drop_impl.
+        self.drop_enums.push(None);
         self.enum_by_name.insert(decl.name.clone(), id);
     }
 
@@ -454,7 +458,29 @@ impl<'a> Checker<'a> {
             Some(owner) => owner,
             None => return,
         };
+        // "impl Trait for Type" blocks are validated separately: only Drop has
+        // behaviour in version 1.4 and it records the type drop hook here.
+        if let Some(trait_ref) = &block.trait_name {
+            self.register_trait_impl(block, owner, trait_ref);
+            return;
+        }
         for func in &block.fns {
+            if func.name == "drop" {
+                let type_name = self.type_name(owner);
+                self.error_at(
+                    format!(
+                        "the method name 'drop' is reserved for the Drop trait in version 1.4; implement 'impl Drop for {}' instead",
+                        type_name
+                    ),
+                    func.name_span,
+                );
+            } else if func.name == "clone" {
+                self.error_at(
+                    "the method name 'clone' is reserved in version 1.4: clone is derived automatically for every type"
+                        .to_string(),
+                    func.name_span,
+                );
+            }
             let key = (owner, func.name.clone());
             if let Some(previous) = self.methods.get(&key) {
                 let previous_span = self.fns[*previous].name_span;
@@ -493,6 +519,134 @@ impl<'a> Checker<'a> {
             });
             self.methods.insert(key, id);
         }
+    }
+
+    /// Validate and register an "impl Trait for Type" block.
+    ///
+    /// Drop is the only trait with behaviour in version 1.4. Copy and Clone are
+    /// derived automatically for every type, so an explicit impl for them is
+    /// rejected, and any other trait is unsupported.
+    fn register_trait_impl(&mut self, block: &ImplBlock, owner: TypeKey, trait_ref: &TraitRef) {
+        match trait_ref.name.as_str() {
+            "Drop" => self.register_drop_impl(block, owner, trait_ref),
+            "Copy" | "Clone" => self.error_at(
+                format!(
+                    "the trait '{}' is derived automatically in version 1.4; remove this impl block",
+                    trait_ref.name
+                ),
+                trait_ref.span,
+            ),
+            other => self.error_at(
+                format!(
+                    "traits are not supported except Drop in version 1.4 (found '{}')",
+                    other
+                ),
+                trait_ref.span,
+            ),
+        }
+    }
+
+    /// Validate "impl Drop for Type" and record the drop hook for the type.
+    fn register_drop_impl(&mut self, block: &ImplBlock, owner: TypeKey, trait_ref: &TraitRef) {
+        let type_name = self.type_name(owner);
+        let method = match block.fns.as_slice() {
+            [method] if method.name == "drop" => method,
+            _ => {
+                self.error_at(
+                    format!(
+                        "impl Drop for {} must define exactly one method named 'drop'",
+                        type_name
+                    ),
+                    trait_ref.span,
+                );
+                return;
+            }
+        };
+        let mut valid = true;
+        let takes_self = method.self_kind == Some(SelfKind::RefMut)
+            && method.params.len() == 1
+            && method.params[0].name == "self";
+        if !takes_self {
+            self.error_at(
+                format!(
+                    "the 'drop' method must take '&mut self' as its only parameter (impl Drop for {})",
+                    type_name
+                ),
+                method.name_span,
+            );
+            valid = false;
+        }
+        if !returns_unit(method) {
+            let span = method
+                .ret
+                .as_ref()
+                .map(|ret| ret.span())
+                .unwrap_or(method.name_span);
+            self.error_at(
+                format!(
+                    "the 'drop' method must return unit (impl Drop for {})",
+                    type_name
+                ),
+                span,
+            );
+            valid = false;
+        }
+        if !valid {
+            return;
+        }
+        let previous_hook = match owner {
+            TypeKey::Struct(id) => self.drop_structs[id],
+            TypeKey::Enum(id) => self.drop_enums[id],
+        };
+        if let Some(previous) = previous_hook {
+            let previous_span = self.fns[previous].span;
+            let diag = Diagnostic::error(
+                format!(
+                    "conflicting implementations of trait 'Drop' for type '{}'",
+                    type_name
+                ),
+                trait_ref.span,
+            )
+            .with_code("E0119")
+            .with_label(previous_span, "first implementation here".to_string());
+            self.diagnostics.push(diag);
+            return;
+        }
+        // The hook is a normal function so its body is checked and lowered, but
+        // it is deliberately absent from the method table: user code cannot
+        // call it directly.
+        let hook = self.push_impl_fn(owner, method);
+        match owner {
+            TypeKey::Struct(id) => self.drop_structs[id] = Some(hook),
+            TypeKey::Enum(id) => self.drop_enums[id] = Some(hook),
+        }
+    }
+
+    /// Allocate the FnInfo for a function declared in an impl block. Whether it
+    /// becomes reachable as a method is up to the caller.
+    fn push_impl_fn(&mut self, owner: TypeKey, func: &FnDecl) -> usize {
+        let type_name = self.type_name(owner);
+        let display = format!("{}::{}", type_name, func.name);
+        let c_name = self.alloc_c_name(format!(
+            "lsaca_fn_{}_{}",
+            sanitize_c_ident(&type_name),
+            sanitize_c_ident(&func.name)
+        ));
+        let id = self.fns.len();
+        self.fns.push(FnInfo {
+            name: func.name.clone(),
+            display,
+            c_name,
+            decl: func.clone(),
+            owner: Some(owner),
+            self_kind: func.self_kind,
+            sig: None,
+            checked: None,
+            param_cnames: Vec::new(),
+            name_span: func.name_span,
+            span: func.span,
+        });
+        id
     }
 
     fn register_const(&mut self, decl: &ast::ConstDecl) {
@@ -1117,6 +1271,15 @@ impl<'a> Checker<'a> {
             }
         }
         states[node] = 2;
+    }
+}
+
+/// Whether a declaration has no return type or returns the unit tuple.
+fn returns_unit(method: &FnDecl) -> bool {
+    match &method.ret {
+        None => true,
+        Some(TypeExpr::Tuple { elems, .. }) => elems.is_empty(),
+        Some(_) => false,
     }
 }
 

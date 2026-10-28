@@ -3,51 +3,70 @@
 lsaca is a small, statically typed programming language with Rust-like syntax and
 semantics, implemented in Rust. Source code is compiled to C17 and built into a
 native executable with the system C compiler. Memory is managed with **ORC**
-(Ownership and Reference Counting): automatic reference counting (ARC, in the
-spirit of Nim's ARC) plus a trial-deletion cycle collector. There is no tracing
-garbage collector and no manual `free` calls; references (`&T`/`&mut T`) are
-checked by a small borrow checker, but ownership and move rules are not part of
-the language.
+(Ownership and Reference Counting): Rust-style ownership and move checking
+decides when a value may be used, automatic reference counting (ARC, in the
+spirit of Nim's ARC) frees heap values when their last owner is released, and a
+trial-deletion cycle collector reclaims reference cycles. **Drop** hooks run
+deterministically when an owner releases a value. There is no tracing garbage
+collector and no manual `free` calls; references (`&T`/`&mut T`) are checked
+by a conservative borrow checker.
 
 This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
-The current release is **1.3.0**. It adds **references**: the shared `&T` and
-mutable `&mut T` types, the `&place` / `&mut place` borrow expressions, `*x`
-dereference, reference parameters, reference return values with lifetime
-elision, auto-deref through references for field/index/method access, and match
-ergonomics. A conservative NLL-lite borrow checker rejects aliasing violations,
-and all of it runs on top of the unchanged ORC runtime: references are
-non-owning, never touch reference counts, and there is still no move semantics.
-The 1.3.0 language is source compatible with 1.2.0.
+The current release is **1.4.0**. It adds **ownership and move semantics**:
+values are either automatically `Copy` (scalars, tuples of scalars, `Option`/
+`Result` of `Copy` values, references, all-`Copy` user types) or move-only
+(`String`, `Vec<T>`, `Rc<T>`, `Box<T>`, function values, user types that
+contain them or implement `Drop`). Assigning, passing, returning, matching or
+capturing a move-only value transfers it, and the move checker rejects use after
+the move, moving out of a borrowed place, and moves while borrowed. `Clone` is
+derived automatically, so `.clone()` is the general way to keep a usable
+original; it shares a `String` buffer copy-on-write, shares an `Rc` cell, and
+deep-copies `Vec` and `Box` payloads. `impl Drop for T` is the only trait a
+program can implement, and the compiler checks its shape. Mutable references to
+owned heap types (`&mut String`, `&mut Vec<T>`, `&mut Rc<T>`,
+`&mut Box<T>`) are now legal. ORC remains underneath: heap allocations are
+still reference-counted and freed when their last owner is released.
+
+Version 1.4.0 is **source-breaking** for programs that relied on implicit
+copying: a value reused after it was assigned, passed or captured must be
+cloned. Programs that never reuse moved values keep working. See the
+[release notes](#release-history) and the [roadmap](docs/language/16-roadmap.md#compatibility).
 
 ## Highlights
 
-- **Rust-like language**: `fn`, `let`/`let mut`, `struct`, `enum`, `impl`,
-  `match` with exhaustiveness checking, `Option`, `Result`, `Vec<T>`, `Rc<T>`,
-  `Box<T>`, tuples, closures, `if let`/`while let`, `for` loops, compound
-  assignment and `print!`/`println!` macros. Blocks, `if` and `match` are
-  expressions.
+- **Rust-like language**: `fn`, `let`/`let mut`, `struct`, `enum`,
+  `impl`, `match` with exhaustiveness checking, `Option`, `Result`,
+  `Vec<T>`, `Rc<T>`, `Box<T>`, tuples, closures, `if let`/`while let`,
+  `for` loops, compound assignment and `print!`/`println!` macros. Blocks,
+  `if` and `match` are expressions.
+- **Ownership and moves**: automatically derived `Copy` and `Clone`, move-only
+  heap types, deterministic `Drop` hooks, move checking (use after move, moves
+  out of projections, moves while borrowed) and the general `clone()` escape
+  hatch - all without lifetime annotations. See
+  [docs/language/11-ownership-and-moves.md](docs/language/11-ownership-and-moves.md).
+- **Memory management without a tracing GC**: every heap value is reference
+  counted (strings, vectors, `Box` payloads, `Rc` cells, closure
+  environments, and the structs/enums that own them). Owning a value retains
+  it, releasing it decrements the count, and the last owner frees it
+  deterministically; `Drop` hooks run first. Cycles created through `Rc<T>`
+  are reclaimed automatically by a Bacon-Rajan trial-deletion cycle collector.
+  There is no manual `free` and no use-after-free.
+- **References without ownership**: `&T` and `&mut T` borrow a place without
+  taking ownership or changing a reference count. A conservative borrow checker
+  enforces the usual aliasing rule (many shared borrows or one mutable borrow at
+  a time) with non-lexical, last-use lifetimes; parameters and return values
+  work with lifetime elision, and match ergonomics binds `&T` fields when
+  matching a reference. Mutable references to `String`, `Vec<T>`, `Rc<T>`
+  and `Box<T>` are allowed since 1.4.0.
 - **Fallible code without ceremony**: postfix `?` works on `Option` and
   `Result`, returns from the enclosing function with the same return kind, and
   composes with the standard combinators `Option::map`/`map_or`/`and_then`/
   `filter`/`ok_or` and `Result::map`/`map_err`/`and_then`.
 - **Static typing with local inference**: annotations are optional where the type
   follows from the initializer; numeric literals default to `i64`/`f64`.
-- **ORC memory management**: every owned value is reference counted (strings,
-  vectors, closures, and structs/enums that own data). Assignment, argument
-  passing, capture and return copy handles; no use-after-free is possible.
-  Shared mutable state is written with the builtin `Rc<T>` cell, and reference
-  cycles created through `Rc<T>` are reclaimed automatically by a Bacon-Rajan
-  trial-deletion cycle collector. `Box<T>` provides owned indirection with
-  value semantics for recursive types.
-- **References without ownership**: `&T` and `&mut T` borrow a place without
-  taking ownership or changing a reference count. A conservative borrow checker
-  enforces the usual aliasing rule (many shared borrows or one mutable borrow at
-  a time) with non-lexical, last-use lifetimes; parameters and return values
-  work with lifetime elision, and match ergonomics binds `&T` fields when
-  matching a reference.
 - **Formatting controls**: format strings accept the Rust-style
   `[[fill]align][sign][0][width][.precision][?]` specification, so
   `{:>8}`, `{:*^9}`, `{:+}`, `{:08}`, `{:08.2}`, `{:.3}` and `{:?}` all
@@ -57,18 +76,18 @@ The 1.3.0 language is source compatible with 1.2.0.
   the system C compiler. `lsaca emit-c` writes the whole project, including a
   complete `CMakeLists.txt`, so it can be inspected or embedded in another
   build; `--cmake` makes `run`/`build` use that CMake project instead.
-- **Fast, cached builds**: a cold build of a benchmark program takes 1.15-1.72 s
-  on the reference machine and a cached rebuild takes 22-45 ms, because the
-  direct C backend skips CMake and runtime objects are compiled once per profile
-  and shared by every program.
+- **Fast, cached builds**: builds are cached by content hash, and the direct C
+  backend skips CMake, so a memoised rebuild of an unchanged program takes tens
+  of milliseconds instead of a second. Runtime objects are compiled once per
+  profile and shared by every program.
 - **Pure Rust compiler, no third-party crates**: the compiler uses only the Rust
   standard library and forbids unsafe code. The runtime is plain C17.
 - **Documented and measured**: a detailed multi-page language manual under
   [docs/](docs/README.md), published as a static documentation site, plus
   cross-language benchmarks (compile time, runtime and peak memory) against C,
   Rust, Python and Node.js with the raw data checked in.
-- **Tested end to end**: 292 compiler unit tests, 7 end-to-end tests that compile
-  and run real programs, 17 CLI tests, a 411-check C runtime suite and a
+- **Tested end to end**: 407 compiler unit tests, 8 end-to-end tests that compile
+  and run 71 real programs, 17 CLI tests, a 411-check C runtime suite and a
   100-check runtime smoke script; CI runs the test matrix on Linux, macOS and
   Windows, plus AddressSanitizer and UndefinedBehaviorSanitizer jobs.
 
@@ -133,6 +152,7 @@ error, `101` a panic inside the compiled program.
     |  parser           AST
     |  type checker     typed HIR: name resolution, inference,
     |                   exhaustiveness, constant evaluation, ? desugaring
+    |  move checker     Copy/Clone classification, move and drop analysis
     |  C code generator main.c
     v
  C17 project  +  runtime (4 C files, 2 headers, embedded in the compiler)
@@ -145,7 +165,7 @@ error, `101` a panic inside the compiled program.
 The generated project is self contained:
 
 ```text
-main.c               the user program plus generated copy/release/format helpers
+main.c               the user program plus generated clone/drop/format helpers
 lsaca_rt.h           public runtime ABI
 lsaca_rt_internal.h  internal runtime declarations shared by the C files
 lsaca_rt.c           reference counting, cycle collection, panics, checked math
@@ -176,37 +196,50 @@ the C compiler commands. The cache is safe to delete at any time. Built
 executables are copied to the requested output directory, so source paths may
 contain any characters.
 
-## Memory management (ORC)
+## Ownership and memory management (ORC)
 
-Every heap value (String, Vec, closure environment, an `Rc<T>` cell, a
-`Box<T>` payload, or a struct/enum value that contains one) is owned by its
-holder through a reference count. Copying a value - assignment, argument
-passing, capture or return - retains it; the holder releases it when the
-variable or temporary goes out of scope. Strings and vectors are copy-on-write,
-so mutating one holder never affects another. Function arguments are borrowed
-rather than moved: programs never fail to compile because of a move. Unlike
-Rust, ORC keeps memory safety but not the move checker.
+Every value belongs to its binding. Values whose type is `Copy` - integers,
+floats, `bool`, `(...)` (unit), tuples of `Copy` values, `Option`/`Result`
+of `Copy` values, references, and user structs/enums with only `Copy` fields
+and no `Drop` - are copied on use, so the source binding stays usable. All
+other values (`String`, `Vec<T>`, `Rc<T>`, `Box<T>`, function values, and
+user types that contain one of them or implement `Drop`) move: after a move
+the old binding is unusable, and the compiler reports it:
 
-References are the second way to use a value. `&value` creates a non-owning
-view: no reference count is changed, no copy is made, and the referent is
-released by whoever owns it. The borrow checker only polices aliasing (a
-`&mut` cannot coexist with any other borrow of the same place, and a borrow
-cannot outlive its referent); it does not police ownership or moves. See
-[docs/language/11-references-and-borrowing.md](docs/language/11-references-and-borrowing.md)
-for the rules, the diagnostics and the limitations of 1.3 (references are not
-yet storable in struct/enum/`Vec` fields).
+```rust
+fn main() {
+    let text = String::from("lsaca");
+    let moved = text;                 // moves the value
+    // println!("{}", text);          // error[E0382]: use of moved value
+    println!("{}", moved);
+}
+```
 
-Ordinary values cannot form reference cycles: copying a value never creates a
-second path back to the same object. The builtin `Rc<T>` type is the exception:
-it is a shared, mutable heap cell whose handles all alias the same payload, so a
-program can build cyclic structures - for example a node whose `next` field
-points back at the cell that contains it. To reclaim those, ORC has two parts:
+`.clone()` keeps the original usable. Cloning is shallow for handles and deep
+for owned containers: a cloned `String` shares its buffer copy-on-write, a
+cloned `Rc<T>` shares the same cell (the reference count goes up), a cloned
+`Vec<T>` or `Box<T>` deep-copies its contents, and a user type clones
+field-by-field. A type that implements `Drop` cannot be cloned (`E0277`).
+
+Heap payloads are still reference counted, so the runtime frees them when their
+last owner is released; ownership only decides *when* release happens and when
+`Drop` hooks run. A `Drop` hook runs before the value's fields are released and
+before the memory is freed; fields drop in declaration order, locals in reverse
+declaration order, and function parameters in reverse order at function exit.
+Pending drops are skipped when the program panics or calls `exit`, and no
+drops run after `main` returns beyond the normal scope cleanup.
+
+The builtin `Rc<T>` type is the exception to plain ownership: it is a shared,
+mutable heap cell whose handles all alias the same payload, so a program can
+build cyclic structures - for example a node whose `next` field points back at
+the cell that contains it. To reclaim those, ORC has two parts:
 
 1. automatic reference counting (ARC), which frees acyclic data as soon as its
    last handle is released, deterministically and without pauses;
 2. a trial-deletion cycle collector (the Bacon-Rajan mark-gray / scan /
    collect-white algorithm), which reclaims cyclic garbage once no handles
-   outside the cycle remain. Reachable cycles are never collected.
+   outside the cycle remain. Reachable cycles are never collected. `Drop` hooks
+   of collected values run when the collector reclaims them.
 
 The collector runs automatically once enough candidate objects accumulate; the
 threshold is internal and not user-visible, and there is no `collect` function
@@ -214,11 +247,23 @@ in the language. A final collection runs during process shutdown, before the
 leak report. A shared counter is written like this:
 
 ```rust
-let counter = Rc::new(0);
-let copy = counter;
-copy.set(copy.get() + 1);
-println!("{}", counter.get());   // prints 1
+fn main() {
+    let counter = Rc::new(0);
+    let copy = counter.clone();      // clone the handle, do not move it
+    copy.set(copy.get() + 1);
+    println!("{}", counter.get());   // prints 1
+}
 ```
+
+References are the second way to use a value. `&value` creates a non-owning
+view: no reference count is changed, no copy is made, and the referent is
+released by whoever owns it. The borrow checker polices aliasing (a `&mut`
+cannot coexist with any other borrow of the same place, and a borrow cannot
+outlive its referent) and the move checker rejects moving a value while it is
+borrowed. See
+[docs/language/12-references-and-borrowing.md](docs/language/12-references-and-borrowing.md)
+for the rules, the diagnostics and the restrictions (references are not yet
+storable in struct/enum/`Vec` fields).
 
 Debug-profile builds - the default for `lsaca run` and `lsaca build` - compile
 the runtime with `-DLSACA_DEBUG`, which makes it track reference-counted
@@ -226,10 +271,10 @@ allocations and print a leak report at shutdown. To get the same tracking in a
 release build, set `LSACA_DEBUG_RC=1` in the environment in which you run the
 *compiler* (not the program): `LSACA_DEBUG_RC=1 lsaca build -r program.ls`. The
 compiler then defines `-DLSACA_DEBUG_RC` for the C compilation, which turns the
-tracking on in every profile; for an emitted CMake project the equivalent
-switch is `-DLSACA_DEBUG_RC=ON` at configure time. Cyclic garbage is collected
-before the report, so the report only counts genuinely leaked allocations (for
-example acyclic data that the compiler failed to release); it indicates a
+tracking on in every profile; for an emitted CMake project the equivalent switch
+is `-DLSACA_DEBUG_RC=ON` at configure time. Cyclic garbage is collected before the
+report, so the report only counts genuinely leaked allocations (for example
+acyclic data that the compiler failed to release); it indicates a
 compiler/runtime bug, not a user bug, unless the program panicked or called
 `exit`. The report is:
 
@@ -261,13 +306,15 @@ fn main() {
 ```
 
 [docs/README.md](docs/README.md) is the entry point to the language manual: full
-syntax, semantics, the standard library, memory rules and the deliberate
-deviations from Rust. See [examples/](examples/) for runnable programs.
+syntax, semantics, the standard library, ownership and memory rules and the
+deliberate deviations from Rust. See [examples/](examples/) for runnable
+programs, including [examples/ownership.ls](examples/ownership.ls) (moves,
+`.clone()` and `Drop`).
 
-Release 1.2 added the postfix `?` operator and the Option/Result
-combinators. `?` unwraps `Some`/`Ok` and returns early on `None`/`Err`; the
-enclosing function must return the same kind (`Option` or `Result`), and the
-error type must match exactly (there is no `From` conversion):
+Release 1.2 added the postfix `?` operator and the Option/Result combinators.
+`?` unwraps `Some`/`Ok` and returns early on `None`/`Err`; the enclosing
+function must return the same kind (`Option` or `Result`), and the error type
+must match exactly (there is no `From` conversion):
 
 ```rust
 fn half(n: i64) -> Option<i64> {
@@ -299,7 +346,8 @@ fn main() {
     println!("{}", boxed.get());      // 7
 }
 ```
-Release 1.3 adds references. A `&` borrow reads a place without copying it, a
+
+Release 1.3 added references. A `&` borrow reads a place without copying it, a
 `&mut` borrow writes through it, and a borrow checker rejects aliasing:
 
 ```rust
@@ -330,6 +378,39 @@ fn main() {
 }
 ```
 
+Release 1.4 added ownership, `.clone()` and `Drop`. The example below shows
+the three at once:
+
+```rust
+struct Resource { name: String }
+
+impl Resource {
+    fn new(name: String) -> Resource { Resource { name: name } }
+}
+
+impl Drop for Resource {
+    fn drop(&mut self) { println!("releasing {}", self.name); }
+}
+
+fn consume(resource: Resource) {
+    println!("consuming {}", resource.name);
+}
+
+fn main() {
+    let original = String::from("lsaca");
+    let copy = original.clone();          // keeps both usable
+    println!("original = {} copy = {}", original, copy);
+
+    let first = Resource::new(String::from("first"));
+    consume(first);                       // moved into consume, dropped there
+
+    let second = Resource::new(String::from("second"));
+    println!("second still alive: {}", second.name);  // dropped at end of main
+}
+```
+
+The full program is [examples/ownership.ls](examples/ownership.ls).
+
 ## Documentation
 
 The manual is split into one detailed page per topic under [docs/](docs/):
@@ -338,22 +419,28 @@ The manual is split into one detailed page per topic under [docs/](docs/):
   a table linking every chapter.
 - [docs/language/01-getting-started.md](docs/language/01-getting-started.md)
   through
-  [docs/language/16-benchmarks.md](docs/language/16-benchmarks.md) - getting
-  started, program structure, lexical structure, types, the ORC memory model
-  (`Rc<T>`, `Box<T>` and cycle collection), variables and mutability, operators,
-  statements and control flow, functions, structs/enums/`impl`, pattern
-  matching, references and borrowing, closures, the standard library (including
-  `?` and the combinators) and the roadmap with the deviations from Rust.
-- [docs/language/11-references-and-borrowing.md](docs/language/11-references-and-borrowing.md)
-  - the v1.3 reference types, borrow rules, lifetime elision, match ergonomics
-  and the borrow-checker diagnostics.
-- [docs/language/16-benchmarks.md](docs/language/16-benchmarks.md) - benchmark
+  [docs/language/17-benchmarks.md](docs/language/17-benchmarks.md) - getting
+  started, program structure, lexical structure, types, the memory model,
+  variables and mutability, operators, statements and control flow, functions,
+  structs/enums/`impl`, ownership and moves, references and borrowing, pattern
+  matching, closures, the standard library (including `?` and the combinators),
+  the roadmap with the deviations from Rust, and the benchmarks.
+- [docs/language/11-ownership-and-moves.md](docs/language/11-ownership-and-moves.md)
+  - the v1.4 ownership model: `Copy` versus move-only types, moves, `.clone()`,
+  the `Drop` trait, move diagnostics and the differences from Rust.
+- [docs/language/12-references-and-borrowing.md](docs/language/12-references-and-borrowing.md)
+  - the reference types (including the `&mut String`/`Vec`/`Rc`/`Box` support
+  added in 1.4.0), borrow rules, lifetime elision, match ergonomics and the
+  borrow-checker diagnostics.
+- [docs/language/16-roadmap.md](docs/language/16-roadmap.md) - the deliberate
+  deviations from Rust and the verified limitations of the current release.
+- [docs/language/17-benchmarks.md](docs/language/17-benchmarks.md) - benchmark
   methodology, per-workload analysis and the measured numbers.
 
 The same pages are published as a static site with GitHub Pages at
 <https://menghuihuan44.github.io/lsaca/> (built by
-[`.github/workflows/pages.yml`](.github/workflows/pages.yml) from the Markdown
-sources with `scripts/docsite.py`).
+[.github/workflows/pages.yml](.github/workflows/pages.yml) from the Markdown
+sources with [scripts/docsite.py](scripts/docsite.py)).
 
 ## Benchmarks
 
@@ -363,22 +450,32 @@ runtime median and peak working set. lsaca programs are built through the normal
 cached `lsaca build` pipeline; where the C toolchain is unavailable the harness
 can fall back to a labelled direct-compile mode.
 
-Release 1.3.0 was measured on the reference machine (Windows 11, Core i7-1260P,
-gcc 15.2.0). A cold `lsaca build -r` of a benchmark program takes 1.15-1.72 s and
-a cached rebuild 22-45 ms; the 4,511-line `compile_large` source takes 3.97 s
-cold and 308 ms cached. Scalar loops, sorting and floating-point code are in the
-same ballpark as C: `loop_sum` 13.9 ms versus C's 14.2 ms, `vec_memory` 30.7
-versus 36.4 (peak 18.8 MiB for both), `matrix_multiply` 17.0 versus 17.1,
-`sieve` 39.4 versus 41.5 and `mandelbrot` 49.2 versus 63.9. `sort_i64` (63.1
-versus 50.2) and `string_build` (45.2 versus 27.0) remain slower than C.
+The latest measured results for the 1.4.0 compiler are in
+[benchmarks/results/latest.md](benchmarks/results/latest.md): compile-time,
+runtime and peak-memory tables for eleven runtime workloads plus a compile-only
+scaling workload, compared with C, Rust, Python and Node. The same tables,
+per-workload analysis, methodology and caveats are in
+[docs/language/17-benchmarks.md](docs/language/17-benchmarks.md); raw JSON data
+is in [benchmarks/results/](benchmarks/results/).
 
-The new 1.3 benchmark is `binary_trees_refs`, which sums the same 131,071-node
-tree as `binary_trees` but traverses it through `&Option<Box<Node>>` references
-instead of copying it. It runs in 223 ms with a 35.8 MiB peak, versus 1,217 ms
-and 150.1 MiB for the by-value traversal: 5.4x faster and 4.2x less memory, and
-9.2x C instead of 47x C. Full tables, per-workload analysis, methodology and
-caveats are in [docs/language/16-benchmarks.md](docs/language/16-benchmarks.md);
-raw data is in [benchmarks/results/](benchmarks/results/).
+Headline numbers of the 1.4.0 run (Windows 11, Core i7-1260P, gcc 15.2.0, median
+of 7 runtime runs; the 1.3.0 column is the previous release on the same
+machine):
+
+| workload | lsaca 1.4.0 | C (gcc -O2) | lsaca 1.3.0 |
+| --- | ---: | ---: | ---: |
+| `fib` (runtime) | 35.8 ms | 43.8 ms | 44.2 ms |
+| `loop_sum` (runtime) | 12.7 ms | 12.3 ms | 13.9 ms |
+| `vec_memory` (runtime / peak) | 23.4 ms / 18.8 MiB | 22.4 ms / 18.8 MiB | 30.7 ms / 18.8 MiB |
+| `binary_trees` (runtime / peak) | 677.3 ms / 101.1 MiB | 25.1 ms / 7.7 MiB | 1216.7 ms / 150.1 MiB |
+| `binary_trees_refs` (runtime / peak) | 35.8 ms / 19.9 MiB | 26.9 ms / 7.7 MiB | 223.2 ms / 35.8 MiB |
+| cold build, typical workload | 1.03-1.32 s | - | 1.15-1.72 s |
+| cached build, typical workload | 20-36 ms | - | 22-45 ms |
+
+Ownership and moves eliminated most implicit reference-count traffic, so the
+tree workloads improved a lot even though the generated C is otherwise similar:
+by-value `binary_trees` is 1.8x faster and uses a third less peak memory than
+in 1.3.0, and its borrowing variant is 6.2x faster and 1.8x smaller.
 
 ## Environment variables
 
@@ -400,7 +497,7 @@ raw data is in [benchmarks/results/](benchmarks/results/).
   compiler could not write to its build cache. Run with `-v` to see the chosen
   cache directory, or point `LSACA_CACHE_DIR` at a writable directory. The
   compiler probes the cache location and falls back to `.lsaca-build-cache` in
-  the current directory instead of failing on an unwritable `%TEMP%`.
+  the current directory instead of failing on an unwritable `TEMP`.
 - **`no C compiler found`**: install GCC or Clang (MSYS2 UCRT64 on Windows) and
   put it on `PATH`, or set `LSACA_CC` to the compiler executable.
 - **`CMake was not found on PATH`** or **`no build generator found`**: these
@@ -411,7 +508,7 @@ raw data is in [benchmarks/results/](benchmarks/results/).
 ## Testing
 
 ```sh
-cargo test --workspace          # 292 unit + 7 end-to-end + 17 CLI tests
+cargo test --workspace          # 407 unit + 8 end-to-end + 17 CLI tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -433,6 +530,16 @@ only that CLI test; the dedicated CI job still covers the CMake backend.
 
 ## Release history
 
+- **1.4.0** - ownership and move semantics with automatically derived `Copy`
+  and `Clone`, `.clone()`, the `Drop` trait with deterministic drop order,
+  mutable references to `String`/`Vec<T>`/`Rc<T>`/`Box<T>`, the move
+  checker (`E0382`, `E0505`, `E0507`, `E0509`) and clone restrictions
+  (`E0277`); ORC remains the memory manager underneath. Source-breaking for
+  programs that relied on implicit copying. Removing implicit copies made the
+  tree benchmark 1.8x faster with lower peak memory; this release also fixes
+  short-circuit lowering for `||`, `Vec::extend` on copy-element vectors, a
+  `Result::clone().unwrap_or` leak, and double drops when a whole value is
+  bound from a `match` scrutinee.
 - **1.3.0** - shared and mutable references (`&T`, `&mut T`), borrow
   expressions, dereference, reference parameters/returns with lifetime elision,
   auto-deref for field/index/method access, match ergonomics, and a conservative
@@ -452,7 +559,8 @@ only that CLI test; the dedicated CI job still covers the CMake backend.
 ## Repository layout
 
 ```text
-crates/lsaca/            the compiler library (lexer, parser, type checker, C codegen, driver)
+crates/lsaca/            the compiler library (lexer, parser, type checker, move checker,
+                         C codegen, driver)
 crates/lsaca/tests/      end-to-end tests and test programs
 crates/lsaca-cli/        the lsaca command line tool
 runtime/                 the C17 ORC runtime embedded into generated projects

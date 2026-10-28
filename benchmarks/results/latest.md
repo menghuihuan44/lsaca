@@ -1,6 +1,6 @@
 # lsaca cross-language benchmarks
 
-Generated: 2026-10-27T23:19:55+08:00  
+Generated: 2026-10-28T22:50:42+08:00  
 Harness: python scripts/bench.py (see benchmarks/README.md)
 
 ## Environment
@@ -8,7 +8,7 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 - OS: Windows-11-10.0.26300-SP0
 - CPU: 12th Gen Intel(R) Core(TM) i7-1260P (16 logical CPUs)
 - RAM: 15.63 GiB
-- lsaca: lsaca 1.3.0 (target\bench-tools\lsaca.exe)
+- lsaca: lsaca 1.4.0 (target\bench-tools\lsaca.exe)
 - lsaca build backend: direct C compiler back end (default; --cmake available)
 - gcc: gcc.EXE (Rev14, Built by MSYS2 project) 15.2.0
 - rustc: rustc 1.99.0 (b940084d7 2026-09-28)
@@ -22,18 +22,18 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 
 | program | lsaca cold build (default back end) | lsaca cached build | lsaca emit-c + gcc | gcc -O2 | rustc -O | Python 3 | Node.js |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fib | 1.545 | 0.031 | n/a | 0.393 | 1.260 | n/a | n/a |
-| loop_sum | 1.227 | 0.022 | n/a | 0.303 | 0.933 | n/a | n/a |
-| string_build | 1.390 | 0.024 | n/a | 0.339 | 1.414 | n/a | n/a |
-| vec_memory | 1.509 | 0.032 | n/a | 0.502 | 1.652 | n/a | n/a |
-| sort_i64 | 1.718 | 0.045 | n/a | 0.491 | 1.115 | n/a | n/a |
-| matrix_multiply | 1.163 | 0.023 | n/a | 0.343 | 0.989 | n/a | n/a |
-| binary_trees | 1.247 | 0.036 | n/a | 0.365 | 0.942 | n/a | n/a |
-| binary_trees_refs | 1.151 | 0.023 | n/a | 0.363 | 0.934 | n/a | n/a |
-| string_split | 1.186 | 0.031 | n/a | 0.361 | 1.047 | n/a | n/a |
-| sieve | 1.163 | 0.026 | n/a | 0.305 | 1.334 | n/a | n/a |
-| mandelbrot | 1.368 | 0.029 | n/a | 0.427 | 1.571 | n/a | n/a |
-| compile_large (compile-only) | 3.972 | 0.308 | n/a | n/a | n/a | n/a | n/a |
+| fib | 1.206 | 0.028 | n/a | 0.420 | 0.360 | n/a | n/a |
+| loop_sum | 1.199 | 0.025 | n/a | 0.266 | 0.307 | n/a | n/a |
+| string_build | 1.031 | 0.020 | n/a | 0.296 | 0.339 | n/a | n/a |
+| vec_memory | 1.147 | 0.025 | n/a | 0.332 | 0.369 | n/a | n/a |
+| sort_i64 | 1.223 | 0.027 | n/a | 0.385 | 0.409 | n/a | n/a |
+| matrix_multiply | 2.823 | 0.022 | n/a | 0.290 | 0.332 | n/a | n/a |
+| binary_trees | 1.066 | 0.022 | n/a | 0.367 | 0.322 | n/a | n/a |
+| binary_trees_refs | 1.065 | 0.022 | n/a | 0.412 | 0.365 | n/a | n/a |
+| string_split | 1.232 | 0.024 | n/a | 0.331 | 0.417 | n/a | n/a |
+| sieve | 1.321 | 0.026 | n/a | 0.308 | 0.325 | n/a | n/a |
+| mandelbrot | 1.253 | 0.036 | n/a | 0.285 | 0.359 | n/a | n/a |
+| compile_large (compile-only) | 4.031 | 0.324 | n/a | n/a | n/a | n/a | n/a |
 
 > lsaca cold build: one default `lsaca build -r` from a fresh LSACA_CACHE_DIR. Since 1.2 the default build back end is the compiler's built-in direct C compiler back end: it emits the generated C and compiles it together with the cached runtime translation units using gcc. The cached build repeats the command against the same cache directory (the runtime objects and the content-addressed project are reused, so it mostly just re-links). The compiler still supports the older CMake + Ninja path via `lsaca build -r --cmake`; the harness does not measure it by default.
 
@@ -43,21 +43,21 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 
 | language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 44.2 (38.3) | 13.9 (12.2) | 45.2 (42.4) | 30.7 (27.4) | 63.1 (61.2) | 17.0 (16.5) | 1216.7 (1189.9) | 223.2 (215.5) | 32.2 (28.9) | 39.4 (38.2) | 49.2 (47.2) |
-| C (gcc -O2) | 35.7 (33.5) | 14.2 (12.0) | 27.0 (25.2) | 36.4 (30.5) | 50.2 (46.9) | 17.1 (15.8) | 25.8 (23.9) | 24.4 (22.9) | 19.3 (18.1) | 41.5 (37.7) | 63.9 (59.7) |
-| Rust (rustc -O) | 23.2 (20.8) | 14.2 (13.3) | 146.4 (127.4) | 34.8 (30.1) | 43.6 (42.5) | 16.2 (15.5) | 26.5 (24.9) | 25.8 (24.6) | 18.6 (17.7) | 38.9 (36.8) | 59.1 (50.8) |
-| Python 3 | 1163.1 (1112.7) | 1511.7 (1168.6) | 704.8 (615.6) | 867.7 (773.7) | 756.8 (734.5) | 1538.4 (1518.3) | 117.7 (112.5) | 117.9 (114.2) | 83.8 (78.6) | 772.5 (674.1) | 3423.3 (2729.5) |
-| Node.js | 344.3 (281.9) | 214.8 (190.1) | 388.1 (307.8) | 349.0 (326.9) | 202.6 (197.2) | 172.3 (163.5) | 173.6 (164.6) | 179.7 (169.0) | 171.7 (166.9) | 249.6 (230.3) | 192.6 (154.7) |
+| lsaca | 35.8 (33.9) | 12.7 (12.2) | 39.4 (38.2) | 23.4 (19.2) | 41.4 (39.1) | 16.1 (15.8) | 677.3 (662.8) | 35.8 (35.6) | 31.7 (22.5) | 36.6 (33.1) | 34.3 (33.6) |
+| C (gcc -O2) | 43.8 (34.6) | 12.3 (12.0) | 16.7 (15.5) | 22.4 (19.1) | 37.2 (33.4) | 16.6 (15.6) | 25.1 (23.6) | 26.9 (24.9) | 19.5 (18.5) | 34.5 (34.1) | 34.9 (33.2) |
+| Rust (rustc -O) | 24.9 (21.1) | 19.0 (14.3) | 96.1 (89.5) | 23.9 (21.6) | 35.6 (35.0) | 15.6 (15.0) | 24.6 (23.9) | 26.3 (25.2) | 17.2 (16.5) | 36.2 (34.9) | 38.3 (34.9) |
+| Python 3 | 1180.9 (1116.6) | 1147.1 (1072.2) | 471.4 (466.0) | 636.0 (573.2) | 803.3 (729.1) | 1689.4 (1535.4) | 111.9 (110.9) | 146.2 (124.2) | 80.3 (77.6) | 599.0 (581.5) | 2869.9 (2773.7) |
+| Node.js | 346.6 (329.6) | 165.6 (154.9) | 236.6 (225.7) | 261.1 (255.8) | 201.1 (189.3) | 161.7 (153.4) | 154.9 (152.4) | 184.1 (175.8) | 169.5 (159.2) | 201.8 (177.9) | 162.2 (156.1) |
 
 ## Peak memory (MiB, peak working set; lower is better)
 
 | language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 4.0 | 4.0 | 10.6 | 18.8 | 6.6 | 4.4 | 150.1 | 35.8 | 11.1 | 18.8 | 4.0 |
-| C (gcc -O2) | 4.0 | 4.0 | 7.3 | 18.8 | 5.1 | 4.4 | 7.6 | 7.6 | 4.0 | 18.8 | 4.0 |
-| Rust (rustc -O) | 4.1 | 4.1 | 7.4 | 18.9 | 5.2 | 4.5 | 7.7 | 7.7 | 4.1 | 18.9 | 4.1 |
-| Python 3 | 11.0 | 11.0 | 73.6 | 142.8 | 21.8 | 13.6 | 21.0 | 21.0 | 16.8 | 26.2 | 11.0 |
-| Node.js | 43.0 | 44.5 | 89.5 | 121.1 | 51.0 | 46.9 | 56.1 | 56.2 | 50.6 | 59.3 | 44.1 |
+| lsaca | 4.0 | 4.1 | 10.4 | 18.8 | 6.6 | 4.4 | 101.1 | 19.9 | 11.1 | 18.9 | 4.0 |
+| C (gcc -O2) | 4.0 | 4.0 | 7.4 | 18.8 | 5.1 | 4.4 | 7.7 | 7.7 | 4.0 | 18.9 | 4.1 |
+| Rust (rustc -O) | 4.2 | 4.2 | 7.4 | 18.9 | 5.2 | 4.3 | 7.7 | 7.7 | 4.4 | 18.9 | 4.2 |
+| Python 3 | 11.1 | 11.0 | 73.8 | 142.2 | 21.4 | 13.7 | 21.1 | 21.1 | 17.0 | 26.3 | 11.1 |
+| Node.js | 42.8 | 45.7 | 89.6 | 121.1 | 50.9 | 46.9 | 56.2 | 56.2 | 50.6 | 60.0 | 44.9 |
 
 ## Workloads
 

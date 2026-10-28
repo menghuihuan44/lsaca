@@ -3,7 +3,7 @@
 
 use crate::codegen::c_writer::CWriter;
 use crate::codegen::helpers::{compound_types, managed_types};
-use crate::codegen::ops::{self, is_trivially_copyable};
+use crate::codegen::ops;
 use crate::codegen::types::{
     EMPTY_STRUCT_FIELD, FN_ENV_FIELD, OPTION_SOME_MEMBER, RESULT_ERR_MEMBER, RESULT_OK_MEMBER,
     TypeNames, TypeRegistry, UNION_FIELD, field_cname, positional_field, variant_member,
@@ -81,7 +81,7 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
         Ty::Vec(elem) => {
             let elem_ty = names.ctype(elem);
             w.line(format!("{} out;", c_ty));
-            if !is_trivially_copyable(program, elem) {
+            if !program.is_copy(elem) {
                 w.line("size_t i;");
                 w.line("out.len = v.len;");
                 w.line("out.cap = v.len;");
@@ -263,7 +263,7 @@ fn emit_assign_copy(
     target: &str,
     value: &str,
 ) {
-    if is_trivially_copyable(program, ty) {
+    if program.is_copy(ty) {
         w.line(format!("{} = {};", target, value));
     } else {
         w.line(format!(
@@ -285,7 +285,7 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
     w.indent();
     match ty {
         Ty::Vec(elem) => {
-            if !is_trivially_copyable(program, elem) {
+            if !program.is_copy(elem) {
                 w.line("size_t i;");
                 w.line("for (i = 0; i < v.len; i += 1) {");
                 w.indent();
@@ -340,6 +340,11 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
             w.line("(void)v;");
         }
         Ty::Struct(index) => {
+            // The user Drop hook runs before the fields are released, exactly
+            // like a language-level drop at scope exit.
+            if let Some(hook) = program.drop_hook(ty) {
+                w.line(format!("{}(&v);", program.fns[hook].c_name));
+            }
             if let Some((_, fields)) = struct_item(program, *index) {
                 for (field_name, field_ty) in &fields {
                     emit_release_value(
@@ -355,6 +360,11 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
         }
         Ty::Enum(index) => match enum_item(program, *index) {
             Some(item) => {
+                // The user Drop hook runs before the active payload variant is
+                // released.
+                if let Some(hook) = program.drop_hook(ty) {
+                    w.line(format!("{}(&v);", program.fns[hook].c_name));
+                }
                 w.line("switch (v.tag) {");
                 w.indent();
                 for variant in &item.variants {
@@ -415,7 +425,7 @@ fn emit_release_value(
     ty: &Ty,
     value: &str,
 ) {
-    if is_trivially_copyable(program, ty) {
+    if program.is_copy(ty) {
         return;
     }
     if let Some(stmt) = ops::release_stmt(names, ty, value) {

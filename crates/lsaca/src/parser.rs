@@ -655,6 +655,7 @@ impl<'a> Parser<'a> {
         let start = impl_token
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
+        let trait_name = self.parse_impl_trait_ref();
         let ty = self.parse_type();
         let ty_span = ty.span();
         let ty_name = match &ty {
@@ -699,9 +700,94 @@ impl<'a> Parser<'a> {
             ty,
             ty_name,
             ty_span,
+            trait_name,
             fns,
             span: start.join(end),
         }
+    }
+
+    /// Parse the optional `Trait for` prefix of an impl block. Returns Some for
+    /// a trait impl (`impl Trait for Type`) and None for an inherent impl
+    /// (`impl Type`). Only the shape of the trait reference is checked here;
+    /// the type checker decides which trait names are meaningful (only Drop has
+    /// behaviour in version 1.4) and validates the body.
+    fn parse_impl_trait_ref(&mut self) -> Option<TraitRef> {
+        if self.at(TokenKind::KwFor) {
+            // 'impl for T': the trait name (or type) is missing. Recover by
+            // skipping the stray 'for' and parsing T as the implemented type.
+            let span = self.span();
+            let found = self.peek_kind().describe();
+            self.bump();
+            self.error(
+                format!("expected a type or trait name, found {}", found),
+                span,
+            );
+            return None;
+        }
+        let (name, name_span) = match self.kind() {
+            TokenKind::Ident(name) => (name.clone(), self.span()),
+            _ => return None,
+        };
+        match self.peek_kind_at(1) {
+            Some(TokenKind::KwFor) => {
+                // The common form: 'impl Drop for Point'.
+                self.bump(); // trait name
+                self.bump(); // 'for'
+                Some(TraitRef {
+                    name,
+                    span: name_span,
+                })
+            }
+            Some(TokenKind::ColonColon) | Some(TokenKind::Lt) => {
+                // A path or a generic argument list follows the first
+                // identifier. If a top level 'for' follows it, this is a trait
+                // impl whose trait reference is malformed for version 1.4:
+                // trait names must be a single identifier without generic
+                // arguments. Reject it instead of parsing the whole path as an
+                // inherent impl type followed by a stray 'for'.
+                let (spec_span, for_pos) = self.find_malformed_impl_trait()?;
+                self.error(
+                    "traits are not supported except Drop in version 1.4; a trait impl must name the trait with a single identifier and no generic arguments",
+                    spec_span,
+                );
+                while self.pos < for_pos {
+                    self.bump();
+                }
+                self.bump(); // 'for'
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Look ahead from the first token of impl trait reference for a top level
+    /// `for` keyword before the impl body starts. Returns the span of the
+    /// malformed trait reference (from the first identifier through the token
+    /// before `for`) and the token index of the `for` keyword.
+    fn find_malformed_impl_trait(&self) -> Option<(Span, usize)> {
+        /// Do not scan arbitrarily far into a malformed item.
+        const MAX_LOOKAHEAD: usize = 128;
+        let mut depth = 0i32;
+        let mut spec_span = self.span();
+        let mut offset = 1usize;
+        while let Some(token) = self.tokens.get(self.pos + offset) {
+            if offset > MAX_LOOKAHEAD {
+                return None;
+            }
+            match token.kind {
+                TokenKind::KwFor if depth == 0 => return Some((spec_span, self.pos + offset)),
+                TokenKind::Lt => depth += 1,
+                TokenKind::Gt => depth = (depth - 1).max(0),
+                TokenKind::Shr => depth = (depth - 2).max(0),
+                TokenKind::LBrace | TokenKind::RBrace | TokenKind::Semi | TokenKind::Eof => {
+                    return None;
+                }
+                _ => {}
+            }
+            spec_span = spec_span.join(token.span);
+            offset += 1;
+        }
+        None
     }
 
     fn parse_const_decl(&mut self) -> ConstDecl {
@@ -2668,6 +2754,7 @@ impl Point {
             })
             .expect("expected an impl block");
         assert_eq!(implementation.ty_name, "Point");
+        assert!(implementation.trait_name.is_none());
         assert_eq!(implementation.fns.len(), 4);
         assert!(implementation.fns[0].self_kind.is_none());
         assert!(matches!(
@@ -2690,6 +2777,144 @@ impl Point {
             other => panic!("expected the impl type as receiver type, got {:?}", other),
         }
         assert_eq!(implementation.fns[0].params.len(), 1);
+    }
+
+    fn first_impl_block(program: &Program) -> &ImplBlock {
+        program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Impl(block) => Some(block),
+                _ => None,
+            })
+            .expect("expected an impl block")
+    }
+
+    #[test]
+    fn inherent_impl_keeps_trait_name_none() {
+        let source = r#"struct Point { x: i64 }
+impl Point {
+    fn get(&self) -> i64 { self.x }
+}"#;
+        let program = parse_ok(source);
+        let implementation = first_impl_block(&program);
+        assert!(implementation.trait_name.is_none());
+        assert_eq!(implementation.ty_name, "Point");
+    }
+
+    #[test]
+    fn parses_drop_trait_impl() {
+        let source = r#"struct Point { x: i64 }
+impl Drop for Point {
+    fn drop(&mut self) {
+        self.x = 0;
+    }
+}"#;
+        let program = parse_ok(source);
+        let implementation = first_impl_block(&program);
+        assert_eq!(implementation.ty_name, "Point");
+        let trait_ref = implementation
+            .trait_name
+            .as_ref()
+            .expect("expected a trait reference");
+        assert_eq!(trait_ref.name, "Drop");
+        assert_eq!(
+            &source[trait_ref.span.start as usize..trait_ref.span.end as usize],
+            "Drop"
+        );
+        assert_eq!(implementation.fns.len(), 1);
+        assert_eq!(implementation.fns[0].name, "drop");
+        assert!(matches!(
+            implementation.fns[0].self_kind,
+            Some(SelfKind::RefMut)
+        ));
+    }
+
+    #[test]
+    fn parses_non_drop_trait_impl_for_typeck_validation() {
+        // The parser accepts any single identifier as a trait name; only the
+        // type checker decides which traits are meaningful in version 1.4.
+        let source = r#"struct Point { x: i64 }
+impl Other for Point {
+    fn method(&self) -> i64 { self.x }
+}"#;
+        let program = parse_ok(source);
+        let implementation = first_impl_block(&program);
+        assert_eq!(implementation.ty_name, "Point");
+        let trait_ref = implementation
+            .trait_name
+            .as_ref()
+            .expect("expected a trait reference");
+        assert_eq!(trait_ref.name, "Other");
+    }
+
+    #[test]
+    fn rejects_trait_path_in_impl() {
+        let source = "struct Point { x: i64 }\nimpl Trait::Sub for Point { }";
+        let (program, diagnostics) = parse_source(source);
+        let messages = messages(&diagnostics);
+        assert!(
+            diagnostics.has_errors(),
+            "expected a parse error, got {:?}",
+            messages
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("single identifier")),
+            "expected a malformed trait reference diagnostic, got {:?}",
+            messages
+        );
+        // Recovery still parses the implemented type and the empty body.
+        let implementation = first_impl_block(&program);
+        assert!(implementation.trait_name.is_none());
+        assert_eq!(implementation.ty_name, "Point");
+        assert!(implementation.fns.is_empty());
+    }
+
+    #[test]
+    fn rejects_generic_trait_impl() {
+        let source = "struct Point { x: i64 }\nimpl Trait<i64> for Point { }";
+        let (program, diagnostics) = parse_source(source);
+        let messages = messages(&diagnostics);
+        assert!(
+            diagnostics.has_errors(),
+            "expected a parse error, got {:?}",
+            messages
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("single identifier")),
+            "expected a malformed trait reference diagnostic, got {:?}",
+            messages
+        );
+        let implementation = first_impl_block(&program);
+        assert!(implementation.trait_name.is_none());
+        assert_eq!(implementation.ty_name, "Point");
+    }
+
+    #[test]
+    fn rejects_impl_without_trait_or_type() {
+        let source = "struct Point { x: i64 }\nimpl for Point { }";
+        let (program, diagnostics) = parse_source(source);
+        let messages = messages(&diagnostics);
+        assert!(
+            diagnostics.has_errors(),
+            "expected a parse error, got {:?}",
+            messages
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("expected a type or trait name")),
+            "expected a missing type diagnostic, got {:?}",
+            messages
+        );
+        // Recovery: the stray 'for' is skipped and Point becomes the impl type.
+        let implementation = first_impl_block(&program);
+        assert!(implementation.trait_name.is_none());
+        assert_eq!(implementation.ty_name, "Point");
     }
 
     #[test]

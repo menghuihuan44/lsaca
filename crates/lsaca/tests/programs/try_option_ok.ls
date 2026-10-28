@@ -6,7 +6,7 @@ fn lookup(numbers: Vec<i64>, index: i64) -> Option<i64> {
 
 fn main() {
     let numbers = vec![3, 4, 5];
-    match lookup(numbers, 1) {
+    match lookup(numbers.clone(), 1) {
         Some(value) => println!("some {}", value),
         None => println!("none"),
     }

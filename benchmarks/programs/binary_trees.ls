@@ -1,8 +1,9 @@
 // binary_trees: build a perfect binary tree of depth 16 (131,071 nodes, leaves
 // carry consecutive payloads) through recursive Option<Box<Node>> fields, then
-// recursively sum the payloads. Box values are deep-copied by lsaca value
-// semantics, so build/traverse copies the tree at each level; that cost is part
-// of what this workload measures.
+// recursively sum the payloads. The traversal takes its input by value, so in
+// 1.4 it clones the child subtrees explicitly with .clone(); that deep-copy cost
+// is part of what this workload measures. Compare binary_trees_refs, which
+// traverses the same tree through borrowed references and copies nothing.
 struct Node {
     value: i64,
     left: Option<Box<Node>>,
@@ -24,7 +25,7 @@ fn sum_tree(node: Option<Box<Node>>) -> i64 {
         None => 0,
         Some(boxed) => {
             let inner = boxed.get();
-            inner.value + sum_tree(inner.left) + sum_tree(inner.right)
+            inner.value + sum_tree(inner.left.clone()) + sum_tree(inner.right.clone())
         }
     }
 }

@@ -1,7 +1,8 @@
 # References and borrowing
 
-Version 1.3 adds references to lsaca. A reference is a **non-owning view of a value
-that already exists somewhere else**. You borrow a value with `&` (shared) or `&mut`
+Version 1.3 added references to lsaca, and version 1.4 adds ownership, moves, the
+`Drop` trait and `.clone()` (see [Ownership and moves](11-ownership-and-moves.md)).
+A reference is a **non-owning view of a value that already exists somewhere else**. You borrow a value with `&` (shared) or `&mut`
 (mutable), use it through a dereference, and give it back — the ORC memory model keeps
 the underlying value alive and tracks every allocation exactly as before.
 
@@ -23,9 +24,15 @@ This page covers:
 - where references are allowed and where the compiler refuses them;
 - the interaction with ORC, `Rc<T>` and `Box<T>`, plus the generated C representation.
 
-If you have written Rust, most of the syntax will look familiar. The semantics are not
-Rust's borrow checker: lsaca values remain refcounted, copyable, and never move, so a
-reference is a checked pointer, not an ownership transfer.
+If you have written Rust, the syntax will look familiar, but the checker underneath is
+not Rust's borrow checker. A reference is still a non-owning, checked pointer: it does
+not keep its referent alive on its own, and the compiler only accepts a borrow when an
+owner provably outlives its last use. There are no lifetime annotations — a borrow ends at
+the last point where the reference is used — and the checker is conservative inside a
+single expression (two mutable borrows there are rejected even when Rust would accept
+them; see [Known limitations](#known-limitations-in-version-140)). Since 1.4 the ownership
+and move checks (E0382, E0507, E0505) run alongside the reference checks, so moving a
+value while a borrow of it is live is rejected too.
 
 ## Reference types
 
@@ -635,6 +642,57 @@ error[E0506]: cannot assign to values because it is borrowed
 lsaca: example-24.ls: could not compile example-24.ls due to previous error(s)
 ```
 
+## References and moves
+
+References never own their referent, so ownership still decides when the value
+itself can be moved. A live borrow keeps the referent in place: moving it while
+the borrow is still in use is `E0505`. Because a borrow ends at its last use, a
+move afterwards is fine:
+
+```ls
+fn main() {
+    let text = String::from("hi");
+    let r = &text;
+    println!("{}", *r);
+    let owned = text;          // the borrow ended: the move is allowed
+    println!("{}", owned);
+}
+```
+
+Output:
+
+```text
+hi
+hi
+```
+
+```ls,compile-fail
+fn main() {
+    let text = String::from("hi");
+    let r = &text;
+    let owned = text;          // error: text is borrowed by r
+    println!("{} {}", *r, owned);
+}
+```
+
+Error:
+
+```text
+error[E0505]: cannot move out of text because it is borrowed
+  --> example-26.ls:4:17
+   |
+ 4 |     let owned = text;          // error: text is borrowed by r
+   |                 ^^^^
+   = note: example-26.ls:3:13: shared borrow occurs here
+   = note: a move would leave the reference pointing at a value the program no longer owns; clone the value instead of moving it
+
+lsaca: example-26.ls: could not compile example-26.ls due to previous error(s)
+```
+
+References themselves are `Copy`: binding or passing a reference copies the
+pointer and never moves the referent. A `&mut` reference is also exclusive — no
+other borrow and no move of the referent may overlap it.
+
 ## References and functions
 
 A reference parameter is declared with the reference type in the parameter list, and a
@@ -747,20 +805,20 @@ fn main() {
 Error:
 ```text
 error[E0106]: missing lifetime specifier
-  --> example-28.ls:1:13
+  --> example-30.ls:1:13
    |
  1 | fn bad() -> &i64 {
    |             ^
    = note: this function's return type contains a borrowed value, but there is no reference input to borrow from
 
 error[E0515]: returns a reference to a local value
-  --> example-28.ls:3:5
+  --> example-30.ls:3:5
    |
  3 |     &value
    |     ^^^^^^
    = note: the returned reference must borrow from a function parameter
 
-lsaca: example-28.ls: could not compile example-28.ls due to previous error(s)
+lsaca: example-30.ls: could not compile example-30.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -777,13 +835,13 @@ fn main() {
 Error:
 ```text
 error[E0106]: missing lifetime specifier
-  --> example-29.ls:1:41
+  --> example-31.ls:1:41
    |
  1 | fn choose(first: &i64, second: &i64) -> &i64 {
    |                                         ^
    = note: this function's return type contains a borrowed value, but the signature does not say which parameter it is borrowed from
 
-lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
+lsaca: example-31.ls: could not compile example-31.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -800,13 +858,13 @@ fn main() {
 Error:
 ```text
 error[E0515]: returns a reference to a local value
-  --> example-30.ls:3:5
+  --> example-32.ls:3:5
    |
  3 |     &local
    |     ^^^^^^
    = note: the returned reference must borrow from a function parameter
 
-lsaca: example-30.ls: could not compile example-30.ls due to previous error(s)
+lsaca: example-32.ls: could not compile example-32.ls due to previous error(s)
 ```
 
 A reference cannot outlive the value it borrows. The common case is storing a reference
@@ -827,14 +885,14 @@ fn main() {
 Error:
 ```text
 error[E0597]: inner does not live long enough
-  --> example-31.ls:6:13
+  --> example-33.ls:6:13
    |
  6 |         r = &inner;
    |             ^^^^^^
-   = note: example-31.ls:5:13: inner is dropped here
+   = note: example-33.ls:5:13: inner is dropped here
    = note: the reference must not outlive the value it points to; keep the referent alive longer or copy the value
 
-lsaca: example-31.ls: could not compile example-31.ls due to previous error(s)
+lsaca: example-33.ls: could not compile example-33.ls due to previous error(s)
 ```
 
 ### Implicit coercions
@@ -949,19 +1007,19 @@ fn main() {}
 Error:
 ```text
 error[E0596]: cannot return a mutable reference from a shared reference source
-  --> example-35.ls:3:28
+  --> example-37.ls:3:28
    |
  3 |     fn count_mut(&self) -> &mut i64 {
    |                            ^
    = note: a &mut return type must borrow from a &mut parameter or from a &mut self receiver
 
 error[E0596]: cannot borrow this value as mutable: the binding is not declared as mutable
-  --> example-35.ls:4:9
+  --> example-37.ls:4:9
    |
  4 |         &mut self.count
    |         ^^^^^^^^^^^^^^^
 
-lsaca: example-35.ls: could not compile example-35.ls due to previous error(s)
+lsaca: example-37.ls: could not compile example-37.ls due to previous error(s)
 ```
 
 ## Match ergonomics
@@ -1126,12 +1184,12 @@ fn main() {
 Error:
 ```text
 error: reference patterns are not supported; match a reference scrutinee directly, bindings become references
-  --> example-41.ls:4:9
+  --> example-43.ls:4:9
    |
  4 |     let &x = r;
    |         ^
 
-lsaca: example-41.ls: could not compile example-41.ls due to previous error(s)
+lsaca: example-43.ls: could not compile example-43.ls due to previous error(s)
 ```
 
 ## Where references are allowed
@@ -1141,7 +1199,9 @@ References are restricted to the places where their lifetime is obvious. They ma
 - local bindings, function parameters and function return values;
 - method receivers (`&self`, `&mut self`);
 - elements of expressions and arguments;
-- reborrowed through other references.
+- reborrowed through other references;
+- mutable references to owned heap values: `&mut String`, `&mut Vec<T>`,
+  `&mut Rc<T>` and `&mut Box<T>` (new in version 1.4).
 
 They may **not** be:
 
@@ -1150,7 +1210,6 @@ They may **not** be:
 | stored in a struct or enum field | error E0498 |
 | stored in a tuple, `Vec<T>`, `Option<T>`, `Result<T, E>` or `Box<T>` | error E0498 |
 | captured by a closure | error E0498 |
-| `&mut String`, `&mut Vec<T>`, `&mut Rc<T>`, `&mut Box<T>` | error E0498 |
 | returned from a function that cannot name its source | error E0106 |
 | compared with `==` | error E0369 |
 | used as the `for` iterator | error E0277 |
@@ -1168,23 +1227,25 @@ fn main() {
 
 Error:
 ```text
-error[E0498]: references cannot be stored in this type in v1.3 (found &i64)
-  --> example-42.ls:1:17
+error[E0498]: references cannot be stored in this type in version 1.4 (found &i64)
+  --> example-44.ls:1:17
    |
  1 | struct Holder { value: &i64 }
    |                 ^^^^^
 
-error[E0498]: references cannot be stored in this type in v1.3 (found &i64)
-  --> example-42.ls:4:34
+error[E0498]: references cannot be stored in this type in version 1.4 (found &i64)
+  --> example-44.ls:4:34
    |
  4 |     let holder = Holder { value: &n };
    |                                  ^^
 
-lsaca: example-42.ls: could not compile example-42.ls due to previous error(s)
+lsaca: example-44.ls: could not compile example-44.ls due to previous error(s)
 ```
 
-A closure may take references as parameters, but it may not capture one, because the
-closure could outlive the borrowed value:
+A closure may take references as parameters, but it may not capture one: closures
+capture by value, references cannot be stored in the captured environment
+(`E0498`), and the closure could outlive the borrowed value. (The compiler's message
+still says "in v1.3"; the wording has not been updated in 1.4.)
 
 ```ls,compile-fail
 fn main() {
@@ -1198,18 +1259,19 @@ fn main() {
 Error:
 ```text
 error[E0498]: references cannot be captured by closures in v1.3
-  --> example-43.ls:4:17
+  --> example-45.ls:4:17
    |
  4 |     let f = || *r;
    |                 ^
 
-lsaca: example-43.ls: could not compile example-43.ls due to previous error(s)
+lsaca: example-45.ls: could not compile example-45.ls due to previous error(s)
 ```
 
-Mutable references to owned heap types are not supported at all in version 1.3 — take a
-shared reference, or pass the value and use copy-on-write semantics:
+Mutable references to owned heap types are supported in version 1.4: a
+`&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>` can be a parameter, a
+local binding or a return value, and the callee mutates the payload in place:
 
-```ls,compile-fail
+```ls
 fn append(text: &mut String) {
     text.push_str("!");
 }
@@ -1220,22 +1282,14 @@ fn main() {
 }
 ```
 
-Error:
+Output:
 ```text
-error[E0498]: mutable references to String are not supported in v1.3; take &String or restructure the code
-  --> example-44.ls:1:11
-   |
- 1 | fn append(text: &mut String) {
-   |           ^^^^
-
-error[E0498]: mutable references to String are not supported in v1.3; take &String or restructure the code
-  --> example-44.ls:6:12
-   |
- 6 |     append(&mut text);
-   |            ^^^^^^^^^
-
-lsaca: example-44.ls: could not compile example-44.ls due to previous error(s)
+hi!
 ```
+
+This makes in-place updates through a reference possible without cloning the
+container. The restrictions on *storing* references still apply: a `&mut String`
+cannot be a struct field or a `Vec` element (error `E0498`).
 
 For loops iterate over a `Vec<T>` **by value** or over an integer range. A `&Vec<T>` is
 not an iterator, so this is an error:
@@ -1253,12 +1307,12 @@ fn main() {
 Error:
 ```text
 error[E0277]: cannot iterate over a value of type &Vec<{integer}>; for loops require a range or Vec<T>
-  --> example-45.ls:4:18
+  --> example-47.ls:4:18
    |
  4 |     for value in r {
    |                  ^
 
-lsaca: example-45.ls: could not compile example-45.ls due to previous error(s)
+lsaca: example-47.ls: could not compile example-47.ls due to previous error(s)
 ```
 
 Use an index loop when you want to read a vector through a shared reference without
@@ -1292,7 +1346,8 @@ References do not participate in any of that. A reference:
 - does not increment or decrement a refcount;
 - does not keep its referent alive on its own — the borrow checker guarantees that some
   owner outlives the borrow;
-- does not copy, move or modify the referent, except through `*r` assignment on a `&mut`;
+- does not copy, move or modify the referent, except through assignment on a `&mut`
+  (`*r = value` or `r.field = value`);
 - never introduces a cycle, because it is never stored anywhere that outlives it.
 
 The observable consequence is that borrowing is free and invisible: `Rc::strong_count`
@@ -1403,10 +1458,9 @@ stays alive.
 | Code | Message (abbreviated) | Typical cause |
 | --- | --- | --- |
 | E0106 | `missing lifetime specifier` | a function returns a reference but has zero or two or more reference parameters |
-| E0498 | `references cannot be stored in this type in v1.3` | `&T` inside a struct, enum, tuple, `Vec`, `Option`, `Result` or `Box` |
-| E0498 | `references cannot be captured by closures in v1.3` | a closure body uses a captured reference |
-| E0498 | `mutable references to String are not supported in v1.3` | `&mut` to `String`, `Vec`, `Rc` or `Box` |
-| E0499 | `cannot borrow X as mutable more than once at a time` | two overlapping mutable borrows |
+| E0498 | `references cannot be stored in this type in version 1.4 (found &T)` | `&T` inside a struct, enum, tuple, `Vec`, `Option`, `Result` or `Box` |
+| E0498 | `references cannot be captured by closures in v1.3` (compiler wording retained verbatim from 1.3) | a closure body uses a captured reference |
+| E0499 | `cannot borrow X as mutable more than once at a time` | two overlapping mutable borrows, including two mutable borrows inside one expression |
 | E0502 | `cannot borrow X as immutable because it is also borrowed as mutable` | shared borrow while a mutable borrow is alive |
 | E0506 | `cannot assign to X because it is borrowed` | assignment while a borrow is still in use |
 | E0515 | `returns a reference to a local value` | returning `&local` from a function |
@@ -1422,19 +1476,20 @@ stays alive.
 Errors without a code (parser level): `reference patterns are not supported; match a
 reference scrutinee directly, bindings become references`.
 
-## Known limitations in version 1.3.0
+## Known limitations in version 1.4.0
 
-Version 1.3.0 is the first release with references, and the feature set is intentionally
-minimal. The current restrictions are:
+Version 1.3.0 introduced references, and 1.4.0 adds ownership and moves on top of them.
+The current restrictions are:
 
 1. **No lifetime syntax.** Only the two elision rules (receiver, single reference
    parameter) are available; there are no explicit `'a` annotations, labels or `'static`.
 2. **References cannot be stored.** Struct fields, enum payloads, tuples, `Vec`,
    `Option`, `Result`, `Box` and closures cannot hold references. Keep the reference in
    a local for the duration of the computation instead.
-3. **`&mut` is limited to scalars, tuples, structs and enums.** `&mut String`,
-   `&mut Vec<T>`, `&mut Rc<T>` and `&mut Box<T>` are rejected (E0498). Use `Rc<T>::set`
-   for shared mutation or rely on copy-on-write values.
+3. **Mutable references to user aggregates with heap fields are rejected.** `&mut` works
+   for Copy values and for `String`, `Vec<T>`, `Rc<T>` and `Box<T>`, but not for a user
+   struct or enum that contains a `String`, `Vec`, `Rc`, `Box` or Drop field (E0498).
+   Borrow those with a shared reference, or move them by value.
 4. **By-value `self` cannot return a reference.** A method that takes `self` by value
    and returns `&T` or `&mut T` is rejected with `E0106` ("missing lifetime specifier");
    use a `&self` or `&mut self` receiver to return a field reference.
@@ -1445,6 +1500,10 @@ minimal. The current restrictions are:
 7. **No references in `for` loops** (`for x in &vec` is an error), no `==` on references,
    and no indexing a `&String`.
 8. **No raw pointers and no casts to or from references.**
+9. **The borrow checker is conservative inside a single expression.** Two mutable
+   borrows written in one expression (for example `side(&mut c) || side(&mut c)`)
+   are rejected with `E0499` even though the calls run in order; bind each result
+   to a local first and combine the locals.
 
 ## Summary
 
@@ -1464,8 +1523,9 @@ minimal. The current restrictions are:
   `self` inside a method follows the same rule.
 - References never retain or release ORC allocations and cannot create cycles; ORC
   remains the only owner.
-- References cannot be stored, captured by closures, compared with `==`, or used to
-  mutate `String`/`Vec`/`Rc`/`Box` in this version.
+- References cannot be stored in aggregates, captured by closures or compared with
+  `==`; mutable references to `String`, `Vec`, `Rc` and `Box` *are* allowed as
+  parameters, locals and return values in version 1.4.
 
 ## What next
 
@@ -1474,11 +1534,11 @@ minimal. The current restrictions are:
 - [Types](04-types.md) — where `&T` and `&mut T` sit in the type system.
 - [Functions](09-functions.md) — parameter passing, return values, reference elision.
 - [Structs, enums and impl](10-structs-enums-and-impl.md) — receivers and methods.
-- [Pattern matching](12-pattern-matching.md) — the pattern language used by match
+- [Pattern matching](13-pattern-matching.md) — the pattern language used by match
   ergonomics.
-- [Standard library](14-standard-library.md) — the owned containers references point
+- [Standard library](15-standard-library.md) — the owned containers references point
   into.
-- [Roadmap](15-roadmap.md) — what is still planned (move semantics, reference fields,
-  lifetimes, generics).
-- [Benchmarks](16-benchmarks.md) — measured performance of the reference and ORC
+- [Roadmap](16-roadmap.md) — what is still planned (reference fields, lifetimes,
+  generics, traits and iterators).
+- [Benchmarks](17-benchmarks.md) — measured performance of the reference and ORC
   runtime.

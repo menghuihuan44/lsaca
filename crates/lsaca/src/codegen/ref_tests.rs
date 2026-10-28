@@ -131,7 +131,7 @@ fn main_fn(body: crate::hir::HBlock) -> HFn {
 }
 
 fn program(name: &str, structs: Vec<HStruct>, fns: Vec<HFn>, main_fn: usize) -> Program {
-    Program {
+    let mut program = Program {
         name: name.to_string(),
         structs,
         enums: Vec::<HEnum>::new(),
@@ -139,7 +139,13 @@ fn program(name: &str, structs: Vec<HStruct>, fns: Vec<HFn>, main_fn: usize) -> 
         consts: Vec::<HConst>::new(),
         closures: Vec::<HClosure>::new(),
         main_fn,
-    }
+        copy_structs: Vec::new(),
+        copy_enums: Vec::new(),
+        drop_structs: Vec::new(),
+        drop_enums: Vec::new(),
+    };
+    program.classify_types(Vec::new(), Vec::new());
+    program
 }
 
 fn point() -> HStruct {
@@ -960,15 +966,19 @@ fn emits_reference_equality_comparing_referents() {
         &main_c,
         "bool lsaca_fn_same(const int64_t* p0, const int64_t* p1)",
     );
-    // The referents are compared through temporary dereferences, so the emitted
-    // comparison dereferences both references instead of comparing the pointers.
-    assert_eq!(
-        body.matches("(*(t").count(),
-        2,
+    // Both operands are borrowed places read through their parameter lvalues,
+    // so the comparison dereferences the parameters directly instead of
+    // materialising owned temporaries; pointers are never compared.
+    assert!(
+        body.contains("result1 = (((*(p0))) == ((*(p1))));"),
         "unexpected comparison: {body}"
     );
-    assert!(body.contains("result1 = (((*(t"));
-    assert!(body.contains(" == "));
+    assert_eq!(
+        body.matches(" == ").count(),
+        1,
+        "unexpected comparison: {body}"
+    );
+    assert!(!body.contains("(*(t"), "no temporaries: {body}");
     assert!(!main_c.contains("p0 == p1"));
     assert!(!main_c.contains("lsaca_copy_Ref"));
 }

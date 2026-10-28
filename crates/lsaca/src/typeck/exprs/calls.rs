@@ -2,7 +2,7 @@
 
 use super::combinators::is_combinator_method;
 use crate::ast::{self, ExprKind};
-use crate::hir::{HBuiltinAssoc, HBuiltinFn, HMacroKind};
+use crate::hir::{HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HMacroKind};
 use crate::span::Span;
 use crate::typeck::builtins::{
     FormatPiece, FormatValueKind, builtin_assoc, builtin_fn, builtin_method, format_spec_error,
@@ -858,6 +858,36 @@ impl<'a> Checker<'a> {
                 "generic arguments are only supported for .parse::<T>()".to_string(),
                 method_span,
                 "E0107",
+            );
+        }
+        // .clone() is derived automatically for every type in version 1.4. It
+        // takes no arguments and clones the referent through any number of
+        // references. Types with drop glue cannot be cloned because the copy
+        // would run a user destructor a second time.
+        if method == "clone" {
+            let clone_ty = receiver_ty.clone();
+            let arg_exprs = self.check_call_args(&[], args, span);
+            self.apply_hint(&clone_ty, hint);
+            if self.has_drop_glue(&clone_ty) {
+                let described = self.describe_resolved(&clone_ty);
+                self.error_code(
+                    format!(
+                        "type {} implements Drop and cannot be cloned in version 1.4; use references instead",
+                        described
+                    ),
+                    method_span,
+                    "E0277",
+                );
+            }
+            let receiver_expr = self.wrap_derefs(receiver_expr);
+            return TExpr::new(
+                clone_ty,
+                TExprKind::BuiltinMethod {
+                    receiver: Box::new(receiver_expr),
+                    method: HBuiltinMethod::Clone,
+                    args: arg_exprs,
+                },
+                span,
             );
         }
         if is_combinator_method(&receiver_ty, method) {

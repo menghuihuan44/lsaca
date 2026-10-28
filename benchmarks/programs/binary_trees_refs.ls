@@ -3,7 +3,9 @@
 // the traversal borrows the tree instead of consuming it: sum_tree takes
 // &Option<Box<Node>> and recurses with &current.left / &current.right, so no
 // payload is deep-copied. Compare with binary_trees.ls, whose sum_tree takes
-// Option<Box<Node>> by value and therefore copies the tree at every level.
+// Option<Box<Node>> by value and, in 1.4, explicitly clones the two child
+// subtrees at each level - that deep copy is the measured cost of the by-value
+// traversal.
 struct Node {
     value: i64,
     left: Option<Box<Node>>,

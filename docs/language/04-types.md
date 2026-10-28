@@ -13,23 +13,23 @@ type, and describes inference and conversions.
 | `i8` `i16` `i32` `i64` | Signed integers. | Two's complement; `i64` is the default integer type and the type of all lengths and indices. |
 | `u8` `u16` `u32` `u64` | Unsigned integers. | Values are kept in the corresponding C unsigned type. |
 | `f32` `f64` | IEEE-754 binary floating point. | `f64` is the default float type. |
-| `String` | Owned immutable UTF-8 string. | Reference-counted, copy-on-write; `len()` is a byte count. |
-| `Vec<T>` | Growable array. | Builtin generic; copy-on-write. |
+| `String` | Owned UTF-8 string. | Move-only refcounted buffer; `.clone()` shares until written (copy-on-write); `len()` is a byte count. |
+| `Vec<T>` | Growable array. | Builtin generic, move-only; `.clone()` deep-copies. |
 | `Option<T>` | `Some(T)` or `None`. | Builtin generic. |
 | `Result<T, E>` | `Ok(T)` or `Err(E)`. | Builtin generic. |
-| `Rc<T>` | Shared, mutable heap cell. | Copies share one payload; `get()`/`set()`. |
-| `Box<T>` | Owned heap indirection. | Added in 1.1.0; copies deep-copy the payload. |
-| `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. Cannot be stored in aggregates; see [References and borrowing](11-references-and-borrowing.md). |
+| `Rc<T>` | Shared, mutable heap cell. | Move-only handle; `.clone()` shares one payload; `get()`/`set()`. |
+| `Box<T>` | Owned heap indirection. | Added in 1.1.0; move-only; `.clone()` deep-copies the payload. |
+| `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. Cannot be stored in aggregates (mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4); see [References and borrowing](12-references-and-borrowing.md). |
 | `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; only flat tuples are supported by the current code generator. |
 | `fn(A, B) -> R` | Function type. | Values of this type are first-class; see [Functions](09-functions.md). |
-| `Name` | User struct or enum. | Declared with `struct`/`enum`. |
+| `Name` | User struct or enum. | Declared with `struct`/`enum`. `Copy` when every field is `Copy` and there is no `Drop` impl; otherwise move-only. `.clone()` is derived for every type; `impl Drop for Name` adds a destructor hook. |
 | `Alias` | Type alias. | `type Alias = T;` introduces no new type. |
 
 There is no `usize`, `isize`, `char`, raw pointer type, array type or slice type.
 References are written `&T` (shared) and `&mut T` (mutable); they are
 **non-owning** views of an existing place, added in 1.3.0, and cannot be stored
 in aggregates. They are described in [References and
-borrowing](11-references-and-borrowing.md). `Self` is not a type available to
+borrowing](12-references-and-borrowing.md). `Self` is not a type available to
 user code in general: it names "the type of this `impl` block" inside an
 `impl`, and is accepted in parameter and return positions there (see [Structs,
 enums and impl](10-structs-enums-and-impl.md)).
@@ -87,7 +87,7 @@ unannotated float literal is `f64` unless context requires `f32`. Floats follow
 C semantics for special values: division by zero produces an infinity, `0.0 /
 0.0` produces NaN, and comparisons involving NaN are false except `!=`. Display
 uses the shortest round-tripping decimal form; `{:?}` and format specifiers work
-as described in [Standard library](14-standard-library.md).
+as described in [Standard library](15-standard-library.md).
 
 ```ls
 fn main() {
@@ -118,18 +118,19 @@ is occasionally useful in generic-looking code.
 ## Strings and Vecs
 
 `String` and `Vec<T>` are the two owned container types. Both are
-reference-counted with copy-on-write: assigning or passing one copies a handle,
-and mutating through one handle clones the buffer first if it is shared, so two
-variables never observe each other's mutations. Both are indexed by `i64`, and
-`String` methods use **byte** offsets. They are described in
+reference-counted with copy-on-write: `.clone()` copies a handle and shares the
+buffer, and mutating one clone copies the buffer first if it is still shared.
+Assigning or passing a `String` or `Vec` by value moves it, so clone first when
+both sides must stay usable. Both are indexed by `i64`, and `String` methods
+use **byte** offsets. They are described in
 [Memory model](05-memory-model.md) and their full API is in
-[Standard library](14-standard-library.md).
+[Standard library](15-standard-library.md).
 
 ```ls
 fn main() {
     let mut text = String::from("abc");
     let mut numbers = vec![1, 2, 3];
-    let copy = text;
+    let copy = text.clone();
     text.push_str("d");
     numbers.push(4);
     println!("{} {} {} {}", text.len(), copy.len(), numbers.len(), copy);
@@ -147,8 +148,8 @@ Output:
 `Some(value)` or `None`; `Result<T, E>` is either `Ok(value)` or `Err(error)`.
 They are the idiomatic way to express a missing value or an operation that can
 fail, and they support pattern matching and the methods listed in
-[Standard library](14-standard-library.md). Neither type supports `==` in
-version 1.3.0: compare them by pattern matching.
+[Standard library](15-standard-library.md). Neither type supports `==` in
+version 1.4.0: compare them by pattern matching.
 
 ```ls
 fn classify(n: i64) -> Result<String, String> {
@@ -183,10 +184,11 @@ ok: non-negative
 
 ## Rc and Box
 
-`Rc<T>` is a shared **cell**: all handles refer to one payload, and mutation
-through any handle is visible through all of them. `Box<T>` is an owned heap
-allocation: a `Box` has value semantics, and copying a `Box` copies the payload
-(deep copy), so boxes never alias. Both exist to break the "everything is a
+`Rc<T>` is a shared **cell**: handles made with `.clone()` all refer to one
+payload, and mutation through any handle is visible through all of them.
+`Box<T>` is an owned heap allocation with value semantics: `.clone()` copies the
+payload (a deep copy), while assigning or passing a box by value moves it.
+Boxes never alias. Both exist to break the "everything is a
 value" rule in controlled ways: `Rc` when you need shared mutable state or a
 cycle, `Box` when you need indirection (a recursive data structure, or a large
 value moved without a deep copy on the surface). `Box` is described in
@@ -195,12 +197,12 @@ value moved without a deep copy on the surface). `Box` is described in
 ```ls
 fn main() {
     let cell = Rc::new(1);
-    let shared = cell;
+    let shared = cell.clone();
     shared.set(shared.get() + 41);
     println!("{} {}", cell.get(), shared.get());
 
     let boxed = Box::new(String::from("owner"));
-    let moved = boxed;
+    let moved = boxed.clone();
     println!("{} {}", boxed.get(), moved.get());
     println!("{}", boxed == moved);
 }
@@ -243,7 +245,7 @@ functions, returned from functions, and stored in locals. Unlike `String`,
 `Vec`, `Rc<T>` and `Box<T>`, a reference does **not** own anything and does
 **not** change any reference count; it must not outlive the value it points to,
 and the compiler's lightweight borrow checker enforces that (see
-[References and borrowing](11-references-and-borrowing.md)).
+[References and borrowing](12-references-and-borrowing.md)).
 
 Field access, method calls and indexing automatically dereference a reference,
 so `r.field` and `r.method()` work without an explicit `*`; writes through a
@@ -257,7 +259,7 @@ be converted with `as`.
   may be live at the same time.
 
 The full rules, including reference parameters, elision and match ergonomics,
-are on [References and borrowing](11-references-and-borrowing.md).
+are on [References and borrowing](12-references-and-borrowing.md).
 
 ## Tuples
 
@@ -270,7 +272,7 @@ tuple. Elements are accessed by index (`t.0`, `t.1`, ...) or destructured in a
 **Current limitation:** the C code generator only handles *flat* tuples. A tuple
 nested inside another tuple, whether as a value or as a type of a struct field,
 generates invalid C and fails at the C compiler, so avoid nested tuples in
-1.3.0. Tuples with other element types (including `String`, `Rc<T>`,
+1.4.0. Tuples with other element types (including `String`, `Rc<T>`,
 `Option<String>`) work.
 
 ```ls
@@ -581,5 +583,5 @@ lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 * How values are represented and shared: [Memory model](05-memory-model.md).
 * Operators on each type: [Operators](07-operators.md).
 * Borrow values without giving up ownership: [References and
-  borrowing](11-references-and-borrowing.md).
-* The full built-in API: [Standard library](14-standard-library.md).
+  borrowing](12-references-and-borrowing.md).
+* The full built-in API: [Standard library](15-standard-library.md).

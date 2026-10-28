@@ -10,13 +10,13 @@ fn main() {
         values: vec![1, 2, 3],
     });
 
-    let copy = config;
+    let copy = config.clone();
     let snapshot = copy.get();
     println!("{} {:?}", config.get().name, snapshot.values);
     println!("{}", copy.get().values.len());
 
     let text = Rc::new(String::from("hello"));
-    let text2 = text;
+    let text2 = text.clone();
     println!("{}", text.get());
     text2.set(String::from("world"));
     println!("{}", text.get());
