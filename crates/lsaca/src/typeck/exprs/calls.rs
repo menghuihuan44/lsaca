@@ -655,12 +655,9 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
+        self.validate_storage_type(&elem, span);
         let value = self.check_expr(&args[0], Some(&elem));
-        if !self.unify_quiet(&elem, &value.ty) {
-            let resolved_elem = self.infer.resolve(&elem);
-            let resolved_value = self.infer.resolve(&value.ty);
-            self.report_mismatch(&resolved_elem, &resolved_value, args[0].span);
-        }
+        let value = self.coerce_to(value, &elem, args[0].span);
         TExpr::new(
             ITy::option(elem),
             TExprKind::OptionSome(Box::new(value)),
@@ -695,6 +692,7 @@ impl<'a> Checker<'a> {
             },
             None => self.infer.fresh_var(),
         };
+        self.validate_storage_type(&elem, span);
         let ty = ITy::option(elem);
         self.apply_hint(&ty, hint);
         TExpr::new(ty, TExprKind::OptionNone, span)
@@ -724,12 +722,9 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
+        self.validate_storage_type(&ok_ty, span);
         let value = self.check_expr(&args[0], Some(&ok_ty));
-        if !self.unify_quiet(&ok_ty, &value.ty) {
-            let resolved_ok = self.infer.resolve(&ok_ty);
-            let resolved_value = self.infer.resolve(&value.ty);
-            self.report_mismatch(&resolved_ok, &resolved_value, args[0].span);
-        }
+        let value = self.coerce_to(value, &ok_ty, args[0].span);
         TExpr::new(
             ITy::result(ok_ty, err_ty),
             TExprKind::ResultOk(Box::new(value)),
@@ -761,12 +756,9 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
+        self.validate_storage_type(&err_ty, span);
         let value = self.check_expr(&args[0], Some(&err_ty));
-        if !self.unify_quiet(&err_ty, &value.ty) {
-            let resolved_err = self.infer.resolve(&err_ty);
-            let resolved_value = self.infer.resolve(&value.ty);
-            self.report_mismatch(&resolved_err, &resolved_value, args[0].span);
-        }
+        let value = self.coerce_to(value, &err_ty, args[0].span);
         TExpr::new(
             ITy::result(ok_ty, err_ty),
             TExprKind::ResultErr(Box::new(value)),
@@ -788,7 +780,16 @@ impl<'a> Checker<'a> {
         hint: Option<&ITy>,
     ) -> TExpr {
         let receiver_expr = self.check_expr(receiver, None);
-        let receiver_ty = self.infer.resolve(&receiver_expr.ty);
+        let raw_ty = self.infer.resolve(&receiver_expr.ty);
+        // Auto-dereference: method lookup and builtin dispatch happen on the
+        // pointee type; the lowered receiver is dereferenced to match it.
+        let receiver_ty = self.peel_refs(&raw_ty);
+        if let ITy::Never = raw_ty {
+            for arg in args {
+                let _ = self.check_expr(arg, None);
+            }
+            return self.never_expr(span);
+        }
         let owner = match &receiver_ty {
             ITy::Struct(id) => Some(TypeKey::Struct(*id)),
             ITy::Enum(id) => Some(TypeKey::Enum(*id)),
@@ -797,13 +798,30 @@ impl<'a> Checker<'a> {
         if let Some(owner) = owner
             && let Some(fn_id) = self.methods.get(&(owner, method.to_string())).copied()
         {
+            if self.fns[fn_id].self_kind.is_none() {
+                let type_name = self.type_name(owner);
+                self.error_code(
+                    format!(
+                        "associated function {}::{} cannot be called with method syntax",
+                        type_name, method
+                    ),
+                    method_span,
+                    "E0599",
+                );
+                for arg in args {
+                    let _ = self.check_expr(arg, None);
+                }
+                return self.never_expr(span);
+            }
             if matches!(self.fns[fn_id].self_kind, Some(SelfKind::RefMut)) {
-                self.require_mutable_place(
+                self.require_mutable_receiver(
                     &receiver_expr,
+                    &raw_ty,
                     receiver.span,
                     "mutate through this receiver",
                 );
             }
+            let receiver_expr = self.wrap_derefs(receiver_expr);
             return self.check_direct_call(fn_id, Some(receiver_expr), args, span, hint);
         }
         if !turbofish.is_empty() {
@@ -814,6 +832,7 @@ impl<'a> Checker<'a> {
                 if let Some((builtin, ret)) = parse_alias(&target) {
                     let arg_exprs = self.check_call_args(&[], args, span);
                     self.apply_hint(&ret, hint);
+                    let receiver_expr = self.wrap_derefs(receiver_expr);
                     return TExpr::new(
                         ret,
                         TExprKind::BuiltinMethod {
@@ -842,18 +861,21 @@ impl<'a> Checker<'a> {
             );
         }
         if is_combinator_method(&receiver_ty, method) {
+            let receiver_expr = self.wrap_derefs(receiver_expr);
             return self.check_combinator_method(receiver_expr, method, args, span, hint);
         }
         if let Some(info) = builtin_method(&receiver_ty, method) {
             if info.mutable_receiver {
-                self.require_mutable_place(
+                self.require_mutable_receiver(
                     &receiver_expr,
+                    &raw_ty,
                     receiver.span,
                     "mutate through this receiver",
                 );
             }
             let arg_exprs = self.check_call_args(&info.params, args, span);
             self.apply_hint(&info.ret, hint);
+            let receiver_expr = self.wrap_derefs(receiver_expr);
             return TExpr::new(
                 info.ret,
                 TExprKind::BuiltinMethod {
@@ -879,6 +901,32 @@ impl<'a> Checker<'a> {
             let _ = self.check_expr(arg, None);
         }
         self.never_expr(span)
+    }
+
+    /// Require that the receiver of a mutating method can be mutated: either it
+    /// is an assignable place, or it goes through a mutable reference.
+    fn require_mutable_receiver(
+        &mut self,
+        receiver: &TExpr,
+        receiver_ty: &ITy,
+        span: Span,
+        action: &str,
+    ) -> bool {
+        match self.ref_chain_mutability(receiver_ty) {
+            Some(true) => true,
+            Some(false) => {
+                self.error_code(
+                    format!(
+                        "cannot {}: cannot mutate through a shared reference",
+                        action
+                    ),
+                    span,
+                    "E0596",
+                );
+                false
+            }
+            None => self.require_mutable_place(receiver, span, action),
+        }
     }
 
     pub fn suggest_method(&self, receiver_ty: &ITy, method: &str) -> Option<String> {

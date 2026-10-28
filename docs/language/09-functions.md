@@ -138,7 +138,7 @@ A function name used as a value has the type `fn(ArgTypes) -> ReturnType`. Such
 values are first-class: they can be bound to a variable, passed to another
 function, returned from a function, and called. They are ordinary lsaca values
 (refcounted, copied on assignment). A closure with no captures can be used
-wherever a `fn` value is expected (`[Closures](12-closures.md)`).
+wherever a `fn` value is expected (`[Closures](13-closures.md)`).
 
 ```ls
 fn inc(n: i64) -> i64 {
@@ -186,7 +186,7 @@ Output:
 8 13
 ```
 
-Two limitations apply in 1.2.0:
+Two limitations apply in 1.3.0:
 
 * function values **cannot be stored in struct fields or in a `Vec`** — the C
   backend does not generate a valid representation for them there; using them
@@ -310,6 +310,127 @@ error[E0428]: the name 'double' is defined multiple times
 lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 ```
 
+## Reference parameters and returns
+
+A parameter type may be a reference. A `&T` parameter is a read-only view of the
+caller's value; a `&mut T` parameter lets the function write through the
+reference. Callers pass a borrow expression:
+
+```ls
+fn double(value: &i64) -> i64 {
+    *value * 2
+}
+
+fn bump(value: &mut i64) {
+    *value += 1;
+}
+
+fn main() {
+    let mut n = 5;
+    bump(&mut n);
+    println!("{}", double(&n));
+}
+```
+
+Output:
+```text
+12
+```
+
+Inside a `&mut` parameter, whole-place writes use `*value = ...`; field writes
+auto-dereference too, so `counter.count += 1` and `(*counter).count += 1` both
+write the caller's field:
+
+```ls
+struct Counter {
+    count: i64,
+}
+
+fn bump_count(counter: &mut Counter) {
+    counter.count += 1;
+}
+
+fn main() {
+    let mut counter = Counter { count: 0 };
+    bump_count(&mut counter);
+    bump_count(&mut counter);
+    println!("{}", counter.count);
+}
+```
+
+Output:
+```text
+2
+```
+
+A function may also **return** a reference. Because lsaca has no lifetime
+syntax, the returned reference's source is inferred by elision:
+
+* In a method, a returned reference is borrowed from the receiver (`&self` or
+  `&mut self`).
+* In a free function, the return type may contain a reference only if the
+  function has **exactly one** reference parameter; that parameter is the
+  source. Zero or several reference parameters give `E0106` (missing lifetime
+  specifier).
+
+```ls
+fn first(values: &Vec<i64>) -> &i64 {
+    &values[0]
+}
+
+fn main() {
+    let values = vec![10, 20, 30];
+    let head = first(&values);
+    println!("{}", *head);
+}
+```
+
+Output:
+```text
+10
+```
+
+The returned reference must point into that source: returning a reference to a
+local (`E0515`) or to a value that does not live long enough (`E0597`) is
+rejected. When the function has more than one reference parameter and the
+answer is ambiguous, the compiler reports `E0106`:
+
+```ls,compile-fail
+fn choose(first: &i64, second: &i64) -> &i64 {
+    first
+}
+
+fn main() {
+    let a = 1;
+    let b = 2;
+    println!("{}", *choose(&a, &b));
+}
+```
+
+Error:
+```text
+error[E0106]: missing lifetime specifier
+  --> example-16.ls:1:41
+   |
+ 1 | fn choose(first: &i64, second: &i64) -> &i64 {
+   |                                         ^
+   = note: this function's return type contains a borrowed value, but the signature does not say which parameter it is borrowed from
+
+lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
+```
+
+At calls, returns and `let` bindings, a few reference coercions happen
+implicitly:
+
+* `&mut T` coerces to `&T`;
+* `&Rc<T>` coerces to `&T`;
+* `&Box<T>` coerces to `&T`.
+
+Methods with `&self`/`&mut self` receivers are covered in [Structs, enums and
+impl](10-structs-enums-and-impl.md#methods-and-associated-functions-with-impl);
+the full borrowing rules are in [References and
+borrowing](11-references-and-borrowing.md).
+
 ## Nested functions
 
 Functions may be declared inside blocks and inside other functions. Nested items
@@ -352,6 +473,8 @@ those restrictions: it can call anything and declare nested items.
 
 ## What next
 
-* Closures and capture-by-value: [Closures](12-closures.md).
+* Closures and capture-by-value: [Closures](13-closures.md).
 * The full function-value type syntax: [Types](04-types.md#function-types).
+* Borrowing in parameters and return values: [References and
+  borrowing](11-references-and-borrowing.md).
 * Recursion and control flow: [Statements and control flow](08-statements-and-control-flow.md).

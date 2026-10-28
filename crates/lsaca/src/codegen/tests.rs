@@ -416,11 +416,9 @@ fn emits_width_and_precision_format_helpers() {
     for line in main_c.lines() {
         if let Some(index) = line.find(" = ls_format_begin(0);") {
             let name = line[..index].trim();
-            assert!(
-                main_c.contains(&format!("ls_release({});", name)),
-                "the format buffer {} is not released",
-                name
-            );
+            let released = main_c.contains(&format!("ls_release((void*)({}));", name))
+                || main_c.contains(&format!("ls_release({});", name));
+            assert!(released, "the format buffer {} is not released", name);
             formatted += 1;
         }
     }

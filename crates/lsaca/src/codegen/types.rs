@@ -60,6 +60,10 @@ impl TypeNames {
                 }
                 out
             }
+            Ty::Ref { mutable, inner } => {
+                let prefix = if *mutable { "RefMut" } else { "Ref" };
+                format!("{}_{}", prefix, self.mangle(inner))
+            }
             Ty::Fn(params, ret) => {
                 let mut out = format!("Fn{}", params.len());
                 for param in params {
@@ -92,6 +96,21 @@ impl TypeNames {
             Ty::String => String::from("LsString*"),
             // Rc and Box values are pointers to their managed cells.
             Ty::Rc(_) | Ty::Box(_) => format!("Ls{}*", self.mangle(ty)),
+            // References are non-owning pointers to the referent value.
+            //
+            // The referent may already be const-qualified (a reference to a
+            // reference). C forbids repeating the same qualifier and
+            // -Wduplicate-decl-specifier (implied by -Wall) rejects it, so a
+            // second const layer is only added when the referent is not
+            // already const-qualified.
+            Ty::Ref { mutable, inner } => {
+                let referent = self.ctype(inner);
+                if *mutable || referent.starts_with("const ") {
+                    format!("{}*", referent)
+                } else {
+                    format!("const {}*", referent)
+                }
+            }
             _ => format!("Ls{}", self.mangle(ty)),
         }
     }
@@ -335,6 +354,13 @@ impl<'a> Collector<'a> {
     }
 
     fn visit_ty(&mut self, ty: &Ty) {
+        // References never get a generated definition: they are plain C
+        // pointers. Still visit the referent so that the types it mentions get
+        // registered even when they only appear behind a reference.
+        if let Ty::Ref { inner, .. } = ty {
+            self.visit_ty(inner);
+            return;
+        }
         if !self.registry.insert_ty(ty) {
             return;
         }
@@ -459,7 +485,9 @@ impl<'a> Collector<'a> {
                 self.visit_expr(base);
                 self.visit_expr(index);
             }
-            HExprKind::Unary { expr, .. } => self.visit_expr(expr),
+            HExprKind::Unary { expr, .. }
+            | HExprKind::Ref { expr, .. }
+            | HExprKind::Deref { expr } => self.visit_expr(expr),
             HExprKind::Binary { lhs, rhs, .. } => {
                 self.visit_expr(lhs);
                 self.visit_expr(rhs);
@@ -582,6 +610,9 @@ impl TypeRegistry {
             Ty::Result(ok, err) => TypeDef::Result((**ok).clone(), (**err).clone()),
             Ty::Tuple(elems) => TypeDef::Tuple(elems.clone()),
             Ty::Fn(params, ret) => TypeDef::Fn(params.clone(), (**ret).clone()),
+            // References are never registered through `insert_ty`; they have no
+            // generated definition. This arm only keeps the match exhaustive.
+            Ty::Ref { .. } => TypeDef::Scalar,
         };
         self.order.push(ty.clone());
         self.defs.insert(ty.clone(), def);
@@ -630,7 +661,9 @@ impl TypeNames {
             Ty::Float(float_ty) => crate::codegen::util::float_literal(0.0, *float_ty),
             Ty::String => String::from("ls_str_new()"),
             Ty::Vec(_) => format!("(({}){{0, 0, NULL}})", self.ctype(ty)),
-            Ty::Rc(_) | Ty::Box(_) => format!("(({})NULL)", self.ctype(ty)),
+            Ty::Rc(_) | Ty::Box(_) | Ty::Ref { .. } => {
+                format!("(({})NULL)", self.ctype(ty))
+            }
             Ty::Option(elem) => {
                 if **elem == Ty::String {
                     String::from("ls_opt_string_none()")

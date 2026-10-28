@@ -1,7 +1,7 @@
 //! Built-in method, associated function and free function signatures.
 //!
 //! The signature tables follow the library reference in
-//! docs/language/13-standard-library.md. Generic element
+//! docs/language/14-standard-library.md. Generic element
 //! types are substituted with the receiver type's parameters.
 
 use super::itype::ITy;

@@ -222,7 +222,7 @@ lsaca: example-07.ls: could not compile example-07.ls due to previous error(s)
 An enum declares alternatives (variants). A variant is either a unit name or a
 tuple variant with a parenthesized payload. Every variant must be usable as a
 value of the enum type; pattern matching on enums is the main way to take them
-apart — see [Pattern matching](11-pattern-matching.md).
+apart — see [Pattern matching](12-pattern-matching.md).
 
 ```ls
 enum Shape {
@@ -323,6 +323,102 @@ Output:
 7
 ```
 
+### Reference receivers and returns
+
+The `&self` receiver is itself a reference to the value, so a method can return a
+reference to one of its fields. The reference is borrowed from the receiver:
+
+```ls
+struct Counter {
+    count: i64,
+}
+
+impl Counter {
+    fn new() -> Counter {
+        Counter { count: 0 }
+    }
+
+    fn increment(&mut self) {
+        self.count += 1;
+    }
+
+    fn count(&self) -> &i64 {
+        &self.count
+    }
+}
+
+fn main() {
+    let mut counter = Counter::new();
+    counter.increment();
+    let seen = counter.count();
+    println!("{}", *seen);
+}
+```
+
+Output:
+```text
+1
+```
+
+A method that returns `&String` or a `&Vec` element works the same way:
+
+```ls
+struct Named {
+    name: String,
+}
+
+impl Named {
+    fn name(&self) -> &String {
+        &self.name
+    }
+}
+
+fn main() {
+    let named = Named { name: String::from("lsaca") };
+    let name = named.name();
+    println!("{}", *name);
+}
+```
+
+Output:
+```text
+lsaca
+```
+
+Returning a reference from a method is allowed when the receiver decides the lifetime:
+a `&self` method may return a shared reference to its fields, and a `&mut self` method
+may return a shared or mutable reference to its fields. Returning `&mut` from a `&self`
+method is rejected (`E0596`, "cannot return a mutable reference from a shared reference
+source"), and a by-value `self` receiver cannot return a reference (`E0106`).
+
+```ls
+struct Counter {
+    count: i64,
+}
+
+impl Counter {
+    fn count_mut(&mut self) -> &mut i64 {
+        &mut self.count
+    }
+}
+
+fn main() {
+    let mut counter = Counter { count: 0 };
+    *counter.count_mut() += 1;
+    println!("{}", counter.count);
+}
+```
+
+Output:
+```text
+1
+```
+
+Struct and enum fields cannot themselves be references; a reference is a
+non-owning view and may only live in a local, a parameter or a return value
+(see [References and borrowing](11-references-and-borrowing.md)). Storing one
+in a field is an `E0498` error.
+
 `Self` is a type name usable inside `impl` blocks — in `-> Self` return types and
 parameter types. It **cannot** be used to construct a value: `Self { … }` and even
 `Self::new(…)` in expression position are rejected:
@@ -350,12 +446,12 @@ fn main() {
 Error:
 ```text
 error[E0532]: expected an enum, found a struct
-   --> example-11.ls:11:9
+   --> example-14.ls:11:9
     |
  11 |         Self::new(2)
     |         ^^^^
 
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
 An `impl` block may be split into several blocks for the same type; all of them
@@ -413,12 +509,12 @@ fn main() {
 Error:
 ```text
 error[E0596]: cannot mutate through this receiver: the binding is not declared as mutable
-   --> example-13.ls:13:5
+   --> example-16.ls:13:5
     |
  13 |     c.bump();
     |     ^
 
-lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
+lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 ```
 
 ### Methods on enums
@@ -435,8 +531,8 @@ enum Shape {
 impl Shape {
     fn area(&self) -> f64 {
         match self {
-            Shape::Circle(r) => 3.14159 * r * r,
-            Shape::Square(s) => s * s,
+            Shape::Circle(r) => 3.14159 * (*r) * (*r),
+            Shape::Square(s) => (*s) * (*s),
         }
     }
 }
@@ -474,12 +570,12 @@ fn main() {
 Error:
 ```text
 error[E0063]: missing field y in initializer of Point
-  --> example-15.ls:7:13
+  --> example-18.ls:7:13
    |
  7 |     let p = Point { x: 1 };
    |             ^^^^^^^^^^^^^^
 
-lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
+lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -497,12 +593,12 @@ fn main() {
 Error:
 ```text
 error[E0560]: struct Point has no field named z; did you mean x?
-  --> example-16.ls:7:33
+  --> example-19.ls:7:33
    |
  7 |     let p = Point { x: 1, y: 2, z: 3 };
    |                                 ^
 
-lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
+lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
 ```
 
 Accessing a field that does not exist and calling a method that does not exist
@@ -523,12 +619,12 @@ fn main() {
 Error:
 ```text
 error[E0609]: no field z on type Point; did you mean x?
-  --> example-17.ls:8:20
+  --> example-20.ls:8:20
    |
  8 |     println!("{}", p.z);
    |                    ^^^
 
-lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
+lsaca: example-20.ls: could not compile example-20.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -546,12 +642,12 @@ fn main() {
 Error:
 ```text
 error[E0599]: no method named frobnicate found for type Point in the current scope
-  --> example-18.ls:8:22
+  --> example-21.ls:8:22
    |
  8 |     println!("{}", p.frobnicate());
    |                      ^^^^^^^^^^
 
-lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
+lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
 ```
 
 Declaring the same field twice is rejected as well:
@@ -570,13 +666,13 @@ fn main() {
 Error:
 ```text
 error[E0124]: field 'x' is already declared
-  --> example-19.ls:3:5
+  --> example-22.ls:3:5
    |
  3 |     x: String,
    |     ^
-   = note: example-19.ls:2:5: previous declaration of 'x' here
+   = note: example-22.ls:2:5: previous declaration of 'x' here
 
-lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
+lsaca: example-22.ls: could not compile example-22.ls due to previous error(s)
 ```
 
 ## Printing and equality
@@ -584,11 +680,13 @@ lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
 Structs and enums have no user-defined formatting. `Display` and `Debug` both
 print a structural form: `Point { x: 1, y: 2 }`, `Shape::Circle(2)`,
 `Shape::Empty`. Strings nested inside a composite are printed quoted, exactly as
-in Debug; a top-level `String` prints unquoted. Format widths apply to scalars and
-built-in containers but are ignored for user structs — see
-[Standard library](13-standard-library.md#formatting-and-printing).
+in Debug; a top-level `String` prints unquoted. Width, fill and alignment apply
+to the whole structural form (so `{:30}` pads a struct or enum as a unit), while
+the `+`/\`0\` sign flags and precision are only accepted for numbers and strings
+and are rejected for structs and enums with `E0001` — see
+[Standard library](14-standard-library.md#formatting-and-printing).
 
-Equality (`==`) is not implemented for user structs or enums in 1.2.0: the
+Equality (`==`) is not implemented for user structs or enums in 1.3.0: the
 compiler reports `E0369`. Compare the fields you care about, or want to compare,
 with a `match` expression:
 
@@ -608,12 +706,12 @@ fn main() {
 Error:
 ```text
 error[E0369]: binary operation == cannot be applied to type Point
-  --> example-20.ls:9:20
+  --> example-23.ls:9:20
    |
  9 |     println!("{}", a == b);
    |                    ^^^^^^
 
-lsaca: example-20.ls: could not compile example-20.ls due to previous error(s)
+lsaca: example-23.ls: could not compile example-23.ls due to previous error(s)
 ```
 
 To compare points, compare the fields explicitly:
@@ -644,7 +742,9 @@ true false
 ## What next
 
 * The pattern syntax for destructuring structs and enums:
-  [Pattern matching](11-pattern-matching.md).
+  [Pattern matching](12-pattern-matching.md).
 * Receiver semantics and copy-on-write effects:
   [Memory model](05-memory-model.md#value-semantics-for-aggregates).
+* Reference receivers, match ergonomics and borrowing rules:
+  [References and borrowing](11-references-and-borrowing.md).
 * Structs and enums as type expressions: [Types](04-types.md).

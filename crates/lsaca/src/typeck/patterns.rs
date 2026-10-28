@@ -28,7 +28,10 @@ impl<'a> Checker<'a> {
         _span: Span,
     ) -> TPat {
         self.pattern_names.push(HashMap::new());
+        let previous_mode = self.pattern_binding_mode;
+        self.pattern_binding_mode = None;
         let checked = self.check_pattern_inner(pat, expected, None);
+        self.pattern_binding_mode = previous_mode;
         self.pattern_names.pop();
         if !self.pattern_irrefutable(&checked) {
             let diag = Diagnostic::error(
@@ -50,7 +53,10 @@ impl<'a> Checker<'a> {
     /// Check a pattern against an expected type.
     pub fn check_pattern(&mut self, pat: &Pattern, expected: &ITy) -> TPat {
         self.pattern_names.push(HashMap::new());
+        let previous_mode = self.pattern_binding_mode;
+        self.pattern_binding_mode = None;
         let checked = self.check_pattern_inner(pat, expected, None);
+        self.pattern_binding_mode = previous_mode;
         self.pattern_names.pop();
         checked
     }
@@ -62,6 +68,20 @@ impl<'a> Checker<'a> {
         overrides: Option<&HashMap<String, BindingInfo>>,
     ) -> TPat {
         let expected = self.infer.resolve(expected);
+        // Match ergonomics: non-reference patterns match through any number of
+        // references, and the bindings they contain inherit the binding mode.
+        let expected = match &pat.kind {
+            PatternKind::Wild | PatternKind::Binding { .. } => expected,
+            _ => {
+                let (pointee, mode) = self.peel_pattern_refs(&expected);
+                if let Some(mode) = mode
+                    && self.pattern_binding_mode.is_none()
+                {
+                    self.pattern_binding_mode = Some(mode);
+                }
+                pointee
+            }
+        };
         match &pat.kind {
             PatternKind::Wild => TPat::new(expected, TPatKind::Wild, pat.span),
             PatternKind::Binding { name, mutable } => {
@@ -91,12 +111,30 @@ impl<'a> Checker<'a> {
         span: Span,
         overrides: Option<&HashMap<String, BindingInfo>>,
     ) -> TPat {
-        if let ITy::Enum(enum_id) = expected
+        // A lone binding matches the value as it is. Only when an enclosing
+        // non-reference pattern has already peeled a reference (match
+        // ergonomics) does the binding become a reference to the matched
+        // value. Peeling here on its own would turn a binding of a reference
+        // value such as `let copy = &r;` into the referent type.
+        let pointee = match self.pattern_binding_mode {
+            Some(_) => {
+                let (pointee, peeled_mode) = self.peel_pattern_refs(expected);
+                if let Some(mode) = peeled_mode {
+                    self.pattern_binding_mode = Some(mode);
+                }
+                pointee
+            }
+            None => self.infer.resolve(expected),
+        };
+        let binding_ty = self.ergonomic_binding_type(&pointee, expected);
+        // A plain identifier is a unit variant pattern when the expected type
+        // is an enum that has a matching unit variant.
+        if let ITy::Enum(enum_id) = &pointee
             && let Some(entries) = self.unit_variants.get(name).cloned()
             && let Some((_, variant)) = entries.iter().find(|(id, _)| id == enum_id)
         {
             return TPat::new(
-                expected.clone(),
+                pointee.clone(),
                 TPatKind::Enum {
                     enum_id: *enum_id,
                     variant: *variant,
@@ -105,15 +143,17 @@ impl<'a> Checker<'a> {
                 span,
             );
         }
+        // A plain identifier is a constant pattern when a constant with that
+        // name is in scope.
         if let Some(&const_id) = self.const_by_name.get(name) {
-            return self.check_const_pattern(const_id, expected, span);
+            return self.check_const_pattern(const_id, &pointee, span);
         }
         if let Some(overrides) = overrides
             && let Some(info) = overrides.get(name)
         {
-            self.unify_or_report(&info.ty, expected, span);
+            self.unify_or_report(&info.ty, &binding_ty, span);
             return TPat::new(
-                expected.clone(),
+                binding_ty,
                 TPatKind::Bind {
                     name: name.to_string(),
                     c_name: info.c_name.clone(),
@@ -141,9 +181,9 @@ impl<'a> Checker<'a> {
         } else if let Some(names) = self.pattern_names.last_mut() {
             names.insert(name.to_string(), span);
         }
-        let c_name = self.declare_local(name, expected.clone(), mutable, span);
+        let c_name = self.declare_local(name, binding_ty.clone(), mutable, span);
         TPat::new(
-            expected.clone(),
+            binding_ty,
             TPatKind::Bind {
                 name: name.to_string(),
                 c_name,
@@ -151,6 +191,18 @@ impl<'a> Checker<'a> {
             },
             span,
         )
+    }
+
+    /// The type of a binding introduced while the current match-ergonomics
+    /// mode is active.
+    fn ergonomic_binding_type(&self, pointee: &ITy, expected: &ITy) -> ITy {
+        match self.pattern_binding_mode {
+            Some(mutable) => ITy::Ref {
+                mutable,
+                inner: Box::new(pointee.clone()),
+            },
+            None => expected.clone(),
+        }
     }
 
     fn check_const_pattern(&mut self, const_id: usize, expected: &ITy, span: Span) -> TPat {

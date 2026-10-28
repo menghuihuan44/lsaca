@@ -1,7 +1,7 @@
 # lsaca cross-language benchmarks
 
 This directory holds the benchmark programs and the measurement harness used for the
-"Benchmarks" page of the language manual (docs/language/15-benchmarks.md).
+"Benchmarks" page of the language manual (docs/language/16-benchmarks.md).
 
 The goal is a *small* but honest comparison: the same workloads implemented
 idiomatically in lsaca, C, Rust, Python and Node.js, with every run validated against an
@@ -14,8 +14,8 @@ compile-only workload measures how the lsaca build scales with source size.
       programs/            one source per (workload, language)
         fib.ls  fib.c  fib.rs  fib.py  fib.js
         loop_sum.ls  ...            (and the same for: string_build, vec_memory,
-        sort_i64.ls  ...             matrix_multiply, binary_trees, string_split,
-        sieve.ls  ...                sieve, mandelbrot)
+        sort_i64.ls  ...             matrix_multiply, binary_trees, binary_trees_refs,
+        sieve.ls  ...                string_split, sieve, mandelbrot)
         compile_large.ls   generated 4,511-line lsaca source (compile-only workload)
         gen_compile_large.py  stdlib-only generator for compile_large.ls
       results/
@@ -36,8 +36,8 @@ Then run the suite from the repository root:
 
     python scripts/bench.py
 
-That takes roughly 3-5 minutes on a modern laptop (eleven programs, ten of them executed
-with 7 runs each, plus the peak-memory runs) and writes:
+That takes roughly 3-5 minutes on a modern laptop (the published run took 3m47s; twelve
+programs, eleven of them executed with 7 runs each, plus the peak-memory runs) and writes:
 
 - benchmarks/results/latest.json  (raw data)
 - benchmarks/results/latest.md    (tables)
@@ -68,6 +68,7 @@ fails; fallback results are labelled in the JSON and in the markdown tables.
 | sort_i64 | sorting / indexed writes | in-language iterative quicksort of 200,000 pseudo-random i64 values; checksum is first,last,sum | checksum=21749,2147481261,214813518297651 |
 | matrix_multiply | nested loops / arithmetic | naive triple-loop multiply of two 160x160 i64 matrices; checksum is the sum of the result | checksum=1018924712000 |
 | binary_trees | recursive allocation / pointer chasing | perfect binary tree of depth 16 (131,071 nodes), recursive build and sum | checksum=2147450880 |
+| binary_trees_refs | borrowed traversal (1.3 references) | the same tree as binary_trees, but summed through borrowed references (&Option<Box<Node>>) instead of by value, so the traversal does not copy the tree; checksum matches binary_trees | checksum=2147450880 |
 | string_split | string splitting / parsing | build a 194,500-byte comma-separated numeric string, split it, parse every token and sum | checksum=194500,50000,24975000 |
 | sieve | array marking / branches | sieve of Eratosthenes, count primes below 2,000,000 | checksum=148933 |
 | mandelbrot | floating point math | 600x400 Mandelbrot grid, 100 iterations max, sum of iteration counts | checksum=6282265 |
@@ -116,12 +117,14 @@ equivalent for a construct, the program uses that language's normal idiom, and t
 page describes the differences:
 
 - lsaca: Vec<...> with Vec::with_capacity and push; strings are built with
-  push_str(format!("{},", v)). An lsaca Vec is still a value type (the language has no
-  references yet), but 1.2 avoids the physical copies in the common paths: binding a
-  Vec::with_capacity temporary and iterating with `for` no longer duplicate the buffer,
-  which is why vec_memory is at parity with C. Recursive Box payloads still deep-copy on
-  get(); that is the binary_trees cost. lsaca has no sort method on Vec and no generics,
-  which is why the workloads stay simple.
+  push_str(format!("{},", v)). An lsaca Vec/Box is still a value type: copying one
+  deep-copies its payload. 1.2 removed the accidental copies in the common paths (binding a
+  Vec::with_capacity temporary and iterating with `for` no longer duplicate the buffer),
+  which is why vec_memory is at parity with C. Since 1.3 the language has references
+  (`&T` / `&mut T`) with borrow checking, and binary_trees_refs uses
+  `&Option<Box<Node>>` to traverse the tree without copying it, while binary_trees
+  (traversal by value) still pays the copying cost. lsaca has no sort method on Vec and no
+  generics, which is why the workloads stay simple.
 - C: a manually resized char buffer for string_build, a malloc'ed array of structs for
   vec_memory.
 - Rust: String::with_capacity plus push, Vec::with_capacity plus push, to_string().
@@ -133,15 +136,18 @@ The newer workloads add these language-specific choices, all described on the do
 - sort_i64: no implementation uses a built-in/library sort even where one exists, because
   that would compare standard libraries instead of the language's own loop performance.
   Every version hand-writes the same iterative quicksort with an explicit stack. The
-  lsaca version keeps the sort loop in main because lsaca function arguments are
-  immutable, so there is no way to pass a mutable Vec to a helper function.
+  lsaca version keeps the sort loop in main (the workload was written before 1.3 added
+  reference arguments; the loop uses only indexing and swaps either way).
 - matrix_multiply: every language uses one flat row-major array plus index arithmetic
   (no nested vectors/objects), which is the natural representation in lsaca and keeps the
   triple loop identical everywhere.
 - binary_trees: lsaca uses Option<Box<Node>> (a Box deep-copies its payload on copy), C
   uses malloc/free pointers, Rust uses Box, Python a __slots__ class and Node.js plain
   objects. The lsaca row therefore also pays for the boxed nodes being copied - that is
-  the measured cost of value semantics, not a compiler bug.
+  the measured cost of value semantics, not a compiler bug. binary_trees_refs starts from
+  the same tree but sums it through a borrowed `&Option<Box<Node>>` parameter, the shape
+  a Rust user would write; the difference between the two lsaca rows is what 1.3
+  reference support buys.
 - string_split: C scans the buffer and parses with strtoll, Rust/Python/Node split and
   parse, lsaca uses String::split plus parse_i64.
 - sieve: every language marks a flat flag array with 64-bit-wide slots (Node.js
@@ -204,7 +210,7 @@ A compile-only workload shows up only in the compile-time table, with its name m
 "(compile-only)"; there is no runtime or peak-memory entry for it.
 
 benchmarks/results/latest.json and latest.md are regenerated by every run. The manual page
-[docs/language/15-benchmarks.md](../docs/language/15-benchmarks.md) quotes the numbers
+[docs/language/16-benchmarks.md](../docs/language/16-benchmarks.md) quotes the numbers
 measured on the reference machine; those tables are generated from
 benchmarks/results/latest.md, and the page explains how to reproduce them. The recorded
 run used the `official` build mode (the normal `lsaca build -r` path, not the fallback);

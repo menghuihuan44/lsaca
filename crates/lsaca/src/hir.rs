@@ -223,6 +223,7 @@ impl HExpr {
                 | HExprKind::Capture { .. }
                 | HExprKind::Field { .. }
                 | HExprKind::Index { .. }
+                | HExprKind::Deref { .. }
         )
     }
 }
@@ -385,6 +386,16 @@ pub enum HExprKind {
     Break,
     Continue,
     Return(Option<Box<HExpr>>),
+    /// A borrow expression: `&place` or `&mut place`. References do not own
+    /// their referent and never change a reference count.
+    Ref {
+        mutable: bool,
+        expr: Box<HExpr>,
+    },
+    /// An explicit dereference of a reference place: `*expr`.
+    Deref {
+        expr: Box<HExpr>,
+    },
 }
 
 /// A reference to a field of a struct or tuple. Indices are checked against the

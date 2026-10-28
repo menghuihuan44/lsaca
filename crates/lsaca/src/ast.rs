@@ -304,6 +304,17 @@ pub enum ExprKind {
     Break(Option<Box<Expr>>),
     Continue,
     Return(Option<Box<Expr>>),
+    /// A borrow expression: `&expr` or `&mut expr`. The operand must be a
+    /// place expression; the type checker verifies mutability for `&mut`.
+    Ref {
+        mutable: bool,
+        expr: Box<Expr>,
+    },
+    /// An explicit dereference of a reference, `*expr`. The result is a place
+    /// expression of the referent type.
+    Deref {
+        expr: Box<Expr>,
+    },
     /// Postfix try operator: `expr?`. Only valid where the enclosing function
     /// or closure returns Option or Result; the type checker verifies that and
     /// lowering desugars it into a match plus early return.
@@ -594,6 +605,12 @@ pub enum TypeExpr {
         ret: Box<TypeExpr>,
         span: Span,
     },
+    /// A reference type: &T or &mut T
+    Ref {
+        mutable: bool,
+        inner: Box<TypeExpr>,
+        span: Span,
+    },
 }
 
 impl TypeExpr {
@@ -602,6 +619,7 @@ impl TypeExpr {
             TypeExpr::Path { name_span, .. } => *name_span,
             TypeExpr::Tuple { span, .. } => *span,
             TypeExpr::Fn { span, .. } => *span,
+            TypeExpr::Ref { span, .. } => *span,
         }
     }
 
@@ -641,6 +659,13 @@ impl TypeExpr {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("fn({}) -> {}", params, ret.describe())
+            }
+            TypeExpr::Ref { mutable, inner, .. } => {
+                if *mutable {
+                    format!("&mut {}", inner.describe())
+                } else {
+                    format!("&{}", inner.describe())
+                }
             }
         }
     }

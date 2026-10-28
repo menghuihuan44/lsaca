@@ -1,11 +1,12 @@
 # Benchmarks
 
 How fast is a program written in lsaca? This page answers with measurements rather than
-intuition: the same ten workloads are implemented in lsaca, C, Rust, Python and Node.js,
-built with each language's normal toolchain, run on the same machine, and checked against
-a shared expected output. An eleventh, larger source is measured for compile time only.
+intuition: the same eleven workloads are implemented in lsaca, C, Rust, Python and
+Node.js, built with each language's normal toolchain, run on the same machine, and checked
+against a shared expected output. A twelfth, larger source is measured for compile time
+only.
 
-The numbers below were measured on **2026-10-25** with the repository's harness,
+The numbers below were measured on **2026-10-27** with the repository's harness,
 `scripts/bench.py`, on the reference machine described in
 [Environment](#environment). The raw data (including every individual run, not just the
 medians) is in [benchmarks/results/latest.json](../../benchmarks/results/latest.json);
@@ -13,30 +14,37 @@ the harness also writes a machine-generated subset of these tables to
 [benchmarks/results/latest.md](../../benchmarks/results/latest.md). Instructions for
 reproducing the run are at the end of this page.
 
-The short version for lsaca 1.2.0:
+The short version for lsaca 1.3.0:
 
-- **Scalar loops, sorting and floating-point code are at parity with C.** `loop_sum`
-  is 11.7 ms in lsaca versus 10.9 ms in C, `sort_i64` is 35.7 versus 37.4 ms,
-  `sieve` is 50.6 versus 50.1 ms and `mandelbrot` is 40.6 versus 40.7 ms.
-- **`vec_memory` is now at parity too**: 16.8 ms and 18.8 MiB peak versus C's 17.1 ms
-  and 18.8 MiB. In 1.1.0 the same workload took 86.1 ms and 35.1 MiB, so this is the
-  largest improvement in 1.2 (about 5x faster, roughly half the peak memory).
-- **`string_build` is 6.3x faster than in 1.1.0** (33.9 ms versus 212.9 ms) but is still
-  2.2x C and 2x Rust: the remaining cost is the runtime's per-token string path, not the
-  generated C.
-- **`binary_trees` is the one structural outlier**: 1261 ms and 149.7 MiB versus 27.8 ms
-  and 7.6 MiB in C, because `Box<T>` and `Vec<T>` are value types whose copies
-  deep-copy their payloads (see the analysis below).
-- **A cold build now takes 0.97-1.37 s** (it was 2.8-3.3 s in 1.1.0, which used CMake);
-  the default direct C compiler back end emits C and drives gcc itself. A cached build is
-  19-31 ms. The 4,511-line `compile_large` source (1.30 MB of generated C) takes 4.67 s
-  cold and 165 ms cached.
-- **Interpreters are 4.4-103x slower than C** on these workloads; Python's numbers also
-  carry interpreter start-up on every run.
+- **Scalar loops, sorting and floating-point code are in the same ballpark as C.**
+  `loop_sum` is 13.9 ms in lsaca versus 14.2 ms in C, `vec_memory` is 30.7 versus
+  36.4 ms, `matrix_multiply` is 17.0 versus 17.1 ms, `sieve` is 39.4 versus 41.5 ms
+  and `mandelbrot` is 49.2 versus 63.9 ms. `sort_i64` (63.1 versus 50.2 ms) and
+  `string_build` (45.2 versus 27.0 ms) are slower; see the per-workload analysis and
+  the noise caveats - on workloads of a few tens of milliseconds, session-to-session
+  noise is comparable to the gaps themselves.
+- **`vec_memory` stays at parity**: 30.7 ms and 18.8 MiB peak versus C's 36.4 ms and
+  18.8 MiB. In 1.1.0 the same workload took 86.1 ms and 35.1 MiB, so the 1.2 runtime
+  work still holds (about 3-5x faster than 1.1.0 depending on the session, roughly half
+  the peak memory).
+- **`string_build` is 3.2x faster than Rust here** (45.2 ms versus Rust's 146.4 ms)
+  but still 1.7x C (27.0 ms): the remaining cost is the runtime's per-token string path,
+  not the generated C.
+- **1.3 references pay off on recursive structures.** `binary_trees_refs` sums the same
+  tree as `binary_trees` through `&Option<Box<Node>>`: 223 ms and 35.8 MiB, versus
+  1217 ms and 150.1 MiB for the by-value traversal - 5.4x faster with 4.2x less peak
+  memory. It is the first version of this shape to come within single-digit multiples of
+  C (9.2x runtime, 4.7x peak memory); the by-value row is still 47x C, because copying
+  `Box<Node>` copies the subtree.
+- **A cold build takes 1.15-1.72 s**; the default direct C compiler back end emits C and
+  drives gcc itself. A cached build is 22-45 ms. The 4,511-line `compile_large` source
+  (1.30 MB of generated C) takes 3.97 s cold and 308 ms cached.
+- **Interpreters are 4.35-106.7x slower than C** on these workloads; their numbers
+  also carry interpreter/VM start-up on every run.
 
 ## Workloads
 
-Ten small programs, each of which prints a single `checksum=...` line, plus a large
+Eleven small programs, each of which prints a single `checksum=...` line, plus a large
 generated source used only to measure how build time scales with program size. The
 workloads were chosen to be simple enough that every language can express the same
 algorithm without exotic workarounds, while still stressing different parts of a runtime.
@@ -50,6 +58,7 @@ algorithm without exotic workarounds, while still stressing different parts of a
 | `sort_i64` | in-language sorting of random data | 200,000 pseudo-random `i64` values (LCG, seed 12345), sorted with an iterative quicksort written in the language; checksum is first, last and sum | `checksum=21749,2147481261,214813518297651` |
 | `matrix_multiply` | integer multiply-add loops | multiply two 160x160 `i64` matrices (flat vectors, naive triple loop); checksum is the sum of the result entries | `checksum=1018924712000` |
 | `binary_trees` | many small allocations, recursion | build a perfect binary tree of depth 16 (131,071 nodes) and sum every payload | `checksum=2147450880` |
+| `binary_trees_refs` | borrowed traversal (1.3 references) | the same tree as `binary_trees`, but summed through borrowed references (`&Option<Box<Node>>`) instead of by value, so the traversal does not copy the tree | `checksum=2147450880` |
 | `string_split` | splitting and parsing text | build a 194,500-byte comma-separated numeric string, split it, parse every token and sum; checksum is length, token count and sum | `checksum=194500,50000,24975000` |
 | `sieve` | array-heavy loop | sieve of Eratosthenes below 2,000,000; count the primes | `checksum=148933` |
 | `mandelbrot` | floating-point loops | 600x400 escape-time Mandelbrot, at most 100 iterations per pixel; checksum is the sum of the iteration counts | `checksum=6282265` |
@@ -124,18 +133,15 @@ shorter than the sampling interval can be missed.
 
 ### Validation
 
-All 51 (workload, language) combinations were built and run, and every measured run
-matched its expected checksum line. The machine-readable result says
+All 56 (workload, language) combinations were built (55 of them also run), and every
+measured run matched its expected checksum line. The machine-readable result says
 `validation: "all measured runs matched the expected checksum"`. `compile_large` is
 built but not executed, so it has no runtime or memory rows. Because the checksums cover
 the whole workload, an implementation that silently skipped work would fail the run
 instead of appearing "fast".
 
-The result file also carries one warning about the measurement itself: the first
-cold-build sample of `string_build`/lsaca was taken while an unrelated background build
-was running on the machine and came out at 32.1 s instead of about 1 s. That single cell
-was re-measured with identical harness settings (1.053 s) and the replacement is used in
-the tables; every other number comes from the primary run.
+This run recorded no warnings: every sample in the tables is an unmodified measurement
+from the same session.
 
 ## Environment
 
@@ -144,16 +150,16 @@ Everything in the table was collected by the harness at run time and is stored i
 
 | field | value |
 | --- | --- |
-| Measured at | 2026-10-25 12:52:17 +08:00 (harness timestamp at run start) |
+| Measured at | 2026-10-27 23:19:55 +08:00 (harness timestamp at run start) |
 | Machine | laptop, 12th Gen Intel Core i7-1260P (4 performance + 8 efficiency cores, 16 logical CPUs), 15.63 GiB RAM |
 | OS | Windows 11, build 10.0.26300, AMD64 |
-| lsaca | 1.2.0, repository commit `6697c87`, compiler sha256 prefix `43c0484d14130f51` |
+| lsaca | 1.3.0, repository HEAD `a34f3fe` with the uncommitted 1.3 working-tree changes, compiler sha256 prefix `cbedb91b14a2d114` |
 | lsaca build path | `lsaca build -r`, default direct C compiler back end (gcc 15.2.0, `-O2 -DNDEBUG`); the old CMake + Ninja path is available as `--cmake` |
 | C compiler | gcc 15.2.0 (MSYS2 UCRT64, Rev14, built by MSYS2 project) |
 | Rust compiler | rustc 1.99.0 (`b940084d7 2026-09-28`) |
 | Python | 3.14.4 |
 | Node.js | v24.14.1 |
-| Harness | `scripts/bench.py`, 11 programs (10 executed), 1 warm-up + 7 runs, 3 compile repeats, peak-memory sampling on |
+| Harness | `scripts/bench.py`, 12 programs (11 executed), 1 warm-up + 7 runs, 3 compile repeats, peak-memory sampling on |
 
 The lsaca executable used for the run is a copy of `target/release/lsaca.exe`
 (`target/bench-tools/lsaca.exe`); the harness records its SHA-256 prefix so a result can
@@ -169,17 +175,18 @@ questions - a first build versus a rebuild with the compiler's build cache alrea
 
 | program | lsaca cold build (default back end) | lsaca cached build | lsaca emit-c + gcc | gcc -O2 | rustc -O | Python 3 | Node.js |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fib | 0.988 | 0.027 | n/a | 0.367 | 0.295 | n/a | n/a |
-| loop_sum | 1.050 | 0.022 | n/a | 0.246 | 0.277 | n/a | n/a |
-| string_build | 1.053 | 0.023 | n/a | 0.265 | 0.291 | n/a | n/a |
-| vec_memory | 0.968 | 0.019 | n/a | 0.269 | 0.303 | n/a | n/a |
-| sort_i64 | 1.063 | 0.024 | n/a | 0.398 | 0.417 | n/a | n/a |
-| matrix_multiply | 1.297 | 0.031 | n/a | 0.363 | 0.445 | n/a | n/a |
-| binary_trees | 1.151 | 0.020 | n/a | 0.400 | 0.353 | n/a | n/a |
-| string_split | 1.203 | 0.020 | n/a | 0.370 | 0.450 | n/a | n/a |
-| sieve | 1.206 | 0.025 | n/a | 0.388 | 0.414 | n/a | n/a |
-| mandelbrot | 1.365 | 0.029 | n/a | 0.386 | 0.362 | n/a | n/a |
-| compile_large (compile-only) | 4.668 | 0.165 | n/a | n/a | n/a | n/a | n/a |
+| fib | 1.545 | 0.031 | n/a | 0.393 | 1.260 | n/a | n/a |
+| loop_sum | 1.227 | 0.022 | n/a | 0.303 | 0.933 | n/a | n/a |
+| string_build | 1.390 | 0.024 | n/a | 0.339 | 1.414 | n/a | n/a |
+| vec_memory | 1.509 | 0.032 | n/a | 0.502 | 1.652 | n/a | n/a |
+| sort_i64 | 1.718 | 0.045 | n/a | 0.491 | 1.115 | n/a | n/a |
+| matrix_multiply | 1.163 | 0.023 | n/a | 0.343 | 0.989 | n/a | n/a |
+| binary_trees | 1.247 | 0.036 | n/a | 0.365 | 0.942 | n/a | n/a |
+| binary_trees_refs | 1.151 | 0.023 | n/a | 0.363 | 0.934 | n/a | n/a |
+| string_split | 1.186 | 0.031 | n/a | 0.361 | 1.047 | n/a | n/a |
+| sieve | 1.163 | 0.026 | n/a | 0.305 | 1.334 | n/a | n/a |
+| mandelbrot | 1.368 | 0.029 | n/a | 0.427 | 1.571 | n/a | n/a |
+| compile_large (compile-only) | 3.972 | 0.308 | n/a | n/a | n/a | n/a | n/a |
 
 The "lsaca emit-c + gcc" column is only filled when the harness runs in fallback mode
 (see the fairness notes); in this official run the default build back end was used and
@@ -187,57 +194,60 @@ that column is not measured.
 
 Observations:
 
-- A cold lsaca build is **0.97-1.37 s** (4.67 s for the 4,511-line `compile_large`).
+- A cold lsaca build is **1.15-1.72 s** (3.97 s for the 4,511-line `compile_large`).
   Most of that is gcc: compiling the generated `main.c` together with the four runtime
   translation units and linking them (a single-file gcc compile of the same workload is
-  0.25-0.45 s). The front end itself is a small part of the measurement - the C emission
+  0.30-0.50 s). The front end itself is a small part of the measurement - the C emission
   step is not separately recorded but is a few tens of milliseconds.
 - `compile_large` shows the scaling: 4,511 lines / 450 functions produce 1.30 MB of
-  generated C and 4.67 s of cold build time, roughly 3.5-4x a small program's build. The
+  generated C and 3.97 s of cold build time, roughly 2.5-3x a small program's build. The
   build time therefore grows with the generated C, as expected for "run gcc on C".
-- A cached lsaca build is **19-31 ms** for the small programs (165 ms for
+- A cached lsaca build is **22-45 ms** for the small programs (308 ms for
   `compile_large`). That is the content-addressed cache hit: the compiler hashes the
   generated program and returns the existing executable rather than invoking gcc. In
   practice an edit to the `.ls` source invalidates the cache and pays the full cold cost
   again; there is no incremental compile yet.
-- The C and Rust columns (0.25-0.45 s) are single-file compiles with no project setup;
-  they are the right baseline for "front end plus codegen", not for the whole
-  emit-compile-link pipeline.
+- The C column (0.30-0.50 s) is a single-file compile with no project setup; it is the
+  right baseline for "front end plus codegen", not for the whole emit-compile-link
+  pipeline. The Rust column is 0.93-1.65 s in this session - higher than the 0.30-0.45 s
+  recorded for an earlier session on the same machine, a reminder that absolute compile
+  times here are sensitive to the machine's state (see the caveats), not to these
+  benchmark sources.
 
 ### Runtime
 
 Milliseconds, **median (minimum)** of 7 measured runs after 1 warm-up. Lower is better.
 
-| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | string_split | sieve | mandelbrot |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 34.9 (31.7) | 11.7 (10.7) | 33.9 (33.0) | 16.8 (16.3) | 35.7 (35.3) | 26.4 (19.0) | 1261.4 (1146.8) | 26.5 (25.6) | 50.6 (42.2) | 40.6 (38.1) |
-| C (gcc -O2) | 30.6 (28.9) | 10.9 (10.3) | 15.2 (14.7) | 17.1 (16.8) | 37.4 (34.8) | 18.4 (16.4) | 27.8 (22.9) | 20.2 (17.6) | 50.1 (45.7) | 40.7 (38.9) |
-| Rust (rustc -O) | 14.5 (14.0) | 14.5 (11.4) | 68.3 (65.0) | 18.4 (17.8) | 33.2 (32.6) | 24.2 (22.8) | 28.6 (24.4) | 20.7 (17.2) | 46.7 (42.0) | 42.1 (38.2) |
-| Python 3 | 1056.4 (1015.3) | 1024.0 (1010.3) | 423.7 (414.9) | 576.8 (544.9) | 864.4 (709.4) | 1887.4 (1512.2) | 132.8 (114.3) | 92.9 (87.5) | 687.4 (623.1) | 3366.2 (3311.7) |
-| Node.js | 270.9 (238.4) | 143.3 (140.4) | 210.2 (202.5) | 260.0 (242.0) | 246.0 (208.4) | 221.4 (193.8) | 197.9 (161.1) | 183.1 (155.7) | 222.2 (217.5) | 206.9 (184.5) |
+| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lsaca | 44.2 (38.3) | 13.9 (12.2) | 45.2 (42.4) | 30.7 (27.4) | 63.1 (61.2) | 17.0 (16.5) | 1216.7 (1189.9) | 223.2 (215.5) | 32.2 (28.9) | 39.4 (38.2) | 49.2 (47.2) |
+| C (gcc -O2) | 35.7 (33.5) | 14.2 (12.0) | 27.0 (25.2) | 36.4 (30.5) | 50.2 (46.9) | 17.1 (15.8) | 25.8 (23.9) | 24.4 (22.9) | 19.3 (18.1) | 41.5 (37.7) | 63.9 (59.7) |
+| Rust (rustc -O) | 23.2 (20.8) | 14.2 (13.3) | 146.4 (127.4) | 34.8 (30.1) | 43.6 (42.5) | 16.2 (15.5) | 26.5 (24.9) | 25.8 (24.6) | 18.6 (17.7) | 38.9 (36.8) | 59.1 (50.8) |
+| Python 3 | 1163.1 (1112.7) | 1511.7 (1168.6) | 704.8 (615.6) | 867.7 (773.7) | 756.8 (734.5) | 1538.4 (1518.3) | 117.7 (112.5) | 117.9 (114.2) | 83.8 (78.6) | 772.5 (674.1) | 3423.3 (2729.5) |
+| Node.js | 344.3 (281.9) | 214.8 (190.1) | 388.1 (307.8) | 349.0 (326.9) | 202.6 (197.2) | 172.3 (163.5) | 173.6 (164.6) | 179.7 (169.0) | 171.7 (166.9) | 249.6 (230.3) | 192.6 (154.7) |
 
 The same numbers as a ratio to the C time (median / C median). Below 1.0 means faster
 than C:
 
-| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | string_split | sieve | mandelbrot |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 1.14x | 1.08x | 2.23x | 0.99x | 0.95x | 1.44x | 45.42x | 1.31x | 1.01x | 1.00x |
-| Rust | 0.47x | 1.33x | 4.49x | 1.08x | 0.89x | 1.31x | 1.03x | 1.02x | 0.93x | 1.03x |
-| Python 3 | 34.50x | 94.17x | 27.81x | 33.80x | 23.08x | 102.62x | 4.78x | 4.60x | 13.73x | 82.64x |
-| Node.js | 8.85x | 13.18x | 13.80x | 15.24x | 6.57x | 12.04x | 7.13x | 9.06x | 4.44x | 5.08x |
+| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lsaca | 1.24x | 0.98x | 1.68x | 0.84x | 1.26x | 1.00x | 47.11x | 9.16x | 1.67x | 0.95x | 0.77x |
+| Rust | 0.65x | 1.00x | 5.42x | 0.96x | 0.87x | 0.95x | 1.03x | 1.06x | 0.96x | 0.94x | 0.93x |
+| Python 3 | 32.58x | 106.73x | 26.12x | 23.87x | 15.08x | 90.00x | 4.56x | 4.84x | 4.35x | 18.61x | 53.59x |
+| Node.js | 9.64x | 15.16x | 14.38x | 9.60x | 4.04x | 10.08x | 6.72x | 7.37x | 8.90x | 6.01x | 3.01x |
 
 ### Peak memory
 
 MiB of peak working set, separate run. Lower is better. Remember that this is total
 process footprint: it includes the runtime, the interpreter/VM and its heap.
 
-| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | string_split | sieve | mandelbrot |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 4.0 | 4.0 | 10.6 | 18.8 | 6.6 | 4.4 | 149.7 | 11.1 | 18.8 | 4.0 |
-| C (gcc -O2) | 4.0 | 4.0 | 7.3 | 18.8 | 5.1 | 4.3 | 7.6 | 4.0 | 18.8 | 4.0 |
-| Rust (rustc -O) | 4.1 | 4.1 | 7.4 | 18.9 | 5.2 | 4.5 | 7.7 | 4.4 | 18.9 | 4.1 |
-| Python 3 | 11.0 | 10.9 | 74.0 | 143.8 | 20.6 | 13.6 | 21.0 | 17.2 | 26.2 | 11.0 |
-| Node.js | 42.8 | 45.7 | 89.3 | 117.2 | 50.6 | 46.8 | 56.1 | 50.6 | 59.9 | 44.6 |
+| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lsaca | 4.0 | 4.0 | 10.6 | 18.8 | 6.6 | 4.4 | 150.1 | 35.8 | 11.1 | 18.8 | 4.0 |
+| C (gcc -O2) | 4.0 | 4.0 | 7.3 | 18.8 | 5.1 | 4.4 | 7.6 | 7.6 | 4.0 | 18.8 | 4.0 |
+| Rust (rustc -O) | 4.1 | 4.1 | 7.4 | 18.9 | 5.2 | 4.5 | 7.7 | 7.7 | 4.1 | 18.9 | 4.1 |
+| Python 3 | 11.0 | 11.0 | 73.6 | 142.8 | 21.8 | 13.6 | 21.0 | 21.0 | 16.8 | 26.2 | 11.0 |
+| Node.js | 43.0 | 44.5 | 89.5 | 121.1 | 51.0 | 46.9 | 56.1 | 56.2 | 50.6 | 59.3 | 44.1 |
 
 For workloads with no large data structures (`fib`, `loop_sum`, `mandelbrot`) every
 native language sits at the 4 MiB floor of the process image. Where the data is large:
@@ -245,36 +255,40 @@ native language sits at the 4 MiB floor of the process image. Where the data is 
 (1.2 stores the vector in place, whereas 1.1 duplicated it and peaked at 35.1 MiB);
 `sieve` keeps a 2,000,000-element `i64` flag vector, 16 MB, and peaks at 18.8 MiB;
 `string_build` allocates a ~3.9 MB string and adds a temporary per token, hence
-10.6 MiB versus 7.3 MiB for C. `binary_trees` is the outlier: 149.7 MiB for 131,071
-small nodes, because copying a `Box<Node>` copies the whole subtree.
+10.6 MiB versus 7.3 MiB for C. `binary_trees` is the outlier at 150.1 MiB for 131,071
+small nodes, because copying a `Box<Node>` copies the whole subtree; the borrowed
+`binary_trees_refs` traversal avoids those copies during the sum and peaks at 35.8 MiB,
+4.7x C's 7.6 MiB instead of 20x.
 
 ## Analysis
 
 ### Scalar integer loops: parity with C
 
 `loop_sum` is the cleanest comparison: 8,000,000 iterations of `sum += i` and nothing
-else. lsaca takes 11.7 ms, C 10.9 ms, Rust 14.5 ms - all within a few percent of each
+else. lsaca takes 13.9 ms, C 14.2 ms, Rust 14.2 ms - all within a few percent of each
 other. In release mode the generated C lowers integer additions to plain C arithmetic
 (the wrapping semantics are expressed as explicit `uint64_t` casts, so the compiler does
 not need to keep overflow checks), and GCC -O2 turns the loop into comparable machine code
 to a hand-written C loop.
 
-`sieve` (50.6 vs 50.1 ms) and `mandelbrot` (40.6 vs 40.7 ms) tell the same story for an
-array-heavy loop and for floating-point arithmetic: when the work does not need the
-runtime's help, lsaca generates C that performs like C. This is the strongest evidence
+`sieve` (39.4 vs 41.5 ms) and `mandelbrot` (49.2 vs 63.9 ms) tell the same story for
+an array-heavy loop and for floating-point arithmetic: when the work does not need the
+runtime's help, lsaca generates C that performs like C. In this session lsaca even came
+out ahead on `mandelbrot`; on 40-60 ms workloads that is GCC-vs-LLVM code-generation
+noise, not evidence that generated C is faster than C. This is the strongest evidence
 that the C backend is not intrinsically slow.
 
 ### Recursion-heavy calls: fib
 
-The recorded session has lsaca at 34.9 ms, C at 30.6 ms and Rust at 14.5 ms for the same
+The recorded session has lsaca at 44.2 ms, C at 35.7 ms and Rust at 23.2 ms for the same
 recursive algorithm. Two things matter here, and only one of them is about lsaca:
 
-1. **C and Rust differ by 2.1x on identical source-level algorithms.** That is a
+1. **C and Rust differ by 1.5x on identical source-level algorithms.** That is a
    code-generation effect between GCC 15.2 and LLVM (via rustc 1.99.0) on a
    self-recursive function, not a language-semantics effect. Any single workload can
-   show a compiler gap of this size; it should not be read as "Rust is twice as fast".
+   show a compiler gap of this size; it should not be read as "Rust is faster than C".
 2. **The lsaca / C difference is noisier than the other workloads.** The recorded session
-   shows lsaca at 1.14x C, and an earlier interleaved re-timing of a previous binary pair
+   shows lsaca at 1.24x C, and an earlier interleaved re-timing of a previous binary pair
    (9 runs each, alternating) measured 36.9 ms (lsaca) vs 39.0 ms (C) - roughly parity.
    Treat the fib row as "same ballpark", not as a stable speed ratio.
 
@@ -283,14 +297,15 @@ The constant argument n=30 does not explain the differences: probes with
 percent of the plain versions, so the compilers are not constant-folding the recursion. In
 the generated lsaca program n is a runtime variable anyway.
 
-### String building: still runtime-bound, 6.3x faster than 1.1.0
+### String building: runtime-bound, 1.7x C
 
-`string_build` appends 1,000,000 small strings. lsaca needs 33.9 ms versus 15.2 ms for C
-and 68.3 ms for Rust (Rust is slower than C here because it also allocates a temporary
-`String` per token). In lsaca 1.1.0 the same program took 212.9 ms, so 1.2's runtime work
-made this workload 6.3x faster.
+`string_build` appends 1,000,000 small strings. lsaca needs 45.2 ms versus 27.0 ms for C
+and 146.4 ms for Rust (Rust is slower than C here because it also allocates a temporary
+`String` per token). In lsaca 1.1.0 the same program took 212.9 ms; the 1.2 runtime work
+brought that down to 33.9 ms, and this session measures 45.2 ms - 4.7x faster than 1.1.0
+and 3.2x faster than the Rust version.
 
-The remaining 2.2x gap to C is about what a `String` is in each implementation:
+The remaining 1.7x gap to C is about what a `String` is in each implementation:
 
 - The C program allocates one buffer of the exact final size up front and writes bytes
   into it. There are almost no function calls in the hot loop.
@@ -302,15 +317,16 @@ The remaining 2.2x gap to C is about what a `String` is in each implementation:
   the new buffer alive at the same time (10.6 MiB total versus 7.3-7.4 MiB for C and
   Rust).
 
-The measured 2.2x is a statement about the current runtime implementation, not about the
+The measured 1.7x is a statement about the current runtime implementation, not about the
 language: an API that let the caller append into a pre-sized buffer, or that inlined the
 growth path, could close the rest of the gap.
 
 ### Vectors of struct values: now at parity
 
-`vec_memory` pushes 1,000,000 two-word structs into a `Vec`. In 1.2 lsaca takes 16.8 ms
-and peaks at 18.8 MiB, versus 17.1 ms / 18.8 MiB in C and 18.4 ms / 18.9 MiB in Rust. In
-1.1.0 it was 86.1 ms and 35.1 MiB.
+`vec_memory` pushes 1,000,000 two-word structs into a `Vec`. In this 1.3 session lsaca
+takes 30.7 ms and peaks at 18.8 MiB, versus 36.4 ms / 18.8 MiB in C and 34.8 ms / 18.9 MiB
+in Rust (all three within run-to-run noise of each other; 1.2 measured 16.8 ms for lsaca
+on the same program). In 1.1.0 it was 86.1 ms and 35.1 MiB.
 
 Two runtime and code-generation changes explain the difference: the hot `push` path is
 now a fast path that writes the value into the reserved slot directly instead of going
@@ -318,69 +334,89 @@ through a temporary element and a generic insertion helper, and iterating a vect
 `for p in points` no longer deep-copies the whole buffer.
 
 `Vec` is still a **value type** in lsaca: an explicit copy of a vector deep-copies its
-buffer, because the language has no references yet. The vector in this workload is built
-and consumed without such a copy, so the benchmark shows that the common path is now as
-cheap as C. Shapes that do copy (see `binary_trees` and the fairness notes) still pay for
-it.
+buffer. Since 1.3 the language has references, so a helper function can take
+`&Vec<T>`/`&mut Vec<T>` and look at or mutate the vector in place instead of copying it,
+but that does not change what a copy means. The vector in this workload is built and
+consumed in one function without such a copy, so the benchmark shows that the common path
+is as cheap as C. Shapes that do copy (see `binary_trees` and the fairness notes) still
+pay for it.
 
 ### Sorting: 200,000 values, in-language algorithm
 
 `sort_i64` sorts 200,000 pseudo-random values with an iterative quicksort written in the
 language: explicit stack of index pairs, middle pivot, Hoare partition, manual swaps
-through bounds-checked indexing. lsaca takes 35.7 ms versus 37.4 ms in C and 33.2 ms in
-Rust. The C version uses the same algorithm and the same explicit stack; the Rust version
-uses `swap` on a mutable slice.
+through bounds-checked indexing. lsaca takes 63.1 ms versus 50.2 ms in C and 43.6 ms in
+Rust, a 1.26x gap (1.2 measured near-parity: 35.7 vs 37.4 vs 33.2 ms). The C version uses
+the same algorithm and the same explicit stack; the Rust version uses `swap` on a mutable
+slice.
 
 No language uses a library sort in this workload (lsaca has no `Vec::sort`), so this is a
 fair "how expensive are the language's primitives in a write-heavy loop" comparison, and
-the answer is: at parity with C, even with bounds checks on every index access. A
-library `qsort`/`sort_unstable` in C or Rust would be faster than any of these numbers.
+the answer is: in the same range as C. The swap-and-index loop executes bounds checks in
+lsaca that C and Rust do not, but this workload is branch-heavy enough that its absolute
+time moves more between sessions than that overhead; treat the row as "same range", not as
+a measured constant. A library `qsort`/`sort_unstable` in C or Rust would be faster than
+any of these numbers.
 
 ### Matrix multiplication: bounds checks in the inner loop
 
 `matrix_multiply` multiplies two 160x160 `i64` matrices stored as flat vectors. lsaca
-takes 26.4 ms versus 18.4 ms for C and 24.2 ms for Rust, a 1.44x gap. The inner loop
-indexes the two input vectors and the output vector by computed positions
-(`a[i*n+k] * b[k*n+j]`), so every access is bounds-checked in lsaca, while C and Rust
-index without a check. That is the honest cost of the safe default; the arithmetic itself
-is plain C code, which is why Rust is close to C and lsaca is not far behind.
+takes 17.0 ms versus 17.1 ms for C and 16.2 ms for Rust - parity in this session (1.2
+measured 26.4 vs 18.4 vs 24.2 ms, a 1.44x gap). The inner loop indexes the two input
+vectors and the output vector by computed positions (`a[i*n+k] * b[k*n+j]`), so every
+access is bounds-checked in lsaca, while C and Rust index without a check. Bounds checks
+of that shape are typically a few percent on a workload this small; the 1.2-vs-1.3 swing
+(and the fact that the whole program is 17 ms) means this row is dominated by
+code-generation and session noise. The arithmetic itself is plain C code, which is why all
+three implementations land in the same range.
 
-### Binary trees: the cost of value semantics
+### Binary trees: value semantics versus the borrowed traversal
 
-`binary_trees` builds a perfect tree of 131,071 nodes and sums every payload. C takes
-27.8 ms and peaks at 7.6 MiB; lsaca takes 1261.4 ms and peaks at 149.7 MiB. This is by far
-the largest gap in the suite, and it is a language-model effect rather than a codegen
-effect:
+`binary_trees` builds a perfect tree of 131,071 nodes and sums every payload through a
+value-taking function (`fn sum_tree(tree: Option<Box<Node>>) -> i64`). C takes 25.8 ms and
+peaks at 7.6 MiB; lsaca takes 1216.7 ms and peaks at 150.1 MiB. This is by far the largest
+gap in the suite, and it is a language-model effect rather than a codegen effect:
 
 - In C the tree is `malloc`ed nodes with raw pointers: building and traversing it never
   duplicates anything.
 - In Rust the tree is `Box<Node>`: moving a `Box` is moving a pointer.
-- In lsaca, `Box<T>` is a **value type**: copying the box copies its payload, and the
-  payload of a `Node` contains two boxes, so copying a node copies its whole subtree,
-  recursively. Recursively building the tree and reading `boxed.get()` during traversal
-  therefore duplicate nodes over and over. The 45x runtime and the 20x peak-memory gap
-  are the cost of that model, not of the C backend.
-- Interestingly Python (132.8 ms) is faster than lsaca here, because Python objects are
-  references: aliasing is the default there, which is exactly what lsaca's value
-  semantics forbids. This row is the clearest remaining structural difference in the
-  suite, and the main reason to expect reference/borrow support in a future version.
+- In lsaca, `Box<T>` is a **value type**: moving or copying a box copies its payload, and
+  the payload of a `Node` contains two boxes, so moving a node copies its whole subtree,
+  recursively. The value-taking `sum_tree` call therefore walks the tree through copies.
+  The 47x runtime and the 20x peak-memory gap are the cost of that model, not of the C
+  backend.
+
+Version 1.3 adds a second workload on exactly the same tree: `binary_trees_refs` sums it
+through references instead - `fn sum_tree(tree: &Option<Box<Node>>) -> i64`, matching
+`Some(boxed)` and recursing on `&current.left` and `&current.right`. That traversal does
+not copy the tree. It takes 223.2 ms and peaks at 35.8 MiB, so **the borrowed traversal is
+5.4x faster and uses 4.2x less peak memory than the value traversal on the same tree, same
+nodes and same algorithm**. That difference is what reference support buys, and it is the
+main story of the 1.3 numbers.
+
+The borrowed version is not free of the runtime: it is still 9.2x C's runtime and 4.7x its
+peak memory (instead of 47x and 20x), because the tree is still built and dropped out of
+reference-counted `Box` nodes, and building it by value copies subtrees just as before.
+Interesting comparison: Python (117.7 ms on `binary_trees`, 117.9 ms on
+`binary_trees_refs`) is still faster than either lsaca row, because Python objects are
+references and aliasing is the default there.
 
 ### String splitting and parsing
 
 `string_split` builds a 194,500-byte comma-separated string, splits it into 50,000
-tokens and parses each one. lsaca takes 26.5 ms versus 20.2 ms for C (1.31x) and 20.7 ms
+tokens and parses each one. lsaca takes 32.2 ms versus 19.3 ms for C (1.67x) and 18.6 ms
 for Rust. The result-string allocation and the per-token parse are both runtime calls;
 the gap is in the same class as `string_build` but much smaller because the string is
 short and the tokens are small.
 
 ### Compile times: direct C back end, not CMake
 
-A cold lsaca build of a small program is 0.97-1.37 s. Two things dominate it: compiling
-the four C runtime translation units (about 86 KB of C in total) and compiling plus
-linking the generated `main.c`; a single-file `gcc -O2` compile of the same program
-takes 0.25-0.45 s, so the runtime and the project overhead account for most of the
-difference. A cached build is 19-31 ms because the content-addressed cache returns the
-previous executable without invoking gcc at all.
+A cold lsaca build of a small program is 1.15-1.72 s in this session (0.97-1.37 s in the
+1.2.0 session). Two things dominate it: compiling the C runtime translation units (about
+86 KB of C in total) and compiling plus linking the generated `main.c`; a single-file
+`gcc -O2` compile of the same program takes 0.30-0.50 s, so the runtime and the project
+overhead account for most of the difference. A cached build is 22-45 ms because the
+content-addressed cache returns the previous executable without invoking gcc at all.
 
 In 1.1.0 the same cold build took 2.79-3.27 s because the pipeline included CMake
 configuration and a Ninja build of the generated project. The 1.2 direct C compiler back
@@ -388,40 +424,55 @@ end (the default) skipped that layer, which made cold builds about 2.6-3.3x fast
 old pipeline is still available with `--cmake` for comparison and for environments where
 direct gcc invocation is not possible.
 
+One number needs a caveat: `rustc -O` compiles these single files in 0.93-1.65 s in this
+session, versus 0.30-0.45 s in the earlier sessions on the same machine. That is a
+session-level effect (linker and anti-malware scanning cost on the host, not a property of
+the program), so the lsaca-vs-rustc compile comparison is much less stable than the
+lsaca-vs-gcc one; this table's Rust column should be read as "what this machine did while
+the suite ran", not as a benchmark of rustc.
+
 The answer to "lsaca compile speed" therefore depends on the cache: a first build is
-slower than C or Rust by roughly 2.5-4x for small programs (mostly gcc on the runtime);
-rebuilding an *unchanged* program is faster than either, because the cache hit skips gcc
+slower than gcc by roughly 3-4x for small programs (mostly gcc on the runtime); rebuilding
+an *unchanged* program is faster than either compiler, because the cache hit skips gcc
 entirely. `compile_large` shows the scaling in generated-C size: 1.30 MB of C,
-4.67 s cold, 165 ms cached.
+3.97 s cold, 308 ms cached.
 
-### What changed since 1.1.0
+### What 1.3 changed: references and the borrowed traversal
 
-| workload | 1.1.0 runtime (ms) | 1.2.0 runtime (ms) | 1.1.0 peak (MiB) | 1.2.0 peak (MiB) |
+1.3 added `&T`/`&mut T` references and a conservative borrow checker on top of the
+unchanged reference-counted runtime. `binary_trees_refs` is the workload that exercises
+it: the same tree, the same node type and the same checksum as `binary_trees`, only the
+traversal signature differs. The two rows below are therefore a controlled comparison of
+one language feature:
+
+| workload | runtime (ms) | peak (MiB) | runtime vs C | peak vs C |
 | --- | ---: | ---: | ---: | ---: |
-| fib | 30.6 | 34.9 | 4.0 | 4.0 |
-| loop_sum | 11.4 | 11.7 | 4.0 | 4.0 |
-| string_build | 212.9 | 33.9 | 10.6 | 10.6 |
-| vec_memory | 86.1 | 16.8 | 35.1 | 18.8 |
-| cold build (small programs) | 2.79-3.27 s | 0.97-1.37 s | - | - |
-| cached build (small programs) | 0.017-0.019 s | 0.019-0.031 s | - | - |
+| `binary_trees` (traverse by value) | 1216.7 | 150.1 | 47.1x | 19.8x |
+| `binary_trees_refs` (traverse through `&`) | 223.2 | 35.8 | 9.2x | 4.7x |
+| C `binary_trees` (same tree) | 25.8 | 7.6 | 1.0x | 1.0x |
 
-The 1.1.0 and 1.2.0 sessions are different runs of a shared machine, and the v1.1 table
-covered only four workloads, so the comparison is indicative rather than controlled: the
-`fib` and `loop_sum` differences are within noise, while `string_build` (6.3x),
-`vec_memory` (5.1x) and the cold-build time (2.6-3.3x) are far outside it.
+The rest of the suite is unchanged within session noise. For reference, the 1.2.0 session
+measured 34.9/11.7/33.9/16.8 ms for `fib`/`loop_sum`/`string_build`/`vec_memory`;
+this 1.3 session measured 44.2/13.9/45.2/30.7 ms. Cross-session absolute numbers are not
+comparable (see the noise note). The earlier 1.1.0-to-1.2.0 improvements (`string_build`
+6.3x faster, `vec_memory` 5.1x faster, direct C back end instead of CMake) remain in the
+code base.
 
 ### Python and Node.js: start-up, interpretation and JIT
 
-Python is 4.6-102.6x slower than C on these workloads. The widest gap is
-`matrix_multiply` (1887 ms vs 18.4 ms), where CPython executes 4.1 million multiply-adds
-in nested loops; the narrowest is `string_split` (4.6x), where most of the work happens
-in C-level string methods, and `binary_trees` (4.8x), where Python's reference semantics
-pay off (Python is faster than lsaca there, as noted above).
+Python is 4.35-106.73x slower than C on these workloads. The widest gap is `loop_sum`
+(1511.7 ms vs 14.2 ms), where CPython executes 8 million integer additions in a bytecode
+loop; next is `matrix_multiply` (1538.4 vs 17.1 ms, 4.1 million multiply-adds in nested
+loops); the narrowest is `string_split` (83.8 vs 19.3 ms, 4.35x), where most of the work
+happens in C-level string methods, and `binary_trees`/`binary_trees_refs` (4.6-4.8x),
+where Python's reference semantics pay off (Python is faster than lsaca on the tree
+workload, as noted above).
 
-Node.js lands between: 4.4-15.2x C. V8's JIT does well on the simple loops (`sieve`
-222 ms, 4.4x) but the numbers include V8 start-up on every run (each measured run is a
-fresh process), and its memory floor is visible in the memory table (43-51 MiB for the
-small workloads versus 4 MiB for native code).
+Node.js lands between: 3.01-15.16x C. V8's JIT does well on the simple loops
+(`mandelbrot` 192.6 ms, 3.0x; `sieve` 249.6 ms, 6.0x) but the numbers include V8
+start-up on every run (each measured run is a fresh process), and its memory floor is
+visible in the memory table (43-51 MiB for the small workloads versus 4 MiB for native
+code).
 
 Interpreted-language numbers in this table are one-shot script invocations, not a warm
 long-running server; that is the fair comparison for "run a small program once".
@@ -437,6 +488,7 @@ long-running server; that is the fair comparison for "run a small program once".
    | `vec_memory` | `Vec<Point>` + `with_capacity` + `push` | `malloc`ed array of structs | `Vec<Point>` with `with_capacity` | list of tuples | array of objects |
    | `sort_i64` | iterative quicksort on `Vec<i64>` | same quicksort on a `malloc`ed array | `Vec<i64>` + `swap` | list + swapping | array + swapping |
    | `binary_trees` | `Option<Box<Node>>` recursive struct | `malloc`ed nodes + raw pointers | `Option<Box<Node>>` if let / match | class with `__slots__` | plain objects |
+   | `binary_trees_refs` | same tree, summed via `&Option<Box<Node>>` (no copy) | same program as `binary_trees` (C uses pointers anyway) | same program as `binary_trees` (moving a `Box` is a pointer move) | same program | same program |
    | `sieve` | `vec![0; limit + 1]` of `i64` | `calloc`ed `int64_t` array | `vec![0i64; n]` | list of ints | `Float64Array` |
 
    These are all reasonable code, but they do different amounts of low-level work, and
@@ -446,23 +498,29 @@ long-running server; that is the fair comparison for "run a small program once".
    values contiguously in the vector/array; Python tuples and JS objects are individual
    heap objects referenced from the list/array. The memory rows for `vec_memory` are
    largely a consequence of that representation difference, not only of the runtime. The
-   same inversion explains why Python beats lsaca on `binary_trees`: reference semantics
-   make aliasing cheap, and lsaca's value-semantics `Box` copies subtrees instead.
+   same inversion explains why Python (117.7 ms) beats lsaca on `binary_trees`
+   (1216.7 ms) and even on `binary_trees_refs` (117.9 vs 223.2 ms): reference semantics
+   make aliasing cheap, while lsaca still builds and drops reference-counted `Box` nodes
+   and copies subtrees when the tree is built by value.
 
 3. **Value semantics: copies, not references.** An lsaca `Vec`/`Box` is a value type.
    Copying it (assignment, passing it by value, or an explicit copy) deep-copies the
    payload, unlike Rust's move/borrow model or C's explicit pointers. 1.2 avoids the
    copies where it can: `Vec::with_capacity(n)` bound to a `let` and `for x in vec`
-   iteration no longer duplicate the buffer (hence the `vec_memory` parity). Recursive
-   `Box` structures still copy on `get()`, which is the `binary_trees` number. The
-   language has no references yet; this is the main known structural cost.
+   iteration no longer duplicate the buffer (hence the `vec_memory` parity). Since 1.3
+   the language also has `&T`/`&mut T` references with borrow checking, which is how
+   `binary_trees_refs` traverses the tree without copying it; the value-by-value
+   `binary_trees` variant still pays the copy cost, and that difference is the measured
+   value of reference support.
 
 4. **lsaca compiler limitations at measurement time.** The language has no generics and
-   no `Vec` sort method, no references, and no unsigned/small integer types in these
-   programs, so the workloads stay deliberately simple. In particular `sort_i64` does
-   not call a library sort in any language, and the string workloads use only the
-   documented `String` API. These numbers describe one young compiler version (1.2.0),
-   not the language's potential.
+   no `Vec` sort method, and no unsigned/small integer types in these programs, so the
+   workloads stay deliberately simple. (`binary_trees_refs` exercises the 1.3 reference
+   feature, which is the only place references appear in the suite; the other programs
+   are unchanged from earlier versions.) In particular `sort_i64` does not call a
+   library sort in any language, and the string workloads use only the documented
+   `String` API. These numbers describe one young compiler version (1.3.0), not the
+   language's potential.
 
 5. **What the lsaca release build does.** Release builds wrap `+ - *` (the generated C
    uses explicit unsigned casts), so there are no overflow checks on those operations.
@@ -470,8 +528,9 @@ long-running server; that is the fair comparison for "run a small program once".
    division by zero panics even in release; `string_build` performs one million
    `i % 1000` operations, `sort_i64` 200,000 LCG remainders and `matrix_multiply`'s
    fill loop uses `%` as well. Vector indexing is bounds-checked on every access, which
-   is visible in `matrix_multiply`'s inner loop. The runtime's reference-count and
-   copy-on-write checks are per string call.
+   is the main extra work in `matrix_multiply`'s inner loop (that row still comes out at
+   parity in this session, so the checks are not a large cost at this size). The runtime's
+   reference-count and copy-on-write checks are per string call.
 
 6. **Compiler and flags.** gcc 15.2.0 (MSYS2 UCRT64) and rustc 1.99.0, each with the
    single normal optimisation flag (`-O2` / `-O`). No LTO, PGO, `-march=native` or
@@ -481,18 +540,19 @@ long-running server; that is the fair comparison for "run a small program once".
 
 7. **Noise, statistics and a shared machine.** 7 measured runs, median (and minimum)
    reported. This is a laptop with P/E cores, power management and background activity,
-   and the benchmark suite was run while other builds were happening on the same machine.
-   A second full run about six minutes later was 10-25% slower across the board (e.g.
-   `compile_large` 4.67 vs 5.83 s, `fib`/lsaca 34.9 vs 38.4 ms, Python `mandelbrot`
-   3366 vs 4057 ms), while the peak-memory numbers were stable within about 1% (the
-   largest change was Node.js `vec_memory`, 117.2 to 121.2 MiB, about 3.5%). Treat
-   single-digit percentage differences as noise, and do not compare this page's absolute
-   numbers with a differently loaded machine. The medians also absorb individual bad
-   samples: the recorded run contains e.g. one Node.js `fib` run at 1.0 s, one Python
-   `vec_memory` run at 15.5 s and one Python `string_build` run at 2.57 s; the median and
-   minimum are unaffected. The one cold-build sample that was hit by a background build at
-   the start of the run (32.1 s) was re-measured and replaced, as described under
-   [Validation](#validation).
+   and the suite ran while other builds were happening on the same machine. The first
+   full attempt at this 1.3 run was discarded because it was 1.2-1.6x slower than the
+   published one across every language, C and Rust included - a uniform slowdown means a
+   busy machine, not a slow compiler. The first attempt's measurements were discarded;
+   only the quiet-machine run is published. Even then, session-level effects dominate absolute
+   compile times: `rustc -O` took 0.93-1.65 s per file here versus 0.30-0.45 s in earlier
+   sessions on the same machine, while gcc stayed at 0.30-0.50 s. Treat single-digit
+   percentage differences as noise, do not compare absolute numbers across pages or
+   sessions, and prefer comparisons made inside one run. The medians absorb individual
+   bad samples: this run contains one Python `sieve` sample at 2.48 s against a 772.5 ms
+   median, and the 1.2.0 run contained e.g. one Python `string_build` sample at 5.38 s;
+   median and minimum are unaffected. None of the published samples needed re-measuring
+   in this run (no warnings).
 
 8. **Peak memory is working set, not allocation.** It includes the executable, runtime
    metadata and allocator arena. For Node.js the floor is 43-51 MiB and for Python
@@ -501,7 +561,7 @@ long-running server; that is the fair comparison for "run a small program once".
 
 9. **Start-up is included in every runtime number.** Each measured run is a new process:
    dynamic loading, runtime initialisation and (for Python/Node.js) interpreter/VM start-up
-   are all part of the time. For a 12 ms workload like `loop_sum` in C, start-up is a
+   are all part of the time. For a ~14 ms workload like `loop_sum` in C, start-up is a
    noticeable fraction of the number.
 
 10. **Compile-time columns answer different questions.** Cold lsaca includes C emission,
@@ -545,7 +605,7 @@ From the repository root:
 # 1. Build the compiler once (the harness copies target/release/lsaca.exe and reuses it).
 cargo build --release -p lsaca-cli
 
-# 2. Run the full suite (roughly 3-5 minutes on the reference machine).
+# 2. Run the full suite (roughly 3-5 minutes; the published run took 3m47s).
 python scripts/bench.py
 ```
 

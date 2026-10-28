@@ -71,7 +71,13 @@ impl<'a> Checker<'a> {
                     break;
                 }
             }
-            if !useful {
+            // `if let` without an `else` is parsed as a match whose last
+            // arm is a synthetic wildcard carrying an empty span. When the
+            // user's pattern is irrefutable that arm is dead, but warning
+            // about it would blame a pattern the user never wrote.
+            let synthetic =
+                matches!(arm.pat.kind, TPatKind::Wild) && arm.pat.span.start == arm.pat.span.end;
+            if !useful && !synthetic {
                 self.warning_code(
                     "unreachable pattern".to_string(),
                     arm.pat.span,

@@ -25,7 +25,7 @@ pub fn is_trivially_copyable(program: &hir::Program, ty: &Ty) -> bool {
             return false;
         }
         match ty {
-            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) => true,
+            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::Ref { .. } => true,
             Ty::String | Ty::Vec(_) | Ty::Fn(_, _) | Ty::Rc(_) | Ty::Box(_) => false,
             Ty::Option(inner) => trivial(program, inner, depth + 1),
             Ty::Result(ok, error) => {
@@ -100,11 +100,15 @@ pub fn copy_expr(names: &TypeNames, ty: &Ty, expr: &str) -> String {
     if !is_managed(ty) {
         return expr.to_string();
     }
+    // A value read through a shared reference can carry a const qualifier on
+    // its handle type (const LsString*), while ls_retain takes void*. The
+    // reference count lives outside the pointee, so the explicit cast is
+    // sound and keeps the generated C qualifier-clean.
     if ty.is_string() {
-        return format!("((LsString*)ls_retain({}))", expr);
+        return format!("((LsString*)ls_retain((void*)({})))", expr);
     }
     if ty.is_rc() {
-        return format!("(({})ls_retain({}))", names.ctype(ty), expr);
+        return format!("(({})ls_retain((void*)({})))", names.ctype(ty), expr);
     }
     format!("{}({})", copy_fn_name(names, ty), expr)
 }
@@ -115,17 +119,21 @@ pub fn release_stmt(names: &TypeNames, ty: &Ty, expr: &str) -> Option<String> {
     if !is_managed(ty) {
         return None;
     }
-    if ty.is_string() {
-        return Some(format!("ls_release({});", expr));
-    }
-    if ty.is_rc() {
-        return Some(format!("ls_release({});", expr));
+    if ty.is_string() || ty.is_rc() {
+        // The void* cast makes the call valid for handle values read through
+        // a shared reference (which are const-qualified).
+        return Some(format!("ls_release((void*)({}));", expr));
     }
     Some(format!("{}({});", release_fn_name(names, ty), expr))
 }
 
 /// A C boolean expression comparing two values.
 pub fn eq_expr(names: &TypeNames, ty: &Ty, a: &str, b: &str) -> String {
+    if let Ty::Ref { inner, .. } = ty {
+        // References compare by referent value, matching Rust's PartialEq for
+        // shared and mutable references.
+        return eq_expr(names, inner, &format!("(*({}))", a), &format!("(*({}))", b));
+    }
     if ty.is_unit() {
         String::from("true")
     } else if ty.is_string() {
@@ -198,6 +206,10 @@ pub fn debug_append_statement(
     acc: &str,
     value: &str,
 ) -> Option<String> {
+    if let Ty::Ref { inner, .. } = ty {
+        // Debug output for a reference delegates to the referent.
+        return debug_append_statement(names, inner, acc, &format!("(*({}))", value));
+    }
     if ty.is_unit() {
         return Some(format!(
             "{} = ls_format_push_cstr({}, {});",
@@ -252,11 +264,11 @@ mod tests {
         assert_eq!(copy_expr(&names, &Ty::i64(), "v0"), "v0");
         assert_eq!(
             copy_expr(&names, &Ty::string(), "v0"),
-            "((LsString*)ls_retain(v0))"
+            "((LsString*)ls_retain((void*)(v0)))"
         );
         assert_eq!(
             release_stmt(&names, &Ty::string(), "v0"),
-            Some(String::from("ls_release(v0);"))
+            Some(String::from("ls_release((void*)(v0));"))
         );
         assert_eq!(release_stmt(&names, &Ty::i64(), "v0"), None);
         assert_eq!(
@@ -265,11 +277,11 @@ mod tests {
         );
         assert_eq!(
             copy_expr(&names, &Ty::rc(Ty::i64()), "v0"),
-            "((LsRc_i64*)ls_retain(v0))"
+            "((LsRc_i64*)ls_retain((void*)(v0)))"
         );
         assert_eq!(
             release_stmt(&names, &Ty::rc(Ty::i64()), "v0"),
-            Some(String::from("ls_release(v0);"))
+            Some(String::from("ls_release((void*)(v0));"))
         );
         assert_eq!(
             eq_expr(&names, &Ty::rc(Ty::i64()), "a", "b"),

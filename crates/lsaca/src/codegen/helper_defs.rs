@@ -975,8 +975,8 @@ fn emit_rc_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, i
     w.blank();
 
     w.line(format!(
-        "{} lsaca_rc_get_{}({} self) {{",
-        inner_ty, suffix, cell_ptr
+        "{} lsaca_rc_get_{}(const {}* self) {{",
+        inner_ty, suffix, cell
     ));
     w.indent();
     w.line(format!(
@@ -1046,8 +1046,8 @@ fn emit_box_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, 
     w.blank();
 
     w.line(format!(
-        "{} lsaca_box_get_{}({} self) {{",
-        inner_ty, suffix, cell_ptr
+        "{} lsaca_box_get_{}(const {}* self) {{",
+        inner_ty, suffix, cell
     ));
     w.indent();
     w.line(format!(

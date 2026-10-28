@@ -19,16 +19,20 @@ type, and describes inference and conversions.
 | `Result<T, E>` | `Ok(T)` or `Err(E)`. | Builtin generic. |
 | `Rc<T>` | Shared, mutable heap cell. | Copies share one payload; `get()`/`set()`. |
 | `Box<T>` | Owned heap indirection. | Added in 1.1.0; copies deep-copy the payload. |
+| `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. Cannot be stored in aggregates; see [References and borrowing](11-references-and-borrowing.md). |
 | `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; only flat tuples are supported by the current code generator. |
 | `fn(A, B) -> R` | Function type. | Values of this type are first-class; see [Functions](09-functions.md). |
 | `Name` | User struct or enum. | Declared with `struct`/`enum`. |
 | `Alias` | Type alias. | `type Alias = T;` introduces no new type. |
 
-There is no `usize`, `isize`, `char`, reference type, pointer type, array type or
-slice type. `Self` is not a type available to user code in general: it names
-"the type of this `impl` block" inside an `impl`, and is accepted in parameter
-and return positions there (see [Structs, enums and
-impl](10-structs-enums-and-impl.md)).
+There is no `usize`, `isize`, `char`, raw pointer type, array type or slice type.
+References are written `&T` (shared) and `&mut T` (mutable); they are
+**non-owning** views of an existing place, added in 1.3.0, and cannot be stored
+in aggregates. They are described in [References and
+borrowing](11-references-and-borrowing.md). `Self` is not a type available to
+user code in general: it names "the type of this `impl` block" inside an
+`impl`, and is accepted in parameter and return positions there (see [Structs,
+enums and impl](10-structs-enums-and-impl.md)).
 
 ## Integers
 
@@ -83,7 +87,7 @@ unannotated float literal is `f64` unless context requires `f32`. Floats follow
 C semantics for special values: division by zero produces an infinity, `0.0 /
 0.0` produces NaN, and comparisons involving NaN are false except `!=`. Display
 uses the shortest round-tripping decimal form; `{:?}` and format specifiers work
-as described in [Standard library](13-standard-library.md).
+as described in [Standard library](14-standard-library.md).
 
 ```ls
 fn main() {
@@ -119,7 +123,7 @@ and mutating through one handle clones the buffer first if it is shared, so two
 variables never observe each other's mutations. Both are indexed by `i64`, and
 `String` methods use **byte** offsets. They are described in
 [Memory model](05-memory-model.md) and their full API is in
-[Standard library](13-standard-library.md).
+[Standard library](14-standard-library.md).
 
 ```ls
 fn main() {
@@ -143,8 +147,8 @@ Output:
 `Some(value)` or `None`; `Result<T, E>` is either `Ok(value)` or `Err(error)`.
 They are the idiomatic way to express a missing value or an operation that can
 fail, and they support pattern matching and the methods listed in
-[Standard library](13-standard-library.md). Neither type supports `==` in
-version 1.2.0: compare them by pattern matching.
+[Standard library](14-standard-library.md). Neither type supports `==` in
+version 1.3.0: compare them by pattern matching.
 
 ```ls
 fn classify(n: i64) -> Result<String, String> {
@@ -209,6 +213,52 @@ owner owner
 true
 ```
 
+## References
+
+A reference is a non-owning view of a place: a local variable, a function
+parameter, a field, an index, or a dereferenced reference. Writing `&place`
+creates a shared reference (`&T`); `&mut place` creates a mutable reference
+(`&mut T`). A reference is created with a *borrow expression* and read or
+written with the dereference operator `*`:
+
+```ls
+fn main() {
+    let mut value = 10;
+    let shared = &value;
+    println!("{}", *shared);
+    let exclusive = &mut value;
+    *exclusive += 1;
+    println!("{}", value);
+}
+```
+
+Output:
+```text
+10
+11
+```
+
+References are first-class for *reading*: they can be copied, passed to
+functions, returned from functions, and stored in locals. Unlike `String`,
+`Vec`, `Rc<T>` and `Box<T>`, a reference does **not** own anything and does
+**not** change any reference count; it must not outlive the value it points to,
+and the compiler's lightweight borrow checker enforces that (see
+[References and borrowing](11-references-and-borrowing.md)).
+
+Field access, method calls and indexing automatically dereference a reference,
+so `r.field` and `r.method()` work without an explicit `*`; writes through a
+reference need either `*r = value` for a whole place or `(*r).field = value`
+for a field. References cannot be stored in structs, enums, tuples, `Vec`,
+`Option`, `Result`, `Box` or closures, cannot be compared with `==`, and cannot
+be converted with `as`.
+
+* `&T` — shared reference: any number of shared references may exist; reads only.
+* `&mut T` — mutable reference: exactly one at a time, and no shared reference
+  may be live at the same time.
+
+The full rules, including reference parameters, elision and match ergonomics,
+are on [References and borrowing](11-references-and-borrowing.md).
+
 ## Tuples
 
 A tuple groups a fixed number of values of possibly different types:
@@ -220,7 +270,7 @@ tuple. Elements are accessed by index (`t.0`, `t.1`, ...) or destructured in a
 **Current limitation:** the C code generator only handles *flat* tuples. A tuple
 nested inside another tuple, whether as a value or as a type of a struct field,
 generates invalid C and fails at the C compiler, so avoid nested tuples in
-1.2.0. Tuples with other element types (including `String`, `Rc<T>`,
+1.3.0. Tuples with other element types (including `String`, `Rc<T>`,
 `Option<String>`) work.
 
 ```ls
@@ -252,7 +302,8 @@ A function value has a type written `fn(A, B) -> R`, with the return type
 omitted for `()`. Functions can be stored in `let` bindings, passed to other
 functions and returned from functions; they cannot be compared with `==` and
 are not supported as fields of structs or elements of `Vec` by the current code
-generator (see [Functions](09-functions.md)).
+generator (see [Functions](09-functions.md)). Function types may mention
+references, for example `fn(&i64) -> i64` or `fn(&i64) -> &i64`.
 
 ```ls
 fn inc(x: i64) -> i64 {
@@ -368,24 +419,24 @@ fn main() {
 Error:
 ```text
 error[E0282]: type annotations needed: the type of this expression is not known
-  --> example-10.ls:2:9
+  --> example-11.ls:2:9
    |
  2 |     let v = Vec::new();
    |         ^
 
 error[E0282]: type annotations needed: the type of this expression is not known
-  --> example-10.ls:2:13
+  --> example-11.ls:2:13
    |
  2 |     let v = Vec::new();
    |             ^^^^^^^^^^
 
 error[E0282]: type annotations needed: the type of this expression is not known
-  --> example-10.ls:3:20
+  --> example-11.ls:3:20
    |
  3 |     println!("{}", v.len());
    |                    ^
 
-lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
+lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 ```
 
 Inference works from context too, including in arguments and returns:
@@ -418,7 +469,8 @@ Output:
 
 The `as` operator converts between scalar types only. It is the *only*
 conversion: assigning an `i32` to an `i64` or passing it where a `f64` is
-expected is a type error. `as` binds tighter than arithmetic but looser than
+expected is a type error. References (`&T` / `&mut T`) cannot be converted
+with `as`. `as` binds tighter than arithmetic but looser than
 unary operators; see the precedence table in [Operators](07-operators.md).
 
 The conversion rules follow Rust:
@@ -468,13 +520,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-13.ls:3:18
+  --> example-14.ls:3:18
    |
  3 |     let y: f64 = x;
    |                  ^
    = note: expected f64, found i64
 
-lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
 A type that does not exist gives a name-resolution error rather than a cast
@@ -490,12 +542,12 @@ fn main() {
 Error:
 ```text
 error[E0412]: cannot find type 'usize' in this scope
-  --> example-14.ls:2:12
+  --> example-15.ls:2:12
    |
  2 |     let x: usize = 0;
    |            ^^^^^
 
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
 ```
 
 Finally, an unknown type name in any position is reported as `E0412`:
@@ -510,22 +562,24 @@ fn main() {
 Error:
 ```text
 error[E0412]: cannot find type 'Widget' in this scope
-  --> example-15.ls:2:17
+  --> example-16.ls:2:17
    |
  2 |     let widget: Widget = Widget { value: 1 };
    |                 ^^^^^^
 
 error[E0412]: cannot find struct Widget in this scope
-  --> example-15.ls:2:26
+  --> example-16.ls:2:26
    |
  2 |     let widget: Widget = Widget { value: 1 };
    |                          ^^^^^^
 
-lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
+lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 ```
 
 ## What next
 
 * How values are represented and shared: [Memory model](05-memory-model.md).
 * Operators on each type: [Operators](07-operators.md).
-* The full built-in API: [Standard library](13-standard-library.md).
+* Borrow values without giving up ownership: [References and
+  borrowing](11-references-and-borrowing.md).
+* The full built-in API: [Standard library](14-standard-library.md).

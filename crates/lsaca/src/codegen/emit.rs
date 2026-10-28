@@ -58,12 +58,6 @@ pub(crate) struct LoopCtx {
     pub used_continue: bool,
 }
 
-/// The receiver parameter of the current function, if it is a method.
-pub(crate) struct Receiver {
-    pub c_name: String,
-    pub by_pointer: bool,
-}
-
 /// The environment of the closure whose body is currently generated.
 pub(crate) struct EnvInfo {
     pub c_type: String,
@@ -82,7 +76,6 @@ pub(crate) struct Gen<'a> {
     pub frames: Vec<Frame>,
     pub loops: Vec<LoopCtx>,
     pub fn_ret: Ty,
-    pub receiver: Option<Receiver>,
     pub env: Option<EnvInfo>,
     pub block_terminated: bool,
     pub fn_terminated: bool,
@@ -107,7 +100,6 @@ impl<'a> Gen<'a> {
             frames: Vec::new(),
             loops: Vec::new(),
             fn_ret: Ty::Unit,
-            receiver: None,
             env: None,
             block_terminated: false,
             fn_terminated: false,
@@ -310,14 +302,99 @@ impl<'a> Gen<'a> {
         target
     }
 
+    /// The C expression that reads a local binding.
+    ///
+    /// The value of a local is its C variable: owned values are handles or
+    /// plain scalars, reference-typed locals are pointers. A method receiver
+    /// is no longer special-cased here: since v1.3 `self` has reference type
+    /// in the HIR, so its C variable already holds the pointer and every
+    /// auto-deref site (`place_through_reference`, `auto_deref_base`) peels
+    /// the reference itself rather than the binding.
     pub(crate) fn local_lvalue(&self, c_name: &str) -> String {
-        if let Some(receiver) = &self.receiver
-            && receiver.by_pointer
-            && receiver.c_name == c_name
-        {
-            return format!("(*{})", c_name);
-        }
         c_name.to_string()
+    }
+
+    /// Lvalue reached by dereferencing a reference expression: `(*(ptr))`.
+    /// The pointer expression itself is materialised into a temporary.
+    pub(crate) fn deref_lvalue(&mut self, expr: &HExpr) -> String {
+        let pointer = self.gen_owned(expr);
+        format!("(*({}))", pointer)
+    }
+
+    /// True when values of this type are represented by a C pointer that is
+    /// handed around as-is: String, Rc, Box and the reference types.
+    ///
+    /// Values read through a shared reference may gain a const qualifier, so
+    /// the sites that re-materialise such a value cast it back to its plain C
+    /// type.
+    pub(crate) fn is_pointer_type(&self, ty: &Ty) -> bool {
+        self.ctype(ty).ends_with('*')
+    }
+
+    /// Emit `target = &<inner>` for a reference expression of type `ref_ty`.
+    ///
+    /// Three shapes are handled:
+    /// * reborrow / `&mut T` -> `&T` coercion: the pointer value of the inner
+    ///   expression is already the address of the pointee, so it is passed
+    ///   through unchanged;
+    /// * borrow of an `Rc<T>` / `Box<T>` payload cell (optionally through a
+    ///   reference): the reference points at the payload inside the cell;
+    /// * plain borrow of a place: the address of its lvalue.
+    pub(crate) fn gen_ref(&mut self, inner: &HExpr, ref_ty: &Ty, target: &str) {
+        let Some(pointee) = ref_ty.ref_inner().cloned() else {
+            let place = self.gen_place(inner);
+            self.w.line(format!("{} = &({});", target, place));
+            return;
+        };
+        let ctype = self.ctype(ref_ty);
+        if let Some(existing) = inner.ty.ref_inner()
+            && *existing == pointee
+        {
+            let pointer = self.gen_owned(inner);
+            self.w.line(format!("{} = ({}){};", target, ctype, pointer));
+            return;
+        }
+        let place = self.gen_place(inner);
+        if let Some(lvalue) = Self::payload_lvalue(place.clone(), &inner.ty, &pointee) {
+            self.w
+                .line(format!("{} = ({})&({});", target, ctype, lvalue));
+            return;
+        }
+        self.w
+            .line(format!("{} = ({})&({});", target, ctype, place));
+    }
+
+    /// The C lvalue of the `Rc`/`Box` payload reachable from an already
+    /// materialised place by auto-dereferencing references and cell handles.
+    ///
+    /// `place` is the lvalue of the inner expression and `ty` its type, so
+    /// the walk never evaluates the inner expression a second time (a borrow of
+    /// an indexed place must not repeat its bounds check or side effects).
+    /// Returns None when the walk does not end at an `Rc`/`Box` payload of
+    /// type `payload`, so that a plain borrow of a cell handle itself stays a
+    /// borrow of the handle.
+    fn payload_lvalue(mut lvalue: String, ty: &Ty, payload: &Ty) -> Option<String> {
+        let mut ty = ty.clone();
+        let mut crossed_cell = false;
+        for _ in 0..8 {
+            match &ty {
+                Ty::Ref { inner, .. } => {
+                    lvalue = format!("(*({}))", lvalue);
+                    ty = (**inner).clone();
+                }
+                Ty::Rc(inner) | Ty::Box(inner) => {
+                    lvalue = format!("(({})->payload)", lvalue);
+                    ty = (**inner).clone();
+                    crossed_cell = true;
+                }
+                _ => break,
+            }
+        }
+        if crossed_cell && ty == *payload {
+            Some(lvalue)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn capture_lvalue(&self, index: usize) -> String {
@@ -335,8 +412,26 @@ impl<'a> Gen<'a> {
             HExprKind::Capture { index, .. } => self.capture_lvalue(*index),
             HExprKind::Field { base, field } => self.field_lvalue(base, *field),
             HExprKind::Index { base, index } => self.index_lvalue(base, index, expr.span),
+            HExprKind::Deref { expr: inner } => self.deref_lvalue(inner),
             _ => self.gen_owned(expr),
         }
+    }
+
+    /// Lvalue of an expression with every reference layer peeled off.
+    ///
+    /// Builtin methods (`v.len()`, `s.contains(..)`, ...) operate on a place.
+    /// When the front end hands over a receiver of reference type the place is
+    /// the referent, so `&Vec<T>` and `&String` readers work without an
+    /// explicit dereference in the HIR. `Rc`/`Box` receivers are not
+    /// auto-dereferenced here: the front end wraps those in `Deref`.
+    pub(crate) fn place_through_reference(&mut self, expr: &HExpr) -> String {
+        let mut lvalue = self.gen_place(expr);
+        let mut ty = expr.ty.clone();
+        while let Ty::Ref { inner, .. } = ty {
+            lvalue = format!("(*({}))", lvalue);
+            ty = *inner;
+        }
+        lvalue
     }
 
     pub(crate) fn literal(&self, lit: &HLit) -> String {
@@ -504,6 +599,22 @@ impl<'a> Gen<'a> {
             HExprKind::Break => self.gen_break(),
             HExprKind::Continue => self.gen_continue(),
             HExprKind::Return(value) => self.gen_return(value.as_deref(), target),
+            HExprKind::Ref {
+                mutable: _,
+                expr: inner,
+            } => self.gen_ref(inner, &expr.ty, target),
+            HExprKind::Deref { expr: inner } => {
+                let place = self.deref_lvalue(inner);
+                let source = if self.is_pointer_type(&expr.ty) {
+                    // A shared reference to a pointer-shaped value (String,
+                    // Rc, Box or another reference) has a const-qualified
+                    // handle type; the value itself is not const.
+                    format!("(({})({}))", self.ctype(&expr.ty), place)
+                } else {
+                    place
+                };
+                self.emit_copy_into(target, &expr.ty, &source);
+            }
         }
     }
 

@@ -277,7 +277,7 @@ Function values and closures do not support `==` (`E0369`), and a closure cannot
 call itself — there is no way to name it from inside its own body. To write a
 recursive function value, use a named `fn`.
 
-## Known limitations in 1.2.0
+## Known limitations in 1.3.0
 
 Two restrictions come from the C backend rather than the type checker:
 
@@ -286,11 +286,11 @@ Two restrictions come from the C backend rather than the type checker:
   those positions;
 * closures and function values cannot be compared with `==`.
 
-See [Roadmap](14-roadmap.md) for the full list.
+See [Roadmap](15-roadmap.md) for the full list.
 
 ## What next
 
 * Functions and higher-order functions: [Functions](09-functions.md).
 * Where function values are used in the standard library:
-  [Standard library](13-standard-library.md).
+  [Standard library](14-standard-library.md).
 * The exact `fn` type syntax: [Types](04-types.md#function-types).

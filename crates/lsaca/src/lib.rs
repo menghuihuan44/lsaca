@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ast;
+pub mod borrow;
 pub mod codegen;
 pub mod diag;
 pub mod driver;

@@ -470,6 +470,13 @@ impl<'a> Checker<'a> {
                 parts: self.lower_format_parts(&call.parts),
                 args: call.args.iter().map(|arg| self.lower_expr(arg)).collect(),
             }),
+            TExprKind::Ref { mutable, expr } => HExprKind::Ref {
+                mutable: *mutable,
+                expr: Box::new(self.lower_expr(expr)),
+            },
+            TExprKind::Deref { expr } => HExprKind::Deref {
+                expr: Box::new(self.lower_expr(expr)),
+            },
             TExprKind::Try {
                 expr,
                 ret,

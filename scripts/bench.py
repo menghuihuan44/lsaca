@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-language benchmark harness for the lsaca compiler.
 
-Measures, for the same eleven workloads implemented in every language it
+Measures, for the same twelve workloads implemented in every language it
 supports (lsaca, C, Rust, Python and Node.js; the compile_large workload is
 lsaca-only and compile-only):
 
@@ -100,6 +100,14 @@ PROGRAMS = {
         "expected": "checksum=2147450880",
         "description": "build a perfect binary tree of depth 16 (131,071 nodes) and sum "
                        "all payloads",
+        "workload": {"depth": 16, "nodes": 131071},
+    },
+    "binary_trees_refs": {
+        "expected": "checksum=2147450880",
+        "description": "the same perfect binary tree of depth 16 (131,071 nodes) as "
+                       "binary_trees, but summed through borrowed references "
+                       "(&Option<Box<Node>>) instead of by value, so the traversal does "
+                       "not copy the tree; checksum matches binary_trees",
         "workload": {"depth": 16, "nodes": 131071},
     },
     "string_split": {

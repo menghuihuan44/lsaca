@@ -18,7 +18,7 @@ use crate::types::{IntTy, SelfKind, Ty};
 
 use super::CodegenOptions;
 use super::c_writer::CWriter;
-use super::emit::{BoundVar, EnvInfo, Gen, Receiver};
+use super::emit::{BoundVar, EnvInfo, Gen};
 use super::helper_defs;
 use super::helpers;
 use super::ops;
@@ -428,7 +428,15 @@ impl<'a> Gen<'a> {
             let mut parameter_type = self.registry.ctype(&param.ty);
             if index == 0 {
                 match self_kind {
-                    Some(SelfKind::Ref) | Some(SelfKind::RefMut) => parameter_type.push('*'),
+                    Some(SelfKind::Ref) | Some(SelfKind::RefMut) => {
+                        // The HIR signature stores the receiver as a shared or
+                        // mutable reference, but the C calling convention
+                        // passes a plain pointer to the impl type.
+                        parameter_type = match param.ty.ref_inner() {
+                            Some(inner) => format!("{}*", self.registry.ctype(inner)),
+                            None => format!("{}*", parameter_type),
+                        };
+                    }
                     _ => {}
                 }
             }
@@ -542,13 +550,7 @@ impl<'a> Gen<'a> {
         self.block_terminated = false;
         self.fn_terminated = false;
         self.fn_ret = return_type.clone();
-        self.receiver = match self_kind {
-            Some(SelfKind::Ref) | Some(SelfKind::RefMut) => params.first().map(|param| Receiver {
-                c_name: param.c_name.clone(),
-                by_pointer: true,
-            }),
-            _ => None,
-        };
+
         self.env = env;
         self.w.line("{");
         self.w.indent();

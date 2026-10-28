@@ -205,7 +205,7 @@ negation is folded, so the most negative value of a signed type cannot be writte
 as a plain negative literal: `let x: i8 = -128;` is rejected with
 `error[E0080]: literal out of range for i8: 128`. Compute it instead, for
 example `-127 - 1`, or produce it by arithmetic. This is a known simplification
-of the 1.2.0 constant checker.
+of the 1.3.0 constant checker.
 
 ## Float literals
 
@@ -389,7 +389,7 @@ lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
 ```
 
 To work with "characters", use one-character strings and the string methods in
-[Standard library](13-standard-library.md); remember that most of them use byte
+[Standard library](14-standard-library.md); remember that most of them use byte
 offsets, not character indices.
 
 ## Whitespace and semicolons
@@ -420,4 +420,4 @@ Output:
 
 * The types these literals inhabit: [Types](04-types.md).
 * Operators and their precedence: [Operators](07-operators.md).
-* All built-in string methods: [Standard library](13-standard-library.md).
+* All built-in string methods: [Standard library](14-standard-library.md).

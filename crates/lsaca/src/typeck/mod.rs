@@ -10,6 +10,7 @@ mod items;
 mod itype;
 mod lower;
 mod patterns;
+mod refs;
 mod tree;
 
 use std::path::Path;
@@ -71,6 +72,17 @@ pub fn check_reporting(
     sort_and_dedup(&mut warnings);
     if late_errors.has_errors() {
         let mut reported = late_errors;
+        for diagnostic in warnings.clone().into_vec() {
+            reported.push(diagnostic);
+        }
+        sort_and_dedup(&mut reported);
+        return (Err(reported), warnings);
+    }
+    // The borrow checker is a read-only post-lowering pass: it validates the
+    // fully typed HIR and never modifies it.
+    let borrow_diagnostics = crate::borrow::check(&program);
+    if borrow_diagnostics.has_errors() {
+        let mut reported = borrow_diagnostics;
         for diagnostic in warnings.clone().into_vec() {
             reported.push(diagnostic);
         }
@@ -1599,6 +1611,948 @@ fn main() {
             other => panic!("expected a direct method call, got {:?}", other),
         }
     }
+    // -----------------------------------------------------------------
+    // References (v1.3)
+    // -----------------------------------------------------------------
+
+    fn let_init(block: &hir::HBlock, index: usize) -> &HExpr {
+        match block.stmts.get(index) {
+            Some(HStmt::Let {
+                init: Some(init), ..
+            }) => init,
+            other => panic!(
+                "expected a let statement with an initializer, got {:?}",
+                other
+            ),
+        }
+    }
+
+    fn shared_ref(inner: Ty) -> Ty {
+        Ty::Ref {
+            mutable: false,
+            inner: Box::new(inner),
+        }
+    }
+
+    fn mutable_ref(inner: Ty) -> Ty {
+        Ty::Ref {
+            mutable: true,
+            inner: Box::new(inner),
+        }
+    }
+
+    // ----- borrowing and dereferencing -----
+
+    #[test]
+    fn lifetime_diagnostics_use_source_names() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let reference = {
+        let value = 5;
+        &value
+    };
+    println!("{}", *reference);
+}"#,
+        );
+        let rendered = messages(&diagnostics).join(" | ");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == Some("E0597"))
+                .count(),
+            1,
+            "{}",
+            rendered
+        );
+        assert!(
+            has_message(&diagnostics, "value does not live long enough"),
+            "{}",
+            rendered
+        );
+        for message in messages(&diagnostics) {
+            for token in message.split_whitespace() {
+                let looks_like_c_name = token.len() > 1
+                    && (token.starts_with('v') || token.starts_with('p') || token.starts_with('t'))
+                    && token[1..].chars().all(|digit| digit.is_ascii_digit());
+                assert!(
+                    !looks_like_c_name,
+                    "diagnostic must use source names, got: {}",
+                    message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bindings_of_references_keep_their_reference_types() {
+        // Match ergonomics must not peel a plain binding: a binding initialised
+        // with a reference keeps that reference as its own type.
+        let program = expect_ok(
+            r#"fn main() {
+    let value = 10;
+    let first = &value;
+    let second = first;
+    let nested = &second;
+    println!("{} {}", *first, **nested);
+}"#,
+        );
+        let main = main_fn(&program);
+        let expected = shared_ref(shared_ref(Ty::Int(IntTy::I64)));
+        match &main.body.stmts[3] {
+            HStmt::Let {
+                pat,
+                init: Some(init),
+                ..
+            } => {
+                assert_eq!(pat.ty, expected);
+                assert_eq!(init.ty, expected);
+            }
+            other => panic!("expected let nested = &second, got {:?}", other),
+        }
+        assert_eq!(let_init(&main.body, 2).ty, shared_ref(Ty::Int(IntTy::I64)));
+    }
+
+    #[test]
+    fn accepts_shared_borrows_and_reads_through_deref() {
+        let program = expect_ok(
+            r#"fn main() {
+    let value = 5;
+    let reference = &value;
+    let copy = *reference;
+    println!("{}", copy);
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let reference = let_init(body, 1);
+        assert_eq!(reference.ty, shared_ref(Ty::Int(IntTy::I64)));
+        match &reference.kind {
+            HExprKind::Ref { mutable, expr } => {
+                assert!(!*mutable);
+                assert!(matches!(&expr.kind, HExprKind::Local { name, .. } if name == "value"));
+            }
+            other => panic!("expected a borrow expression, got {:?}", other),
+        }
+        let copy = let_init(body, 2);
+        assert_eq!(copy.ty, Ty::Int(IntTy::I64));
+        assert!(matches!(
+            &copy.kind,
+            HExprKind::Deref { expr }
+                if matches!(&expr.kind, HExprKind::Local { name, .. } if name == "reference")
+        ));
+    }
+
+    #[test]
+    fn writes_through_mutable_borrows() {
+        let program = expect_ok(
+            r#"fn main() {
+    let mut value = 1;
+    let reference = &mut value;
+    *reference = *reference + 1;
+    println!("{}", value);
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let reference = let_init(body, 1);
+        assert_eq!(reference.ty, mutable_ref(Ty::Int(IntTy::I64)));
+        match body.stmts.get(2) {
+            Some(HStmt::Expr(HExpr {
+                kind: HExprKind::Assign { target, .. },
+                ..
+            })) => assert!(matches!(&target.kind, HExprKind::Deref { .. })),
+            other => panic!("expected an assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mutable_parameters_write_through_references() {
+        let program = expect_ok(
+            r#"fn bump(value: &mut i64) {
+    *value = *value + 1;
+}
+
+fn main() {
+    let mut count = 1;
+    bump(&mut count);
+    println!("{}", count);
+}"#,
+        );
+        let bump = find_fn(&program, "bump").expect("bump should be lowered");
+        assert_eq!(bump.params[0].ty, mutable_ref(Ty::Int(IntTy::I64)));
+        match bump.body.stmts.first() {
+            Some(HStmt::Expr(HExpr {
+                kind: HExprKind::Assign { target, .. },
+                ..
+            })) => assert!(matches!(&target.kind, HExprKind::Deref { .. })),
+            other => panic!("expected an assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn allows_reborrowing_through_a_mutable_parameter() {
+        let program = expect_ok(
+            r#"fn increment(value: &mut i64) {
+    let inner = &mut *value;
+    *inner = *inner + 1;
+}
+
+fn main() {
+    let mut count = 1;
+    increment(&mut count);
+    println!("{}", count);
+}"#,
+        );
+        let increment = find_fn(&program, "increment").expect("increment should be lowered");
+        assert_eq!(increment.params[0].ty, mutable_ref(Ty::Int(IntTy::I64)));
+    }
+
+    #[test]
+    fn allows_forwarding_reference_parameters() {
+        let program = expect_ok(
+            r#"fn forward(value: &i64) -> &i64 {
+    value
+}
+
+fn main() {
+    let number = 3;
+    println!("{}", *forward(&number));
+}"#,
+        );
+        assert!(find_fn(&program, "forward").is_some());
+    }
+
+    #[test]
+    fn allows_returning_a_mutable_reference_parameter() {
+        let program = expect_ok(
+            r#"fn passthrough(value: &mut i64) -> &mut i64 {
+    value
+}
+
+fn main() {
+    let mut number = 1;
+    let reference = passthrough(&mut number);
+    *reference = 2;
+    println!("{}", number);
+}"#,
+        );
+        assert!(find_fn(&program, "passthrough").is_some());
+    }
+
+    #[test]
+    fn auto_derefs_fields_through_multiple_reference_levels() {
+        let program = expect_ok(
+            r#"struct Point {
+    x: i64,
+}
+
+fn read(point: &&Point) -> i64 {
+    point.x
+}
+
+fn main() {
+    let point = Point { x: 1 };
+    let reference = &point;
+    println!("{}", read(&reference));
+}"#,
+        );
+        assert!(find_fn(&program, "read").is_some());
+    }
+
+    // ----- auto-deref for fields, methods and indexing (R4) -----
+
+    #[test]
+    fn auto_derefs_field_access_and_method_receivers() {
+        let program = expect_ok(
+            r#"struct Point {
+    x: i64,
+    y: i64,
+}
+
+impl Point {
+    fn sum(&self) -> i64 {
+        self.x + self.y
+    }
+}
+
+fn distance(point: &Point) -> i64 {
+    point.x + point.y + point.sum()
+}
+
+fn main() {
+    let point = Point { x: 1, y: 2 };
+    println!("{}", distance(&point));
+}"#,
+        );
+        let distance = find_fn(&program, "distance").expect("distance should be lowered");
+        match &distance.body.tail {
+            Some(tail) => match &tail.kind {
+                HExprKind::Binary { rhs, .. } => match &rhs.kind {
+                    HExprKind::DirectCall {
+                        fn_id, receiver, ..
+                    } => {
+                        assert_eq!(program.fns[*fn_id].name, "Point::sum");
+                        match receiver.as_deref() {
+                            Some(HExpr {
+                                kind: HExprKind::Deref { expr },
+                                ..
+                            }) => assert!(
+                                matches!(&expr.kind, HExprKind::Local { name, .. } if name == "point")
+                            ),
+                            other => panic!("expected a deref receiver, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected a method call, got {:?}", other),
+                },
+                other => panic!("expected an addition, got {:?}", other),
+            },
+            None => panic!("distance should have a tail expression"),
+        }
+    }
+
+    #[test]
+    fn auto_derefs_fields_through_rc_and_box_references() {
+        let program = expect_ok(
+            r#"struct Node {
+    value: i64,
+}
+
+fn read_shared(node: &Rc<Node>) -> i64 {
+    node.value
+}
+
+fn read_owned(node: &Box<Node>) -> i64 {
+    node.value
+}
+
+fn main() {
+    let shared = Rc::new(Node { value: 7 });
+    let owned = Box::new(Node { value: 8 });
+    println!("{} {}", read_shared(&shared), read_owned(&owned));
+}"#,
+        );
+        assert!(find_fn(&program, "read_shared").is_some());
+        assert!(find_fn(&program, "read_owned").is_some());
+    }
+
+    #[test]
+    fn auto_derefs_len_and_index_on_reference_vectors() {
+        let program = expect_ok(
+            r#"fn sum(values: &Vec<i64>) -> i64 {
+    let mut total = 0;
+    for index in 0..values.len() {
+        total = total + values[index];
+    }
+    total
+}
+
+fn main() {
+    let values = vec![1, 2, 3];
+    println!("{}", sum(&values));
+}"#,
+        );
+        assert!(find_fn(&program, "sum").is_some());
+    }
+
+    #[test]
+    fn auto_derefs_multiple_reference_levels_for_methods() {
+        let program = expect_ok(
+            r#"fn length(values: &&Vec<i64>) -> i64 {
+    values.len()
+}
+
+fn main() {
+    let values = vec![1, 2, 3];
+    let reference = &values;
+    println!("{}", length(&reference));
+}"#,
+        );
+        assert!(find_fn(&program, "length").is_some());
+    }
+
+    #[test]
+    fn auto_derefs_mutable_reference_receivers() {
+        let program = expect_ok(
+            r#"struct Counter {
+    value: i64,
+}
+
+impl Counter {
+    fn increment(&mut self) {
+        self.value = self.value + 1;
+    }
+}
+
+fn main() {
+    let mut counter = Counter { value: 0 };
+    counter.increment();
+    println!("{}", counter.value);
+}"#,
+        );
+        assert!(find_fn(&program, "Counter::increment").is_some());
+    }
+
+    // ----- coercions (R5) -----
+
+    #[test]
+    fn coerces_mutable_borrows_to_shared_borrows_at_arguments() {
+        let program = expect_ok(
+            r#"fn read(value: &i64) -> i64 {
+    *value
+}
+
+fn main() {
+    let mut value = 1;
+    let copy = read(&mut value);
+    println!("{}", copy);
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let copy = let_init(body, 1);
+        match &copy.kind {
+            HExprKind::DirectCall { args, .. } => {
+                assert_eq!(args.len(), 1);
+                match &args[0].kind {
+                    HExprKind::Ref {
+                        mutable: false,
+                        expr,
+                    } => {
+                        assert!(matches!(&expr.kind, HExprKind::Ref { mutable: true, .. }));
+                    }
+                    other => panic!("expected a coercion wrapper, got {:?}", other),
+                }
+            }
+            other => panic!("expected a call, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn coerces_mutable_borrows_to_shared_borrows_at_returns() {
+        let program = expect_ok(
+            r#"fn as_shared(value: &mut i64) -> &i64 {
+    value
+}
+
+fn main() {
+    let mut number = 1;
+    println!("{}", *as_shared(&mut number));
+}"#,
+        );
+        let as_shared = find_fn(&program, "as_shared").expect("as_shared should be lowered");
+        match &as_shared.body.tail {
+            Some(tail) => assert!(matches!(&tail.kind, HExprKind::Ref { mutable: false, .. })),
+            None => panic!("as_shared should have a tail expression"),
+        }
+    }
+
+    #[test]
+    fn coerces_rc_and_box_borrows_to_payload_references() {
+        let program = expect_ok(
+            r#"fn read(value: &i64) -> i64 {
+    *value
+}
+
+fn main() {
+    let shared = Rc::new(5);
+    let owned = Box::new(7);
+    println!("{} {}", read(&shared), read(&owned));
+}"#,
+        );
+        assert!(find_fn(&program, "read").is_some());
+    }
+
+    // ----- match ergonomics -----
+
+    #[test]
+    fn match_ergonomics_bind_shared_references() {
+        let program = expect_ok(
+            r#"fn describe(value: &Option<i64>) -> i64 {
+    match value {
+        Some(inner) => *inner,
+        None => 0,
+    }
+}
+
+fn main() {
+    let option = Some(5);
+    println!("{}", describe(&option));
+}"#,
+        );
+        let describe = find_fn(&program, "describe").expect("describe should be lowered");
+        match &describe.body.tail {
+            Some(tail) => match &tail.kind {
+                HExprKind::Match { arms, .. } => {
+                    assert_eq!(arms.len(), 2);
+                    match &arms[0].pat.kind {
+                        HPatKind::OptionSome(inner) => {
+                            assert_eq!(inner.ty, shared_ref(Ty::Int(IntTy::I64)));
+                        }
+                        other => panic!("expected a Some pattern, got {:?}", other),
+                    }
+                }
+                other => panic!("expected a match expression, got {:?}", other),
+            },
+            None => panic!("describe should have a tail expression"),
+        }
+    }
+
+    #[test]
+    fn match_ergonomics_bind_mutable_references() {
+        let program = expect_ok(
+            r#"fn bump(value: &mut Option<i64>) {
+    match value {
+        Some(inner) => {
+            *inner = *inner + 1;
+        }
+        None => {}
+    }
+}
+
+fn main() {
+    let mut option = Some(1);
+    bump(&mut option);
+    println!("{}", option.unwrap_or(0));
+}"#,
+        );
+        let bump = find_fn(&program, "bump").expect("bump should be lowered");
+        let mut found = false;
+        if let Some(tail) = &bump.body.tail
+            && let HExprKind::Match { arms, .. } = &tail.kind
+            && let HPatKind::OptionSome(inner) = &arms[0].pat.kind
+        {
+            assert_eq!(inner.ty, mutable_ref(Ty::Int(IntTy::I64)));
+            found = true;
+        }
+        assert!(found, "expected a Some pattern bound by mutable reference");
+    }
+
+    #[test]
+    fn match_ergonomics_bind_struct_fields() {
+        let program = expect_ok(
+            r#"struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn magnitude(point: &Point) -> i64 {
+    match point {
+        Point { x, y } => *x + *y,
+    }
+}
+
+fn main() {
+    let point = Point { x: 1, y: 2 };
+    println!("{}", magnitude(&point));
+}"#,
+        );
+        let magnitude = find_fn(&program, "magnitude").expect("magnitude should be lowered");
+        match &magnitude.body.tail {
+            Some(tail) => match &tail.kind {
+                HExprKind::Match { arms, .. } => match &arms[0].pat.kind {
+                    HPatKind::Struct { fields, .. } => {
+                        assert_eq!(fields.len(), 2);
+                        for (_, field) in fields {
+                            assert_eq!(field.ty, shared_ref(Ty::Int(IntTy::I64)));
+                        }
+                    }
+                    other => panic!("expected a struct pattern, got {:?}", other),
+                },
+                other => panic!("expected a match expression, got {:?}", other),
+            },
+            None => panic!("magnitude should have a tail expression"),
+        }
+    }
+
+    // ----- borrowing rules (R1, R2, R3, R7) -----
+
+    #[test]
+    fn rejects_borrows_of_temporary_values() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let reference = &5;
+    println!("{}", *reference);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0745"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "cannot borrow a temporary value"));
+    }
+
+    #[test]
+    fn mutable_borrows_require_mutable_bindings() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let value = 1;
+    let reference = &mut value;
+    println!("{}", *reference);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0596"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn cannot_mutate_through_shared_references() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let mut value = 1;
+    let reference = &value;
+    *reference = 2;
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0596"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_dereferencing_non_reference_values() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let value = 1;
+    let bad = *value;
+    println!("{}", bad);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0614"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "cannot be dereferenced"));
+    }
+
+    #[test]
+    fn rejects_mutable_references_to_owned_values() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let mut text = String::from("hi");
+    let reference = &mut text;
+    println!("{}", reference.len());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "mutable references to String"));
+    }
+
+    #[test]
+    fn rejects_mutable_references_to_vectors() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let mut values = vec![1, 2];
+    let reference = &mut values;
+    println!("{}", reference.len());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "mutable references to Vec"));
+    }
+
+    #[test]
+    fn rejects_mutable_reference_parameters_to_owned_values() {
+        let diagnostics = analyze(
+            r#"fn trim(value: &mut String) {
+    println!("{}", value.len());
+}
+
+fn main() {
+    let mut text = String::from("hi");
+    trim(&mut text);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_references_stored_in_struct_fields() {
+        let diagnostics = analyze(
+            r#"struct Holder {
+    value: &i64,
+}
+
+fn main() {
+    let number = 1;
+    let holder = Holder { value: &number };
+    println!("{}", holder.value);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "references cannot be stored in this type"
+        ));
+    }
+
+    #[test]
+    fn rejects_references_stored_in_vector_elements() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let number = 1;
+    let values: Vec<&i64> = vec![&number];
+    println!("{}", values.len());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_references_stored_in_optional_values() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let number = 1;
+    let wrapped: Option<&i64> = Some(&number);
+    println!("{}", *wrapped.unwrap());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_references_stored_in_tuples() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let number = 1;
+    let pair: (&i64, i64) = (&number, 2);
+    println!("{}", *pair.0);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_references_captured_by_closures() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let value = 1;
+    let reference = &value;
+    let read = || *reference;
+    println!("{}", read());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "references cannot be captured by closures"
+        ));
+    }
+
+    // ----- lifetimes and elision (R6) -----
+
+    #[test]
+    fn returns_borrow_derived_from_parameter() {
+        let program = expect_ok(
+            r#"fn first(values: &Vec<i64>) -> &i64 {
+    &values[0]
+}
+
+fn main() {
+    let values = vec![4, 5];
+    let head = first(&values);
+    println!("{}", *head);
+}"#,
+        );
+        let first = find_fn(&program, "first").expect("first should be lowered");
+        assert_eq!(first.ret, shared_ref(Ty::Int(IntTy::I64)));
+        assert!(matches!(
+            &first.body.tail,
+            Some(tail) if matches!(&tail.kind, HExprKind::Ref { mutable: false, .. })
+        ));
+    }
+
+    #[test]
+    fn methods_return_references_to_their_receiver_fields() {
+        let program = expect_ok(
+            r#"struct Point {
+    x: i64,
+    y: i64,
+}
+
+impl Point {
+    fn x_ref(&self) -> &i64 {
+        &self.x
+    }
+}
+
+fn main() {
+    let point = Point { x: 3, y: 4 };
+    let x = point.x_ref();
+    println!("{}", *x);
+}"#,
+        );
+        let x_ref = find_fn(&program, "Point::x_ref").expect("x_ref should be lowered");
+        assert_eq!(x_ref.ret, shared_ref(Ty::Int(IntTy::I64)));
+    }
+
+    #[test]
+    fn reference_returns_need_a_lifetime_source() {
+        let diagnostics = analyze(
+            r#"fn constant() -> &i64 {
+    let value = 1;
+    &value
+}
+
+fn main() {
+    println!("{}", *constant());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0106"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "missing lifetime specifier"));
+        assert!(has_note(&diagnostics, "no reference input"));
+    }
+
+    #[test]
+    fn reference_returns_need_an_unambiguous_lifetime_source() {
+        let diagnostics = analyze(
+            r#"fn choose(first: &i64, second: &i64) -> &i64 {
+    first
+}
+
+fn main() {
+    let a = 1;
+    let b = 2;
+    println!("{}", *choose(&a, &b));
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0106"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_note(&diagnostics, "which parameter"));
+    }
+
+    #[test]
+    fn rejects_returning_references_to_locals() {
+        let diagnostics = analyze(
+            r#"fn pick(value: &i64) -> &i64 {
+    let local = *value;
+    &local
+}
+
+fn main() {
+    let number = 1;
+    println!("{}", *pick(&number));
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0515"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "returns a reference to a local value"
+        ));
+    }
+
+    #[test]
+    fn reference_returns_must_borrow_from_the_elided_parameter() {
+        let diagnostics = analyze(
+            r#"struct Holder {
+    value: i64,
+}
+
+impl Holder {
+    fn pick(&self, other: &i64) -> &i64 {
+        other
+    }
+}
+
+fn main() {
+    let holder = Holder { value: 1 };
+    let number = 2;
+    println!("{}", *holder.pick(&number));
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0515"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn mutable_reference_returns_require_a_mutable_source() {
+        let diagnostics = analyze(
+            r#"fn borrow(value: &i64) -> &mut i64 {
+    value
+}
+
+fn main() {
+    let number = 1;
+    println!("{}", *borrow(&number));
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0596"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_iterating_over_references_to_vectors() {
+        let diagnostics = analyze(
+            r#"fn main() {
+    let values = vec![1, 2, 3];
+    for value in &values {
+        println!("{}", value);
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "cannot iterate over a value of type &Vec"
+        ));
+    }
+
     // -----------------------------------------------------------------
     // End-to-end fixture corpus
     // -----------------------------------------------------------------

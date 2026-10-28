@@ -27,6 +27,9 @@ mod types;
 mod util;
 
 #[cfg(test)]
+mod ref_tests;
+
+#[cfg(test)]
 mod tests;
 
 /// Options that influence generated code.

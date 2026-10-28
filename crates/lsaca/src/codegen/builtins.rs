@@ -47,12 +47,12 @@ impl<'a> Gen<'a> {
         match method {
             // ----- String --------------------------------------------------
             HBuiltinMethod::StrLen => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let ctype = self.ctype(ty);
                 self.line(format!("{} = ({})ls_str_len({});", target, ctype, place));
             }
             HBuiltinMethod::StrIsEmpty => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!("{} = ls_str_is_empty({});", target, place));
             }
             HBuiltinMethod::StrPushStr => {
@@ -76,7 +76,7 @@ impl<'a> Gen<'a> {
                     false
                 };
                 if !fused {
-                    let place = self.gen_place(receiver);
+                    let place = self.place_through_reference(receiver);
                     if let Some(arg) = args.first() {
                         let value = self.gen_owned(arg);
                         self.line(format!(
@@ -88,7 +88,7 @@ impl<'a> Gen<'a> {
                 self.assign_unit(target);
             }
             HBuiltinMethod::StrClear => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!("{} = ls_str_clear({});", place, place));
                 self.assign_unit(target);
             }
@@ -102,7 +102,7 @@ impl<'a> Gen<'a> {
                 self.string_predicate(receiver, args, "ls_str_ends_with", target);
             }
             HBuiltinMethod::StrFind => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
                     let value = self.gen_owned(arg);
                     let found = self.new_plain_of("int64_t", "found");
@@ -122,7 +122,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::StrReplace => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let (Some(from), Some(to)) = (args.first(), args.get(1)) {
                     let from_value = self.gen_owned(from);
                     let to_value = self.gen_owned(to);
@@ -133,26 +133,26 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::StrToUppercase => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!("{} = ls_str_to_uppercase({});", target, place));
             }
             HBuiltinMethod::StrToLowercase => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!("{} = ls_str_to_lowercase({});", target, place));
             }
             HBuiltinMethod::StrTrim => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!("{} = ls_str_trim({});", target, place));
             }
             HBuiltinMethod::StrSplit => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
                     let value = self.gen_owned(arg);
                     self.line(format!("{} = ls_str_split({}, {});", target, place, value));
                 }
             }
             HBuiltinMethod::StrParseI64 => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let parsed = self.new_plain_of("int64_t", "parsed");
                 self.line(format!("if (ls_str_parse_i64({}, &{})) {{", place, parsed));
                 self.w.indent();
@@ -179,7 +179,7 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
             HBuiltinMethod::StrParseF64 => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let parsed = self.new_plain_of("double", "parsed");
                 self.line(format!("if (ls_str_parse_f64({}, &{})) {{", place, parsed));
                 self.w.indent();
@@ -206,7 +206,7 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
             HBuiltinMethod::StrSubstring => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let (Some(start), Some(length)) = (args.first(), args.get(1)) {
                     let start_value = self.gen_owned(start);
                     let length_value = self.gen_owned(length);
@@ -225,7 +225,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::StrRepeat => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
                     let count = self.gen_owned(arg);
                     self.line(format!("if ((int64_t)({}) < 0) {{", count));
@@ -246,16 +246,16 @@ impl<'a> Gen<'a> {
 
             // ----- Vec<T> --------------------------------------------------
             HBuiltinMethod::VecLen => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let ctype = self.ctype(ty);
                 self.line(format!("{} = ({}){}.{};", target, ctype, place, "len"));
             }
             HBuiltinMethod::VecIsEmpty => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!("{} = ({}.len == 0);", target, place));
             }
             HBuiltinMethod::VecPush => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
                     let value = self.gen_owned(arg);
                     if ops::is_frozen_shared(&receiver.ty) {
@@ -293,7 +293,7 @@ impl<'a> Gen<'a> {
                 self.assign_unit(target);
             }
             HBuiltinMethod::VecPop => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if ops::is_frozen_shared(&receiver.ty) {
                     let out = self.new_plain_of("LsString*", "out");
                     self.line(format!("if (ls_vec_string_pop(&({}), &{})) {{", place, out));
@@ -319,7 +319,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::VecInsert => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let (Some(index), Some(value)) = (args.first(), args.get(1)) {
                     let index_value = self.gen_owned(index);
                     let element_value = self.gen_owned(value);
@@ -345,7 +345,7 @@ impl<'a> Gen<'a> {
                 self.assign_unit(target);
             }
             HBuiltinMethod::VecRemove => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let Some(index) = args.first() {
                     let index_value = self.gen_owned(index);
                     self.line(format!(
@@ -373,7 +373,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::VecClear => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if ops::is_frozen_shared(&receiver.ty) {
                     self.line(format!("ls_vec_string_clear(&({}));", place));
                 } else {
@@ -406,7 +406,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::VecExtend => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
                     let other = self.gen_owned(arg);
                     if ops::is_frozen_shared(&receiver.ty) {
@@ -442,7 +442,7 @@ impl<'a> Gen<'a> {
                 self.assign_unit(target);
             }
             HBuiltinMethod::VecReverse => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 if ops::is_frozen_shared(&receiver.ty) {
                     self.line(format!("ls_vec_string_reverse(&({}));", place));
                 } else {
@@ -458,7 +458,7 @@ impl<'a> Gen<'a> {
 
             // ----- Option<T> -----------------------------------------------
             HBuiltinMethod::OptIsSome => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!(
                     "{} = (({}).{} == 1);",
                     target,
@@ -467,7 +467,7 @@ impl<'a> Gen<'a> {
                 ));
             }
             HBuiltinMethod::OptIsNone => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!(
                     "{} = (({}).{} != 1);",
                     target,
@@ -476,7 +476,7 @@ impl<'a> Gen<'a> {
                 ));
             }
             HBuiltinMethod::OptUnwrap => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let payload_ty = option_payload(&receiver.ty);
                 self.line(format!("if (({}).{} != 1) {{", place, types::TAG_FIELD));
                 self.w.indent();
@@ -501,7 +501,7 @@ impl<'a> Gen<'a> {
                 self.line(format!("{} = {};", target, value));
             }
             HBuiltinMethod::OptUnwrapOr => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let payload_ty = option_payload(&receiver.ty);
                 if let Some(default) = args.first() {
                     let default_value = self.gen_owned(default);
@@ -527,7 +527,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::OptExpect => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let payload_ty = option_payload(&receiver.ty);
                 if let Some(message) = args.first() {
                     let message_value = self.gen_owned(message);
@@ -553,7 +553,7 @@ impl<'a> Gen<'a> {
 
             // ----- Result<T, E> --------------------------------------------
             HBuiltinMethod::ResIsOk => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!(
                     "{} = (({}).{} == 0);",
                     target,
@@ -562,7 +562,7 @@ impl<'a> Gen<'a> {
                 ));
             }
             HBuiltinMethod::ResIsErr => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 self.line(format!(
                     "{} = (({}).{} != 0);",
                     target,
@@ -571,7 +571,7 @@ impl<'a> Gen<'a> {
                 ));
             }
             HBuiltinMethod::ResUnwrap => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let ok_ty = result_ok_type(&receiver.ty);
                 self.line(format!("if (({}).{} != 0) {{", place, types::TAG_FIELD));
                 self.w.indent();
@@ -596,7 +596,7 @@ impl<'a> Gen<'a> {
                 self.line(format!("{} = {};", target, value));
             }
             HBuiltinMethod::ResUnwrapOr => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let ok_ty = result_ok_type(&receiver.ty);
                 if let Some(default) = args.first() {
                     let default_value = self.gen_owned(default);
@@ -622,7 +622,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::ResExpect => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let ok_ty = result_ok_type(&receiver.ty);
                 if let Some(message) = args.first() {
                     let message_value = self.gen_owned(message);
@@ -646,7 +646,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::ResOk => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let ok_ty = result_ok_type(&receiver.ty);
                 let names = self.names;
                 let value = ops::copy_expr(
@@ -667,7 +667,7 @@ impl<'a> Gen<'a> {
             }
             HBuiltinMethod::RcGet => {
                 if let Ty::Rc(inner) = &receiver.ty {
-                    let place = self.gen_place(receiver);
+                    let place = self.place_through_reference(receiver);
                     let suffix = self.names.mangle(inner);
                     let ctype = self.ctype(ty);
                     self.line(format!(
@@ -681,7 +681,13 @@ impl<'a> Gen<'a> {
             }
             HBuiltinMethod::RcSet => {
                 if let (Ty::Rc(inner), Some(arg)) = (&receiver.ty, args.first()) {
-                    let place = self.gen_place(receiver);
+                    // Mutation goes through the shared cell, so the receiver
+                    // may be reached through a shared reference (a const
+                    // qualified pointer in C). The cell itself is never const,
+                    // so the qualifier is cast away for the mutating helper.
+                    let cell_ctype = self.ctype(&receiver.ty);
+                    let place = self.place_through_reference(receiver);
+                    let place = format!("(({})({}))", cell_ctype, place);
                     let suffix = self.names.mangle(inner);
                     // The cell takes ownership of the new payload, so the
                     // generated code must not release the argument again.
@@ -694,13 +700,13 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::RcStrongCount => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let ctype = self.ctype(ty);
                 self.line(format!("{} = ({})ls_refcount({});", target, ctype, place));
             }
             HBuiltinMethod::BoxGet => {
                 if let Ty::Box(inner) = &receiver.ty {
-                    let place = self.gen_place(receiver);
+                    let place = self.place_through_reference(receiver);
                     let suffix = self.names.mangle(inner);
                     let ctype = self.ctype(ty);
                     self.line(format!(
@@ -714,7 +720,12 @@ impl<'a> Gen<'a> {
             }
             HBuiltinMethod::BoxSet => {
                 if let (Ty::Box(inner), Some(arg)) = (&receiver.ty, args.first()) {
-                    let place = self.gen_place(receiver);
+                    // See RcSet: a receiver reached through a shared reference
+                    // is const qualified in C, while the box cell that owns the
+                    // payload is not.
+                    let cell_ctype = self.ctype(&receiver.ty);
+                    let place = self.place_through_reference(receiver);
+                    let place = format!("(({})({}))", cell_ctype, place);
                     let suffix = self.names.mangle(inner);
                     // The cell takes ownership of the new payload, so the
                     // generated code must not release the argument again.
@@ -727,7 +738,7 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::ResErr => {
-                let place = self.gen_place(receiver);
+                let place = self.place_through_reference(receiver);
                 let err_ty = result_err_type(&receiver.ty);
                 let names = self.names;
                 let value = ops::copy_expr(
@@ -1017,7 +1028,7 @@ impl<'a> Gen<'a> {
     }
 
     fn string_predicate(&mut self, receiver: &HExpr, args: &[HExpr], func: &str, target: &str) {
-        let place = self.gen_place(receiver);
+        let place = self.place_through_reference(receiver);
         if let Some(arg) = args.first() {
             let value = self.gen_owned(arg);
             self.line(format!("{} = {}({}, {});", target, func, place, value));
@@ -1075,7 +1086,7 @@ impl<'a> Gen<'a> {
         index_arg: Option<&HExpr>,
         target: &str,
     ) {
-        let place = self.gen_place(receiver);
+        let place = self.place_through_reference(receiver);
         let frozen = ops::is_frozen_shared(&receiver.ty);
         let index_value = index_arg.map(|argument| self.gen_owned(argument));
         let condition = match &index_value {

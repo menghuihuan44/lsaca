@@ -68,6 +68,8 @@ fn expr_mentions_local(expression: &HExpr, name: &str) -> bool {
             expr_mentions_local(base, name) || expr_mentions_local(index, name)
         }
         HExprKind::Unary { expr, .. }
+        | HExprKind::Ref { expr, .. }
+        | HExprKind::Deref { expr }
         | HExprKind::Cast { expr }
         | HExprKind::OptionSome(expr)
         | HExprKind::ResultOk(expr)
@@ -164,7 +166,7 @@ impl<'a> Gen<'a> {
                     // temporary first would add a full deep copy.
                     if !self.write_bind(pat, init) {
                         let value = self.gen_owned(init);
-                        self.bind_pattern(pat, &value);
+                        self.bind_let_pattern(pat, init, &value);
                     }
                 }
             }
@@ -267,16 +269,59 @@ impl<'a> Gen<'a> {
     /// Copy the values selected by a pattern out of `source` into the
     /// predeclared variables.
     fn bind_pattern(&mut self, pat: &HPat, source: &str) {
+        self.bind_pattern_mode(pat, source, false);
+    }
+
+    /// Bind the variables of a `let` pattern whose initialiser may be a
+    /// reference.
+    ///
+    /// This mirrors the scrutinee peeling done by `gen_match`: when the
+    /// initialiser is a reference, match ergonomics make every binding a
+    /// reference to the selected place, and structural sub-patterns read
+    /// through the dereferenced pointer instead of the pointer itself.
+    fn bind_let_pattern(&mut self, pat: &HPat, init: &HExpr, value: &str) {
+        let mut source = value.to_string();
+        let mut scrutinee_ty = init.ty.clone();
+        let mut ref_mode = false;
+        while let Ty::Ref { inner, .. } = scrutinee_ty {
+            source = format!("(*({}))", source);
+            scrutinee_ty = *inner;
+            ref_mode = true;
+        }
+        self.bind_pattern_mode(pat, &source, ref_mode);
+    }
+
+    /// Bind the variables of a pattern.
+    ///
+    /// With `ref_mode` set (the scrutinee is a reference, match ergonomics)
+    /// every binding takes the address of the place selected by the pattern
+    /// instead of copying its value: the binding itself has reference type.
+    /// Test paths and binding paths read through the same dereferenced source,
+    /// so nested structural patterns work unchanged.
+    fn bind_pattern_mode(&mut self, pat: &HPat, source: &str, ref_mode: bool) {
         match &pat.kind {
             HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => {}
             HPatKind::Bind { c_name, .. } => {
-                self.emit_release(&pat.ty, c_name);
-                self.emit_copy_into(c_name, &pat.ty, source);
+                if ref_mode && pat.ty.is_ref() {
+                    // Match ergonomics: the binding borrows the place that the
+                    // pattern selected. References are plain addresses, so the
+                    // binding is the address of the selected field, never a
+                    // retain of the pointee.
+                    self.w.line(format!(
+                        "{} = ({})(&({}));",
+                        c_name,
+                        self.ctype(&pat.ty),
+                        source
+                    ));
+                } else {
+                    self.emit_release(&pat.ty, c_name);
+                    self.emit_copy_into(c_name, &pat.ty, source);
+                }
             }
             HPatKind::Tuple(parts) => {
                 for (index, part) in parts.iter().enumerate() {
                     let sub = format!("({}).{}", source, types::positional_field(index));
-                    self.bind_pattern(part, &sub);
+                    self.bind_pattern_mode(part, &sub, ref_mode);
                 }
             }
             HPatKind::Struct {
@@ -291,7 +336,7 @@ impl<'a> Gen<'a> {
                         .map(|field| field.name.clone())
                         .unwrap_or_else(|| format!("field{}", index));
                     let sub = format!("({}).{}", source, types::field_cname(&name));
-                    self.bind_pattern(part, &sub);
+                    self.bind_pattern_mode(part, &sub, ref_mode);
                 }
             }
             HPatKind::Enum {
@@ -314,7 +359,7 @@ impl<'a> Gen<'a> {
                         types::variant_member(&name),
                         types::positional_field(index)
                     );
-                    self.bind_pattern(part, &sub);
+                    self.bind_pattern_mode(part, &sub, ref_mode);
                 }
             }
             HPatKind::OptionSome(inner) => {
@@ -324,7 +369,7 @@ impl<'a> Gen<'a> {
                     types::UNION_FIELD,
                     types::OPTION_SOME_MEMBER
                 );
-                self.bind_pattern(inner, &sub);
+                self.bind_pattern_mode(inner, &sub, ref_mode);
             }
             HPatKind::ResultOk(inner) => {
                 let sub = format!(
@@ -333,7 +378,7 @@ impl<'a> Gen<'a> {
                     types::UNION_FIELD,
                     types::RESULT_OK_MEMBER
                 );
-                self.bind_pattern(inner, &sub);
+                self.bind_pattern_mode(inner, &sub, ref_mode);
             }
             HPatKind::ResultErr(inner) => {
                 let sub = format!(
@@ -342,7 +387,7 @@ impl<'a> Gen<'a> {
                     types::UNION_FIELD,
                     types::RESULT_ERR_MEMBER
                 );
-                self.bind_pattern(inner, &sub);
+                self.bind_pattern_mode(inner, &sub, ref_mode);
             }
             HPatKind::Or(alternatives) => {
                 // Bind the variables from whichever alternative matched.
@@ -355,7 +400,7 @@ impl<'a> Gen<'a> {
                     self.gen_match_tests(alternative, source, &matched);
                     self.w.line(format!("if ({}) {{", matched));
                     self.w.indent();
-                    self.bind_pattern(alternative, source);
+                    self.bind_pattern_mode(alternative, source, ref_mode);
                     self.w.dedent();
                     self.w.line("}");
                 }
@@ -455,6 +500,19 @@ impl<'a> Gen<'a> {
         self.push_frame();
         let scrutinee_value = self.declare_temp(&scrutinee.ty);
         self.gen_into(scrutinee, &scrutinee_value);
+        // Match ergonomics: when the scrutinee is a reference the tests and
+        // bindings read through the pointer, and every binding becomes the
+        // address of the matched place (see bind_pattern_mode). Nested
+        // references are peeled one level per structure, which makes
+        // `&&Option<T>` and `Option<T>` behave identically.
+        let mut scrutinee_ty = scrutinee.ty.clone();
+        let mut source = scrutinee_value.clone();
+        let mut ref_mode = false;
+        while let Ty::Ref { inner, .. } = scrutinee_ty {
+            source = format!("(*({}))", source);
+            scrutinee_ty = *inner;
+            ref_mode = true;
+        }
         if self.fn_terminated {
             self.frame_cleanup(frame);
             self.pop_frame();
@@ -476,10 +534,10 @@ impl<'a> Gen<'a> {
             // when the guard evaluates to false.
             let pass = self.new_plain(&Ty::Bool, "g");
             self.w.line(format!("{} = false;", pass));
-            self.gen_match_tests(&arm.pat, &scrutinee_value, &matched);
+            self.gen_match_tests(&arm.pat, &source, &matched);
             self.w.line(format!("if ({}) {{", matched));
             self.w.indent();
-            self.bind_pattern(&arm.pat, &scrutinee_value);
+            self.bind_pattern_mode(&arm.pat, &source, ref_mode);
             let guard_frame = self.frames.len();
             self.push_frame();
             match &arm.guard {

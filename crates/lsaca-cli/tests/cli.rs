@@ -455,6 +455,14 @@ fn default_build_uses_the_direct_compiler() {
 
 #[test]
 fn cmake_flag_builds_through_the_generated_project() {
+    // CMake spawns a build tool (Ninja) that cannot create child processes
+    // under some confined developer sandboxes: the children hang instead of
+    // failing. The generated project's CMake path is still covered by the
+    // dedicated CI job, so such an environment opts out explicitly.
+    if std::env::var_os("LSACA_SKIP_CMAKE_TESTS").is_some() {
+        eprintln!("skipping the CMake backend test: LSACA_SKIP_CMAKE_TESTS is set");
+        return;
+    }
     let dir = unique_dir("cmake-backend");
     let path = write_program(
         &dir,

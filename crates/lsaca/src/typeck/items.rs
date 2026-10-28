@@ -105,6 +105,9 @@ pub struct ConstItem {
 pub struct FnSig {
     pub params: Vec<ITy>,
     pub ret: ITy,
+    /// Parameter index the elided return lifetime is borrowed from, if the
+    /// return type is a reference (v1.3 elision, design R6).
+    pub ret_ref_source: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -216,6 +219,8 @@ fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
         | ExprKind::Cast { expr, .. }
         | ExprKind::TupleField { base: expr, .. }
         | ExprKind::Try { expr }
+        | ExprKind::Ref { expr, .. }
+        | ExprKind::Deref { expr }
         | ExprKind::Field { base: expr, .. } => scan_expr(expr, out),
         ExprKind::Binary { lhs, rhs, .. } => {
             scan_expr(lhs, out);
@@ -570,6 +575,13 @@ impl<'a> Checker<'a> {
                 let resolved_ret = self.resolve_ty(ret, self_key)?;
                 Some(ITy::function(resolved_params, resolved_ret))
             }
+            TypeExpr::Ref { mutable, inner, .. } => {
+                let resolved = self.resolve_ty(inner, self_key)?;
+                Some(ITy::Ref {
+                    mutable: *mutable,
+                    inner: Box::new(resolved),
+                })
+            }
         }
     }
 
@@ -754,6 +766,7 @@ impl<'a> Checker<'a> {
                 Some(ty) => ty,
                 None => self.infer.fresh_var(),
             };
+            self.validate_storage_type(&ty, field.name_span);
             fields.push(StructField {
                 name: field.name.clone(),
                 name_span: field.name_span,
@@ -793,8 +806,12 @@ impl<'a> Checker<'a> {
             seen.insert(variant.name.clone(), variant.name_span);
             let mut fields = Vec::with_capacity(variant.fields.len());
             for field in &variant.fields {
+                let field_span = field.span();
                 match self.resolve_ty(field, None) {
-                    Some(ty) => fields.push(ty),
+                    Some(ty) => {
+                        self.validate_storage_type(&ty, field_span);
+                        fields.push(ty);
+                    }
                     None => {
                         let placeholder = self.infer.fresh_var();
                         fields.push(placeholder);
@@ -858,6 +875,32 @@ impl<'a> Checker<'a> {
             };
             params.push(ty);
         }
+        for (index, param) in decl.params.iter().enumerate() {
+            if let Some(param_ty) = params.get(index).cloned() {
+                self.validate_value_type(&param_ty, param.name_span);
+            }
+        }
+        // A method receiver is a reference to the impl type, not the impl
+        // type itself: inside the body `self` has type `&Self` or `&mut
+        // Self`. Modeling that in the signature keeps `self` behaving like
+        // any other reference value (match ergonomics, field auto-deref,
+        // copies of `self` being non-owning) instead of pretending it is an
+        // owned local.
+        if let Some(kind) = decl.self_kind
+            && let Some(receiver_ty) = params.first().cloned()
+        {
+            let mutable = match kind {
+                SelfKind::Ref => Some(false),
+                SelfKind::RefMut => Some(true),
+                SelfKind::Value => None,
+            };
+            if let Some(mutable) = mutable {
+                params[0] = ITy::Ref {
+                    mutable,
+                    inner: Box::new(receiver_ty),
+                };
+            }
+        }
         let ret = match &decl.ret {
             Some(ret_ty) => match self.resolve_ty(ret_ty, owner) {
                 Some(ty) => ty,
@@ -865,6 +908,10 @@ impl<'a> Checker<'a> {
             },
             None => ITy::Unit,
         };
+        if let Some(ret_ty) = &decl.ret {
+            let ret_span = ret_ty.span();
+            self.validate_value_type(&ret, ret_span);
+        }
         if decl.self_kind.is_some() {
             match decl.params.first() {
                 Some(receiver) if receiver.name == "self" => {
@@ -873,7 +920,10 @@ impl<'a> Checker<'a> {
                             TypeKey::Struct(struct_id) => ITy::Struct(struct_id),
                             TypeKey::Enum(enum_id) => ITy::Enum(enum_id),
                         };
+                        // The receiver is stored as `&Self`/`&mut Self`, so
+                        // compare the pointee with the impl type.
                         let actual = self.infer.resolve(&params[0]);
+                        let actual = self.peel_refs(&actual);
                         let expected = self.infer.resolve(&expected);
                         if actual != expected {
                             let owner_name = self.type_name(owner_key);
@@ -902,10 +952,80 @@ impl<'a> Checker<'a> {
                 decl.name_span,
             );
         }
+        let mut ret_ref_source: Option<usize> = None;
+        let ret_resolved = self.infer.resolve(&ret);
+        if let ITy::Ref { mutable, .. } = ret_resolved {
+            let mut sources: Vec<usize> = Vec::new();
+            // Only `&self`/`&mut self` receivers borrow from a reference. A
+            // by-value `self` owns the receiver, so returning a reference
+            // derived from it would dangle; such a method must elide its
+            // return lifetime from one of its own reference parameters instead.
+            if matches!(decl.self_kind, Some(SelfKind::Ref) | Some(SelfKind::RefMut)) {
+                sources.push(0);
+            } else {
+                for (index, param_ty) in params.iter().enumerate() {
+                    if matches!(self.infer.resolve(param_ty), ITy::Ref { .. }) {
+                        sources.push(index);
+                    }
+                }
+            }
+            let ret_span = decl
+                .ret
+                .as_ref()
+                .map(|ty| ty.span())
+                .unwrap_or(decl.name_span);
+            if sources.is_empty() {
+                let diag = Diagnostic::error("missing lifetime specifier".to_string(), ret_span)
+                    .with_code("E0106")
+                    .with_note(
+                        "this function's return type contains a borrowed value, but there is no reference input to borrow from"
+                            .to_string(),
+                    );
+                self.diagnostics.push(diag);
+            } else if sources.len() > 1 {
+                let diag = Diagnostic::error("missing lifetime specifier".to_string(), ret_span)
+                    .with_code("E0106")
+                    .with_note(
+                        "this function's return type contains a borrowed value, but the signature does not say which parameter it is borrowed from"
+                            .to_string(),
+                    );
+                self.diagnostics.push(diag);
+            } else {
+                let source = sources[0];
+                ret_ref_source = Some(source);
+                if mutable {
+                    let from_mutable = if source == 0 && decl.self_kind.is_some() {
+                        matches!(decl.self_kind, Some(SelfKind::RefMut))
+                    } else {
+                        matches!(
+                            self.infer.resolve(&params[source]),
+                            ITy::Ref { mutable: true, .. }
+                        )
+                    };
+                    if !from_mutable {
+                        let diag = Diagnostic::error(
+                            "cannot return a mutable reference from a shared reference source"
+                                .to_string(),
+                            ret_span,
+                        )
+                        .with_code("E0596")
+                        .with_note(
+                            "a &mut return type must borrow from a &mut parameter or from a &mut self receiver"
+                                .to_string(),
+                        );
+                        self.diagnostics.push(diag);
+                    }
+                }
+            }
+        }
         let param_cnames = (0..params.len())
             .map(|index| format!("p{}", index))
             .collect();
-        self.fns[id].sig = Some(FnSig { params, ret });
+        self.fns[id].sig = Some(FnSig {
+            params,
+            ret,
+            ret_ref_source,
+        });
         self.fns[id].param_cnames = param_cnames;
     }
 

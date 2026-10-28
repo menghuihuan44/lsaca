@@ -3,8 +3,12 @@
 lsaca uses **ORC** — *Owned Reference Counting*: automatic reference counting
 for owned values plus a trial-deletion cycle collector. It gives deterministic
 destruction of acyclic data, transparent sharing of immutable buffers, and safe
-collection of cycles, without the move/borrow rules of Rust and without a
-stop-the-world tracing garbage collector as in Go or the JVM.
+collection of cycles, without Rust's move semantics, lifetimes or ownership
+annotations, and without a stop-the-world tracing garbage collector as in Go or
+the JVM. Version 1.3 adds non-owning references with a lightweight borrow
+checker that enforces aliasing (it does not own or free anything — see
+[References and borrowing](11-references-and-borrowing.md)); the ORC model on
+this page is otherwise unchanged.
 
 This page is the authoritative description of value ownership, copying,
 copy-on-write mutation, `Rc<T>`, `Box<T>`, cycles and leak tracking. Reading it
@@ -36,6 +40,13 @@ Types whose values are refcounted handles, possibly at several levels:
 A program never observes counts directly except through `Rc<T>::strong_count`;
 the representation is an implementation detail unless you enable leak tracking
 or measure performance.
+
+References (`&T` / `&mut T`) are a third, *borrowed* representation: a plain C
+pointer that never participates in reference counting. A reference is a
+non-owning view of an existing place; it is never retained or released, and it
+cannot be stored inside any of the types above, so it never appears as a field
+or element of an aggregate. This is why references add no ORC traffic at all —
+see [References and borrowing](11-references-and-borrowing.md).
 
 ## Ownership and copying
 
@@ -260,9 +271,10 @@ struct Node {
 ```
 
 Acyclic values cannot form cycles: copying an owned `String`, `Vec` or `Box`
-never produces a second handle to the *same* payload, and there are no
-references or pointers. There is also no global mutable state and no weak
-reference type.
+never produces a second handle to the *same* payload. Non-owning references
+cannot form a cycle either, because they are never stored inside a value and
+never counted; they just point at a place owned by somebody else. There is also
+no global mutable state and no weak reference type.
 
 The language does not prevent cycles. Instead, an ORC cycle collector (the
 Bacon–Rajan trial-deletion algorithm) runs automatically in the background once
@@ -411,11 +423,50 @@ collector-liveness question, not a memory-safety one) or a compiler/runtime bug.
 In either case it is not something user code can control; treat it as a bug
 report.
 
+## References: non-owning views
+
+Borrowing is free. Creating a reference with `&place` or `&mut place` produces a
+plain C pointer and does not touch any reference count; passing a reference to a
+function, returning it, or copying the reference copies that pointer. No
+`retain` or `release` happens for references, and a reference never keeps its
+referent alive: the owner — a local, a parameter, or a value stored in a local —
+is responsible for the value's lifetime.
+
+That split of responsibility is the whole memory model:
+
+* **ORC** owns and frees all values (owned values are refcounted; cycles are
+  collected by trial deletion).
+* **The borrow checker** only checks *aliasing*: it ensures that a reference is
+  never used after its referent is gone and that a mutable borrow is exclusive.
+  It never decides when a value is freed.
+
+Because references are never stored inside an aggregate, they cannot create
+cycles, leaks or refcount traffic, and a program that stops using all references
+behaves exactly like a program without them.
+
+```ls
+fn main() {
+    let text = String::from("hello");
+    let r = &text;
+    println!("{} {}", text.len(), r.len());
+}
+```
+
+Output:
+```text
+5 5
+```
+
+See [References and borrowing](11-references-and-borrowing.md) for the rules.
+
 ## Summary
 
 * Owned values are refcounted handles; scalars are plain.
 * Copying is always allowed and always cheap for owned values; there are no
   move errors.
+* References (`&T`/`&mut T`) are non-owning pointers: borrowing never changes a
+  reference count and never keeps a value alive; the borrow checker enforces
+  aliasing, not ownership.
 * `String` and `Vec` mutate copy-on-write; structs, enums and tuples have value
   semantics.
 * `Rc<T>` provides shared mutable cells; copies of a handle share one payload;
@@ -433,6 +484,8 @@ report.
 * Variables, mutability and constants: [Variables and
   mutability](06-variables-and-mutability.md).
 * The `String`, `Vec`, `Option`, `Result`, `Rc` and `Box` APIs:
-  [Standard library](13-standard-library.md).
+  [Standard library](14-standard-library.md).
+* Non-owning views of values and their rules: [References and
+  borrowing](11-references-and-borrowing.md).
 * Closures capture by value; read about them with the memory model in mind:
-  [Closures](12-closures.md).
+  [Closures](13-closures.md).

@@ -24,6 +24,11 @@ pub enum ITy {
     Result(Box<ITy>, Box<ITy>),
     Tuple(Vec<ITy>),
     Fn(Vec<ITy>, Box<ITy>),
+    /// A reference type: &T or &mut T.
+    Ref {
+        mutable: bool,
+        inner: Box<ITy>,
+    },
     Struct(usize),
     Enum(usize),
     /// The type of diverging expressions (return, break, continue). It unifies
@@ -110,6 +115,10 @@ impl ITy {
             Ty::Fn(params, ret) => {
                 ITy::function(params.iter().map(ITy::from_ty).collect(), ITy::from_ty(ret))
             }
+            Ty::Ref { mutable, inner } => ITy::Ref {
+                mutable: *mutable,
+                inner: Box::new(ITy::from_ty(inner)),
+            },
             Ty::Struct(id) => ITy::Struct(*id),
             Ty::Enum(id) => ITy::Enum(*id),
         }
@@ -208,6 +217,10 @@ impl Infer {
     pub fn resolve(&self, ty: &ITy) -> ITy {
         match ty {
             ITy::Var(_) => self.resolve_var(ty),
+            ITy::Ref { mutable, inner } => ITy::Ref {
+                mutable: *mutable,
+                inner: Box::new(self.resolve(inner)),
+            },
             ITy::Vec(elem) => ITy::vec(self.resolve(elem)),
             ITy::Rc(elem) => ITy::rc(self.resolve(elem)),
             ITy::Box(elem) => ITy::box_(self.resolve(elem)),
@@ -275,6 +288,16 @@ impl Infer {
             (ITy::Unit, ITy::Unit) | (ITy::Bool, ITy::Bool) | (ITy::String, ITy::String) => Ok(()),
             (ITy::Int(a), ITy::Int(b)) if a == b => Ok(()),
             (ITy::Float(a), ITy::Float(b)) if a == b => Ok(()),
+            (
+                ITy::Ref {
+                    mutable: a_mut,
+                    inner: a_inner,
+                },
+                ITy::Ref {
+                    mutable: b_mut,
+                    inner: b_inner,
+                },
+            ) if a_mut == b_mut => self.unify_resolved(*a_inner, *b_inner),
             (ITy::Vec(a), ITy::Vec(b)) => self.unify_resolved(*a, *b),
             (ITy::Rc(a), ITy::Rc(b)) => self.unify_resolved(*a, *b),
             (ITy::Box(a), ITy::Box(b)) => self.unify_resolved(*a, *b),
@@ -354,6 +377,7 @@ impl Infer {
                     None => false,
                 }
             }
+            ITy::Ref { inner, .. } => self.occurs(id, inner),
             ITy::Vec(elem) | ITy::Rc(elem) | ITy::Box(elem) | ITy::Option(elem) => {
                 self.occurs(id, elem)
             }
@@ -428,6 +452,10 @@ impl Infer {
             }
             ITy::Struct(id) => Ok(Ty::Struct(*id)),
             ITy::Enum(id) => Ok(Ty::Enum(*id)),
+            ITy::Ref { mutable, inner } => Ok(Ty::Ref {
+                mutable: *mutable,
+                inner: Box::new(self.finalize_resolved(inner)?),
+            }),
             ITy::Never => Ok(Ty::Unit),
             ITy::Var(_) => Err(()),
         }

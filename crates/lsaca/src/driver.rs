@@ -96,18 +96,92 @@ pub fn generate_c(program: &hir::Program, options: &CodegenOptions) -> Generated
 /// needed.
 pub fn write_project(dir: &Path, generated: &Generated) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    fs::write(dir.join("main.c"), &generated.main_c)?;
+    write_atomic(&dir.join("main.c"), &generated.main_c)?;
     write_runtime_sources(dir)?;
-    fs::write(dir.join("CMakeLists.txt"), &generated.cmake)?;
+    write_atomic(&dir.join("CMakeLists.txt"), &generated.cmake)?;
     Ok(())
 }
 
 /// Write the runtime sources (headers and translation units) next to main.c.
 fn write_runtime_sources(dir: &Path) -> io::Result<()> {
     for (name, contents) in runtime::sources() {
-        fs::write(dir.join(name), contents)?;
+        write_atomic(&dir.join(name), contents)?;
     }
     Ok(())
+}
+
+/// Write a file without ever exposing a partially written file to concurrent
+/// readers: the contents go to a unique temporary file in the same directory
+/// that is then renamed into place. Build trees are content-addressed, so
+/// several threads may legitimately write the same file with the same bytes;
+/// losing that race is not an error.
+fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let temp = temporary_path(parent, name);
+    fs::write(&temp, contents)?;
+    match fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            if is_non_empty_file(path) {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    error.kind(),
+                    format!("could not write {}: {}", path.display(), error),
+                ))
+            }
+        }
+    }
+}
+
+/// A collision-free temporary path in the same directory as the final file.
+fn temporary_path(dir: &Path, name: &str) -> PathBuf {
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(".{}.{}.{}.tmp", name, process::id(), id))
+}
+
+/// Move a freshly built file to its final content-addressed location.
+///
+/// Concurrent builds may race to install the same file. Each build compiles to
+/// its own temporary path, so a rename that loses the race can be discarded as
+/// soon as the destination is a complete file.
+fn install_built_file(temp: &Path, destination: &Path, what: &str) -> io::Result<()> {
+    for attempt in 0..5 {
+        match fs::rename(temp, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if is_non_empty_file(destination) {
+                    let _ = fs::remove_file(temp);
+                    return Ok(());
+                }
+                if attempt == 4 {
+                    let _ = fs::remove_file(temp);
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "could not install the {} at {}: {}",
+                            what,
+                            destination.display(),
+                            error
+                        ),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+            }
+        }
+    }
+    Err(io::Error::other(format!(
+        "could not install the {} at {}",
+        what,
+        destination.display()
+    )))
 }
 
 /// Result of a successful native build.
@@ -302,7 +376,7 @@ fn build_project_direct(
             missing.push(((*source).to_string(), object));
         }
     }
-    let main_object = build_dir.join("main.o");
+    let main_object = temporary_path(&build_dir, "main.o");
     let (runtime_result, main_result) = std::thread::scope(|scope| {
         let runtime_handle = scope.spawn(|| {
             compile_runtime_objects(&compiler, project_dir, &tmp_dir, &flags, options, &missing)
@@ -326,18 +400,21 @@ fn build_project_direct(
     main_result?;
 
     let executable = build_dir.join(executable_name(&options.program_name));
+    let temp_executable = temporary_path(&build_dir, &executable_name(&options.program_name));
     let mut link = Command::new(&compiler);
     link.arg(&main_object);
     for source in &runtime_sources {
         link.arg(object_dir.join(runtime_object_name(source)));
     }
-    link.arg("-o").arg(&executable);
+    link.arg("-o").arg(&temp_executable);
     if cfg!(unix) {
         link.arg("-lm");
     }
     link.current_dir(project_dir);
     prepare_child(&mut link, compiler.parent(), &tmp_dir);
     run_tool(&mut link, "link executable", options.verbose)?;
+    install_built_file(&temp_executable, &executable, "executable")?;
+    let _ = fs::remove_file(&main_object);
 
     if options.verbose {
         eprintln!(
@@ -417,6 +494,11 @@ fn compile_runtime_objects(
             handles.push(scope.spawn(move || -> io::Result<()> {
                 for index in (worker..missing.len()).step_by(threads) {
                     let (source, object) = &missing[index];
+                    // Compile to a private temporary file and install it
+                    // atomically: parallel test threads (and parallel
+                    // compiler invocations) may miss the same object and
+                    // race to build it.
+                    let temp = temporary_path(tmp_dir, &runtime_object_name(source));
                     let mut command = Command::new(compiler);
                     command
                         .arg("-c")
@@ -425,7 +507,7 @@ fn compile_runtime_objects(
                         .arg("-I")
                         .arg(project_dir)
                         .arg("-o")
-                        .arg(object);
+                        .arg(&temp);
                     command.current_dir(project_dir);
                     prepare_child(&mut command, compiler.parent(), tmp_dir);
                     run_tool(
@@ -433,6 +515,7 @@ fn compile_runtime_objects(
                         &format!("compile runtime source {}", source),
                         verbose,
                     )?;
+                    install_built_file(&temp, object, "runtime object")?;
                 }
                 Ok(())
             }));

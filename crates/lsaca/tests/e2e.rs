@@ -527,6 +527,70 @@ fn cases() -> Vec<Case> {
             exit: 101,
             stderr_contains: &["panicked at", "attempt to add with overflow"],
         },
+        Case {
+            name: "refs_basic",
+            source: include_str!("programs/refs_basic.ls"),
+            args: &[],
+            stdout: "10 10\n42\n5\n5\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "refs_functions",
+            source: include_str!("programs/refs_functions.ls"),
+            args: &[],
+            stdout: "42\n3\n(1, 2)\n4\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "refs_struct",
+            source: include_str!("programs/refs_struct.ls"),
+            args: &[],
+            stdout: "10 20\n30\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "refs_match",
+            source: include_str!("programs/refs_match.ls"),
+            args: &[],
+            stdout: "7\n12\n7\n9\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "refs_box_rc",
+            source: include_str!("programs/refs_box_rc.ls"),
+            args: &[],
+            stdout: "15\n42\n1\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "refs_nll",
+            source: include_str!("programs/refs_nll.ls"),
+            args: &[],
+            stdout: "2\n5\n15 3\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "refs_mut_match_ergonomics",
+            source: include_str!("programs/refs_mut_match_ergonomics.ls"),
+            args: &[],
+            stdout: "10 20\n7\nSome(2)\nSome(9)\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "refs_mut_self_returns",
+            source: include_str!("programs/refs_mut_self_returns.ls"),
+            args: &[],
+            stdout: "1\n1\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
     ]
 }
 
@@ -599,6 +663,42 @@ fn frontend_rejects_invalid_programs() {
         ("missing_main", "fn helper() {}\n"),
         ("bad_try_scope", include_str!("programs/bad_try_scope.ls")),
         ("bad_try_type", include_str!("programs/bad_try_type.ls")),
+        (
+            "bad_borrow_alias",
+            include_str!("programs/bad_borrow_alias.ls"),
+        ),
+        (
+            "bad_borrow_shared_mut",
+            include_str!("programs/bad_borrow_shared_mut.ls"),
+        ),
+        (
+            "bad_borrow_assign",
+            include_str!("programs/bad_borrow_assign.ls"),
+        ),
+        ("bad_ref_return", include_str!("programs/bad_ref_return.ls")),
+        (
+            "bad_ref_param_return",
+            include_str!("programs/bad_ref_param_return.ls"),
+        ),
+        (
+            "bad_ref_local_lifetime",
+            include_str!("programs/bad_ref_local_lifetime.ls"),
+        ),
+        ("bad_ref_store", include_str!("programs/bad_ref_store.ls")),
+        (
+            "bad_ref_mut_string",
+            include_str!("programs/bad_ref_mut_string.ls"),
+        ),
+        (
+            "bad_ref_temporary",
+            include_str!("programs/bad_ref_temporary.ls"),
+        ),
+        ("bad_deref", include_str!("programs/bad_deref.ls")),
+        (
+            "bad_ambiguous_ref_return",
+            include_str!("programs/bad_ambiguous_ref_return.ls"),
+        ),
+        ("bad_mut_borrow", include_str!("programs/bad_mut_borrow.ls")),
     ];
     let mut problems: Vec<String> = Vec::new();
     for (name, source) in programs {
@@ -729,6 +829,145 @@ fn format_specifier_errors_are_reported() {
                         ));
                     }
                 }
+            }
+        }
+    }
+    if !problems.is_empty() {
+        panic!("{}", problems.join("\n\n"));
+    }
+}
+
+/// Reference and borrowing diagnostics are targeted: every rejected program
+/// names the error code and explains the violated rule. The checker must not
+/// leak internal HIR names such as v1 into user-facing messages.
+#[test]
+fn borrow_errors_are_reported() {
+    let programs: &[(&str, &str, &[&str])] = &[
+        (
+            "bad_borrow_alias",
+            include_str!("programs/bad_borrow_alias.ls"),
+            &[
+                "error[E0499]",
+                "cannot borrow value as mutable more than once at a time",
+            ],
+        ),
+        (
+            "bad_borrow_shared_mut",
+            include_str!("programs/bad_borrow_shared_mut.ls"),
+            &[
+                "error[E0502]",
+                "cannot borrow value as immutable because it is also borrowed as mutable",
+            ],
+        ),
+        (
+            "bad_borrow_assign",
+            include_str!("programs/bad_borrow_assign.ls"),
+            &[
+                "error[E0506]",
+                "cannot assign to value because it is borrowed",
+            ],
+        ),
+        (
+            "bad_ref_return",
+            include_str!("programs/bad_ref_return.ls"),
+            &[
+                "error[E0106]",
+                "missing lifetime specifier",
+                "error[E0515]",
+                "returns a reference to a local value",
+            ],
+        ),
+        (
+            "bad_ref_param_return",
+            include_str!("programs/bad_ref_param_return.ls"),
+            &["error[E0515]", "not the elided lifetime source"],
+        ),
+        (
+            "bad_ref_local_lifetime",
+            include_str!("programs/bad_ref_local_lifetime.ls"),
+            &["error[E0597]", "does not live long enough"],
+        ),
+        (
+            "bad_ref_store",
+            include_str!("programs/bad_ref_store.ls"),
+            &["error[E0498]", "references cannot be stored"],
+        ),
+        (
+            "bad_ref_mut_string",
+            include_str!("programs/bad_ref_mut_string.ls"),
+            &[
+                "error[E0498]",
+                "mutable references to String are not supported",
+            ],
+        ),
+        (
+            "bad_ref_temporary",
+            include_str!("programs/bad_ref_temporary.ls"),
+            &[
+                "error[E0745]",
+                "cannot borrow a temporary value, bind it to a local first",
+            ],
+        ),
+        (
+            "bad_deref",
+            include_str!("programs/bad_deref.ls"),
+            &["error[E0614]", "cannot be dereferenced"],
+        ),
+        (
+            "bad_ambiguous_ref_return",
+            include_str!("programs/bad_ambiguous_ref_return.ls"),
+            &["error[E0106]", "missing lifetime specifier"],
+        ),
+        (
+            "bad_mut_borrow",
+            include_str!("programs/bad_mut_borrow.ls"),
+            &["error[E0596]", "the binding is not declared as mutable"],
+        ),
+        (
+            "bad_ref_return_branch",
+            include_str!("programs/bad_ref_return_branch.ls"),
+            &[
+                "error[E0515]",
+                "cannot return a reference to local variable x",
+            ],
+        ),
+        (
+            "bad_ref_return_match",
+            include_str!("programs/bad_ref_return_match.ls"),
+            &[
+                "error[E0515]",
+                "cannot return a reference to local variable x",
+            ],
+        ),
+        (
+            "bad_ref_return_call_argument",
+            include_str!("programs/bad_ref_return_call_argument.ls"),
+            &[
+                "error[E0515]",
+                "cannot return a reference to local variable x",
+            ],
+        ),
+    ];
+    let mut problems: Vec<String> = Vec::new();
+    for (name, source, expected) in programs {
+        let frontend = Frontend::new(format!("{}.ls", name), *source);
+        let diagnostics = match frontend.check() {
+            Ok(_) => {
+                problems.push(format!(
+                    "{}: expected a compile error, but the program was accepted",
+                    name
+                ));
+                continue;
+            }
+            Err(diagnostics) => diagnostics,
+        };
+        let rendered = diagnostics.render(frontend.file());
+        for needle in *expected {
+            if !rendered.contains(needle) {
+                problems.push(format!(
+                    "{}: diagnostics do not mention {:?}:\n{}",
+                    name, needle, rendered
+                ));
             }
         }
     }

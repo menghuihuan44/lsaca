@@ -6,6 +6,7 @@ use super::items::{
     AliasInfo, ConstItem, ConstState, ConstVal, EnumInfo, FnInfo, StructInfo, TypeKey,
 };
 use super::itype::{ITy, Infer};
+use super::refs::Provenance;
 use super::tree::{TBlock, TClosure, TExpr, TStmt};
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::span::{SourceFile, Span};
@@ -107,6 +108,12 @@ pub struct Checker<'a> {
     pub pattern_names: Vec<HashMap<String, Span>>,
     /// True while checking a constant initializer (locals are not visible).
     pub in_const: bool,
+    /// Match ergonomics binding mode of the pattern currently being checked:
+    /// None binds by value, Some(false) binds through a shared reference and
+    /// Some(true) binds through a mutable reference.
+    pub pattern_binding_mode: Option<bool>,
+    /// Provenance of reference-valued locals of the function being checked.
+    pub ref_local_sources: HashMap<String, Provenance>,
 }
 
 impl<'a> Checker<'a> {
@@ -136,6 +143,8 @@ impl<'a> Checker<'a> {
             current_fn: 0,
             pattern_names: Vec::new(),
             in_const: false,
+            pattern_binding_mode: None,
+            ref_local_sources: HashMap::new(),
         }
     }
 
@@ -278,6 +287,14 @@ impl<'a> Checker<'a> {
             ITy::Vec(elem) => format!("Vec<{}>", self.describe_resolved(elem)),
             ITy::Rc(elem) => format!("Rc<{}>", self.describe_resolved(elem)),
             ITy::Box(elem) => format!("Box<{}>", self.describe_resolved(elem)),
+            ITy::Ref { mutable, inner } => {
+                let inner = self.describe_resolved(inner);
+                if *mutable {
+                    format!("&mut {}", inner)
+                } else {
+                    format!("&{}", inner)
+                }
+            }
             ITy::Option(elem) => format!("Option<{}>", self.describe_resolved(elem)),
             ITy::Result(ok, err) => format!(
                 "Result<{}, {}>",
@@ -432,6 +449,13 @@ impl<'a> Checker<'a> {
                 span,
             );
         }
+        if self.type_contains_ref(ty) {
+            self.error_code(
+                "references cannot be captured by closures in v1.3".to_string(),
+                span,
+                "E0498",
+            );
+        }
         let parent_expr = self.capture_parent_expr(level, name, c_name, ty, mutable, span);
         let info = CaptureInfo {
             name: name.to_string(),
@@ -516,6 +540,7 @@ impl<'a> Checker<'a> {
         let param_cnames = self.fns[id].param_cnames.clone();
         let self_kind = self.fns[id].self_kind;
         self.current_fn = id;
+        self.ref_local_sources.clear();
         let mut frame = Frame::new(sig.ret.clone());
         for (index, param) in decl.params.iter().enumerate() {
             let ty = sig.params.get(index).cloned().unwrap_or(ITy::Unit);
@@ -538,11 +563,23 @@ impl<'a> Checker<'a> {
             );
         }
         self.frames.push(frame);
-        let body = self.check_block(&decl.body, Some(&sig.ret));
+        let mut body = self.check_block(&decl.body, Some(&sig.ret));
         self.frames.pop();
+        // Coercions apply to return expressions, and the implicit return is the
+        // tail expression of the body block.
+        if let Some(tail) = body.tail.take() {
+            let tail_span = tail.span;
+            let coerced = self.coerce_to(*tail, &sig.ret, tail_span);
+            body.tail = Some(Box::new(coerced));
+        }
         let body_ty = block_type(&body);
         if !self.unify_or_report(&sig.ret, &body_ty, decl.body.span) {
             // error already reported
+        }
+        if let Some(tail) = &body.tail {
+            let source = sig.ret_ref_source;
+            let tail = (**tail).clone();
+            self.check_returned_reference(&tail, source, tail.span);
         }
         self.fns[id].checked = Some(body);
     }
@@ -580,21 +617,32 @@ impl<'a> Checker<'a> {
 
     fn check_let_stmt(&mut self, stmt: &crate::ast::LetStmt) -> Option<TStmt> {
         let self_key = self.current_self_key();
+        let ty_span = match &stmt.ty {
+            Some(ty) => ty.span(),
+            None => stmt.span,
+        };
         let annotated = match &stmt.ty {
             Some(ty) => self.resolve_ty(ty, self_key),
             None => None,
         };
         match &stmt.init {
             Some(init) => {
-                let init_expr = self.check_expr(init, annotated.as_ref());
+                let mut init_expr = self.check_expr(init, annotated.as_ref());
                 let expected = match annotated {
                     Some(annotated) => {
-                        self.unify_or_report(&annotated, &init_expr.ty, init.span);
+                        self.validate_value_type(&annotated, ty_span);
+                        init_expr = self.coerce_to(init_expr, &annotated, init.span);
                         annotated
                     }
                     None => init_expr.ty.clone(),
                 };
                 let pat = self.check_irrefutable_pattern(&stmt.pat, &expected, stmt.span);
+                if matches!(self.infer.resolve(&pat.ty), ITy::Ref { .. })
+                    && let super::tree::TPatKind::Bind { c_name, .. } = &pat.kind
+                {
+                    let source = self.reference_source(&init_expr);
+                    self.ref_local_sources.insert(c_name.clone(), source);
+                }
                 Some(TStmt::Let {
                     pat,
                     init: Some(init_expr),

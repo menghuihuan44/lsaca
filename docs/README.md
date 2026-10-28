@@ -9,17 +9,19 @@ the result is a normal native executable. CMake is optional: pass `--cmake` to
 build through the emitted CMake project instead.
 
 This documentation set is the reference for the language as of **version
-1.2.0**. It is split into short pages, one per topic, so you can read it
+1.3.0**. It is split into short pages, one per topic, so you can read it
 linearly from [Getting started](language/01-getting-started.md) or jump straight
 to the part you need. Every runnable example on these pages has been executed
-with the 1.2.0 compiler and shows its real output.
+with the 1.3.0 compiler and shows its real output.
 
 ## Why lsaca?
 
 * **Rust's ergonomics, none of Rust's ceremony.** The syntax is deliberately
   familiar: `fn`, `let`, `struct`, `enum`, `impl`, `match`, closures, the same
-  operator set and the same expression-oriented style. But there is no borrow
-  checker, no lifetimes and no ownership annotations to fight.
+  operator set and the same expression-oriented style. Version 1.3 adds
+  references (`&T`, `&mut T`) and a lightweight borrow checker that enforces
+  aliasing, but there are still no lifetimes, no move semantics and no ownership
+  annotations to fight.
 * **Memory safety without a tracing garbage collector.** Values are managed by
   **ORC**: automatic reference counting plus a trial-deletion (Bacon-Rajan)
   cycle collector. Acyclic data is freed deterministically when its last handle
@@ -28,22 +30,25 @@ with the 1.2.0 compiler and shows its real output.
 * **A small, complete language.** One source file is one compilation unit. The
   items are `fn`, `struct`, `enum`, `impl`, `const` and `type`; the standard
   library is built in: `String`, `Vec<T>`, `Option<T>`, `Result<T, E>`,
-  `Rc<T>` and `Box<T>`. Version 1.2 adds the postfix `?` operator and the
+  `Rc<T>` and `Box<T>`. Version 1.2 added the postfix `?` operator and the
   Option/Result combinators, so fallible code reads like Rust without any
-  imports.
+  imports; version 1.3 adds non-owning references and borrowing.
 * **Predictable native output, built directly.** The compiler emits readable
   C17 plus a small vendored runtime; by default it compiles and links that C
   itself, with no CMake, no Ninja and no extra configuration step. It also
   writes a complete `CMakeLists.txt`, so `lsaca emit-c` output can be inspected
   or embedded in another build, and `--cmake` builds through it when you want
   the platform's CMake pipeline.
-* **Fast builds.** The direct backend cut a cold build of the benchmark corpus
-  from roughly 2.9 s to about 1.2 s on the reference machine; a cached rebuild
-  takes about 0.03 s. Runtime objects are compiled once per profile and reused.
+* **Fast builds.** On the reference machine a cold build of a benchmark program
+  takes roughly 1.2-1.7 s (about 4.0 s for the deliberately large `compile_large`
+  program), and a cached rebuild of an unchanged program takes 22-45 ms (0.31 s
+  for `compile_large`). Runtime objects are compiled once per profile and
+  reused.
 * **A useful subset, honestly documented.** Version 1.1.0 added `Box<T>` and
-  format widths/precision; version 1.2.0 adds `?` and the combinators. Known
+  format widths/precision; 1.2.0 added `?` and the combinators; 1.3.0 adds
+  references and the borrow checker. Known
   implementation limitations are listed in
-  [Roadmap and differences from Rust](language/14-roadmap.md) rather than
+  [Roadmap and differences from Rust](language/15-roadmap.md) rather than
   hidden.
 
 A first taste:
@@ -84,11 +89,12 @@ reference material.
 | [08 Statements and control flow](language/08-statements-and-control-flow.md) | Blocks, `if`/`else`, `loop`, `while`, `for`, ranges, `if let`, `while let` and `return`. |
 | [09 Functions](language/09-functions.md) | Declarations, parameters, recursion, function values, early returns and the restrictions on `main`. |
 | [10 Structs, enums and impl](language/10-structs-enums-and-impl.md) | Data declarations, literals, methods and associated functions, receivers and value semantics. |
-| [11 Pattern matching](language/11-pattern-matching.md) | All pattern forms including or-patterns and `match` guards, exhaustiveness, refutability and unreachable arms. |
-| [12 Closures](language/12-closures.md) | Closure syntax and types, capture semantics, mutation, `move`, and using `Rc<T>` for shared state. |
-| [13 Standard library](language/13-standard-library.md) | Formatting (widths/precision), `String`, `Vec`, `Option` and `Result` with their combinators, `?`, `Rc`, `Box`, free functions and panics. |
-| [14 Roadmap and differences](language/14-roadmap.md) | How lsaca deliberately differs from Rust, verified limitations of the current release and what comes next. |
-| [15 Benchmarks](language/15-benchmarks.md) | Measured compile times, runtime and memory against C, Rust, Python and Node. |
+| [11 References and borrowing](language/11-references-and-borrowing.md) | `&T`/`&mut T`, borrow expressions and dereferencing, the aliasing rules, reference parameters and returns, match ergonomics and how references interact with ORC. |
+| [12 Pattern matching](language/12-pattern-matching.md) | All pattern forms including or-patterns and `match` guards, exhaustiveness, refutability and unreachable arms. |
+| [13 Closures](language/13-closures.md) | Closure syntax and types, capture semantics, mutation, `move`, and using `Rc<T>` for shared state. |
+| [14 Standard library](language/14-standard-library.md) | Formatting (widths/precision), `String`, `Vec`, `Option` and `Result` with their combinators, `?`, `Rc`, `Box`, free functions and panics. |
+| [15 Roadmap and differences](language/15-roadmap.md) | How lsaca deliberately differs from Rust, verified limitations of the current release and what comes next. |
+| [16 Benchmarks](language/16-benchmarks.md) | Measured compile times, runtime and memory against C, Rust, Python and Node. |
 
 ## Building the compiler
 

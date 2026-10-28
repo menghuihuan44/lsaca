@@ -73,6 +73,11 @@ impl<'a> Checker<'a> {
             ExprKind::Continue => self.check_continue(span),
             ExprKind::Return(value) => self.check_return(value.as_deref(), span),
             ExprKind::Try { expr: inner } => self.check_try(inner, span, hint),
+            ExprKind::Ref {
+                mutable,
+                expr: inner,
+            } => self.check_ref(*mutable, inner, span, hint),
+            ExprKind::Deref { expr: inner } => self.check_deref(inner, span, hint),
         }
     }
 
@@ -195,7 +200,8 @@ impl<'a> Checker<'a> {
             }
             arms.push(super::tree::TArm { pat, guard, body });
         }
-        self.check_match_exhaustive(&scrutinee_ty, &arms, match_expr.span);
+        let exhaustive_ty = self.peel_refs(&scrutinee_ty);
+        self.check_match_exhaustive(&exhaustive_ty, &arms, match_expr.span);
         let result = result_ty.unwrap_or_else(ITy::never);
         if let Some(hint) = hint {
             let _ = self.unify_quiet(hint, &result);
@@ -369,10 +375,18 @@ impl<'a> Checker<'a> {
         let value = match value {
             Some(value_ast) => {
                 let value = self.check_expr(value_ast, Some(&expected));
-                if !self.unify_quiet(&expected, &value.ty) {
-                    let resolved_expected = self.infer.resolve(&expected);
-                    let resolved_value = self.infer.resolve(&value.ty);
-                    self.report_mismatch(&resolved_expected, &resolved_value, value_ast.span);
+                let value = self.coerce_to(value, &expected, value_ast.span);
+                let is_closure = self
+                    .frames
+                    .last()
+                    .map(|frame| frame.is_closure)
+                    .unwrap_or(true);
+                if !is_closure {
+                    let source = self.fns[self.current_fn]
+                        .sig
+                        .as_ref()
+                        .and_then(|sig| sig.ret_ref_source);
+                    self.check_returned_reference(&value, source, value_ast.span);
                 }
                 Some(Box::new(value))
             }
@@ -596,10 +610,18 @@ impl<'a> Checker<'a> {
         let c_name = self.fresh_closure_c_name();
         let mut param_tys: Vec<ITy> = Vec::new();
         for (index, param) in closure.params.iter().enumerate() {
+            let annotated_span = param
+                .ty
+                .as_ref()
+                .map(|ty| ty.span())
+                .unwrap_or(param.pat.span);
             let annotated = match &param.ty {
                 Some(ty) => self.resolve_ty(ty, self.current_self_key()),
                 None => None,
             };
+            if let Some(resolved) = &annotated {
+                self.validate_value_type(resolved, annotated_span);
+            }
             let from_hint = hint_signature
                 .as_ref()
                 .and_then(|(params, _)| params.get(index).cloned());
@@ -633,6 +655,28 @@ impl<'a> Checker<'a> {
                 None => self.infer.fresh_var(),
             },
         };
+        if let Some(ret_ty) = &closure.ret {
+            let ret_span = ret_ty.span();
+            self.validate_value_type(&ret, ret_span);
+            if matches!(self.infer.resolve(&ret), ITy::Ref { .. }) {
+                let ref_params = param_tys
+                    .iter()
+                    .filter(|ty| matches!(self.infer.resolve(ty), ITy::Ref { .. }))
+                    .count();
+                if ref_params != 1 {
+                    let diag = Diagnostic::error(
+                        "missing lifetime specifier".to_string(),
+                        ret_span,
+                    )
+                    .with_code("E0106")
+                    .with_note(
+                        "a closure returning a reference needs exactly one reference parameter to borrow from"
+                            .to_string(),
+                    );
+                    self.diagnostics.push(diag);
+                }
+            }
+        }
         let mut frame = Frame::new(ret.clone());
         frame.is_closure = true;
         self.frames.push(frame);
@@ -678,7 +722,8 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let body_expr = self.check_expr(&closure.body, Some(&ret));
+        let checked_body = self.check_expr(&closure.body, Some(&ret));
+        let body_expr = self.coerce_to(checked_body, &ret, closure.body.span);
         if !self.unify_quiet(&ret, &body_expr.ty) {
             let resolved_ret = self.infer.resolve(&ret);
             let resolved_body = self.infer.resolve(&body_expr.ty);
@@ -735,13 +780,13 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .and_then(|expected| expected.get(index).cloned());
             let value = self.check_expr(elem, expected.as_ref());
-            if let Some(expected) = &expected
-                && !self.unify_quiet(expected, &value.ty)
-            {
-                let resolved_expected = self.infer.resolve(expected);
-                let resolved_value = self.infer.resolve(&value.ty);
-                self.report_mismatch(&resolved_expected, &resolved_value, elem.span);
-            }
+            let value = match &expected {
+                Some(expected) => {
+                    let expected = expected.clone();
+                    self.coerce_to(value, &expected, elem.span)
+                }
+                None => value,
+            };
             actual.push(value.ty.clone());
             exprs.push(value);
         }
@@ -749,6 +794,7 @@ impl<'a> Checker<'a> {
             Some(expected) => ITy::tuple(expected),
             None => ITy::tuple(actual),
         };
+        self.validate_storage_type(&ty, span);
         TExpr::new(ty, TExprKind::Tuple(exprs), span)
     }
 
@@ -766,23 +812,18 @@ impl<'a> Checker<'a> {
                 let mut exprs = Vec::new();
                 for elem in elems {
                     let value = self.check_expr(elem, Some(&elem_ty));
-                    if !self.unify_quiet(&elem_ty, &value.ty) {
-                        let resolved_elem = self.infer.resolve(&elem_ty);
-                        let resolved_value = self.infer.resolve(&value.ty);
-                        self.report_mismatch(&resolved_elem, &resolved_value, elem.span);
-                    }
+                    let value = self.coerce_to(value, &elem_ty, elem.span);
                     exprs.push(value);
                 }
+                self.validate_storage_type(&elem_ty, span);
                 TExpr::new(ITy::vec(elem_ty), TExprKind::VecLit { elems: exprs }, span)
             }
             ast::VecLit::Repeat { value, count } => {
                 let elem_ty = expected_elem.unwrap_or_else(|| self.infer.fresh_var());
-                let value = self.check_expr(value, Some(&elem_ty));
-                if !self.unify_quiet(&elem_ty, &value.ty) {
-                    let resolved_elem = self.infer.resolve(&elem_ty);
-                    let resolved_value = self.infer.resolve(&value.ty);
-                    self.report_mismatch(&resolved_elem, &resolved_value, span);
-                }
+                let value_span = value.span;
+                let checked = self.check_expr(value, Some(&elem_ty));
+                let value = self.coerce_to(checked, &elem_ty, value_span);
+                self.validate_storage_type(&elem_ty, span);
                 let count = self.check_expr(count, Some(&ITy::i64()));
                 if !self.unify_quiet(&ITy::i64(), &count.ty) {
                     let resolved = self.infer.resolve(&count.ty);
@@ -860,12 +901,9 @@ impl<'a> Checker<'a> {
             match index {
                 Some(index) => {
                     let expected = struct_fields[index].2.clone();
+                    self.validate_storage_type(&expected, field.value.span);
                     let value = self.check_expr(&field.value, Some(&expected));
-                    if !self.unify_quiet(&expected, &value.ty) {
-                        let resolved_expected = self.infer.resolve(&expected);
-                        let resolved_value = self.infer.resolve(&value.ty);
-                        self.report_mismatch(&resolved_expected, &resolved_value, field.value.span);
-                    }
+                    let value = self.coerce_to(value, &expected, field.value.span);
                     values.push((index, value));
                 }
                 None => {
@@ -970,7 +1008,8 @@ impl<'a> Checker<'a> {
         hint: Option<&ITy>,
     ) -> TExpr {
         let base_expr = self.check_expr(base, None);
-        let base_ty = self.infer.resolve(&base_expr.ty);
+        let raw_ty = self.infer.resolve(&base_expr.ty);
+        let base_ty = self.peel_access_refs(&raw_ty);
         match &base_ty {
             ITy::Struct(id) => {
                 let id = *id;
@@ -1034,7 +1073,8 @@ impl<'a> Checker<'a> {
         hint: Option<&ITy>,
     ) -> TExpr {
         let base_expr = self.check_expr(base, None);
-        let base_ty = self.infer.resolve(&base_expr.ty);
+        let raw_ty = self.infer.resolve(&base_expr.ty);
+        let base_ty = self.peel_access_refs(&raw_ty);
         match &base_ty {
             ITy::Tuple(elems) => {
                 if index < elems.len() {
@@ -1096,7 +1136,8 @@ impl<'a> Checker<'a> {
             let resolved = self.infer.resolve(&index_expr.ty);
             self.report_mismatch(&ITy::i64(), &resolved, index.span);
         }
-        let base_ty = self.infer.resolve(&base_expr.ty);
+        let raw_ty = self.infer.resolve(&base_expr.ty);
+        let base_ty = self.peel_refs(&raw_ty);
         match &base_ty {
             ITy::Vec(elem) => {
                 let elem = (**elem).clone();
@@ -1202,13 +1243,13 @@ impl<'a> Checker<'a> {
         for (index, arg) in args.iter().enumerate() {
             let expected_ty = expected.get(index).cloned();
             let value = self.check_expr(arg, expected_ty.as_ref());
-            if let Some(expected_ty) = &expected_ty
-                && !self.unify_quiet(expected_ty, &value.ty)
-            {
-                let resolved_expected = self.infer.resolve(expected_ty);
-                let resolved_value = self.infer.resolve(&value.ty);
-                self.report_mismatch(&resolved_expected, &resolved_value, arg.span);
-            }
+            let value = match &expected_ty {
+                Some(expected_ty) => {
+                    let expected_ty = expected_ty.clone();
+                    self.coerce_to(value, &expected_ty, arg.span)
+                }
+                None => value,
+            };
             exprs.push(value);
         }
         exprs
@@ -1221,6 +1262,7 @@ impl<'a> Checker<'a> {
                 | TExprKind::Capture { .. }
                 | TExprKind::Field { .. }
                 | TExprKind::Index { .. }
+                | TExprKind::Deref { .. }
         )
     }
 
@@ -1233,8 +1275,17 @@ impl<'a> Checker<'a> {
                 .and_then(|frame| frame.captures.get(*index))
                 .map(|capture| capture.mutable)
                 .unwrap_or(false),
-            TExprKind::Field { base, .. } => self.is_mutable_place(base),
-            TExprKind::Index { base, .. } => self.is_mutable_place(base),
+            // Field and index projections auto-dereference a `&mut` base, so
+            // the projected place is mutable even though the binding that
+            // holds the reference is not. `fn bump(c: &mut Counter)` may
+            // therefore write `c.count`, without requiring `mut c`.
+            TExprKind::Field { base, .. } | TExprKind::Index { base, .. } => {
+                self.is_mutable_place(base)
+                    || matches!(self.infer.resolve(&base.ty), ITy::Ref { mutable: true, .. })
+            }
+            TExprKind::Deref { expr } => {
+                matches!(self.infer.resolve(&expr.ty), ITy::Ref { mutable: true, .. })
+            }
             _ => false,
         }
     }

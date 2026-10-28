@@ -13,11 +13,7 @@ impl<'a> Gen<'a> {
     // ----- places ----------------------------------------------------------
 
     pub(crate) fn field_lvalue(&mut self, base: &HExpr, field: HFieldRef) -> String {
-        let base_lv = if base.is_place() {
-            self.gen_place(base)
-        } else {
-            self.gen_owned(base)
-        };
+        let base_lv = self.auto_deref_base(base);
         match field {
             HFieldRef::Tuple(index) => {
                 format!("({}).{}", base_lv, types::positional_field(index))
@@ -37,11 +33,7 @@ impl<'a> Gen<'a> {
 
     /// Lvalue of a vector element, with a runtime bounds check.
     pub(crate) fn index_lvalue(&mut self, base: &HExpr, index: &HExpr, span: Span) -> String {
-        let base_lv = if base.is_place() {
-            self.gen_place(base)
-        } else {
-            self.gen_owned(base)
-        };
+        let base_lv = self.auto_deref_base(base);
         let index_value = self.gen_owned(index);
         let loc = self.loc(span);
         self.w.line(format!(
@@ -56,6 +48,32 @@ impl<'a> Gen<'a> {
         self.w.dedent();
         self.w.line("}");
         format!("({}).data[(size_t)({})]", base_lv, index_value)
+    }
+
+    /// Lvalue of a place base with auto-deref applied: references are
+    /// dereferenced and `Rc`/`Box` handles are unwrapped to their payload
+    /// cell. Any other value is returned unchanged.
+    pub(crate) fn auto_deref_base(&mut self, base: &HExpr) -> String {
+        let mut lvalue = if base.is_place() {
+            self.gen_place(base)
+        } else {
+            self.gen_owned(base)
+        };
+        let mut ty = base.ty.clone();
+        for _ in 0..8 {
+            match &ty {
+                Ty::Ref { inner, .. } => {
+                    lvalue = format!("(*({}))", lvalue);
+                    ty = (**inner).clone();
+                }
+                Ty::Rc(inner) | Ty::Box(inner) => {
+                    lvalue = format!("(({})->payload)", lvalue);
+                    ty = (**inner).clone();
+                }
+                _ => break,
+            }
+        }
+        lvalue
     }
 
     // ----- unary and binary operators --------------------------------------
@@ -372,30 +390,59 @@ impl<'a> Gen<'a> {
             }
         };
         let mut arguments: Vec<String> = Vec::new();
-        let mut receiver_release: Option<(Ty, String)> = None;
+        // Values whose ownership is transferred to the callee: the caller must
+        // not release them. These are the by-value receiver and the arguments.
+        let mut moved_values: Vec<String> = Vec::new();
         if let Some(receiver_expr) = receiver {
+            let receiver_ty = receiver_expr.ty.clone();
+            let self_ty = item
+                .params
+                .first()
+                .map(|parameter| {
+                    let ty = parameter.ty.clone();
+                    // The receiver parameter is stored as a reference to the
+                    // impl type; pointer setup works on the pointee type.
+                    match item.self_kind {
+                        Some(SelfKind::Ref) | Some(SelfKind::RefMut) => {
+                            ty.ref_inner().cloned().unwrap_or(ty)
+                        }
+                        _ => ty,
+                    }
+                })
+                .unwrap_or(Ty::Unit);
             match item.self_kind {
                 Some(SelfKind::Ref) | Some(SelfKind::RefMut) => {
-                    if receiver_expr.is_place() {
-                        let place = self.gen_place(receiver_expr);
-                        arguments.push(format!("&({})", place));
-                    } else {
-                        let temporary = self.gen_owned(receiver_expr);
-                        arguments.push(format!("&{}", temporary));
-                        receiver_release = Some((receiver_expr.ty.clone(), temporary));
-                    }
+                    let pointer_ctype = format!("{}*", self.ctype(&self_ty));
+                    let pointer = self.receiver_pointer(receiver_expr, &self_ty, &pointer_ctype);
+                    arguments.push(pointer);
                 }
                 _ => {
-                    let value = self.gen_owned(receiver_expr);
-                    arguments.push(value);
+                    if receiver_ty.is_ref() {
+                        // A by-value method reached through a reference: the
+                        // callee consumes a copy of the pointee.
+                        let pointer = self.gen_owned(receiver_expr);
+                        let copy = self.declare_temp(&self_ty);
+                        let pointee = format!("(*({}))", pointer);
+                        let pointee = if self.is_pointer_type(&self_ty) {
+                            format!("(({})({}))", self.ctype(&self_ty), pointee)
+                        } else {
+                            pointee
+                        };
+                        self.emit_copy_into(&copy, &self_ty, &pointee);
+                        arguments.push(copy.clone());
+                        moved_values.push(copy);
+                    } else {
+                        let value = self.gen_owned(receiver_expr);
+                        arguments.push(value.clone());
+                        moved_values.push(value);
+                    }
                 }
             }
         }
-        let mut argument_values: Vec<String> = Vec::new();
         for argument in args {
             let value = self.gen_owned(argument);
             arguments.push(value.clone());
-            argument_values.push(value);
+            moved_values.push(value);
         }
         let call = format!("{}({})", item.c_name, arguments.join(", "));
         if ty.is_unit() {
@@ -405,13 +452,49 @@ impl<'a> Gen<'a> {
         } else {
             self.w.line(format!("{} = {};", target, call));
         }
-        for value in &argument_values {
+        for value in &moved_values {
             self.mark_moved(value);
         }
-        if let Some((receiver_ty, temporary)) = receiver_release {
-            self.emit_release(&receiver_ty, &temporary);
-            self.mark_moved(&temporary);
+    }
+
+    /// A pointer of type `pointer_ctype` that points at the self value of a
+    /// method receiver, for the `&self` / `&mut self` calling convention.
+    ///
+    /// Handles receivers that are already references (the pointer value is
+    /// forwarded), `Rc`/`Box` handles (the pointer targets the payload cell)
+    /// and plain place or value expressions (the address of the value).
+    fn receiver_pointer(&mut self, expr: &HExpr, self_ty: &Ty, pointer_ctype: &str) -> String {
+        let mut ty = expr.ty.clone();
+        let mut pointer_value: Option<String> = None;
+        let mut lvalue;
+        if ty.is_ref() {
+            let pointer = self.gen_owned(expr);
+            ty = ty.ref_inner().cloned().unwrap_or(Ty::Unit);
+            lvalue = format!("(*({}))", pointer);
+            pointer_value = Some(format!("({}){}", pointer_ctype, pointer));
+        } else if expr.is_place() {
+            lvalue = self.gen_place(expr);
+        } else {
+            lvalue = self.gen_owned(expr);
         }
+        let mut crossed_cell = false;
+        for _ in 0..8 {
+            match &ty {
+                Ty::Rc(inner) | Ty::Box(inner) => {
+                    lvalue = format!("(({})->payload)", lvalue);
+                    ty = (**inner).clone();
+                    crossed_cell = true;
+                }
+                _ => break,
+            }
+        }
+        if !crossed_cell
+            && let Some(pointer) = pointer_value
+            && ty == *self_ty
+        {
+            return pointer;
+        }
+        format!("({})&({})", pointer_ctype, lvalue)
     }
 
     // ----- aggregate literals ----------------------------------------------

@@ -67,9 +67,11 @@ fn emit_box_decls(w: &mut CWriter, registry: &TypeRegistry, inner: &Ty) {
         "{} lsaca_box_new_{}({} value);",
         cell_ptr, suffix, inner_ty
     ));
+    // The payload accessor only reads the cell, so it accepts a cell seen
+    // through a shared reference (const qualified) as well.
     w.line(format!(
-        "{} lsaca_box_get_{}({} self);",
-        inner_ty, suffix, cell_ptr
+        "{} lsaca_box_get_{}(const {}* self);",
+        inner_ty, suffix, cell
     ));
     w.line(format!(
         "void lsaca_box_set_{}({} self, {} value);",
@@ -93,9 +95,11 @@ fn emit_rc_decls(w: &mut CWriter, registry: &TypeRegistry, inner: &Ty) {
         "{} lsaca_rc_new_{}({} value);",
         cell_ptr, suffix, inner_ty
     ));
+    // The payload accessor only reads the cell, so it accepts a cell seen
+    // through a shared reference (const qualified) as well.
     w.line(format!(
-        "{} lsaca_rc_get_{}({} self);",
-        inner_ty, suffix, cell_ptr
+        "{} lsaca_rc_get_{}(const {}* self);",
+        inner_ty, suffix, cell
     ));
     w.line(format!(
         "void lsaca_rc_set_{}({} self, {} value);",

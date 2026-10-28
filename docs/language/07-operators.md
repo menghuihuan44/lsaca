@@ -22,7 +22,7 @@ From loosest to tightest binding:
 | 9 | `+` `-` | left | Addition and subtraction, also `String` concatenation. |
 | 10 | `*` `/` `%` | left | Multiplication, division, remainder. |
 | 11 | `as` | left | Type cast. |
-| 12 | `-` `!` | prefix | Unary negation and logical/bitwise NOT. |
+| 12 | `-` `!` `*` `&` `&mut` | prefix | Unary negation, logical/bitwise NOT, dereference and borrow. |
 | 13 | `f(x)` `x.m()` `x.f` `x[i]` `x?` | left | Calls, method calls, field access, indexing, error propagation. |
 
 Two consequences worth remembering: `1 << 3 + 1` is `16` because `+` binds tighter
@@ -33,7 +33,7 @@ The postfix `?` operator is at the same (tightest) level as calls and field
 access: it applies to the value to its left, so `half(n)? + 1` is
 `(half(n)?) + 1`. When it propagates `None`/`Err` it returns from the enclosing
 function immediately, so nothing to its right is evaluated. See
-[Error propagation with `?`](13-standard-library.md#error-propagation-with-).
+[Error propagation with `?`](14-standard-library.md#error-propagation-with-).
 
 ```ls
 fn main() {
@@ -349,7 +349,7 @@ type:
   same cell;
 * `Box<T>` compares by payload, structurally;
 * tuples, structs, enums, `Vec<T>`, `Option<T>` and `Result<T, E>` do **not**
-  support `==` in 1.2.0, and the compiler reports `E0369`. Compare them by
+  support `==` in 1.3.0, and the compiler reports `E0369`. Compare them by
   pattern matching instead;
 * `()` does not support `==` either.
 
@@ -398,11 +398,72 @@ error[E0369]: binary operation == cannot be applied to type Vec<{integer}>
 lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
 ```
 
+## Borrowing and dereferencing
+
+The unary `&` and `&mut` operators form a *borrow expression*; their operand
+must be a **place** (a variable, parameter, field, index, or a dereferenced
+reference). Borrowing a temporary such as `&(1 + 2)`, `&String::from("hi")` or a
+constant is rejected with E0745 — bind the value to a local first. `&place`
+creates a shared reference; `&mut place` creates a mutable one and requires the
+place itself to be mutable.
+
+The unary `*` operator is a *dereference*: `*r` reads the value a reference
+points to, and `*r = value` writes through a mutable reference. Dereference
+binds tighter than every binary operator, so `*r + 1` means `(*r) + 1`, while
+`&n + 1` parses as `(&n) + 1` and is a type error.
+
+Field access, method calls and indexing auto-dereference, so `r.field` reads
+or writes a field through a `&mut` reference and `r[i]` indexes through it;
+the explicit `(*r).field = value` form is equivalent. References cannot be
+compared with `==` and cannot be converted with `as`; compare the *values* they
+point to with `*a == *b`.
+
+```ls
+fn main() {
+    let mut n = 10;
+    let r = &n;
+    println!("{}", *r + 1);
+
+    let m = &mut n;
+    *m = *m + 5;
+    println!("{}", n);
+}
+```
+
+Output:
+```text
+11
+15
+```
+
+This is a short summary; the full aliasing rules, reference parameters,
+elision and match ergonomics are on [References and
+borrowing](11-references-and-borrowing.md).
+
+```ls,compile-fail
+fn main() {
+    let n = 1;
+    println!("{}", &n + 1);
+}
+```
+
+Error:
+```text
+error[E0308]: mismatched types
+  --> example-17.ls:3:20
+   |
+ 3 |     println!("{}", &n + 1);
+   |                    ^^^^^^
+   = note: expected &{integer}, found {integer}
+
+lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
+```
+
 ## Casts
 
 The `as` operator converts between scalar types. It binds tighter than
 arithmetic and looser than unary operators, and it can be chained
-(`x as i32 as f64`). The conversion rules — truncation for integers, saturation
+(`x as i32 as f64`). References cannot be converted with `as`. The conversion rules — truncation for integers, saturation
 for float-to-integer, rounding for large integer-to-float — are listed in
 [Types](04-types.md#casts).
 
@@ -430,5 +491,7 @@ Output:
 * Blocks and control flow, where these operators live:
   [Statements and control flow](08-statements-and-control-flow.md).
 * The complete type rules behind the operators: [Types](04-types.md).
+* Borrowing, dereferencing and the aliasing rules behind `&`, `&mut` and `*`:
+  [References and borrowing](11-references-and-borrowing.md).
 * Operator behavior of floats and strings in the built-in API:
-  [Standard library](13-standard-library.md).
+  [Standard library](14-standard-library.md).

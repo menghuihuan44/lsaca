@@ -11,7 +11,7 @@ program needs must be in that file: there is no `mod`, no `use`, no include
 mechanism and no way to compile two files together. This keeps the language
 small and makes programs easy to move around, but it also means the standard
 library is the only library: the built-in types and free functions listed in
-[Standard library](13-standard-library.md) are the entire prelude.
+[Standard library](14-standard-library.md) are the entire prelude.
 
 Whitespace is insignificant outside literals, and the file is processed from
 beginning to end by the parser. An empty file is a syntactically valid
@@ -375,7 +375,7 @@ lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
 
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 1.2.0 parser. Optional parts
+The grammar below is the authoritative EBNF of the 1.3.0 parser. Optional parts
 are written with `[...]`, repetitions with `*` and `+`, and alternatives with
 `|`. It is reproduced here for reference; the individual pages explain each
 construct in detail.
@@ -416,7 +416,7 @@ shiftExpr    = addExpr ( ( "<<" | ">>" ) addExpr )* ;
 addExpr      = mulExpr ( ( "+" | "-" ) mulExpr )* ;
 mulExpr      = castExpr ( ( "*" | "/" | "%" ) castExpr )* ;
 castExpr     = unaryExpr ( "as" type )* ;
-unaryExpr    = ( "-" | "!" ) unaryExpr | postfixExpr ;
+unaryExpr    = ( "-" | "!" | "*" | "&" [ "mut" ] ) unaryExpr | postfixExpr ;
 postfixExpr  = primary ( call | methodCall | "." IDENT | "." INT | "[" expr "]" | "?" )* ;
 call         = "(" args? ")" ;
 methodCall   = "." IDENT ( "::" "<" typeArgs ">" )? "(" args? ")" ;
@@ -455,7 +455,8 @@ patternList  = pattern ( "," pattern )* ","? ;
 tuplePattern = "(" pattern "," ")" | "(" pattern ( "," pattern )+ ","? ")" ;
 fieldPat     = IDENT ( ":" pattern )? ;
 
-type         = pathType | tupleType | fnType ;
+type         = refType | pathType | tupleType | fnType ;
+refType      = "&" [ "mut" ] type ;
 pathType     = typeIdent ( "::" typeIdent )* ( "::" "<" typeArgs ">" | "<" typeArgs ">" )? ;
 typeIdent    = IDENT | "Self" ;
 tupleType    = "(" ")" | "(" type ")" | "(" type "," ")" | "(" type ( "," type )* ","? ")" ;
@@ -491,7 +492,7 @@ Output:
 small big other
 ```
 
-The full rules are in [Pattern matching](11-pattern-matching.md#or-patterns).
+The full rules are in [Pattern matching](12-pattern-matching.md#or-patterns).
 
 ## What next
 

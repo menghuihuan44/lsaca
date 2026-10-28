@@ -204,6 +204,14 @@ pub enum Ty {
     Tuple(Vec<Ty>),
     /// Function type: parameter types and return type.
     Fn(Vec<Ty>, Box<Ty>),
+    /// A non-owning reference: `&T` when `mutable` is false, `&mut T` when it
+    /// is true. References are plain C pointers: they carry no reference count
+    /// traffic and are trivially copyable. The borrow checker guarantees that
+    /// the referent outlives every live reference.
+    Ref {
+        mutable: bool,
+        inner: Box<Ty>,
+    },
     /// A user struct, referenced by index into the HIR struct table.
     Struct(usize),
     /// A user enum, referenced by index into the HIR enum table.
@@ -295,6 +303,22 @@ impl Ty {
         Ty::Fn(params, Box::new(ret))
     }
 
+    /// A shared reference type `&T`.
+    pub fn ref_to(inner: Ty) -> Ty {
+        Ty::Ref {
+            mutable: false,
+            inner: Box::new(inner),
+        }
+    }
+
+    /// A mutable reference type `&mut T`.
+    pub fn ref_mut_to(inner: Ty) -> Ty {
+        Ty::Ref {
+            mutable: true,
+            inner: Box::new(inner),
+        }
+    }
+
     pub fn is_unit(&self) -> bool {
         matches!(self, Ty::Unit)
     }
@@ -355,11 +379,28 @@ impl Ty {
         matches!(self, Ty::Enum(_))
     }
 
+    pub fn is_ref(&self) -> bool {
+        matches!(self, Ty::Ref { .. })
+    }
+
+    pub fn is_ref_mut(&self) -> bool {
+        matches!(self, Ty::Ref { mutable: true, .. })
+    }
+
+    /// The referent of a reference type.
+    pub fn ref_inner(&self) -> Option<&Ty> {
+        match self {
+            Ty::Ref { inner, .. } => Some(inner),
+            _ => None,
+        }
+    }
+
     /// True for types with no owned (reference counted) parts. Values of these
     /// types can be copied with a plain C assignment and need no cleanup.
     pub fn is_bitwise_copy(&self) -> bool {
         match self {
             Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) => true,
+            Ty::Ref { .. } => true,
             Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) => false,
             Ty::Option(inner) => inner.is_bitwise_copy(),
             Ty::Result(ok, err) => ok.is_bitwise_copy() && err.is_bitwise_copy(),
@@ -375,7 +416,7 @@ impl Ty {
     pub fn is_scalar(&self) -> bool {
         matches!(
             self,
-            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::Fn(_, _)
+            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::Fn(_, _) | Ty::Ref { .. }
         )
     }
 
@@ -414,6 +455,13 @@ impl fmt::Display for Ty {
                     write!(f, "{}", elem)?;
                 }
                 write!(f, ")")
+            }
+            Ty::Ref { mutable, inner } => {
+                if *mutable {
+                    write!(f, "&mut {}", inner)
+                } else {
+                    write!(f, "&{}", inner)
+                }
             }
             Ty::Fn(params, ret) => {
                 write!(f, "fn(")?;

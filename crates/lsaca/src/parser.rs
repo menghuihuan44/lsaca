@@ -33,6 +33,18 @@ const SUGAR_VARIANT_NAMES: [&str; 4] = ["None", "Some", "Ok", "Err"];
 /// 2 MiB stack of a test thread; no sane program comes close.
 const MAX_NESTING_DEPTH: usize = 64;
 
+/// A prefix operator collected by parse_unary before its operand is parsed.
+/// Prefix operators are right associative, so they are folded from the
+/// innermost one outwards after the postfix operand has been parsed.
+#[derive(Clone, Copy)]
+enum PrefixOp {
+    Neg,
+    Not,
+    Ref,
+    RefMut,
+    Deref,
+}
+
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
@@ -359,6 +371,9 @@ impl<'a> Parser<'a> {
                 | TokenKind::LBracket
                 | TokenKind::Minus
                 | TokenKind::Bang
+                | TokenKind::Amp
+                | TokenKind::AmpAmp
+                | TokenKind::Star
                 | TokenKind::Pipe
                 | TokenKind::PipePipe
         )
@@ -750,6 +765,31 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_inner(&mut self) -> TypeExpr {
+        // Reference types: &T and &mut T. The lexer scans a written '&&' as a
+        // single AmpAmp token; it is two nested shared references, &(&T).
+        if self.at(TokenKind::AmpAmp) {
+            let amp = self.bump();
+            let mutable = self.eat(TokenKind::KwMut).is_some();
+            let inner = TypeExpr::Ref {
+                mutable,
+                inner: Box::new(self.parse_type()),
+                span: amp.span,
+            };
+            return TypeExpr::Ref {
+                mutable: false,
+                inner: Box::new(inner),
+                span: amp.span,
+            };
+        }
+        if self.at(TokenKind::Amp) {
+            let amp = self.bump();
+            let mutable = self.eat(TokenKind::KwMut).is_some();
+            return TypeExpr::Ref {
+                mutable,
+                inner: Box::new(self.parse_type()),
+                span: amp.span,
+            };
+        }
         if self.at(TokenKind::KwFn) {
             let fn_token = self.bump();
             let mut params = Vec::new();
@@ -971,6 +1011,19 @@ impl<'a> Parser<'a> {
             TokenKind::Minus => {
                 self.bump();
                 self.parse_negative_literal_pattern(start)
+            }
+            TokenKind::Amp | TokenKind::AmpAmp => {
+                let token = self.bump();
+                self.error(
+                    "reference patterns are not supported; match a reference scrutinee directly, bindings become references",
+                    token.span,
+                );
+                // Recover by parsing the pattern after the rejected reference so
+                // that one mistake does not derail the enclosing match or let
+                // statement. The AST has no reference pattern node, so the inner
+                // pattern is kept on its own.
+                self.eat(TokenKind::KwMut);
+                self.parse_pattern()
             }
             TokenKind::LParen => self.parse_tuple_pattern(),
             TokenKind::Ident(_) | TokenKind::KwSelfTy => self.parse_path_pattern(),
@@ -1464,31 +1517,63 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expr {
-        // Iterative so that a long run of '-' or '!' cannot exhaust the stack.
-        // Unary operators are right associative, so the operators are collected
-        // first and folded from the innermost one outwards.
-        let mut operators: Vec<(UnaryOp, Span)> = Vec::new();
+        // Iterative so that a long run of prefix operators cannot exhaust the
+        // stack. Prefix operators are right associative, so the operators are
+        // collected first and folded from the innermost one outwards.
+        let mut operators: Vec<(PrefixOp, Span)> = Vec::new();
         loop {
-            let op = if self.at(TokenKind::Minus) {
-                UnaryOp::Neg
-            } else if self.at(TokenKind::Bang) {
-                UnaryOp::Not
-            } else {
-                break;
+            let mut op = match self.kind() {
+                TokenKind::Minus => PrefixOp::Neg,
+                TokenKind::Bang => PrefixOp::Not,
+                TokenKind::Amp => PrefixOp::Ref,
+                TokenKind::Star => PrefixOp::Deref,
+                TokenKind::AmpAmp => {
+                    // A written '&&' is one token but two nested shared
+                    // borrows, &(&x). A 'mut' directly after it belongs to the
+                    // inner borrow: '&&mut x' means &(&mut x).
+                    let token = self.bump();
+                    operators.push((PrefixOp::Ref, token.span));
+                    let inner = if self.eat(TokenKind::KwMut).is_some() {
+                        PrefixOp::RefMut
+                    } else {
+                        PrefixOp::Ref
+                    };
+                    operators.push((inner, token.span));
+                    continue;
+                }
+                _ => break,
             };
             let token = self.bump();
+            if matches!(op, PrefixOp::Ref) && self.eat(TokenKind::KwMut).is_some() {
+                op = PrefixOp::RefMut;
+            }
             operators.push((op, token.span));
         }
         let mut expr = self.parse_postfix();
         for (op, op_span) in operators.into_iter().rev() {
             let span = op_span.join(expr.span);
-            expr = Expr::new(
-                ExprKind::Unary {
-                    op,
+            let kind = match op {
+                PrefixOp::Neg => ExprKind::Unary {
+                    op: UnaryOp::Neg,
                     expr: Box::new(expr),
                 },
-                span,
-            );
+                PrefixOp::Not => ExprKind::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(expr),
+                },
+                PrefixOp::Ref => ExprKind::Ref {
+                    mutable: false,
+                    expr: Box::new(expr),
+                },
+                PrefixOp::RefMut => ExprKind::Ref {
+                    mutable: true,
+                    expr: Box::new(expr),
+                },
+                PrefixOp::Deref => ExprKind::Deref {
+                    expr: Box::new(expr),
+                },
+            };
+            expr = Expr::new(kind, span);
         }
         expr
     }
@@ -2656,6 +2741,436 @@ impl Point {
         match &fn_named(&outside, "helper").ret {
             Some(TypeExpr::Path { name, .. }) => assert_eq!(name, "Self"),
             other => panic!("expected a Self return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_reference_expressions() {
+        let tail = parse_tail("&value");
+        match &tail.kind {
+            ExprKind::Ref { mutable, expr } => {
+                assert!(!mutable);
+                assert_eq!(as_path_name(expr), "value");
+            }
+            other => panic!("expected a reference expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_mutable_reference_expressions() {
+        let tail = parse_tail("&mut value");
+        match &tail.kind {
+            ExprKind::Ref { mutable, expr } => {
+                assert!(mutable);
+                assert_eq!(as_path_name(expr), "value");
+            }
+            other => panic!("expected a mutable reference expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_deref_expressions() {
+        let tail = parse_tail("*pointer");
+        match &tail.kind {
+            ExprKind::Deref { expr } => assert_eq!(as_path_name(expr), "pointer"),
+            other => panic!("expected a dereference, got {:?}", other),
+        }
+
+        // Dereference chains are right associative.
+        let tail = parse_tail("**pointer");
+        match &tail.kind {
+            ExprKind::Deref { expr } => match &expr.kind {
+                ExprKind::Deref { expr } => assert_eq!(as_path_name(expr), "pointer"),
+                other => panic!("expected an inner dereference, got {:?}", other),
+            },
+            other => panic!("expected a dereference, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn double_ampersand_is_nested_shared_refs() {
+        let tail = parse_tail("&&x");
+        match &tail.kind {
+            ExprKind::Ref {
+                mutable: false,
+                expr,
+            } => match &expr.kind {
+                ExprKind::Ref {
+                    mutable: false,
+                    expr,
+                } => assert_eq!(as_path_name(expr), "x"),
+                other => panic!("expected an inner reference, got {:?}", other),
+            },
+            other => panic!("expected a reference, got {:?}", other),
+        }
+
+        // A written '&&' is one token; a following 'mut' belongs to the inner
+        // borrow, so &&mut x is &(&mut x).
+        let tail = parse_tail("&&mut x");
+        match &tail.kind {
+            ExprKind::Ref {
+                mutable: false,
+                expr,
+            } => match &expr.kind {
+                ExprKind::Ref {
+                    mutable: true,
+                    expr,
+                } => assert_eq!(as_path_name(expr), "x"),
+                other => panic!("expected an inner mutable reference, got {:?}", other),
+            },
+            other => panic!("expected a reference, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reference_binds_tighter_than_binary_operators() {
+        let root = parse_tail("&a + b");
+        let (op, lhs, rhs) = as_binary(&root);
+        assert_eq!(*op, BinaryOp::Add);
+        assert!(matches!(&lhs.kind, ExprKind::Ref { mutable: false, .. }));
+        assert_eq!(as_path_name(rhs), "b");
+
+        let root = parse_tail("a + &b");
+        let (op, lhs, rhs) = as_binary(&root);
+        assert_eq!(*op, BinaryOp::Add);
+        assert_eq!(as_path_name(lhs), "a");
+        assert!(matches!(&rhs.kind, ExprKind::Ref { .. }));
+
+        let root = parse_tail("a & &b");
+        let (op, _, rhs) = as_binary(&root);
+        assert_eq!(*op, BinaryOp::BitAnd);
+        assert!(matches!(&rhs.kind, ExprKind::Ref { .. }));
+    }
+
+    #[test]
+    fn reference_binds_postfix_operations() {
+        let tail = parse_tail("&point.x");
+        match &tail.kind {
+            ExprKind::Ref {
+                mutable: false,
+                expr,
+            } => match &expr.kind {
+                ExprKind::Field { base, name, .. } => {
+                    assert_eq!(as_path_name(base), "point");
+                    assert_eq!(name, "x");
+                }
+                other => panic!("expected a field access, got {:?}", other),
+            },
+            other => panic!("expected a reference, got {:?}", other),
+        }
+
+        let tail = parse_tail("&mut values[0]");
+        match &tail.kind {
+            ExprKind::Ref {
+                mutable: true,
+                expr,
+            } => {
+                assert!(matches!(&expr.kind, ExprKind::Index { .. }));
+            }
+            other => panic!("expected a mutable reference, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ref_and_deref_chain() {
+        let tail = parse_tail("&*p");
+        match &tail.kind {
+            ExprKind::Ref { expr, .. } => assert!(matches!(&expr.kind, ExprKind::Deref { .. })),
+            other => panic!("expected a reference, got {:?}", other),
+        }
+
+        let tail = parse_tail("*&x");
+        match &tail.kind {
+            ExprKind::Deref { expr } => assert!(matches!(&expr.kind, ExprKind::Ref { .. })),
+            other => panic!("expected a dereference, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unary_not_and_neg_apply_to_references() {
+        let tail = parse_tail("!&x");
+        match &tail.kind {
+            ExprKind::Unary {
+                op: UnaryOp::Not,
+                expr,
+            } => assert!(matches!(&expr.kind, ExprKind::Ref { .. })),
+            other => panic!("expected a logical not, got {:?}", other),
+        }
+
+        let tail = parse_tail("-&x");
+        match &tail.kind {
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => assert!(matches!(&expr.kind, ExprKind::Ref { .. })),
+            other => panic!("expected a negation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn binary_ampersand_and_star_still_work() {
+        let root = parse_tail("a & b");
+        let (op, lhs, rhs) = as_binary(&root);
+        assert_eq!(*op, BinaryOp::BitAnd);
+        assert_eq!(as_path_name(lhs), "a");
+        assert_eq!(as_path_name(rhs), "b");
+
+        let root = parse_tail("a * b");
+        let (op, _, _) = as_binary(&root);
+        assert_eq!(*op, BinaryOp::Mul);
+
+        let root = parse_tail("a && b");
+        let (op, _, _) = as_binary(&root);
+        assert_eq!(*op, BinaryOp::And);
+    }
+
+    #[test]
+    fn parses_reference_types() {
+        let program = parse_ok("fn f(a: &i64, b: &mut String) -> &&f64 { loop {} }");
+        let function = fn_named(&program, "f");
+        match &function.params[0].ty {
+            TypeExpr::Ref { mutable, inner, .. } => {
+                assert!(!mutable);
+                match inner.as_ref() {
+                    TypeExpr::Path { name, .. } => assert_eq!(name, "i64"),
+                    other => panic!("expected the i64 referent, got {:?}", other),
+                }
+            }
+            other => panic!("expected a reference type, got {:?}", other),
+        }
+        match &function.params[1].ty {
+            TypeExpr::Ref { mutable, inner, .. } => {
+                assert!(mutable);
+                match inner.as_ref() {
+                    TypeExpr::Path { name, .. } => assert_eq!(name, "String"),
+                    other => panic!("expected the String referent, got {:?}", other),
+                }
+            }
+            other => panic!("expected a reference type, got {:?}", other),
+        }
+        match &function.ret {
+            Some(TypeExpr::Ref { mutable, inner, .. }) => {
+                assert!(!mutable);
+                match inner.as_ref() {
+                    TypeExpr::Ref { mutable, inner, .. } => {
+                        assert!(!mutable);
+                        assert!(
+                            matches!(inner.as_ref(), TypeExpr::Path { name, .. } if name == "f64")
+                        );
+                    }
+                    other => panic!("expected a nested reference type, got {:?}", other),
+                }
+            }
+            other => panic!("expected a nested reference return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_compound_reference_types() {
+        let program = parse_ok(
+            "fn f(a: &(i64, i64), b: &fn(i64) -> i64, c: &(), d: &mut &Vec<i64>, e: &&mut i64) {}",
+        );
+        let function = fn_named(&program, "f");
+        let descriptions: Vec<String> = function
+            .params
+            .iter()
+            .map(|param| param.ty.describe())
+            .collect();
+        assert_eq!(
+            descriptions,
+            vec![
+                "&(i64, i64)",
+                "&fn(i64) -> i64",
+                "&()",
+                "&mut &Vec<i64>",
+                "&&mut i64"
+            ]
+        );
+    }
+
+    #[test]
+    fn reference_type_spans_cover_the_ampersand() {
+        let source = "fn f(a: &i64, b: &&i64) {}";
+        let program = parse_ok(source);
+        let function = fn_named(&program, "f");
+        let span = function.params[0].ty.span();
+        assert_eq!(&source[span.start as usize..span.end as usize], "&");
+        let span = function.params[1].ty.span();
+        assert_eq!(&source[span.start as usize..span.end as usize], "&&");
+    }
+
+    #[test]
+    fn rejects_reference_patterns() {
+        for source in [
+            "fn f(x: i64) { match x { &mut y => 1, _ => 2 } }",
+            "fn f(x: i64) { match x { &&z => 1, _ => 2 } }",
+            "fn f(x: i64) { let &w = x; }",
+            "fn f(x: i64) { if let &v = &x {} }",
+        ] {
+            let errors = parse_errors(source);
+            assert!(
+                errors
+                    .iter()
+                    .any(|message| message.contains("reference patterns are not supported")),
+                "expected a reference pattern diagnostic for {:?}, got {:?}",
+                source,
+                errors
+            );
+        }
+    }
+
+    #[test]
+    fn reference_pattern_recovery_keeps_parsing() {
+        let (program, diagnostics) = parse_source("fn f(x: i64) { match x { &y => 1, _ => 2 } }");
+        let errors: Vec<String> = diagnostics
+            .into_vec()
+            .into_iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .map(|diagnostic| diagnostic.message)
+            .collect();
+        assert_eq!(errors.len(), 1, "expected one diagnostic, got {:?}", errors);
+        assert!(errors[0].contains("reference patterns are not supported"));
+
+        let function = fn_named(&program, "f");
+        match &function.body.tail.as_deref().expect("tail").kind {
+            ExprKind::Match(match_expr) => {
+                assert_eq!(match_expr.arms.len(), 2);
+                assert_eq!(as_int(&match_expr.arms[0].body), 1);
+                assert_eq!(as_int(&match_expr.arms[1].body), 2);
+            }
+            other => panic!("expected a match expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn receivers_still_parse_with_reference_syntax() {
+        let source = r#"struct Point { x: i64 }
+impl Point {
+    fn get(&self) -> &i64 { &self.x }
+    fn get_mut(&mut self) -> &mut i64 { &mut self.x }
+}"#;
+        let program = parse_ok(source);
+        let implementation = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Impl(block) => Some(block),
+                _ => None,
+            })
+            .expect("expected an impl block");
+        assert!(matches!(
+            &implementation.fns[0].self_kind,
+            Some(SelfKind::Ref)
+        ));
+        assert!(matches!(
+            &implementation.fns[1].self_kind,
+            Some(SelfKind::RefMut)
+        ));
+        assert_eq!(implementation.fns[0].params.len(), 1);
+        assert_eq!(implementation.fns[0].params[0].name, "self");
+
+        match &implementation.fns[0].ret {
+            Some(TypeExpr::Ref { mutable, inner, .. }) => {
+                assert!(!mutable);
+                assert!(matches!(inner.as_ref(), TypeExpr::Path { name, .. } if name == "i64"));
+            }
+            other => panic!("expected a shared reference return type, got {:?}", other),
+        }
+        match &implementation.fns[1].ret {
+            Some(TypeExpr::Ref { mutable, .. }) => assert!(mutable),
+            other => panic!("expected a mutable reference return type, got {:?}", other),
+        }
+
+        match &implementation.fns[0]
+            .body
+            .tail
+            .as_deref()
+            .expect("tail")
+            .kind
+        {
+            ExprKind::Ref {
+                mutable: false,
+                expr,
+            } => match &expr.kind {
+                ExprKind::Field { base, name, .. } => {
+                    assert_eq!(as_path_name(base), "self");
+                    assert_eq!(name, "x");
+                }
+                other => panic!("expected a field access, got {:?}", other),
+            },
+            other => panic!("expected a reference expression, got {:?}", other),
+        }
+        match &implementation.fns[1]
+            .body
+            .tail
+            .as_deref()
+            .expect("tail")
+            .kind
+        {
+            ExprKind::Ref {
+                mutable: true,
+                expr,
+            } => {
+                assert!(matches!(&expr.kind, ExprKind::Field { .. }));
+            }
+            other => panic!("expected a mutable reference expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_ref_and_deref_statements() {
+        let source = "fn main() { let mut n = 1; let m = &mut n; *m = *m + 1; }";
+        let program = parse_ok(source);
+        let stmts = main_stmts(&program);
+        assert_eq!(stmts.len(), 3);
+        assert!(matches!(
+            &let_init(&stmts[1]).kind,
+            ExprKind::Ref { mutable: true, .. }
+        ));
+
+        match &stmt_expr(&stmts[2]).kind {
+            ExprKind::Assign {
+                op: None,
+                target,
+                value,
+            } => {
+                assert!(matches!(&target.kind, ExprKind::Deref { .. }));
+                let (op, lhs, rhs) = as_binary(value);
+                assert_eq!(*op, BinaryOp::Add);
+                assert!(matches!(&lhs.kind, ExprKind::Deref { .. }));
+                assert_eq!(as_int(rhs), 1);
+            }
+            other => panic!("expected an assignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn return_of_reference_value() {
+        let program = parse_ok("fn f(x: i64) -> &i64 { return &x; }");
+        let function = fn_named(&program, "f");
+        assert_eq!(
+            function.ret.as_ref().map(TypeExpr::describe),
+            Some("&i64".to_string())
+        );
+        assert_eq!(function.body.stmts.len(), 1);
+        match &stmt_expr(&function.body.stmts[0]).kind {
+            ExprKind::Return(Some(value)) => {
+                assert!(matches!(&value.kind, ExprKind::Ref { mutable: false, .. }));
+            }
+            other => panic!("expected a return expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reference_in_for_head() {
+        // A block-like expression in final position is the block tail, so the
+        // for loop is the tail expression rather than a statement.
+        let program = parse_ok("fn main() { for x in &items {} }");
+        match &main_tail(&program).kind {
+            ExprKind::For { iter, .. } => {
+                assert!(matches!(&iter.kind, ExprKind::Ref { mutable: false, .. }));
+            }
+            other => panic!("expected a for expression, got {:?}", other),
         }
     }
 

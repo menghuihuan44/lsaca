@@ -9,6 +9,7 @@
 #   test         cargo test --workspace on Linux, macOS and Windows
 #   docs         rustdoc build with warnings denied
 #   runtime      the generated-program C runtime smoke test (gcc, C17)
+#   sanitizers   the C runtime and every generated example under ASan + UBSan
 #   generated-c  emit C for every example, compile with -Werror, run hello,
 #                and build one generated project through CMake + Ninja
 #   site         validate the markdown documentation and build the static site
@@ -192,6 +193,74 @@ jobs:
           fi
           grep -F "reference-counted allocation(s) leaked" leak.txt
 
+  sanitizers:
+    name: Address and UB sanitizers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Leak detection matters for the ORC runtime: a generated program that
+      # reaches its epilogue must have released every reference-counted object.
+      ASAN_OPTIONS: "detect_leaks=1:abort_on_error=0"
+      UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install the C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: sanitizers
+      # The runtime is compiled with its own test driver so the complete
+      # allocation matrix (strings, vectors, closures, facts, Rc cells and the
+      # cycle collector) executes under the sanitizers.
+      - name: Build and run the C runtime smoke test under ASan and UBSan
+        run: |
+          gcc -std=c17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -I runtime runtime/test/main.c \
+            runtime/lsaca_rt.c runtime/lsaca_rt_string.c runtime/lsaca_rt_vec.c \
+            runtime/lsaca_rt_fmt.c -lm -o rt-test-san
+          ./rt-test-san
+          ./rt-test-san --orc-shutdown
+          ./rt-test-san --leak
+      # Panics call exit(101); check the diagnostics still reach stderr cleanly
+      # while ASan intercepts the allocator.
+      - name: Check the panic path under the sanitizers
+        shell: bash
+        run: |
+          set +e
+          ./rt-test-san --panic-div-zero > /dev/null 2> panic.txt
+          status=$?
+          set -e
+          if [ "$status" -ne 101 ]; then
+            echo "expected panic exit code 101, got $status"
+            cat panic.txt
+            exit 1
+          fi
+          grep -F "attempt to divide by zero" panic.txt
+      - name: Build the release CLI
+        run: cargo build --release -p lsaca-cli
+      # Every example is lowered to C, compiled with the sanitizers and run, so
+      # generated pointer arithmetic, borrowed places and refcount traffic are
+      # all checked by ASan/UBSan.
+      - name: Emit and run every example under the sanitizers
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          for example in examples/*.ls; do
+            name="$(basename "$example" .ls)"
+            out="$workdir/$name"
+            ./target/release/lsaca emit-c -r -o "$out" "$example"
+            gcc -std=c17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+              -fno-omit-frame-pointer -I "$out" "$out/main.c" "$out"/lsaca_rt*.c \
+              -lm -o "$out/$name"
+            "$out/$name" > /dev/null
+          done
+
   generated-c:
     name: Generated C is warning-free
     runs-on: ubuntu-latest
@@ -244,6 +313,27 @@ jobs:
           fi
           cmake -S "$workdir/hello" -B "$workdir/hello/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build "$workdir/hello/build"
+      # Borrowed places and reference-counted cells exercise const-qualified
+      # accessors and ORC drops, so a discarded-qualifier or unused-variable
+      # regression in generated C fails here even without the borrow fixtures
+      # being part of the compiler's own unit tests.
+      - name: Emit, compile and run the borrowing and ORC fixtures
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          shopt -s nullglob
+          fixtures=(crates/lsaca/tests/programs/refs_*.ls crates/lsaca/tests/programs/rc_*.ls)
+          for fixture in "${fixtures[@]}"; do
+            name="$(basename "$fixture" .ls)"
+            out="$workdir/$name"
+            echo "::group::Generating $name"
+            ./target/release/lsaca emit-c -r -o "$out" "$fixture"
+            gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -I "$out" \
+              "$out/main.c" "$out"/lsaca_rt*.c -lm -o "$out/$name"
+            "$out/$name" > /dev/null
+            echo "::endgroup::"
+          done
+          echo "compiled and ran ${#fixtures[@]} borrowing/ORC fixtures"
 
   site:
     name: Documentation site

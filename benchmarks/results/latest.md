@@ -1,6 +1,6 @@
 # lsaca cross-language benchmarks
 
-Generated: 2026-10-25T12:52:17+08:00  
+Generated: 2026-10-27T23:19:55+08:00  
 Harness: python scripts/bench.py (see benchmarks/README.md)
 
 ## Environment
@@ -8,7 +8,7 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 - OS: Windows-11-10.0.26300-SP0
 - CPU: 12th Gen Intel(R) Core(TM) i7-1260P (16 logical CPUs)
 - RAM: 15.63 GiB
-- lsaca: lsaca 1.2.0 (target\bench-tools\lsaca.exe)
+- lsaca: lsaca 1.3.0 (target\bench-tools\lsaca.exe)
 - lsaca build backend: direct C compiler back end (default; --cmake available)
 - gcc: gcc.EXE (Rev14, Built by MSYS2 project) 15.2.0
 - rustc: rustc 1.99.0 (b940084d7 2026-09-28)
@@ -22,17 +22,18 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 
 | program | lsaca cold build (default back end) | lsaca cached build | lsaca emit-c + gcc | gcc -O2 | rustc -O | Python 3 | Node.js |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fib | 0.988 | 0.027 | n/a | 0.367 | 0.295 | n/a | n/a |
-| loop_sum | 1.050 | 0.022 | n/a | 0.246 | 0.277 | n/a | n/a |
-| string_build | 1.053 | 0.023 | n/a | 0.265 | 0.291 | n/a | n/a |
-| vec_memory | 0.968 | 0.019 | n/a | 0.269 | 0.303 | n/a | n/a |
-| sort_i64 | 1.063 | 0.024 | n/a | 0.398 | 0.417 | n/a | n/a |
-| matrix_multiply | 1.297 | 0.031 | n/a | 0.363 | 0.445 | n/a | n/a |
-| binary_trees | 1.151 | 0.020 | n/a | 0.400 | 0.353 | n/a | n/a |
-| string_split | 1.203 | 0.020 | n/a | 0.370 | 0.450 | n/a | n/a |
-| sieve | 1.206 | 0.025 | n/a | 0.388 | 0.414 | n/a | n/a |
-| mandelbrot | 1.365 | 0.029 | n/a | 0.386 | 0.362 | n/a | n/a |
-| compile_large (compile-only) | 4.668 | 0.165 | n/a | n/a | n/a | n/a | n/a |
+| fib | 1.545 | 0.031 | n/a | 0.393 | 1.260 | n/a | n/a |
+| loop_sum | 1.227 | 0.022 | n/a | 0.303 | 0.933 | n/a | n/a |
+| string_build | 1.390 | 0.024 | n/a | 0.339 | 1.414 | n/a | n/a |
+| vec_memory | 1.509 | 0.032 | n/a | 0.502 | 1.652 | n/a | n/a |
+| sort_i64 | 1.718 | 0.045 | n/a | 0.491 | 1.115 | n/a | n/a |
+| matrix_multiply | 1.163 | 0.023 | n/a | 0.343 | 0.989 | n/a | n/a |
+| binary_trees | 1.247 | 0.036 | n/a | 0.365 | 0.942 | n/a | n/a |
+| binary_trees_refs | 1.151 | 0.023 | n/a | 0.363 | 0.934 | n/a | n/a |
+| string_split | 1.186 | 0.031 | n/a | 0.361 | 1.047 | n/a | n/a |
+| sieve | 1.163 | 0.026 | n/a | 0.305 | 1.334 | n/a | n/a |
+| mandelbrot | 1.368 | 0.029 | n/a | 0.427 | 1.571 | n/a | n/a |
+| compile_large (compile-only) | 3.972 | 0.308 | n/a | n/a | n/a | n/a | n/a |
 
 > lsaca cold build: one default `lsaca build -r` from a fresh LSACA_CACHE_DIR. Since 1.2 the default build back end is the compiler's built-in direct C compiler back end: it emits the generated C and compiles it together with the cached runtime translation units using gcc. The cached build repeats the command against the same cache directory (the runtime objects and the content-addressed project are reused, so it mostly just re-links). The compiler still supports the older CMake + Ninja path via `lsaca build -r --cmake`; the harness does not measure it by default.
 
@@ -40,23 +41,23 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 
 ## Runtime (median (min), milliseconds; lower is better)
 
-| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | string_split | sieve | mandelbrot |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 34.9 (31.7) | 11.7 (10.7) | 33.9 (33.0) | 16.8 (16.3) | 35.7 (35.3) | 26.4 (19.0) | 1261.4 (1146.8) | 26.5 (25.6) | 50.6 (42.2) | 40.6 (38.1) |
-| C (gcc -O2) | 30.6 (28.9) | 10.9 (10.3) | 15.2 (14.7) | 17.1 (16.8) | 37.4 (34.8) | 18.4 (16.4) | 27.8 (22.9) | 20.2 (17.6) | 50.1 (45.7) | 40.7 (38.9) |
-| Rust (rustc -O) | 14.5 (14.0) | 14.5 (11.4) | 68.3 (65.0) | 18.4 (17.8) | 33.2 (32.6) | 24.2 (22.8) | 28.6 (24.4) | 20.7 (17.2) | 46.7 (42.0) | 42.1 (38.2) |
-| Python 3 | 1056.4 (1015.3) | 1024.0 (1010.3) | 423.7 (414.9) | 576.8 (544.9) | 864.4 (709.4) | 1887.4 (1512.2) | 132.8 (114.3) | 92.9 (87.5) | 687.4 (623.1) | 3366.2 (3311.7) |
-| Node.js | 270.9 (238.4) | 143.3 (140.4) | 210.2 (202.5) | 260.0 (242.0) | 246.0 (208.4) | 221.4 (193.8) | 197.9 (161.1) | 183.1 (155.7) | 222.2 (217.5) | 206.9 (184.5) |
+| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lsaca | 44.2 (38.3) | 13.9 (12.2) | 45.2 (42.4) | 30.7 (27.4) | 63.1 (61.2) | 17.0 (16.5) | 1216.7 (1189.9) | 223.2 (215.5) | 32.2 (28.9) | 39.4 (38.2) | 49.2 (47.2) |
+| C (gcc -O2) | 35.7 (33.5) | 14.2 (12.0) | 27.0 (25.2) | 36.4 (30.5) | 50.2 (46.9) | 17.1 (15.8) | 25.8 (23.9) | 24.4 (22.9) | 19.3 (18.1) | 41.5 (37.7) | 63.9 (59.7) |
+| Rust (rustc -O) | 23.2 (20.8) | 14.2 (13.3) | 146.4 (127.4) | 34.8 (30.1) | 43.6 (42.5) | 16.2 (15.5) | 26.5 (24.9) | 25.8 (24.6) | 18.6 (17.7) | 38.9 (36.8) | 59.1 (50.8) |
+| Python 3 | 1163.1 (1112.7) | 1511.7 (1168.6) | 704.8 (615.6) | 867.7 (773.7) | 756.8 (734.5) | 1538.4 (1518.3) | 117.7 (112.5) | 117.9 (114.2) | 83.8 (78.6) | 772.5 (674.1) | 3423.3 (2729.5) |
+| Node.js | 344.3 (281.9) | 214.8 (190.1) | 388.1 (307.8) | 349.0 (326.9) | 202.6 (197.2) | 172.3 (163.5) | 173.6 (164.6) | 179.7 (169.0) | 171.7 (166.9) | 249.6 (230.3) | 192.6 (154.7) |
 
 ## Peak memory (MiB, peak working set; lower is better)
 
-| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | string_split | sieve | mandelbrot |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 4.0 | 4.0 | 10.6 | 18.8 | 6.6 | 4.4 | 149.7 | 11.1 | 18.8 | 4.0 |
-| C (gcc -O2) | 4.0 | 4.0 | 7.3 | 18.8 | 5.1 | 4.3 | 7.6 | 4.0 | 18.8 | 4.0 |
-| Rust (rustc -O) | 4.1 | 4.1 | 7.4 | 18.9 | 5.2 | 4.5 | 7.7 | 4.4 | 18.9 | 4.1 |
-| Python 3 | 11.0 | 10.9 | 74.0 | 143.8 | 20.6 | 13.6 | 21.0 | 17.2 | 26.2 | 11.0 |
-| Node.js | 42.8 | 45.7 | 89.3 | 117.2 | 50.6 | 46.8 | 56.1 | 50.6 | 59.9 | 44.6 |
+| language | fib | loop_sum | string_build | vec_memory | sort_i64 | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lsaca | 4.0 | 4.0 | 10.6 | 18.8 | 6.6 | 4.4 | 150.1 | 35.8 | 11.1 | 18.8 | 4.0 |
+| C (gcc -O2) | 4.0 | 4.0 | 7.3 | 18.8 | 5.1 | 4.4 | 7.6 | 7.6 | 4.0 | 18.8 | 4.0 |
+| Rust (rustc -O) | 4.1 | 4.1 | 7.4 | 18.9 | 5.2 | 4.5 | 7.7 | 7.7 | 4.1 | 18.9 | 4.1 |
+| Python 3 | 11.0 | 11.0 | 73.6 | 142.8 | 21.8 | 13.6 | 21.0 | 21.0 | 16.8 | 26.2 | 11.0 |
+| Node.js | 43.0 | 44.5 | 89.5 | 121.1 | 51.0 | 46.9 | 56.1 | 56.2 | 50.6 | 59.3 | 44.1 |
 
 ## Workloads
 
@@ -67,12 +68,9 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 - sort_i64: sort 200,000 pseudo-random i64 values with an iterative quicksort written in the language; checksum is first,last,sum; expected stdout checksum=21749,2147481261,214813518297651
 - matrix_multiply: multiply two 160x160 i64 matrices with the naive triple loop; checksum is the sum of the result entries; expected stdout checksum=1018924712000
 - binary_trees: build a perfect binary tree of depth 16 (131,071 nodes) and sum all payloads; expected stdout checksum=2147450880
+- binary_trees_refs: the same perfect binary tree of depth 16 (131,071 nodes) as binary_trees, but summed through borrowed references (&Option<Box<Node>>) instead of by value, so the traversal does not copy the tree; checksum matches binary_trees; expected stdout checksum=2147450880
 - string_split: build a 194,500-byte comma-separated numeric string, split it on commas, parse every token and sum; checksum is len,count,sum; expected stdout checksum=194500,50000,24975000
 - sieve: sieve of Eratosthenes: count the primes below 2,000,000; expected stdout checksum=148933
 - mandelbrot: 600x400 Mandelbrot escape-time grid, at most 100 iterations per pixel; checksum is the sum of iteration counts; expected stdout checksum=6282265
 - compile_large: generated 4,511-line lsaca source (450 functions) used to measure how the lsaca build time scales with program size; compile-only (expected stdout checksum=14655037, not measured by this harness)
-
-## Warnings
-
-- The primary cold-build sample for string_build/lsaca was 32.1 s because an unrelated background build was running on the same machine at that moment; that single cell was re-measured with the same harness settings at 2026-10-25T13:01:46+08:00 (1.053 s, used here). All other numbers are from the primary run at 2026-10-25T12:52:17+08:00.
 

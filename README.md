@@ -5,20 +5,22 @@ semantics, implemented in Rust. Source code is compiled to C17 and built into a
 native executable with the system C compiler. Memory is managed with **ORC**
 (Ownership and Reference Counting): automatic reference counting (ARC, in the
 spirit of Nim's ARC) plus a trial-deletion cycle collector. There is no tracing
-garbage collector, no borrow checker, and no manual `free` calls.
+garbage collector and no manual `free` calls; references (`&T`/`&mut T`) are
+checked by a small borrow checker, but ownership and move rules are not part of
+the language.
 
 This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
-The current release is **1.2.0**. It adds the postfix `?` error-propagation
-operator and the Option/Result combinators (`map`, `map_or`, `and_then`,
-`filter`, `ok_or`, `map_err`) on top of the 1.1 language, and it changes how
-programs are built: the compiler now invokes the C compiler directly instead of
-generating and configuring a CMake project. Builds are much faster, compiled
-runtime objects are cached and reused, and the compiler needs no CMake at all
-unless you ask for it with the new `--cmake` flag. The 1.2.0 language is source
-compatible with 1.1.0.
+The current release is **1.3.0**. It adds **references**: the shared `&T` and
+mutable `&mut T` types, the `&place` / `&mut place` borrow expressions, `*x`
+dereference, reference parameters, reference return values with lifetime
+elision, auto-deref through references for field/index/method access, and match
+ergonomics. A conservative NLL-lite borrow checker rejects aliasing violations,
+and all of it runs on top of the unchanged ORC runtime: references are
+non-owning, never touch reference counts, and there is still no move semantics.
+The 1.3.0 language is source compatible with 1.2.0.
 
 ## Highlights
 
@@ -40,6 +42,12 @@ compatible with 1.1.0.
   cycles created through `Rc<T>` are reclaimed automatically by a Bacon-Rajan
   trial-deletion cycle collector. `Box<T>` provides owned indirection with
   value semantics for recursive types.
+- **References without ownership**: `&T` and `&mut T` borrow a place without
+  taking ownership or changing a reference count. A conservative borrow checker
+  enforces the usual aliasing rule (many shared borrows or one mutable borrow at
+  a time) with non-lexical, last-use lifetimes; parameters and return values
+  work with lifetime elision, and match ergonomics binds `&T` fields when
+  matching a reference.
 - **Formatting controls**: format strings accept the Rust-style
   `[[fill]align][sign][0][width][.precision][?]` specification, so
   `{:>8}`, `{:*^9}`, `{:+}`, `{:08}`, `{:08.2}`, `{:.3}` and `{:?}` all
@@ -49,9 +57,9 @@ compatible with 1.1.0.
   the system C compiler. `lsaca emit-c` writes the whole project, including a
   complete `CMakeLists.txt`, so it can be inspected or embedded in another
   build; `--cmake` makes `run`/`build` use that CMake project instead.
-- **Fast, cached builds**: the direct backend cut a cold build of the benchmark
-  corpus from roughly 2.9 s to about 1.2 s on the reference machine, a cached
-  rebuild takes about 0.03 s, and runtime objects are compiled once per profile
+- **Fast, cached builds**: a cold build of a benchmark program takes 1.15-1.72 s
+  on the reference machine and a cached rebuild takes 22-45 ms, because the
+  direct C backend skips CMake and runtime objects are compiled once per profile
   and shared by every program.
 - **Pure Rust compiler, no third-party crates**: the compiler uses only the Rust
   standard library and forbids unsafe code. The runtime is plain C17.
@@ -59,10 +67,10 @@ compatible with 1.1.0.
   [docs/](docs/README.md), published as a static documentation site, plus
   cross-language benchmarks (compile time, runtime and peak memory) against C,
   Rust, Python and Node.js with the raw data checked in.
-- **Tested end to end**: 184 compiler unit tests, 6 end-to-end tests that compile
+- **Tested end to end**: 292 compiler unit tests, 7 end-to-end tests that compile
   and run real programs, 17 CLI tests, a 411-check C runtime suite and a
   100-check runtime smoke script; CI runs the test matrix on Linux, macOS and
-  Windows.
+  Windows, plus AddressSanitizer and UndefinedBehaviorSanitizer jobs.
 
 ## Requirements
 
@@ -179,6 +187,15 @@ so mutating one holder never affects another. Function arguments are borrowed
 rather than moved: programs never fail to compile because of a move. Unlike
 Rust, ORC keeps memory safety but not the move checker.
 
+References are the second way to use a value. `&value` creates a non-owning
+view: no reference count is changed, no copy is made, and the referent is
+released by whoever owns it. The borrow checker only polices aliasing (a
+`&mut` cannot coexist with any other borrow of the same place, and a borrow
+cannot outlive its referent); it does not police ownership or moves. See
+[docs/language/11-references-and-borrowing.md](docs/language/11-references-and-borrowing.md)
+for the rules, the diagnostics and the limitations of 1.3 (references are not
+yet storable in struct/enum/`Vec` fields).
+
 Ordinary values cannot form reference cycles: copying a value never creates a
 second path back to the same object. The builtin `Rc<T>` type is the exception:
 it is a shared, mutable heap cell whose handles all alias the same payload, so a
@@ -247,7 +264,7 @@ fn main() {
 syntax, semantics, the standard library, memory rules and the deliberate
 deviations from Rust. See [examples/](examples/) for runnable programs.
 
-The 1.2 additions are the postfix `?` operator and the Option/Result
+Release 1.2 added the postfix `?` operator and the Option/Result
 combinators. `?` unwraps `Some`/`Ok` and returns early on `None`/`Err`; the
 enclosing function must return the same kind (`Option` or `Result`), and the
 error type must match exactly (there is no `From` conversion):
@@ -282,6 +299,36 @@ fn main() {
     println!("{}", boxed.get());      // 7
 }
 ```
+Release 1.3 adds references. A `&` borrow reads a place without copying it, a
+`&mut` borrow writes through it, and a borrow checker rejects aliasing:
+
+```rust
+struct Counter { value: i64 }
+
+impl Counter {
+    fn value(&self) -> &i64 { &self.value }
+    fn bump(&mut self) { self.value = self.value + 1; }
+}
+
+fn total(values: &Vec<i64>) -> i64 {
+    let mut sum = 0;
+    let mut index = 0;
+    while index < values.len() {
+        sum = sum + values[index];
+        index = index + 1;
+    }
+    sum
+}
+
+fn main() {
+    let mut counter = Counter { value: 41 };
+    counter.bump();
+    let reference = counter.value();
+    println!("{}", *reference);   // 42
+    let numbers = vec![1, 2, 3];
+    println!("{}", total(&numbers)); // 6
+}
+```
 
 ## Documentation
 
@@ -291,13 +338,16 @@ The manual is split into one detailed page per topic under [docs/](docs/):
   a table linking every chapter.
 - [docs/language/01-getting-started.md](docs/language/01-getting-started.md)
   through
-  [docs/language/14-roadmap.md](docs/language/14-roadmap.md) - getting started,
-  program structure, lexical structure, types, the ORC memory model (`Rc<T>`,
-  `Box<T>` and cycle collection), variables and mutability, operators,
+  [docs/language/16-benchmarks.md](docs/language/16-benchmarks.md) - getting
+  started, program structure, lexical structure, types, the ORC memory model
+  (`Rc<T>`, `Box<T>` and cycle collection), variables and mutability, operators,
   statements and control flow, functions, structs/enums/`impl`, pattern
-  matching, closures, the standard library (including `?` and the combinators)
-  and the roadmap with the deviations from Rust.
-- [docs/language/15-benchmarks.md](docs/language/15-benchmarks.md) - benchmark
+  matching, references and borrowing, closures, the standard library (including
+  `?` and the combinators) and the roadmap with the deviations from Rust.
+- [docs/language/11-references-and-borrowing.md](docs/language/11-references-and-borrowing.md)
+  - the v1.3 reference types, borrow rules, lifetime elision, match ergonomics
+  and the borrow-checker diagnostics.
+- [docs/language/16-benchmarks.md](docs/language/16-benchmarks.md) - benchmark
   methodology, per-workload analysis and the measured numbers.
 
 The same pages are published as a static site with GitHub Pages at
@@ -313,15 +363,21 @@ runtime median and peak working set. lsaca programs are built through the normal
 cached `lsaca build` pipeline; where the C toolchain is unavailable the harness
 can fall back to a labelled direct-compile mode.
 
-Release 1.2.0 is a large improvement on the reference machine (Windows 11,
-Core i7-1260P, gcc 15.2.0). A cold `lsaca build -r` of the benchmark programs
-dropped from roughly 2.9 s to about 1.2 s because CMake is no longer configured,
-a cached rebuild takes about 0.03 s, and the compiled runtime objects are reused
-across programs. Argument passing and memory layout changes made vector-heavy
-code much faster: `vec_memory` went from about 86 ms to about 27 ms and its peak
-working set from 35.1 MiB to 18.8 MiB, and `string_build` from about 213 ms to
-about 35 ms; the numeric workloads are unchanged. Full tables, methodology and
-caveats are in [docs/language/15-benchmarks.md](docs/language/15-benchmarks.md);
+Release 1.3.0 was measured on the reference machine (Windows 11, Core i7-1260P,
+gcc 15.2.0). A cold `lsaca build -r` of a benchmark program takes 1.15-1.72 s and
+a cached rebuild 22-45 ms; the 4,511-line `compile_large` source takes 3.97 s
+cold and 308 ms cached. Scalar loops, sorting and floating-point code are in the
+same ballpark as C: `loop_sum` 13.9 ms versus C's 14.2 ms, `vec_memory` 30.7
+versus 36.4 (peak 18.8 MiB for both), `matrix_multiply` 17.0 versus 17.1,
+`sieve` 39.4 versus 41.5 and `mandelbrot` 49.2 versus 63.9. `sort_i64` (63.1
+versus 50.2) and `string_build` (45.2 versus 27.0) remain slower than C.
+
+The new 1.3 benchmark is `binary_trees_refs`, which sums the same 131,071-node
+tree as `binary_trees` but traverses it through `&Option<Box<Node>>` references
+instead of copying it. It runs in 223 ms with a 35.8 MiB peak, versus 1,217 ms
+and 150.1 MiB for the by-value traversal: 5.4x faster and 4.2x less memory, and
+9.2x C instead of 47x C. Full tables, per-workload analysis, methodology and
+caveats are in [docs/language/16-benchmarks.md](docs/language/16-benchmarks.md);
 raw data is in [benchmarks/results/](benchmarks/results/).
 
 ## Environment variables
@@ -355,7 +411,7 @@ raw data is in [benchmarks/results/](benchmarks/results/).
 ## Testing
 
 ```sh
-cargo test --workspace          # 184 unit + 6 end-to-end + 17 CLI tests
+cargo test --workspace          # 292 unit + 7 end-to-end + 17 CLI tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -371,8 +427,17 @@ without warnings under `-Wall -Wextra`; CI additionally builds them with
 checks the documentation site with `scripts/docsite.py --check`. The complete CI
 definition is in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
+CI also builds emitted projects through CMake. In a confined environment where
+child processes cannot spawn CMake/Ninja, set `LSACA_SKIP_CMAKE_TESTS=1` to skip
+only that CLI test; the dedicated CI job still covers the CMake backend.
+
 ## Release history
 
+- **1.3.0** - shared and mutable references (`&T`, `&mut T`), borrow
+  expressions, dereference, reference parameters/returns with lifetime elision,
+  auto-deref for field/index/method access, match ergonomics, and a conservative
+  NLL-lite borrow checker; C ABI for references; new `binary_trees_refs`
+  benchmark; CI sanitizer job. Source compatible with 1.2.0.
 - **1.2.0** - postfix `?` on `Option`/`Result` and the Option/Result
   combinators; direct C backend by default with cached runtime objects (`--cmake`
   restores the old pipeline); split runtime (`lsaca_rt_string.c`,

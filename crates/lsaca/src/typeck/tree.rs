@@ -169,6 +169,13 @@ pub enum TExprKind {
     OptionNone,
     ResultOk(Box<TExpr>),
     ResultErr(Box<TExpr>),
+    Ref {
+        mutable: bool,
+        expr: Box<TExpr>,
+    },
+    Deref {
+        expr: Box<TExpr>,
+    },
     Format {
         parts: Vec<TFormatPart>,
     },
