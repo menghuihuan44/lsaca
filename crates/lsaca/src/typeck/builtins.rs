@@ -214,6 +214,7 @@ pub fn builtin_assoc(type_name: &str, name: &str) -> Option<HBuiltinAssoc> {
         ("Vec", "with_capacity") => Some(VecWithCapacity),
         ("Rc", "new") => Some(RcNew),
         ("Box", "new") => Some(BoxNew),
+        ("HashMap", "new") => Some(HashMapNew),
         _ => None,
     }
 }

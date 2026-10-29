@@ -1,10 +1,14 @@
 # Structs, enums and impl
 
 lsaca has C-like product types (`struct`) and tagged unions (`enum`), with
-methods and associated functions provided by `impl` blocks. Structs and enums are
-**value types**: assigning or passing one copies its fields, and the copy shares
-heap allocations through copy-on-write handles. There are no classes, no
-inheritance, no traits and no generics on user types.
+methods and associated functions provided by `impl` blocks. Structs and enums
+are **value types**: a `Copy` one is copied when it is assigned or passed, while
+a move-only one (one containing a `String`, `Vec`, `HashMap`, `Box`, `Rc` or
+another move-only field) is moved. Heap fields follow the usual ownership rules:
+nothing is shared behind your back except that `String` and `Vec` may share a
+buffer until one side is mutated. There are no classes and no inheritance;
+since 1.5.0 user-defined traits and generics are supported — see
+[Traits](18-traits.md) and [Generics](17-generics.md).
 
 ## Structs
 
@@ -113,7 +117,7 @@ error: expected '}', found )
  1 | struct Meters(i64);
    |                  ^
 
-error: expected an item (fn, struct, enum, impl, const or type), found )
+error: expected an item (fn, struct, enum, impl, const, type or trait), found )
   --> example-04.ls:1:18
    |
  1 | struct Meters(i64);
@@ -155,7 +159,7 @@ error: expected ';' after let statement, found identifier base
  8 |     let shifted = Point { x: 3, ..base };
    |                                   ^^^^
 
-error: expected an item (fn, struct, enum, impl, const or type), found ;
+error: expected an item (fn, struct, enum, impl, const, type or trait), found ;
   --> example-05.ls:8:41
    |
  8 |     let shifted = Point { x: 3, ..base };
@@ -421,38 +425,39 @@ non-owning view and may only live in a local, a parameter or a return value
 in a field is an `E0498` error.
 
 `Self` is a type name usable inside `impl` blocks — in `-> Self` return types and
-parameter types. It **cannot** be used to construct a value: `Self { … }` and even
-`Self::new(…)` in expression position are rejected:
+parameter types, and since 1.5.0 also in expression position: `Self { … }` builds
+a value of the implementing type and `Self::new(…)` calls an associated function
+on it. Both forms work in generic impls as well:
 
-```ls,compile-fail
+```ls
 struct Point {
     x: i64,
 }
 
 impl Point {
     fn new(x: i64) -> Self {
-        Point { x }
+        Self { x }
     }
 
     fn twice() -> Self {
         Self::new(2)
     }
+
+    fn shifted(&self) -> Self {
+        Self { x: self.x + 1 }
+    }
 }
 
 fn main() {
     println!("{}", Point::twice().x);
+    println!("{}", Point::new(7).shifted().x);
 }
 ```
 
-Error:
+Output:
 ```text
-error[E0532]: expected an enum, found a struct
-   --> example-14.ls:11:9
-    |
- 11 |         Self::new(2)
-    |         ^^^^
-
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+2
+8
 ```
 
 An `impl` block may be split into several blocks for the same type; all of them
@@ -554,9 +559,11 @@ Output:
 
 ### Drop hooks
 
-`impl Drop for T` declares the destructor hook for a struct or enum. It is the
-only trait a program can implement in 1.4.0; the hook runs when a value is
-released:
+`impl Drop for T` declares the destructor hook for a struct or enum. `Drop`
+is a special trait: it is the only built-in trait that changes code generation,
+and its impl must have exactly one method named `drop`. (Since 1.5.0 a program
+can also implement its own traits — see [Traits](18-traits.md) — but none of
+them get this special treatment.) The hook runs when a value is released:
 
 ```ls
 struct Resource {
@@ -729,32 +736,34 @@ the `+`/\`0\` sign flags and precision are only accepted for numbers and strings
 and are rejected for structs and enums with `E0001` — see
 [Standard library](15-standard-library.md#formatting-and-printing).
 
-Equality (`==`) is not implemented for user structs or enums in 1.4.0: the
-compiler reports `E0369`. Compare the fields you care about, or want to compare,
-with a `match` expression:
+Equality (`==`) is implemented for user structs and enums since 1.5.0: the
+compiler compares them field by field, and enum payloads of the same variant:
 
-```ls,compile-fail
+```ls
 struct Point {
     x: i64,
     y: i64,
 }
 
+enum Shape {
+    Empty,
+    Circle(f64),
+}
+
 fn main() {
     let a = Point { x: 1, y: 2 };
     let b = Point { x: 1, y: 2 };
-    println!("{}", a == b);
+    let c = Point { x: 1, y: 3 };
+    println!("{} {}", a == b, a == c);
+
+    println!("{} {}", Shape::Empty == Shape::Empty, Shape::Circle(2.0) == Shape::Circle(2.5));
 }
 ```
 
-Error:
+Output:
 ```text
-error[E0369]: binary operation == cannot be applied to type Point
-  --> example-24.ls:9:20
-   |
- 9 |     println!("{}", a == b);
-   |                    ^^^^^^
-
-lsaca: example-24.ls: could not compile example-24.ls due to previous error(s)
+true false
+true false
 ```
 
 To compare points, compare the fields explicitly:
@@ -786,7 +795,7 @@ true false
 
 * The pattern syntax for destructuring structs and enums:
   [Pattern matching](13-pattern-matching.md).
-* Receiver semantics and copy-on-write effects:
+* Move semantics and receiver effects:
   [Memory model](05-memory-model.md#value-semantics-for-aggregates).
 * Reference receivers, match ergonomics and borrowing rules:
   [References and borrowing](12-references-and-borrowing.md).

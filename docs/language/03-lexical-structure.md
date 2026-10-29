@@ -89,7 +89,7 @@ identifier rules.
 The following words are reserved and cannot be used as identifiers:
 
 ```text
-fn    let   mut   const  struct  enum   impl   type
+fn    let   mut   const  struct  enum   impl   type   trait
 if    else  match while  loop    for    in     return
 break continue true false as     self   Self   pub    move
 ```
@@ -97,8 +97,8 @@ break continue true false as     self   Self   pub    move
 Two of them are context-sensitive in a useful way: `self` and `Self` are
 keywords only where the grammar expects a parameter or a path segment, so they
 can still be used as, say, struct field names — although code is clearer if they
-are not. `pub` is accepted on items and ignored (see
-[Program structure](02-program-structure.md)).
+are not. `pub` is accepted on items, struct fields, enum variants and trait methods, and
+ignored (see [Program structure](02-program-structure.md)).
 
 ## Comments
 
@@ -205,7 +205,7 @@ negation is folded, so the most negative value of a signed type cannot be writte
 as a plain negative literal: `let x: i8 = -128;` is rejected with
 `error[E0080]: literal out of range for i8: 128`. Compute it instead, for
 example `-127 - 1`, or produce it by arithmetic. This is a known simplification
-of the 1.4.0 constant checker.
+of the 1.5.0 constant checker.
 
 ## Float literals
 

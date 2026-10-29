@@ -200,6 +200,9 @@ pub enum Ty {
     Option(Box<Ty>),
     /// Builtin result value, monomorphized in generated code.
     Result(Box<Ty>, Box<Ty>),
+    /// Builtin hash map, monomorphized in generated code. Never implicitly
+    /// copyable: a map owns a heap table.
+    HashMap(Box<Ty>, Box<Ty>),
     /// Tuple type; the empty tuple is Ty::Unit.
     Tuple(Vec<Ty>),
     /// Function type: parameter types and return type.
@@ -291,6 +294,10 @@ impl Ty {
         Ty::Result(Box::new(ok), Box::new(err))
     }
 
+    pub fn hash_map(key: Ty, value: Ty) -> Ty {
+        Ty::HashMap(Box::new(key), Box::new(value))
+    }
+
     pub fn tuple(elems: Vec<Ty>) -> Ty {
         if elems.is_empty() {
             Ty::Unit
@@ -363,6 +370,10 @@ impl Ty {
         matches!(self, Ty::Result(_, _))
     }
 
+    pub fn is_hash_map(&self) -> bool {
+        matches!(self, Ty::HashMap(_, _))
+    }
+
     pub fn is_tuple(&self) -> bool {
         matches!(self, Ty::Tuple(_))
     }
@@ -401,7 +412,9 @@ impl Ty {
         match self {
             Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) => true,
             Ty::Ref { .. } => true,
-            Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) => false,
+            Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) | Ty::HashMap(_, _) => {
+                false
+            }
             Ty::Option(inner) => inner.is_bitwise_copy(),
             Ty::Result(ok, err) => ok.is_bitwise_copy() && err.is_bitwise_copy(),
             Ty::Tuple(elems) => elems.iter().all(Ty::is_bitwise_copy),
@@ -446,6 +459,7 @@ impl fmt::Display for Ty {
             Ty::Box(elem) => write!(f, "Box<{}>", elem),
             Ty::Option(elem) => write!(f, "Option<{}>", elem),
             Ty::Result(ok, err) => write!(f, "Result<{}, {}>", ok, err),
+            Ty::HashMap(key, value) => write!(f, "HashMap<{}, {}>", key, value),
             Ty::Tuple(elems) => {
                 write!(f, "(")?;
                 for (index, elem) in elems.iter().enumerate() {
@@ -500,6 +514,12 @@ mod tests {
         assert!(!Ty::vec(Ty::i64()).is_bitwise_copy());
         assert!(Ty::option(Ty::bool_()).is_bitwise_copy());
         assert!(!Ty::option(Ty::string()).is_bitwise_copy());
+        assert!(!Ty::hash_map(Ty::i64(), Ty::string()).is_bitwise_copy());
+        assert!(Ty::hash_map(Ty::i64(), Ty::bool_()).is_hash_map());
+        assert_eq!(
+            Ty::hash_map(Ty::string(), Ty::i64()).to_string(),
+            "HashMap<String, i64>"
+        );
     }
 
     #[test]

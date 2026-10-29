@@ -5,7 +5,7 @@
  * project, the smoke test matrix, or CMake output.  It exists so the runtime
  * split/optimization work can be measured reproducibly:
  *
- *   gcc -std=c17 -O2 -DNDEBUG bench_runtime.c lsaca_rt.c -lm -o bench_runtime
+ *   gcc -std=c17 -O2 -DNDEBUG bench_runtime.c lsaca_rt.c lsaca_rt_string.c lsaca_rt_vec.c lsaca_rt_fmt.c lsaca_rt_map.c -lm -o bench_runtime
  *   ./bench_runtime                 # timing sections, wall-clock ms, best of 3
  *   ./bench_runtime --peak-vec N    # peak RSS probe: Vec<i64> with N pushes
  *   ./bench_runtime --peak-vec-cap N# peak RSS probe: Vec with exact capacity N
@@ -237,6 +237,193 @@ static unsigned long long sec_fmt_mixed(size_t n)
     return len;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* hash map sections (builtin HashMap<K, V> codegen forms)            */
+/* ------------------------------------------------------------------ */
+
+static void bench_copy_i64(void* out, const void* in)
+{
+    memcpy(out, in, sizeof(int64_t));
+}
+
+static void bench_drop_i64(void* slot)
+{
+    (void)slot;
+}
+
+/* A key slot stores an LsString* handle; copying a key retains it, dropping a
+ * duplicate key releases it. This mirrors the callbacks codegen generates. */
+static void bench_copy_string_slot(void* out, const void* in)
+{
+    LsString* value;
+    memcpy(&value, in, sizeof(value));
+    ls_retain(value);
+    memcpy(out, &value, sizeof(value));
+}
+
+static void bench_drop_string_slot(void* slot)
+{
+    LsString* value;
+    memcpy(&value, slot, sizeof(value));
+    ls_release(value);
+}
+
+static void bench_map_init_i64_i64(LsMapTable* table)
+{
+    ls_map_init(table, sizeof(int64_t), sizeof(int64_t), ls_hash_i64, ls_eq_i64,
+                bench_copy_i64, bench_drop_i64, bench_copy_i64, bench_drop_i64);
+}
+
+static void bench_map_init_string_i64(LsMapTable* table)
+{
+    ls_map_init(table, sizeof(LsString*), sizeof(int64_t), ls_hash_string_slot,
+                ls_eq_string_slot, bench_copy_string_slot,
+                bench_drop_string_slot, bench_copy_i64, bench_drop_i64);
+}
+
+/* The generated wrapper drop helper does clear + free of the three arrays; the
+ * benchmark drives the runtime table directly, so it performs the same steps. */
+static void bench_map_destroy(LsMapTable* table)
+{
+    ls_map_clear(table);
+    free(table->keys);
+    free(table->values);
+    free(table->states);
+    table->keys = NULL;
+    table->values = NULL;
+    table->states = NULL;
+    table->len = 0;
+    table->cap = 0;
+}
+
+/* Fill an i64 -> i64 map; the returned value is the final length. */
+static size_t bench_map_fill_i64(LsMapTable* table, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        int64_t key = (int64_t)i;
+        int64_t value = (int64_t)i * 2;
+        (void)ls_map_insert(table, &key, &value, NULL);
+    }
+    return ls_map_len(table);
+}
+
+static unsigned long long sec_map_i64_insert(size_t n)
+{
+    LsMapTable table;
+    unsigned long long len;
+
+    bench_map_init_i64_i64(&table);
+    len = (unsigned long long)bench_map_fill_i64(&table, n);
+    len += (unsigned long long)table.cap;
+    bench_map_destroy(&table);
+    return len;
+}
+
+static unsigned long long sec_map_i64_lookup(size_t n)
+{
+    LsMapTable table;
+    size_t i;
+    unsigned long long sum = 0;
+
+    bench_map_init_i64_i64(&table);
+    (void)bench_map_fill_i64(&table, n);
+    for (i = 0; i < n; i++) {
+        int64_t key = (int64_t)i;
+        void* slot = NULL;
+        if (ls_map_get_ptr(&table, &key, &slot)) {
+            int64_t value;
+            memcpy(&value, slot, sizeof(value));
+            sum += (unsigned long long)value;
+        }
+    }
+    sum += (unsigned long long)ls_map_len(&table);
+    bench_map_destroy(&table);
+    return sum;
+}
+
+static unsigned long long sec_map_i64_miss(size_t n)
+{
+    LsMapTable table;
+    size_t i;
+    unsigned long long hits = 0;
+
+    bench_map_init_i64_i64(&table);
+    (void)bench_map_fill_i64(&table, n);
+    for (i = 0; i < n; i++) {
+        int64_t key = (int64_t)n + (int64_t)i;
+        void* slot = NULL;
+        if (ls_map_get_ptr(&table, &key, &slot)) {
+            hits++;
+        }
+    }
+    bench_map_destroy(&table);
+    return hits;
+}
+
+static unsigned long long sec_map_iterate(size_t n)
+{
+    LsMapTable table;
+    LsMapIter iter;
+    const void* key_ptr = NULL;
+    const void* value_ptr = NULL;
+    unsigned long long sum = 0;
+    size_t count = 0;
+
+    bench_map_init_i64_i64(&table);
+    (void)bench_map_fill_i64(&table, n);
+    ls_map_iter_init(&iter, &table);
+    while (ls_map_iter_next(&iter, &key_ptr, &value_ptr)) {
+        int64_t key;
+        int64_t value;
+        memcpy(&key, key_ptr, sizeof(key));
+        memcpy(&value, value_ptr, sizeof(value));
+        sum += (unsigned long long)(key + value);
+        count++;
+    }
+    if (count != n) {
+        fprintf(stderr, "bench_runtime: map iteration count mismatch\n");
+    }
+    bench_map_destroy(&table);
+    return sum;
+}
+
+static unsigned long long sec_map_string_keys(size_t n)
+{
+    LsMapTable table;
+    LsString** probes;
+    size_t i;
+    unsigned long long sum = 0;
+
+    probes = (LsString**)malloc(n * sizeof(LsString*));
+    if (probes == NULL) {
+        return 0;
+    }
+    bench_map_init_string_i64(&table);
+    for (i = 0; i < n; i++) {
+        LsString* key = ls_format_begin(8);
+        int64_t value = (int64_t)i;
+        key = ls_fmt_i64(key, (int64_t)i);
+        ls_retain(key);
+        probes[i] = key;
+        (void)ls_map_insert(&table, &key, &value, NULL);
+    }
+    for (i = 0; i < n; i++) {
+        void* slot = NULL;
+        if (ls_map_get_ptr(&table, &probes[i], &slot)) {
+            int64_t value;
+            memcpy(&value, slot, sizeof(value));
+            sum += (unsigned long long)value;
+        }
+        ls_release(probes[i]);
+    }
+    free(probes);
+    sum += (unsigned long long)ls_map_len(&table);
+    bench_map_destroy(&table);
+    return sum;
+}
+
 /* ------------------------------------------------------------------ */
 /* peak-memory probes                                                 */
 /* ------------------------------------------------------------------ */
@@ -412,6 +599,11 @@ int main(int argc, char** argv)
     run_section("alloc_release", (size_t)1000000, sec_alloc_release);
     run_section("vec_string_push", (size_t)200000, sec_vec_string_push);
     run_section("fmt_mixed", (size_t)20000, sec_fmt_mixed);
+    run_section("map_i64_insert", (size_t)200000, sec_map_i64_insert);
+    run_section("map_i64_lookup", (size_t)200000, sec_map_i64_lookup);
+    run_section("map_i64_miss", (size_t)200000, sec_map_i64_miss);
+    run_section("map_iterate", (size_t)200000, sec_map_iterate);
+    run_section("map_string_keys", (size_t)50000, sec_map_string_keys);
 
     ls_runtime_shutdown();
     return 0;

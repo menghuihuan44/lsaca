@@ -23,6 +23,7 @@ pub enum Item {
     Impl(ImplBlock),
     Const(ConstDecl),
     TypeAlias(TypeAliasDecl),
+    Trait(TraitDecl),
 }
 
 impl Item {
@@ -34,6 +35,7 @@ impl Item {
             Item::Impl(item) => item.span,
             Item::Const(item) => item.span,
             Item::TypeAlias(item) => item.span,
+            Item::Trait(item) => item.span,
         }
     }
 
@@ -45,8 +47,20 @@ impl Item {
             Item::Impl(item) => &item.ty_name,
             Item::Const(item) => &item.name,
             Item::TypeAlias(item) => &item.name,
+            Item::Trait(item) => &item.name,
         }
     }
+}
+
+/// One generic parameter declaration: `T` in `fn f<T>(..)` or the bound form
+/// `T: Iterator<i64> + Drop`.
+#[derive(Debug, Clone)]
+pub struct GenericParam {
+    pub name: String,
+    pub name_span: Span,
+    /// Trait bounds, the callable bound `Fn(A, B) -> C`, or the builtin `Drop`
+    /// bound. Stored as written; the type checker resolves them.
+    pub bounds: Vec<TypeExpr>,
 }
 
 /// Function or method declaration.
@@ -54,6 +68,7 @@ impl Item {
 pub struct FnDecl {
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     /// None means the function returns the unit type.
     pub ret: Option<TypeExpr>,
@@ -78,6 +93,7 @@ pub struct Param {
 pub struct StructDecl {
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDef>,
     pub span: Span,
 }
@@ -93,6 +109,7 @@ pub struct FieldDef {
 pub struct EnumDecl {
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<GenericParam>,
     pub variants: Vec<VariantDef>,
     pub span: Span,
 }
@@ -107,23 +124,53 @@ pub struct VariantDef {
     pub span: Span,
 }
 
-/// The trait named in an impl Trait for Type block.
+/// The trait named in an `impl Trait<Args> for Type` block.
 #[derive(Debug, Clone)]
 pub struct TraitRef {
     pub name: String,
+    pub name_span: Span,
+    /// Generic arguments written on the trait: `Iterator<i64>` has one argument.
+    pub args: Vec<TypeExpr>,
+    /// Covers the whole trait reference (name and generic arguments).
     pub span: Span,
 }
 
-/// An impl block. Inline type parameter lists are not supported.
+/// A method signature inside a trait declaration. Trait methods are
+/// signature-only in version 1.5: the body is not part of the AST.
+#[derive(Debug, Clone)]
+pub struct TraitMethod {
+    pub name: String,
+    pub name_span: Span,
+    /// The first parameter is the receiver, synthesized the same way as in an
+    /// impl method (name "self" and the trait self type as the parameter type).
+    pub params: Vec<Param>,
+    pub ret: Option<TypeExpr>,
+    /// Always Some in version 1.5; kept optional to mirror [FnDecl].
+    pub self_kind: Option<SelfKind>,
+    pub span: Span,
+}
+
+/// A trait declaration: `trait Iterator<T> { fn next(&mut self) -> Option<T>; }`.
+#[derive(Debug, Clone)]
+pub struct TraitDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub generics: Vec<GenericParam>,
+    pub methods: Vec<TraitMethod>,
+    pub span: Span,
+}
+
+/// An impl block: an inherent impl (`impl<T> Pair<T> { .. }`) or a trait impl
+/// (`impl Iterator<i64> for Vector { .. }`).
 #[derive(Debug, Clone)]
 pub struct ImplBlock {
+    pub generics: Vec<GenericParam>,
     pub ty: TypeExpr,
     /// Flattened display name of the implemented type, for messages.
     pub ty_name: String,
     pub ty_span: Span,
-    /// Some for impl Trait for Type blocks. Only the Drop trait is
-    /// meaningful in version 1.4; Copy and Clone are derived automatically
-    /// and must not be implemented explicitly.
+    /// Some for trait impl blocks. The type checker validates the trait name,
+    /// the generic arguments and the method signatures.
     pub trait_name: Option<TraitRef>,
     pub fns: Vec<FnDecl>,
     pub span: Span,
@@ -142,6 +189,7 @@ pub struct ConstDecl {
 pub struct TypeAliasDecl {
     pub name: String,
     pub name_span: Span,
+    pub generics: Vec<GenericParam>,
     pub ty: TypeExpr,
     pub span: Span,
 }
@@ -679,5 +727,796 @@ impl TypeExpr {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Span walking
+// ---------------------------------------------------------------------------
+
+impl Program {
+    /// Visit every [Span] stored in the tree.
+    ///
+    /// The prelude loader uses this to erase the spans of prelude items,
+    /// because those declarations do not come from the user's source file.
+    /// The walk is exhaustive: every node type that owns a span extends it.
+    /// New AST nodes that store spans must add them here.
+    pub fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        for item in &mut self.items {
+            item.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl Item {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        match self {
+            Item::Fn(decl) => decl.for_each_span_mut(visit),
+            Item::Struct(decl) => decl.for_each_span_mut(visit),
+            Item::Enum(decl) => decl.for_each_span_mut(visit),
+            Item::Impl(block) => block.for_each_span_mut(visit),
+            Item::Const(decl) => decl.for_each_span_mut(visit),
+            Item::TypeAlias(decl) => decl.for_each_span_mut(visit),
+            Item::Trait(decl) => decl.for_each_span_mut(visit),
+        }
+    }
+}
+
+impl GenericParam {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        for bound in &mut self.bounds {
+            bound.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl FnDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for param in &mut self.generics {
+            param.for_each_span_mut(visit);
+        }
+        for param in &mut self.params {
+            param.for_each_span_mut(visit);
+        }
+        if let Some(ret) = &mut self.ret {
+            ret.for_each_span_mut(visit);
+        }
+        self.body.for_each_span_mut(visit);
+    }
+}
+
+impl Param {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        self.ty.for_each_span_mut(visit);
+    }
+}
+
+impl StructDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for param in &mut self.generics {
+            param.for_each_span_mut(visit);
+        }
+        for field in &mut self.fields {
+            field.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl FieldDef {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        self.ty.for_each_span_mut(visit);
+    }
+}
+
+impl EnumDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for param in &mut self.generics {
+            param.for_each_span_mut(visit);
+        }
+        for variant in &mut self.variants {
+            variant.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl VariantDef {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for field in &mut self.fields {
+            field.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl TraitRef {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for arg in &mut self.args {
+            arg.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl TraitMethod {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for param in &mut self.params {
+            param.for_each_span_mut(visit);
+        }
+        if let Some(ret) = &mut self.ret {
+            ret.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl TraitDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for param in &mut self.generics {
+            param.for_each_span_mut(visit);
+        }
+        for method in &mut self.methods {
+            method.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl ImplBlock {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.ty_span);
+        visit(&mut self.span);
+        for param in &mut self.generics {
+            param.for_each_span_mut(visit);
+        }
+        self.ty.for_each_span_mut(visit);
+        if let Some(trait_ref) = &mut self.trait_name {
+            trait_ref.for_each_span_mut(visit);
+        }
+        for decl in &mut self.fns {
+            decl.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl ConstDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        self.ty.for_each_span_mut(visit);
+        self.value.for_each_span_mut(visit);
+    }
+}
+
+impl TypeAliasDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for param in &mut self.generics {
+            param.for_each_span_mut(visit);
+        }
+        self.ty.for_each_span_mut(visit);
+    }
+}
+
+impl Block {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        for stmt in &mut self.stmts {
+            stmt.for_each_span_mut(visit);
+        }
+        if let Some(tail) = &mut self.tail {
+            tail.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl Stmt {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        match self {
+            Stmt::Let(stmt) => stmt.for_each_span_mut(visit),
+            Stmt::Expr(expr) => expr.for_each_span_mut(visit),
+            Stmt::Item(item) => item.for_each_span_mut(visit),
+            Stmt::Empty(span) => visit(span),
+        }
+    }
+}
+
+impl LetStmt {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        self.pat.for_each_span_mut(visit);
+        if let Some(ty) = &mut self.ty {
+            ty.for_each_span_mut(visit);
+        }
+        if let Some(init) = &mut self.init {
+            init.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl Expr {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        match &mut self.kind {
+            ExprKind::Lit(_) => {}
+            ExprKind::Path(path) => path.for_each_span_mut(visit),
+            ExprKind::Unary { expr, .. } => expr.for_each_span_mut(visit),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                lhs.for_each_span_mut(visit);
+                rhs.for_each_span_mut(visit);
+            }
+            ExprKind::Assign { target, value, .. } => {
+                target.for_each_span_mut(visit);
+                value.for_each_span_mut(visit);
+            }
+            ExprKind::Cast { expr, ty } => {
+                expr.for_each_span_mut(visit);
+                ty.for_each_span_mut(visit);
+            }
+            ExprKind::Call { callee, args } => {
+                callee.for_each_span_mut(visit);
+                for arg in args {
+                    arg.for_each_span_mut(visit);
+                }
+            }
+            ExprKind::MethodCall {
+                receiver,
+                method_span,
+                turbofish,
+                args,
+                ..
+            } => {
+                receiver.for_each_span_mut(visit);
+                visit(method_span);
+                for ty in turbofish {
+                    ty.for_each_span_mut(visit);
+                }
+                for arg in args {
+                    arg.for_each_span_mut(visit);
+                }
+            }
+            ExprKind::Field {
+                base, name_span, ..
+            } => {
+                base.for_each_span_mut(visit);
+                visit(name_span);
+            }
+            ExprKind::TupleField {
+                base, index_span, ..
+            } => {
+                base.for_each_span_mut(visit);
+                visit(index_span);
+            }
+            ExprKind::Index { base, index } => {
+                base.for_each_span_mut(visit);
+                index.for_each_span_mut(visit);
+            }
+            ExprKind::If(if_expr) => if_expr.for_each_span_mut(visit),
+            ExprKind::Match(match_expr) => match_expr.for_each_span_mut(visit),
+            ExprKind::Block(block) => block.for_each_span_mut(visit),
+            ExprKind::Loop { body } => body.for_each_span_mut(visit),
+            ExprKind::While { cond, body } => {
+                cond.for_each_span_mut(visit);
+                body.for_each_span_mut(visit);
+            }
+            ExprKind::For { pat, iter, body } => {
+                pat.for_each_span_mut(visit);
+                iter.for_each_span_mut(visit);
+                body.for_each_span_mut(visit);
+            }
+            ExprKind::Range { start, end, .. } => {
+                start.for_each_span_mut(visit);
+                end.for_each_span_mut(visit);
+            }
+            ExprKind::Closure(closure) => closure.for_each_span_mut(visit),
+            ExprKind::StructLit { path, fields } => {
+                path.for_each_span_mut(visit);
+                for field in fields {
+                    field.for_each_span_mut(visit);
+                }
+            }
+            ExprKind::Tuple(exprs) => {
+                for expr in exprs {
+                    expr.for_each_span_mut(visit);
+                }
+            }
+            ExprKind::Vec(lit) => match lit {
+                VecLit::List(exprs) => {
+                    for expr in exprs {
+                        expr.for_each_span_mut(visit);
+                    }
+                }
+                VecLit::Repeat { value, count } => {
+                    value.for_each_span_mut(visit);
+                    count.for_each_span_mut(visit);
+                }
+            },
+            ExprKind::Macro(call) => call.for_each_span_mut(visit),
+            ExprKind::Break(expr) => {
+                if let Some(expr) = expr {
+                    expr.for_each_span_mut(visit);
+                }
+            }
+            ExprKind::Continue => {}
+            ExprKind::Return(expr) => {
+                if let Some(expr) = expr {
+                    expr.for_each_span_mut(visit);
+                }
+            }
+            ExprKind::Ref { expr, .. } => expr.for_each_span_mut(visit),
+            ExprKind::Deref { expr } => expr.for_each_span_mut(visit),
+            ExprKind::Try { expr } => expr.for_each_span_mut(visit),
+        }
+    }
+}
+
+impl PathExpr {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        for segment in &mut self.segments {
+            segment.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl PathSegment {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        for ty in &mut self.generics {
+            ty.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl IfExpr {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        self.cond.for_each_span_mut(visit);
+        self.then_block.for_each_span_mut(visit);
+        if let Some(else_expr) = &mut self.else_expr {
+            else_expr.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl MatchExpr {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        self.scrutinee.for_each_span_mut(visit);
+        for arm in &mut self.arms {
+            arm.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl MatchArm {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        self.pat.for_each_span_mut(visit);
+        if let Some(guard) = &mut self.guard {
+            guard.for_each_span_mut(visit);
+        }
+        self.body.for_each_span_mut(visit);
+    }
+}
+
+impl FieldInit {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        self.value.for_each_span_mut(visit);
+    }
+}
+
+impl ClosureExpr {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        for param in &mut self.params {
+            param.for_each_span_mut(visit);
+        }
+        if let Some(ret) = &mut self.ret {
+            ret.for_each_span_mut(visit);
+        }
+        self.body.for_each_span_mut(visit);
+    }
+}
+
+impl ClosureParam {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        self.pat.for_each_span_mut(visit);
+        if let Some(ty) = &mut self.ty {
+            ty.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl MacroCall {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for arg in &mut self.args {
+            arg.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl Pattern {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        match &mut self.kind {
+            PatternKind::Wild => {}
+            PatternKind::Binding { .. } => {}
+            PatternKind::Lit(_) => {}
+            PatternKind::Tuple(patterns) => {
+                for pattern in patterns {
+                    pattern.for_each_span_mut(visit);
+                }
+            }
+            PatternKind::Path { path, args } => {
+                path.for_each_span_mut(visit);
+                for arg in args {
+                    arg.for_each_span_mut(visit);
+                }
+            }
+            PatternKind::Struct { path, fields, .. } => {
+                path.for_each_span_mut(visit);
+                for field in fields {
+                    field.for_each_span_mut(visit);
+                }
+            }
+            PatternKind::Or(patterns) => {
+                for pattern in patterns {
+                    pattern.for_each_span_mut(visit);
+                }
+            }
+        }
+    }
+}
+
+impl FieldPat {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        self.pat.for_each_span_mut(visit);
+    }
+}
+
+impl TypeExpr {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        match self {
+            TypeExpr::Path {
+                name_span,
+                generics,
+                ..
+            } => {
+                visit(name_span);
+                for arg in generics {
+                    arg.for_each_span_mut(visit);
+                }
+            }
+            TypeExpr::Tuple { elems, span } => {
+                visit(span);
+                for elem in elems {
+                    elem.for_each_span_mut(visit);
+                }
+            }
+            TypeExpr::Fn { params, ret, span } => {
+                visit(span);
+                for param in params {
+                    param.for_each_span_mut(visit);
+                }
+                ret.for_each_span_mut(visit);
+            }
+            TypeExpr::Ref { inner, span, .. } => {
+                visit(span);
+                inner.for_each_span_mut(visit);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::parse;
+    use crate::span::SourceFile;
+
+    /// A program that exercises every AST node kind.
+    const EVERY_NODE_KIND: &str = r#"
+struct Point<T> {
+    pub x: T,
+    pub y: T,
+}
+
+struct Wrapper<T> {
+    value: T,
+}
+
+enum Maybe<T> {
+    Nothing,
+    Just(T),
+}
+
+trait Shape<T> {
+    pub fn area(&self) -> i64;
+    fn scale(&mut self, factor: i64);
+    fn into_point(self) -> Point<i64>;
+}
+
+trait IntoValue<T> {
+    fn into_value(self) -> T;
+}
+
+const LIMIT: i64 = 10;
+
+type Number = i64;
+
+impl<T> Wrapper<T> {
+    fn get(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> IntoValue<T> for Wrapper<T> {
+    fn into_value(self) -> T {
+        self.value
+    }
+}
+
+impl Shape<i64> for Point<i64> {
+    fn area(&self) -> i64 {
+        self.x
+    }
+
+    fn scale(&mut self, factor: i64) {
+        self.x = self.x + factor;
+    }
+
+    fn into_point(self) -> Point<i64> {
+        self
+    }
+}
+
+impl Drop for Point<i64> {
+    fn drop(&mut self) {
+    }
+}
+
+fn make<T, U: Iterator<i64> + Drop>(first: T, second: U) -> i64 {
+    let _ = first;
+    let _ = second;
+    0
+}
+
+fn callable(callback: fn(i64, String) -> bool, generic: Fn(i64) -> bool) -> bool {
+    callback(1, "text") && generic(2)
+}
+
+fn fallible() -> Option<i64> {
+    Some(1)
+}
+
+fn pick() -> Option<i64> {
+    let value = fallible()?;
+    Some(value)
+}
+
+fn returns_value() -> i64 {
+    return 1;
+}
+
+fn main() {
+    let mut x = 1;
+    let float = 1.5;
+    let text = "hello";
+    let flag = true;
+    let negative = -x;
+    let inverted = !flag;
+    let arithmetic = x + 1 * 2 - 3 / 1 % 2;
+    let comparison = x == 1 || x != 2 && x < 3 && x <= 4 && x > 0 && x >= -1;
+    let bits = (x & 1) | (x ^ 2) | (x << 1) | (x >> 1);
+    x = 2;
+    x += 1;
+    let cast = x as u8;
+    let called = make::<i64, i64>(x, 2);
+    let wrapped = Wrapper::<i64> { value: 3 };
+    let borrowed = wrapped.get::<i64>();
+    let field = wrapped.value;
+    let tuple = (1, 2, 3);
+    let first = tuple.0;
+    let pair: (i64, i64) = (1, 2);
+    let reference: &i64 = &x;
+    let mutable_reference: &mut i64 = &mut x;
+    let list = vec![1, 2, 3];
+    let repeated = vec![0; 3];
+    let indexed = list[0];
+    let block = {
+        const INNER: i64 = 1;
+        let inner = INNER;
+        ;
+        inner
+    };
+    let chosen = if x > 0 { 1 } else if x == 0 { 0 } else { -1 };
+    let mut counter = 0;
+    while counter < 3 {
+        counter += 1;
+    }
+    loop {
+        break;
+    }
+    loop {
+        continue;
+        ;
+    }
+    for k in 0..3 {
+        let _ = k;
+    }
+    for m in 0..=3 {
+        let _ = m;
+    }
+    for mut n in 0..1 {
+        n = 1;
+    }
+    let matched = match x {
+        0 | 1 => 1,
+        _ => 0,
+    };
+    let guarded = match x {
+        value if value > 0 => value,
+        _ => 0,
+    };
+    let tuple_matched = match tuple {
+        (a, b, c) => a + b + c,
+    };
+    let maybe = Maybe::Just(4);
+    let unwrapped = match maybe {
+        Maybe::Nothing => 0,
+        Maybe::Just(value) => value,
+    };
+    let point = Point { x: 1, y: 2 };
+    let point_x = match point {
+        Point { x, y } => x + y,
+    };
+    let closure = move |a: i64, b| a + b;
+    let typed_closure = |value: i64| -> i64 { value + 1 };
+    println!("hello");
+    print!("x");
+    let shared = &x;
+    let unique = &mut x;
+    let dereferenced = *shared;
+    let _ = (
+        float,
+        text,
+        inverted,
+        arithmetic,
+        comparison,
+        bits,
+        cast,
+        called,
+        borrowed,
+        field,
+        first,
+        pair,
+        reference,
+        mutable_reference,
+        repeated,
+        indexed,
+        block,
+        chosen,
+        matched,
+        guarded,
+        tuple_matched,
+        unwrapped,
+        point_x,
+        closure,
+        typed_closure,
+        shared,
+        unique,
+        dereferenced,
+        negative,
+    );
+    return;
+}
+"#;
+
+    fn parse_test_program() -> Program {
+        let file = SourceFile::new("<ast-test>", EVERY_NODE_KIND);
+        let (tokens, lex_diagnostics) = tokenize(EVERY_NODE_KIND);
+        assert!(
+            !lex_diagnostics.has_errors(),
+            "AST test source must lex cleanly:
+{}",
+            lex_diagnostics.render(&file)
+        );
+        let (program, diagnostics) = parse(&tokens, &file);
+        assert!(
+            !diagnostics.has_errors(),
+            "AST test source must parse cleanly:
+{}",
+            diagnostics.render(&file)
+        );
+        program
+    }
+
+    /// Every span rendered by the Debug formatter that is not 0..0.
+    fn non_zero_spans(program: &Program) -> Vec<String> {
+        let text = format!("{:?}", program);
+        let bytes = text.as_bytes();
+        let mut found = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            if !bytes[index].is_ascii_digit() {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+            if index + 1 < bytes.len() && bytes[index] == b'.' && bytes[index + 1] == b'.' {
+                let end_start = index + 2;
+                let mut end = end_start;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                if end > end_start {
+                    let span = &text[start..end];
+                    if span != "0..0" {
+                        found.push(span.to_string());
+                    }
+                    index = end;
+                    continue;
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_node_span_is_visited() {
+        let mut program = parse_test_program();
+        assert!(
+            !non_zero_spans(&program).is_empty(),
+            "the test source should produce spans before the walk"
+        );
+
+        let mut visited = 0usize;
+        program.for_each_span_mut(&mut |span: &mut Span| {
+            *span = Span::empty(0);
+            visited += 1;
+        });
+        assert!(visited > 0, "the span walk must visit the tree");
+
+        let leftover = non_zero_spans(&program);
+        assert!(
+            leftover.is_empty(),
+            "the span walk missed {:?} (Debug output still has non-zero spans)",
+            leftover
+        );
+
+        let mut second_visit = 0usize;
+        program.for_each_span_mut(&mut |span: &mut Span| {
+            assert_eq!(
+                *span,
+                Span::empty(0),
+                "the second walk saw a span the first walk did not clear"
+            );
+            second_visit += 1;
+        });
+        assert_eq!(
+            visited, second_visit,
+            "both walks must visit the same number of spans"
+        );
     }
 }

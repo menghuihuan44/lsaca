@@ -1,7 +1,9 @@
 /* Smoke test for the lsaca C17 runtime.
  *
  * Build (from an ASCII directory, because the repo path has non-ASCII bytes):
- *     gcc -std=c17 -Wall -Wextra -Wpedantic -O1 main.c lsaca_rt.c -lm -o smoke
+ *     gcc -std=c17 -Wall -Wextra -Wpedantic -O1 main.c lsaca_rt.c \
+ *         lsaca_rt_string.c lsaca_rt_vec.c lsaca_rt_fmt.c lsaca_rt_map.c -lm \
+ *         -o smoke
  *     smoke                 -- in-process checks (no file IO)
  *     smoke --io <file>     -- in-process checks including file IO
  *     smoke --args a b      -- prints the language-level argument vector
@@ -417,6 +419,220 @@ static void test_orc_live_edge(void) {
     ls_release(live);
     CHECK(ls_rt_test_live_allocations() == base);
     CHECK(g_orc_drops == drops + 3);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Collector stress tests                                                 */
+/* ---------------------------------------------------------------------- */
+
+/* Deterministic splitmix64 PRNG shared by the ORC and hash-map stress tests.
+ * Stress runs must reproduce bit for bit, so no time seed and no library RNG
+ * are used. */
+#define STRESS_RNG_SEED ((uint64_t)0x9E3779B97F4A7C15ULL)
+
+static uint64_t g_stress_rng_state = STRESS_RNG_SEED;
+
+static uint64_t stress_rng_next(void) {
+    uint64_t z;
+
+    g_stress_rng_state += (uint64_t)0x9E3779B97F4A7C15ULL;
+    z = g_stress_rng_state;
+    z = (z ^ (z >> 30)) * (uint64_t)0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * (uint64_t)0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static void stress_rng_reset(void) {
+    g_stress_rng_state = STRESS_RNG_SEED;
+}
+
+/* Stress sizes are compile-time constants so that the reported check count
+ * stays meaningful: every stress test aggregates its per-operation
+ * observations into a handful of summary CHECKs instead of one check per
+ * allocation or hash-map operation. */
+#define ORC_STRESS_CYCLES ((size_t)5000)
+#define ORC_STRESS_RING_NODES ((size_t)2000)
+#define ORC_STRESS_CHURN_OBJECTS ((size_t)100000)
+#define ORC_STRESS_CHURN_CYCLE_INTERVAL ((size_t)500)
+#define ORC_STRESS_CHURN_COLLECT_INTERVAL ((size_t)10000)
+#define ORC_STRESS_CHURN_CYCLES \
+    ((ORC_STRESS_CHURN_OBJECTS / ORC_STRESS_CHURN_CYCLE_INTERVAL) - 1)
+
+/* Shuffle a node array with Fisher-Yates and the deterministic PRNG. */
+static void stress_shuffle_nodes(OrcTestNode** items, size_t count) {
+    size_t i;
+
+    for (i = count; i > 1; i -= 1) {
+        size_t j = (size_t)(stress_rng_next() % (uint64_t)i);
+        OrcTestNode* tmp = items[i - 1];
+        items[i - 1] = items[j];
+        items[j] = tmp;
+    }
+}
+
+/* (f) 5000 independent two-node cycles: reference counting alone must never
+ * reclaim them, and a single collection must return the live count to the
+ * baseline. Automatic collection is disabled while the cycles are built. */
+static void test_orc_stress_many_cycles(void) {
+    size_t previous_threshold = ls_rt_test_set_candidate_threshold(SIZE_MAX);
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    size_t i;
+
+    for (i = 0; i < ORC_STRESS_CYCLES; i += 1) {
+        OrcTestNode* a = orc_node_new(NULL);
+        OrcTestNode* b = orc_node_new(NULL);
+        orc_node_set_child(a, b);
+        orc_node_set_child(b, a);
+        ls_release(a);
+        ls_release(b);
+    }
+    /* No candidate threshold was crossed: the cycles are still alive and
+     * prove that plain reference counting does not reclaim cycles. */
+    CHECK(ls_rt_test_live_allocations() == base + 2 * ORC_STRESS_CYCLES);
+    ls_collect_cycles();
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops - drops == (int)(2 * ORC_STRESS_CYCLES));
+    (void)ls_rt_test_set_candidate_threshold(previous_threshold);
+}
+
+/* (g) One large cycle of 2000 nodes. Every node's only managed field points
+ * to the next node, so the collector's intrusive mark/scan/collect visitors
+ * recurse around the ring instead of over many small components. */
+static OrcTestNode* s_orc_ring[ORC_STRESS_RING_NODES];
+
+static void test_orc_stress_large_cycle(void) {
+    size_t previous_threshold = ls_rt_test_set_candidate_threshold(SIZE_MAX);
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    size_t i;
+
+    for (i = 0; i < ORC_STRESS_RING_NODES; i += 1) {
+        s_orc_ring[i] = orc_node_new(NULL);
+    }
+    for (i = 0; i < ORC_STRESS_RING_NODES; i += 1) {
+        orc_node_set_child(s_orc_ring[i],
+                           s_orc_ring[(i + 1) % ORC_STRESS_RING_NODES]);
+    }
+    CHECK(ls_rt_test_live_allocations() == base + ORC_STRESS_RING_NODES);
+    for (i = 0; i < ORC_STRESS_RING_NODES; i += 1) {
+        ls_release(s_orc_ring[i]);
+    }
+    /* The ring is garbage now, but every node still has an internal edge. */
+    CHECK(ls_rt_test_live_allocations() == base + ORC_STRESS_RING_NODES);
+    ls_collect_cycles();
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops - drops == (int)ORC_STRESS_RING_NODES);
+    (void)ls_rt_test_set_candidate_threshold(previous_threshold);
+}
+
+/* (h) Edges between garbage and live objects in both directions. */
+static void test_orc_stress_live_edges(void) {
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    OrcTestNode* garbage_a = orc_node_new("garbage-a");
+    OrcTestNode* garbage_b = orc_node_new("garbage-b");
+    OrcTestNode* live_root = orc_node_new("live-root");
+    OrcTestNode* cycle_x;
+    OrcTestNode* cycle_y;
+    OrcTestNode* live_outer;
+
+    /* (1) A garbage cycle points at a live root. The collection must drop the
+     * cycle and leave the live root with only its external reference. */
+    orc_node_set_child(garbage_a, garbage_b);
+    orc_node_set_child(garbage_b, garbage_a);
+    orc_node_set_extra(garbage_b, live_root);
+    CHECK(ls_refcount(live_root) == 2);
+    ls_release(garbage_a);
+    ls_release(garbage_b);
+    ls_collect_cycles();
+    CHECK(ls_rt_test_live_allocations() == base + 2); /* root + its name */
+    CHECK(ls_refcount(live_root) == 1);
+    CHECK_STR(live_root->name, "live-root");
+    CHECK(g_orc_drops - drops == 2);
+
+    /* (2) A live root points into an otherwise garbage cycle. For the trial
+     * deletion that edge is external, so the whole reachable component must
+     * survive the collection. */
+    cycle_x = orc_node_new("cycle-x");
+    cycle_y = orc_node_new("cycle-y");
+    live_outer = orc_node_new("live-outer");
+    orc_node_set_child(cycle_x, cycle_y);
+    orc_node_set_child(cycle_y, cycle_x);
+    orc_node_set_child(live_outer, cycle_x);
+    CHECK(ls_refcount(cycle_x) == 3);
+    CHECK(ls_refcount(cycle_y) == 2);
+    CHECK(ls_refcount(live_outer) == 1);
+    ls_release(cycle_x);
+    ls_release(cycle_y);
+    CHECK(ls_rt_test_live_allocations() == base + 2 + 6);
+    ls_collect_cycles();
+    CHECK(ls_rt_test_live_allocations() == base + 8);
+    CHECK(ls_refcount(cycle_x) == 2);
+    CHECK(ls_refcount(cycle_y) == 1);
+    CHECK(ls_refcount(live_outer) == 1);
+    CHECK_STR(cycle_x->name, "cycle-x");
+    CHECK_STR(live_outer->name, "live-outer");
+    CHECK(g_orc_drops - drops == 2);
+    ls_release(live_outer); /* frees outer, releases its edge to cycle_x */
+    CHECK(ls_rt_test_live_allocations() == base + 6);
+    CHECK(g_orc_drops - drops == 3);
+    ls_collect_cycles(); /* the cycle is garbage once the root is gone */
+    CHECK(ls_rt_test_live_allocations() == base + 2);
+    CHECK(g_orc_drops - drops == 5);
+    ls_release(live_root);
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops - drops == 6);
+}
+
+/* (i) Random churn: 100k managed allocations released in a PRNG-driven order,
+ * a two-node cycle created every 500 allocations, and periodic collections.
+ * Deterministic by construction; the whole test stays well under a second. */
+static OrcTestNode* s_orc_churn[ORC_STRESS_CHURN_OBJECTS];
+
+static void test_orc_stress_random_churn(void) {
+    size_t previous_threshold = ls_rt_test_set_candidate_threshold(SIZE_MAX);
+    size_t base = ls_rt_test_live_allocations();
+    int drops = g_orc_drops;
+    size_t i;
+    size_t cycles = 0;
+    size_t pending_cycles = 0;
+
+    stress_rng_reset();
+    for (i = 0; i < ORC_STRESS_CHURN_OBJECTS; i += 1) {
+        s_orc_churn[i] = orc_node_new(NULL);
+        if (i > 0 && (i % ORC_STRESS_CHURN_CYCLE_INTERVAL) == 0) {
+            OrcTestNode* a = orc_node_new(NULL);
+            OrcTestNode* b = orc_node_new(NULL);
+            orc_node_set_child(a, b);
+            orc_node_set_child(b, a);
+            ls_release(a);
+            ls_release(b);
+            cycles += 1;
+            pending_cycles += 1;
+        }
+        if ((i % ORC_STRESS_CHURN_COLLECT_INTERVAL) ==
+            ORC_STRESS_CHURN_COLLECT_INTERVAL - 1) {
+            ls_collect_cycles();
+            pending_cycles = 0;
+        }
+    }
+    CHECK(cycles == ORC_STRESS_CHURN_CYCLES);
+    CHECK(ls_rt_test_live_allocations() ==
+          base + ORC_STRESS_CHURN_OBJECTS + 2 * pending_cycles);
+    stress_shuffle_nodes(s_orc_churn, ORC_STRESS_CHURN_OBJECTS);
+    for (i = 0; i < ORC_STRESS_CHURN_OBJECTS; i += 1) {
+        ls_release(s_orc_churn[i]);
+        if ((i % ORC_STRESS_CHURN_COLLECT_INTERVAL) ==
+            ORC_STRESS_CHURN_COLLECT_INTERVAL - 1) {
+            ls_collect_cycles();
+        }
+    }
+    ls_collect_cycles();
+    CHECK(ls_rt_test_live_allocations() == base);
+    CHECK(g_orc_drops - drops ==
+          (int)(ORC_STRESS_CHURN_OBJECTS + 2 * cycles));
+    (void)ls_rt_test_set_candidate_threshold(previous_threshold);
 }
 
 /* ====================================================================== */
@@ -1402,6 +1618,1413 @@ static void test_io(const char* path) {
 }
 
 /* ====================================================================== */
+/* Hash maps                                                              */
+/* ====================================================================== */
+
+static int g_map_key_copies = 0;
+static int g_map_key_drops = 0;
+static int g_map_value_copies = 0;
+static int g_map_value_drops = 0;
+
+/* Scalar key/value callbacks. The runtime never calls copy_key(); the counter
+ * exists so the tests can prove it. */
+static void map_copy_key_i64(void* out, const void* in) {
+    memcpy(out, in, sizeof(int64_t));
+    g_map_key_copies += 1;
+}
+
+static void map_drop_key_i64(void* key_bytes) {
+    (void)key_bytes;
+    g_map_key_drops += 1;
+}
+
+static void map_copy_value_i64(void* out, const void* in) {
+    memcpy(out, in, sizeof(int64_t));
+    g_map_value_copies += 1;
+}
+
+static void map_drop_value_i64(void* value_bytes) {
+    (void)value_bytes;
+    g_map_value_drops += 1;
+}
+
+static void map_copy_key_u64(void* out, const void* in) {
+    memcpy(out, in, sizeof(uint64_t));
+    g_map_key_copies += 1;
+}
+
+static void map_drop_key_u64(void* key_bytes) {
+    (void)key_bytes;
+    g_map_key_drops += 1;
+}
+
+static void map_copy_key_bool(void* out, const void* in) {
+    memcpy(out, in, sizeof(bool));
+    g_map_key_copies += 1;
+}
+
+static void map_drop_key_bool(void* key_bytes) {
+    (void)key_bytes;
+    g_map_key_drops += 1;
+}
+
+static void map_copy_key_string(void* out, const void* in) {
+    LsString* handle;
+    memcpy(&handle, in, sizeof handle);
+    handle = (LsString*)ls_retain(handle);
+    memcpy(out, &handle, sizeof handle);
+    g_map_key_copies += 1;
+}
+
+static void map_drop_key_string(void* key_bytes) {
+    LsString* handle;
+    memcpy(&handle, key_bytes, sizeof handle);
+    if (handle != NULL) {
+        ls_release(handle);
+    }
+    g_map_key_drops += 1;
+}
+
+static void map_copy_value_string(void* out, const void* in) {
+    LsString* handle;
+    memcpy(&handle, in, sizeof handle);
+    handle = (LsString*)ls_retain(handle);
+    memcpy(out, &handle, sizeof handle);
+    g_map_value_copies += 1;
+}
+
+static void map_drop_value_string(void* value_bytes) {
+    LsString* handle;
+    memcpy(&handle, value_bytes, sizeof handle);
+    if (handle != NULL) {
+        ls_release(handle);
+    }
+    g_map_value_drops += 1;
+}
+
+static void map_init_i64_i64(LsMapTable* table) {
+    ls_map_init(table, sizeof(int64_t), sizeof(int64_t), ls_hash_i64, ls_eq_i64,
+                map_copy_key_i64, map_drop_key_i64, map_copy_value_i64,
+                map_drop_value_i64);
+}
+
+static void map_init_i64_string(LsMapTable* table) {
+    ls_map_init(table, sizeof(int64_t), sizeof(LsString*), ls_hash_i64,
+                ls_eq_i64, map_copy_key_i64, map_drop_key_i64,
+                map_copy_value_string, map_drop_value_string);
+}
+
+static void map_init_string_i64(LsMapTable* table) {
+    ls_map_init(table, sizeof(LsString*), sizeof(int64_t), ls_hash_string_slot,
+                ls_eq_string_slot, map_copy_key_string, map_drop_key_string,
+                map_copy_value_i64, map_drop_value_i64);
+}
+
+static void map_init_u64_i64(LsMapTable* table) {
+    ls_map_init(table, sizeof(uint64_t), sizeof(int64_t), ls_hash_u64, ls_eq_u64,
+                map_copy_key_u64, map_drop_key_u64, map_copy_value_i64,
+                map_drop_value_i64);
+}
+
+static void map_init_bool_i64(LsMapTable* table) {
+    ls_map_init(table, sizeof(bool), sizeof(int64_t), ls_hash_bool, ls_eq_bool,
+                map_copy_key_bool, map_drop_key_bool, map_copy_value_i64,
+                map_drop_value_i64);
+}
+
+/* Frees the three slot arrays; the table must be empty (cleared) first. */
+static void map_free_arrays(LsMapTable* table) {
+    free(table->keys);
+    free(table->values);
+    free(table->states);
+    table->keys = NULL;
+    table->values = NULL;
+    table->states = NULL;
+    table->cap = 0;
+    table->len = 0;
+}
+
+static bool map_capacity_ok(const LsMapTable* table) {
+    size_t cap = table->cap;
+    if (cap == 0) {
+        return table->len == 0 && table->keys == NULL &&
+               table->values == NULL && table->states == NULL;
+    }
+    if ((cap & (cap - 1)) != 0 || cap < 8) {
+        return false;
+    }
+    if (table->keys == NULL || table->values == NULL ||
+        table->states == NULL) {
+        return false;
+    }
+    return table->len <= (cap / 4) * 3;
+}
+
+static bool map_sequences_equal(const LsMapTable* a, const LsMapTable* b) {
+    LsMapIter ia;
+    LsMapIter ib;
+    ls_map_iter_init(&ia, a);
+    ls_map_iter_init(&ib, b);
+    for (;;) {
+        const void* key_a = NULL;
+        const void* value_a = NULL;
+        const void* key_b = NULL;
+        const void* value_b = NULL;
+        bool more_a = ls_map_iter_next(&ia, &key_a, &value_a);
+        bool more_b = ls_map_iter_next(&ib, &key_b, &value_b);
+        if (more_a != more_b) {
+            return false;
+        }
+        if (!more_a) {
+            return true;
+        }
+        if (memcmp(key_a, key_b, sizeof(int64_t)) != 0) {
+            return false;
+        }
+        if (memcmp(value_a, value_b, sizeof(int64_t)) != 0) {
+            return false;
+        }
+    }
+}
+
+static void test_map_hash_primitives(void) {
+    int64_t zero = 0;
+    int64_t one = 1;
+    int64_t forty_two = 42;
+    int64_t same = 42;
+    int64_t different = 43;
+    int64_t minus_one = -1;
+    uint64_t uzero = 0;
+    uint64_t uone = 1;
+    uint64_t usame = 1;
+    uint64_t udifferent = 2;
+    bool bfalse = false;
+    bool btrue = true;
+    LsString* null_handle = NULL;
+    LsString* first = ls_str_cstr("abc");
+    LsString* second = ls_str_cstr("abc");
+    LsString* third = ls_str_cstr("hello world");
+
+    CHECK(first != NULL && second != NULL && third != NULL);
+    /* FNV-1a 64 followed by splitmix64: frozen constants. */
+    CHECK(ls_hash_bytes("", 0) == 0xF52A15E9A9B5E89BULL);
+    CHECK(ls_hash_bytes(NULL, 0) == 0xF52A15E9A9B5E89BULL);
+    CHECK(ls_hash_bytes("abc", 3) == 0x0DD490490804B508ULL);
+    CHECK(ls_hash_bytes("hello world", 11) == 0x05CB585112BE1151ULL);
+    CHECK(ls_hash_bytes("abc", 3) != ls_hash_bytes("abd", 3));
+    CHECK(ls_hash_i64(&zero) == 0);
+    CHECK(ls_hash_i64(&one) == 0x5692161D100B05E5ULL);
+    CHECK(ls_hash_i64(&forty_two) == 0xA759EA27D4727622ULL);
+    CHECK(ls_hash_i64(&minus_one) == 0xB4D055FCF2CBBD7BULL);
+    CHECK(ls_hash_i64(&forty_two) == ls_hash_i64(&same));
+    CHECK(ls_eq_i64(&forty_two, &same));
+    CHECK(!ls_eq_i64(&forty_two, &different));
+    CHECK(ls_hash_u64(&uzero) == 0);
+    CHECK(ls_hash_u64(&uone) == 0x5692161D100B05E5ULL);
+    CHECK(ls_eq_u64(&uone, &usame));
+    CHECK(!ls_eq_u64(&uone, &udifferent));
+    CHECK(ls_hash_bool(&bfalse) == 0);
+    CHECK(ls_hash_bool(&btrue) == 0x5692161D100B05E5ULL);
+    CHECK(ls_eq_bool(&btrue, &btrue));
+    CHECK(ls_eq_bool(&bfalse, &bfalse));
+    CHECK(!ls_eq_bool(&btrue, &bfalse));
+    CHECK(ls_hash_string_slot(&null_handle) == 0);
+    CHECK(ls_eq_string_slot(&null_handle, &null_handle));
+    CHECK(ls_hash_string_slot(&first) == 0x0DD490490804B508ULL);
+    CHECK(ls_hash_string_slot(&first) == ls_hash_string_slot(&second));
+    CHECK(ls_eq_string_slot(&first, &second));
+    CHECK(!ls_eq_string_slot(&first, &third));
+    CHECK(!ls_eq_string_slot(&first, &null_handle));
+    CHECK(!ls_eq_string_slot(&null_handle, &first));
+    CHECK(ls_hash_string_slot(&third) == 0x05CB585112BE1151ULL);
+    ls_release(first);
+    ls_release(second);
+    ls_release(third);
+}
+
+static void test_map_int_basics(void) {
+    LsMapTable table;
+    void* slot = NULL;
+    int64_t key;
+    int64_t value;
+    int64_t out_old = 0;
+    size_t i;
+
+    map_init_i64_i64(&table);
+    CHECK(table.cap == 0);
+    CHECK(table.len == 0);
+    CHECK(table.key_size == sizeof(int64_t));
+    CHECK(table.value_size == sizeof(int64_t));
+    CHECK(table.keys == NULL && table.values == NULL && table.states == NULL);
+    CHECK(map_capacity_ok(&table));
+    CHECK(ls_map_len(&table) == 0);
+    CHECK(ls_map_is_empty(&table));
+
+    key = 0;
+    CHECK(!ls_map_get_ptr(&table, &key, &slot));
+    CHECK(slot == NULL);
+
+    key = 7;
+    value = 70;
+    CHECK(!ls_map_insert(&table, &key, &value, &out_old));
+    CHECK(table.len == 1);
+    CHECK(table.cap == 8);
+    CHECK(map_capacity_ok(&table));
+    CHECK(!ls_map_is_empty(&table));
+    CHECK(ls_map_get_ptr(&table, &key, &slot));
+    CHECK(slot != NULL && *(const int64_t*)slot == 70);
+
+    value = 71;
+    CHECK(ls_map_insert(&table, &key, &value, &out_old));
+    CHECK(out_old == 70);
+    CHECK(ls_map_get_ptr(&table, &key, &slot));
+    CHECK(*(const int64_t*)slot == 71);
+    CHECK(table.len == 1);
+
+    value = 72;
+    /* out_old_value is NULL, so no old value is returned and the result is
+     * false even though the key exists. */
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    CHECK(ls_map_get_ptr(&table, &key, &slot));
+    CHECK(*(const int64_t*)slot == 72);
+
+    {
+        int64_t missing = 8;
+        CHECK(!ls_map_get_ptr(&table, &missing, &slot));
+    }
+
+    out_old = -1;
+    CHECK(ls_map_remove(&table, &key, &out_old));
+    CHECK(out_old == 72);
+    CHECK(table.len == 0);
+    CHECK(ls_map_is_empty(&table));
+    CHECK(!ls_map_get_ptr(&table, &key, &slot));
+    CHECK(!ls_map_remove(&table, &key, &out_old));
+
+    key = 9;
+    value = 90;
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    CHECK(ls_map_remove(&table, &key, NULL));
+    CHECK(table.len == 0);
+
+    for (i = 0; i < 10; i += 1) {
+        key = (int64_t)(i + 1);
+        value = key * 10;
+        CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    }
+    CHECK(table.len == 10);
+    /* 10 entries need (10 + 1) > 8 * 0.75, so the table grows to 16. */
+    CHECK(table.cap == 16);
+    CHECK(map_capacity_ok(&table));
+    for (i = 0; i < 10; i += 1) {
+        key = (int64_t)(i + 1);
+        CHECK(ls_map_get_ptr(&table, &key, &slot));
+        CHECK(*(const int64_t*)slot == key * 10);
+    }
+
+    ls_map_clear(&table);
+    CHECK(table.len == 0);
+    CHECK(ls_map_is_empty(&table));
+    CHECK(table.cap == 16);
+    CHECK(map_capacity_ok(&table));
+    for (i = 0; i < 10; i += 1) {
+        key = (int64_t)(i + 1);
+        CHECK(!ls_map_get_ptr(&table, &key, &slot));
+    }
+
+    key = 3;
+    value = 33;
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    CHECK(ls_map_get_ptr(&table, &key, &slot));
+    CHECK(*(const int64_t*)slot == 33);
+    ls_map_clear(&table);
+    map_free_arrays(&table);
+    CHECK(map_capacity_ok(&table));
+}
+
+static void test_map_iteration_order(void) {
+    /* Frozen slot order for i64 keys 1..5 in a capacity-8 table. */
+    static const int64_t expected[5] = {3, 2, 4, 1, 5};
+    LsMapTable table;
+    LsMapIter iter;
+    int64_t keys[5];
+    size_t i;
+    size_t seen = 0;
+
+    map_init_i64_i64(&table);
+    for (i = 0; i < 5; i += 1) {
+        int64_t value;
+        keys[i] = (int64_t)(i + 1);
+        value = keys[i] * 100;
+        CHECK(!ls_map_insert(&table, &keys[i], &value, NULL));
+    }
+    CHECK(table.cap == 8);
+    ls_map_iter_init(&iter, &table);
+    for (;;) {
+        const void* key_ptr = NULL;
+        const void* value_ptr = NULL;
+        if (!ls_map_iter_next(&iter, &key_ptr, &value_ptr)) {
+            break;
+        }
+        CHECK(seen < 5);
+        if (seen < 5) {
+            CHECK(*(const int64_t*)key_ptr == expected[seen]);
+            CHECK(*(const int64_t*)value_ptr == expected[seen] * 100);
+        }
+        seen += 1;
+    }
+    CHECK(seen == 5);
+
+    /* NULL output pointers are allowed and still advance the iterator. */
+    ls_map_iter_init(&iter, &table);
+    seen = 0;
+    while (ls_map_iter_next(&iter, NULL, NULL)) {
+        seen += 1;
+    }
+    CHECK(seen == 5);
+    map_free_arrays(&table);
+}
+
+static void test_map_growth_iteration(void) {
+    LsMapTable table;
+    LsMapTable twin;
+    LsMapIter iter;
+    size_t i;
+    size_t count;
+    size_t removed = 0;
+    int64_t sum;
+
+    map_init_i64_i64(&table);
+    for (i = 0; i < 1000; i += 1) {
+        int64_t key = (int64_t)i;
+        int64_t value = key * 3;
+        CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    }
+    CHECK(table.len == 1000);
+    CHECK(table.cap == 2048);
+    CHECK(map_capacity_ok(&table));
+    sum = 0;
+    for (i = 0; i < 1000; i += 1) {
+        int64_t key = (int64_t)i;
+        void* slot = NULL;
+        CHECK(ls_map_get_ptr(&table, &key, &slot));
+        if (slot != NULL) {
+            sum += *(const int64_t*)slot;
+        }
+    }
+    CHECK(sum == 1498500);
+    count = 0;
+    sum = 0;
+    ls_map_iter_init(&iter, &table);
+    for (;;) {
+        const void* key_ptr = NULL;
+        const void* value_ptr = NULL;
+        if (!ls_map_iter_next(&iter, &key_ptr, &value_ptr)) {
+            break;
+        }
+        count += 1;
+        sum += *(const int64_t*)key_ptr;
+        CHECK(*(const int64_t*)value_ptr == *(const int64_t*)key_ptr * 3);
+    }
+    CHECK(count == 1000);
+    CHECK(sum == 499500);
+
+    /* A second table built by the same operations iterates identically. */
+    map_init_i64_i64(&twin);
+    for (i = 0; i < 1000; i += 1) {
+        int64_t key = (int64_t)i;
+        int64_t value = key * 3;
+        CHECK(!ls_map_insert(&twin, &key, &value, NULL));
+    }
+    CHECK(map_sequences_equal(&table, &twin));
+
+    /* Remove every third key; the resulting tombstones must not break probing. */
+    for (i = 0; i < 1000; i += 3) {
+        int64_t key = (int64_t)i;
+        int64_t out_value = -1;
+        CHECK(ls_map_remove(&table, &key, &out_value));
+        CHECK(out_value == key * 3);
+        removed += 1;
+    }
+    CHECK(removed == 334);
+    CHECK(table.len == 666);
+    CHECK(map_capacity_ok(&table));
+    for (i = 0; i < 1000; i += 1) {
+        int64_t key = (int64_t)i;
+        void* slot = NULL;
+        bool present = ls_map_get_ptr(&table, &key, &slot);
+        CHECK(present == ((i % 3) != 0));
+        if (present) {
+            CHECK(*(const int64_t*)slot == key * 3);
+        }
+    }
+    count = 0;
+    sum = 0;
+    ls_map_iter_init(&iter, &table);
+    for (;;) {
+        const void* key_ptr = NULL;
+        if (!ls_map_iter_next(&iter, &key_ptr, NULL)) {
+            break;
+        }
+        count += 1;
+        sum += *(const int64_t*)key_ptr;
+    }
+    CHECK(count == 666);
+    CHECK(sum == 332667);
+
+    /* Inserting past the load factor grows the table again; tombstones are
+     * rehashed away and the old entries survive. */
+    for (i = 1000; i < 2000; i += 1) {
+        int64_t key = (int64_t)i;
+        int64_t value = key * 2;
+        CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    }
+    CHECK(table.len == 1666);
+    CHECK(map_capacity_ok(&table));
+    for (i = 1000; i < 2000; i += 1) {
+        int64_t key = (int64_t)i;
+        void* slot = NULL;
+        CHECK(ls_map_get_ptr(&table, &key, &slot));
+        if (slot != NULL) {
+            CHECK(*(const int64_t*)slot == key * 2);
+        }
+    }
+    sum = 0;
+    ls_map_iter_init(&iter, &table);
+    for (;;) {
+        const void* key_ptr = NULL;
+        const void* value_ptr = NULL;
+        if (!ls_map_iter_next(&iter, &key_ptr, &value_ptr)) {
+            break;
+        }
+        (void)value_ptr;
+        sum += *(const int64_t*)key_ptr;
+    }
+    CHECK(sum == 1832167);
+    map_free_arrays(&table);
+    map_free_arrays(&twin);
+}
+
+static void test_map_key_types(void) {
+    LsMapTable u64_map;
+    LsMapTable bool_map;
+    uint64_t ukeys[4] = {0, 1, 2, UINT64_MAX};
+    bool bkeys[2] = {false, true};
+    size_t i;
+
+    map_init_u64_i64(&u64_map);
+    for (i = 0; i < 4; i += 1) {
+        int64_t value = (int64_t)(i * 11 + 1);
+        CHECK(!ls_map_insert(&u64_map, &ukeys[i], &value, NULL));
+    }
+    CHECK(u64_map.len == 4);
+    CHECK(map_capacity_ok(&u64_map));
+    for (i = 0; i < 4; i += 1) {
+        void* slot = NULL;
+        CHECK(ls_map_get_ptr(&u64_map, &ukeys[i], &slot));
+        if (slot != NULL) {
+            CHECK(*(const int64_t*)slot == (int64_t)(i * 11 + 1));
+        }
+    }
+    {
+        uint64_t missing = 3;
+        void* slot = NULL;
+        CHECK(!ls_map_get_ptr(&u64_map, &missing, &slot));
+        CHECK(!ls_map_remove(&u64_map, &missing, NULL));
+    }
+    {
+        int64_t removed = 0;
+        CHECK(ls_map_remove(&u64_map, &ukeys[3], &removed));
+        CHECK(removed == 34);
+    }
+    CHECK(u64_map.len == 3);
+    ls_map_clear(&u64_map);
+    map_free_arrays(&u64_map);
+
+    map_init_bool_i64(&bool_map);
+    {
+        int64_t value_false = 100;
+        int64_t value_true = 200;
+        CHECK(!ls_map_insert(&bool_map, &bkeys[0], &value_false, NULL));
+        CHECK(!ls_map_insert(&bool_map, &bkeys[1], &value_true, NULL));
+    }
+    CHECK(bool_map.len == 2);
+    CHECK(map_capacity_ok(&bool_map));
+    {
+        void* slot = NULL;
+        CHECK(ls_map_get_ptr(&bool_map, &bkeys[0], &slot));
+        CHECK(slot != NULL && *(const int64_t*)slot == 100);
+        slot = NULL;
+        CHECK(ls_map_get_ptr(&bool_map, &bkeys[1], &slot));
+        CHECK(slot != NULL && *(const int64_t*)slot == 200);
+    }
+    {
+        int64_t out_value = 0;
+        CHECK(ls_map_remove(&bool_map, &bkeys[1], &out_value));
+        CHECK(out_value == 200);
+        CHECK(!ls_map_remove(&bool_map, &bkeys[1], &out_value));
+    }
+    CHECK(bool_map.len == 1);
+    ls_map_clear(&bool_map);
+    map_free_arrays(&bool_map);
+}
+
+static void test_map_string_keys(void) {
+    LsMapTable table;
+    LsString* stored;
+    LsString* probe;
+    LsString* keep;
+    int64_t value;
+    int64_t out_value;
+    void* slot = NULL;
+
+    g_map_key_copies = 0;
+    g_map_key_drops = 0;
+    g_map_value_copies = 0;
+    g_map_value_drops = 0;
+
+    map_init_string_i64(&table);
+    stored = ls_str_cstr("alpha");
+    CHECK(stored != NULL);
+    CHECK(ls_refcount(stored) == 1);
+    value = 10;
+    /* Adoption: the map takes over the caller's reference, no callback runs. */
+    CHECK(!ls_map_insert(&table, &stored, &value, NULL));
+    CHECK(table.len == 1);
+    CHECK(ls_refcount(stored) == 1);
+    CHECK(g_map_key_copies == 0);
+    CHECK(g_map_key_drops == 0);
+    CHECK(g_map_value_copies == 0);
+    CHECK(g_map_value_drops == 0);
+
+    probe = ls_str_cstr("alpha");
+    CHECK(probe != NULL && probe != stored);
+    CHECK(ls_map_get_ptr(&table, &probe, &slot));
+    CHECK(slot != NULL && *(const int64_t*)slot == 10);
+    keep = (LsString*)ls_retain(probe);
+    CHECK(keep == probe);
+    CHECK(ls_refcount(probe) == 2);
+    /* Overwriting releases the caller's duplicate key through drop_key(). */
+    value = 20;
+    CHECK(!ls_map_insert(&table, &probe, &value, NULL));
+    CHECK(ls_refcount(probe) == 1);
+    CHECK(g_map_key_drops == 1);
+    CHECK(g_map_value_drops == 1);
+    ls_release(keep);
+
+    /* Overwriting with an old-value output: copy_value retains, drop_value
+     * releases the stored value. */
+    probe = ls_str_cstr("alpha");
+    CHECK(probe != NULL);
+    keep = (LsString*)ls_retain(probe);
+    CHECK(keep == probe);
+    CHECK(ls_refcount(probe) == 2);
+    value = 30;
+    out_value = 0;
+    CHECK(ls_map_insert(&table, &probe, &value, &out_value));
+    CHECK(out_value == 20);
+    CHECK(ls_refcount(probe) == 1);
+    CHECK(g_map_value_copies == 1);
+    CHECK(g_map_value_drops == 2);
+    CHECK(g_map_key_drops == 2);
+    ls_release(keep);
+
+    /* A retained observer keeps a stored key observable across removal. */
+    {
+        LsString* observer = ls_str_cstr("gamma");
+        LsString* observer_probe;
+        int64_t gamma_value = 7;
+        CHECK(observer != NULL);
+        CHECK(!ls_map_insert(&table, &observer, &gamma_value, NULL));
+        CHECK(ls_refcount(observer) == 1);
+        CHECK(ls_retain(observer) == observer);
+        CHECK(ls_refcount(observer) == 2);
+        observer_probe = ls_str_cstr("gamma");
+        CHECK(observer_probe != NULL);
+        CHECK(ls_map_get_ptr(&table, &observer_probe, &slot));
+        CHECK(slot != NULL && *(const int64_t*)slot == 7);
+        ls_release(observer_probe);
+        CHECK(ls_map_remove(&table, &observer, &out_value));
+        CHECK(out_value == 7);
+        CHECK(ls_refcount(observer) == 1);
+        ls_release(observer);
+    }
+
+    /* clear() releases every stored key and value, and the table stays usable. */
+    {
+        LsString* beta = ls_str_cstr("beta");
+        LsString* delta = ls_str_cstr("delta");
+        int64_t beta_value = 2;
+        int64_t delta_value = 4;
+        int key_drops_before = g_map_key_drops;
+        int value_drops_before = g_map_value_drops;
+        CHECK(beta != NULL && delta != NULL);
+        CHECK(!ls_map_insert(&table, &beta, &beta_value, NULL));
+        CHECK(!ls_map_insert(&table, &delta, &delta_value, NULL));
+        CHECK(table.len == 3);
+        ls_map_clear(&table);
+        CHECK(table.len == 0);
+        CHECK(ls_map_is_empty(&table));
+        CHECK(g_map_key_drops == key_drops_before + 3);
+        CHECK(g_map_value_drops == value_drops_before + 3);
+        {
+            LsString* again = ls_str_cstr("alpha");
+            int64_t again_value = 1;
+            CHECK(again != NULL);
+            CHECK(!ls_map_insert(&table, &again, &again_value, NULL));
+            CHECK(table.len == 1);
+            ls_map_clear(&table);
+        }
+    }
+    CHECK(g_map_key_copies == 0);
+    map_free_arrays(&table);
+}
+
+static void test_map_string_values(void) {
+    LsMapTable table;
+    LsString* first;
+    LsString* second;
+    LsString* third;
+    LsString* out_old = NULL;
+    LsString* removed = NULL;
+    int64_t key = 1;
+    void* slot = NULL;
+    int value_copies_before;
+    int value_drops_before;
+    int key_drops_before;
+
+    g_map_key_copies = 0;
+    g_map_key_drops = 0;
+    g_map_value_copies = 0;
+    g_map_value_drops = 0;
+
+    map_init_i64_string(&table);
+    first = ls_str_cstr("first");
+    second = ls_str_cstr("second");
+    CHECK(first != NULL && second != NULL);
+    CHECK(!ls_map_insert(&table, &key, &first, &out_old));
+    CHECK(out_old == NULL);
+    CHECK(ls_refcount(first) == 1);
+    CHECK(ls_map_get_ptr(&table, &key, &slot));
+    CHECK(slot != NULL && *(LsString**)slot == first);
+    CHECK(g_map_value_copies == 0);
+    CHECK(g_map_value_drops == 0);
+
+    /* Overwrite: copy_value retains the old value into out_old, drop_value
+     * releases the map's old reference. */
+    value_copies_before = g_map_value_copies;
+    value_drops_before = g_map_value_drops;
+    CHECK(ls_map_insert(&table, &key, &second, &out_old));
+    CHECK(out_old == first);
+    CHECK(ls_refcount(out_old) == 1);
+    CHECK(ls_refcount(second) == 1);
+    ls_release(out_old);
+    out_old = NULL;
+    CHECK(g_map_value_copies == value_copies_before + 1);
+    CHECK(g_map_value_drops == value_drops_before + 1);
+
+    /* Overwrite without an old value: only drop_value runs. */
+    third = ls_str_cstr("third");
+    CHECK(third != NULL);
+    value_copies_before = g_map_value_copies;
+    value_drops_before = g_map_value_drops;
+    CHECK(!ls_map_insert(&table, &key, &third, NULL));
+    CHECK(ls_refcount(third) == 1);
+    CHECK(g_map_value_copies == value_copies_before);
+    CHECK(g_map_value_drops == value_drops_before + 1);
+
+    /* remove moves the value out. */
+    key_drops_before = g_map_key_drops;
+    value_drops_before = g_map_value_drops;
+    CHECK(ls_map_remove(&table, &key, &removed));
+    CHECK(removed == third);
+    CHECK(ls_refcount(removed) == 1);
+    CHECK(g_map_key_drops == key_drops_before + 1);
+    CHECK(g_map_value_drops == value_drops_before);
+    ls_release(removed);
+    CHECK(ls_map_is_empty(&table));
+
+    /* remove without an output releases the value. */
+    {
+        LsString* fourth = ls_str_cstr("fourth");
+        int64_t other_key = 2;
+        CHECK(fourth != NULL);
+        CHECK(!ls_map_insert(&table, &other_key, &fourth, NULL));
+        value_drops_before = g_map_value_drops;
+        CHECK(ls_map_remove(&table, &other_key, NULL));
+        CHECK(g_map_value_drops == value_drops_before + 1);
+    }
+
+    /* clear drops stored values and the table stays usable. */
+    {
+        LsString* fifth = ls_str_cstr("fifth");
+        int64_t third_key = 3;
+        CHECK(fifth != NULL);
+        CHECK(!ls_map_insert(&table, &third_key, &fifth, NULL));
+        value_drops_before = g_map_value_drops;
+        ls_map_clear(&table);
+        CHECK(g_map_value_drops == value_drops_before + 1);
+    }
+    CHECK(g_map_key_copies == 0);
+    map_free_arrays(&table);
+}
+
+static void test_map_callback_balance(void) {
+    LsMapTable table;
+    int64_t key;
+    int64_t value;
+    int64_t out_old = 0;
+
+    g_map_key_copies = 0;
+    g_map_key_drops = 0;
+    g_map_value_copies = 0;
+    g_map_value_drops = 0;
+
+    map_init_i64_i64(&table);
+    key = 1;
+    value = 10;
+    CHECK(!ls_map_insert(&table, &key, &value, &out_old));
+    CHECK(g_map_key_copies == 0);
+    CHECK(g_map_key_drops == 0);
+    CHECK(g_map_value_copies == 0);
+    CHECK(g_map_value_drops == 0);
+
+    value = 20;
+    CHECK(ls_map_insert(&table, &key, &value, &out_old));
+    CHECK(out_old == 10);
+    CHECK(g_map_key_drops == 1);
+    CHECK(g_map_value_copies == 1);
+    CHECK(g_map_value_drops == 1);
+
+    value = 21;
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    CHECK(g_map_key_drops == 2);
+    CHECK(g_map_value_copies == 1);
+    CHECK(g_map_value_drops == 2);
+
+    CHECK(ls_map_remove(&table, &key, &out_old));
+    CHECK(out_old == 21);
+    CHECK(g_map_key_drops == 3);
+    CHECK(g_map_value_drops == 2);
+
+    key = 2;
+    value = 30;
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    CHECK(ls_map_remove(&table, &key, NULL));
+    CHECK(g_map_key_drops == 4);
+    CHECK(g_map_value_drops == 3);
+
+    key = 3;
+    value = 40;
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    key = 4;
+    value = 50;
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    ls_map_clear(&table);
+    CHECK(g_map_key_drops == 6);
+    CHECK(g_map_value_drops == 5);
+    CHECK(g_map_value_copies == 1);
+    CHECK(g_map_key_copies == 0);
+    map_free_arrays(&table);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Hash map stress and adversarial-state tests                            */
+/* ---------------------------------------------------------------------- */
+
+/* Frozen slot state bytes (see lsaca_rt_map.c): the adversarial tests build
+ * table states directly, so they spell the values out. */
+#define MAP_TEST_EMPTY ((unsigned char)0)
+#define MAP_TEST_OCCUPIED ((unsigned char)1)
+#define MAP_TEST_TOMBSTONE ((unsigned char)2)
+
+/* Stress sizes: compile-time constants keep the aggregate check count small;
+ * each test reports a few summary CHECKs instead of one per operation. */
+#define MAP_STRESS_I64_KEYS ((size_t)100000)
+#define MAP_STRESS_STRING_KEYS ((size_t)20000)
+#define MAP_STRESS_STRING_REMOVE_DIVISOR ((size_t)4)
+#define MAP_STRESS_GROW_CYCLES ((size_t)3)
+#define MAP_STRESS_GROW_KEYS ((size_t)5000)
+
+static int64_t s_map_stress_keys[MAP_STRESS_I64_KEYS];
+
+static void stress_shuffle_i64(int64_t* values, size_t count) {
+    size_t i;
+
+    for (i = count; i > 1; i -= 1) {
+        size_t j = (size_t)(stress_rng_next() % (uint64_t)i);
+        int64_t tmp = values[i - 1];
+        values[i - 1] = values[j];
+        values[j] = tmp;
+    }
+}
+
+/* Build deterministic String keys: "<prefix><index padded to 6 digits>". */
+static void map_stress_key(char* buffer, size_t size, const char* prefix,
+                           size_t index) {
+    (void)snprintf(buffer, size, "%s%06zu", prefix, index);
+}
+
+/* Compare String-keyed tables in slot iteration order. */
+static bool map_string_sequences_equal(const LsMapTable* a,
+                                       const LsMapTable* b) {
+    LsMapIter ia;
+    LsMapIter ib;
+
+    ls_map_iter_init(&ia, a);
+    ls_map_iter_init(&ib, b);
+    for (;;) {
+        const void* key_a = NULL;
+        const void* value_a = NULL;
+        const void* key_b = NULL;
+        const void* value_b = NULL;
+        LsString* string_a;
+        LsString* string_b;
+        bool more_a = ls_map_iter_next(&ia, &key_a, &value_a);
+        bool more_b = ls_map_iter_next(&ib, &key_b, &value_b);
+
+        if (more_a != more_b) {
+            return false;
+        }
+        if (!more_a) {
+            return true;
+        }
+        memcpy(&string_a, key_a, sizeof string_a);
+        memcpy(&string_b, key_b, sizeof string_b);
+        if (!ls_str_eq(string_a, string_b)) {
+            return false;
+        }
+        if (*(const int64_t*)value_a != *(const int64_t*)value_b) {
+            return false;
+        }
+    }
+}
+
+/* 100k i64 inserts, lookups, removals and reinserts; iteration sums; equal
+ * operation sequences must iterate identically; repeated clear/refill grow
+ * cycles must not leak (the table itself owns only three malloc'd arrays). */
+static void test_map_stress_i64(void) {
+    LsMapTable table;
+    LsMapTable twin;
+    size_t base = ls_rt_test_live_allocations();
+    size_t i;
+    size_t found;
+    size_t misses;
+    size_t removed;
+    size_t unexpected;
+    size_t cycle;
+    size_t count;
+    int64_t key_sum;
+    int64_t value_sum;
+    int64_t expected_key_sum;
+    int64_t expected_value_sum;
+    int64_t removed_key_sum;
+    int64_t removed_value_sum;
+    int64_t out_value;
+    void* slot = NULL;
+
+    expected_key_sum =
+        ((int64_t)MAP_STRESS_I64_KEYS * ((int64_t)MAP_STRESS_I64_KEYS - 1)) /
+        2;
+    expected_value_sum = expected_key_sum * 3 + (int64_t)MAP_STRESS_I64_KEYS;
+
+    stress_rng_reset();
+    for (i = 0; i < MAP_STRESS_I64_KEYS; i += 1) {
+        s_map_stress_keys[i] = (int64_t)i;
+    }
+    stress_shuffle_i64(s_map_stress_keys, MAP_STRESS_I64_KEYS);
+
+    map_init_i64_i64(&table);
+    unexpected = 0;
+    for (i = 0; i < MAP_STRESS_I64_KEYS; i += 1) {
+        int64_t key = s_map_stress_keys[i];
+        int64_t value = key * 3 + 1;
+        if (ls_map_insert(&table, &key, &value, NULL)) {
+            unexpected += 1;
+        }
+    }
+    CHECK(unexpected == 0);
+    CHECK(table.len == MAP_STRESS_I64_KEYS);
+    CHECK(map_capacity_ok(&table));
+
+    found = 0;
+    misses = 0;
+    key_sum = 0;
+    value_sum = 0;
+    for (i = 0; i < MAP_STRESS_I64_KEYS; i += 1) {
+        int64_t key = s_map_stress_keys[i];
+        slot = NULL;
+        if (ls_map_get_ptr(&table, &key, &slot) && slot != NULL) {
+            found += 1;
+            key_sum += key;
+            value_sum += *(const int64_t*)slot;
+        } else {
+            misses += 1;
+        }
+    }
+    CHECK(found == MAP_STRESS_I64_KEYS);
+    CHECK(misses == 0);
+    CHECK(key_sum == expected_key_sum);
+    CHECK(value_sum == expected_value_sum);
+    misses = 0;
+    for (i = 0; i < 1000; i += 1) {
+        int64_t key = (int64_t)MAP_STRESS_I64_KEYS + (int64_t)i;
+        slot = NULL;
+        if (ls_map_get_ptr(&table, &key, &slot)) {
+            misses += 1;
+        }
+    }
+    CHECK(misses == 0);
+
+    /* A table built by the same operation sequence iterates identically. */
+    map_init_i64_i64(&twin);
+    unexpected = 0;
+    for (i = 0; i < MAP_STRESS_I64_KEYS; i += 1) {
+        int64_t key = s_map_stress_keys[i];
+        int64_t value = key * 3 + 1;
+        if (ls_map_insert(&twin, &key, &value, NULL)) {
+            unexpected += 1;
+        }
+    }
+    CHECK(unexpected == 0);
+    CHECK(map_sequences_equal(&table, &twin));
+    map_free_arrays(&twin);
+
+    removed = 0;
+    removed_key_sum = 0;
+    removed_value_sum = 0;
+    for (i = 0; i < MAP_STRESS_I64_KEYS; i += 1) {
+        int64_t key = (int64_t)i;
+        if ((i % 3) != 0) {
+            continue;
+        }
+        out_value = -1;
+        if (ls_map_remove(&table, &key, &out_value)) {
+            removed += 1;
+            removed_key_sum += key;
+            removed_value_sum += out_value;
+        }
+    }
+    CHECK(removed == (MAP_STRESS_I64_KEYS + 2) / 3);
+    CHECK(table.len == MAP_STRESS_I64_KEYS - removed);
+    CHECK(map_capacity_ok(&table));
+    count = 0;
+    key_sum = 0;
+    value_sum = 0;
+    {
+        LsMapIter iter;
+        ls_map_iter_init(&iter, &table);
+        for (;;) {
+            const void* key_ptr = NULL;
+            const void* value_ptr = NULL;
+            if (!ls_map_iter_next(&iter, &key_ptr, &value_ptr)) {
+                break;
+            }
+            count += 1;
+            key_sum += *(const int64_t*)key_ptr;
+            value_sum += *(const int64_t*)value_ptr;
+        }
+    }
+    CHECK(count == MAP_STRESS_I64_KEYS - removed);
+    CHECK(key_sum == expected_key_sum - removed_key_sum);
+    CHECK(value_sum == expected_value_sum - removed_value_sum);
+
+    unexpected = 0;
+    for (i = 0; i < MAP_STRESS_I64_KEYS; i += 1) {
+        int64_t key = (int64_t)i;
+        int64_t value;
+        if ((i % 3) != 0) {
+            continue;
+        }
+        value = key * 3 + 2;
+        if (ls_map_insert(&table, &key, &value, NULL)) {
+            unexpected += 1;
+        }
+    }
+    CHECK(unexpected == 0);
+    CHECK(table.len == MAP_STRESS_I64_KEYS);
+    found = 0;
+    for (i = 0; i < MAP_STRESS_I64_KEYS; i += 1) {
+        int64_t key = (int64_t)i;
+        int64_t expected = (i % 3) == 0 ? key * 3 + 2 : key * 3 + 1;
+        slot = NULL;
+        if (ls_map_get_ptr(&table, &key, &slot) && slot != NULL &&
+            *(const int64_t*)slot == expected) {
+            found += 1;
+        }
+    }
+    CHECK(found == MAP_STRESS_I64_KEYS);
+
+    for (cycle = 0; cycle < MAP_STRESS_GROW_CYCLES; cycle += 1) {
+        ls_map_clear(&table);
+        CHECK(table.len == 0);
+        CHECK(table.cap > 0); /* clear() releases entries, keeps capacity */
+        unexpected = 0;
+        for (i = 0; i < MAP_STRESS_I64_KEYS; i += 1) {
+            int64_t key = s_map_stress_keys[i];
+            int64_t value = key + (int64_t)cycle;
+            if (ls_map_insert(&table, &key, &value, NULL)) {
+                unexpected += 1;
+            }
+        }
+        CHECK(unexpected == 0);
+        CHECK(table.len == MAP_STRESS_I64_KEYS);
+        CHECK(map_capacity_ok(&table));
+    }
+    ls_map_clear(&table);
+    CHECK(ls_map_is_empty(&table));
+    CHECK(ls_rt_test_live_allocations() == base);
+    map_free_arrays(&table);
+    CHECK(ls_rt_test_live_allocations() == base);
+}
+
+/* 20k String keys: content hashing/equality, removals, reinserts, determinism
+ * between identical maps, and clear/grow cycles that must release every
+ * adopted key handle (checked through the ORC live-allocation counter). */
+static void test_map_stress_string_keys(void) {
+    LsMapTable table;
+    LsMapTable twin;
+    LsMapIter iter;
+    size_t base = ls_rt_test_live_allocations();
+    size_t i;
+    size_t cycle;
+    size_t found;
+    size_t unexpected;
+    size_t removed;
+    size_t count;
+    int64_t value_sum;
+    int64_t expected_value_sum;
+    int64_t out_value;
+    uint64_t key_checksum;
+    uint64_t expected_key_checksum;
+    char buffer[64];
+
+    expected_value_sum = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        expected_value_sum += (int64_t)(i * 7 + 3);
+    }
+
+    map_init_string_i64(&table);
+    unexpected = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        LsString* key;
+        int64_t value = (int64_t)(i * 7 + 3);
+        map_stress_key(buffer, sizeof buffer, "stress-key-", i);
+        key = ls_str_cstr(buffer);
+        if (ls_map_insert(&table, &key, &value, NULL)) {
+            unexpected += 1;
+        }
+    }
+    CHECK(unexpected == 0);
+    CHECK(table.len == MAP_STRESS_STRING_KEYS);
+    CHECK(ls_rt_test_live_allocations() ==
+          base + MAP_STRESS_STRING_KEYS);
+
+    /* The same operation sequence must produce the same slot iteration. */
+    map_init_string_i64(&twin);
+    unexpected = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        LsString* key;
+        int64_t value = (int64_t)(i * 7 + 3);
+        map_stress_key(buffer, sizeof buffer, "stress-key-", i);
+        key = ls_str_cstr(buffer);
+        if (ls_map_insert(&twin, &key, &value, NULL)) {
+            unexpected += 1;
+        }
+    }
+    CHECK(unexpected == 0);
+    CHECK(map_string_sequences_equal(&table, &twin));
+    CHECK(ls_rt_test_live_allocations() ==
+          base + 2 * MAP_STRESS_STRING_KEYS);
+    ls_map_clear(&twin);
+    CHECK(ls_rt_test_live_allocations() ==
+          base + MAP_STRESS_STRING_KEYS);
+    map_free_arrays(&twin);
+
+    found = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        LsString* probe;
+        void* slot = NULL;
+        int64_t expected = (int64_t)(i * 7 + 3);
+        map_stress_key(buffer, sizeof buffer, "stress-key-", i);
+        probe = ls_str_cstr(buffer);
+        if (ls_map_get_ptr(&table, &probe, &slot) && slot != NULL &&
+            *(const int64_t*)slot == expected) {
+            found += 1;
+        }
+        ls_release(probe);
+    }
+    CHECK(found == MAP_STRESS_STRING_KEYS);
+
+    count = 0;
+    value_sum = 0;
+    key_checksum = 0;
+    ls_map_iter_init(&iter, &table);
+    for (;;) {
+        const void* key_ptr = NULL;
+        const void* value_ptr = NULL;
+        LsString* key;
+        if (!ls_map_iter_next(&iter, &key_ptr, &value_ptr)) {
+            break;
+        }
+        memcpy(&key, key_ptr, sizeof key);
+        count += 1;
+        value_sum += *(const int64_t*)value_ptr;
+        key_checksum += ls_hash_bytes(ls_str_data(key), ls_str_len(key));
+    }
+    CHECK(count == MAP_STRESS_STRING_KEYS);
+    CHECK(value_sum == expected_value_sum);
+    expected_key_checksum = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        map_stress_key(buffer, sizeof buffer, "stress-key-", i);
+        expected_key_checksum += ls_hash_bytes(buffer, strlen(buffer));
+    }
+    CHECK(key_checksum == expected_key_checksum);
+
+    removed = 0;
+    unexpected = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        LsString* probe;
+        int64_t expected;
+        if ((i % MAP_STRESS_STRING_REMOVE_DIVISOR) != 0) {
+            continue;
+        }
+        expected = (int64_t)(i * 7 + 3);
+        out_value = -1;
+        map_stress_key(buffer, sizeof buffer, "stress-key-", i);
+        probe = ls_str_cstr(buffer);
+        if (ls_map_remove(&table, &probe, &out_value)) {
+            removed += 1;
+            if (out_value != expected) {
+                unexpected += 1;
+            }
+        }
+        ls_release(probe);
+    }
+    CHECK(removed ==
+          MAP_STRESS_STRING_KEYS / MAP_STRESS_STRING_REMOVE_DIVISOR);
+    CHECK(unexpected == 0);
+    CHECK(table.len == MAP_STRESS_STRING_KEYS - removed);
+    CHECK(ls_rt_test_live_allocations() ==
+          base + MAP_STRESS_STRING_KEYS - removed);
+
+    found = 0;
+    unexpected = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        LsString* probe;
+        void* slot = NULL;
+        bool present;
+        map_stress_key(buffer, sizeof buffer, "stress-key-", i);
+        probe = ls_str_cstr(buffer);
+        present = ls_map_get_ptr(&table, &probe, &slot);
+        if ((i % MAP_STRESS_STRING_REMOVE_DIVISOR) == 0) {
+            if (present) {
+                unexpected += 1;
+            }
+        } else if (present && slot != NULL &&
+                   *(const int64_t*)slot == (int64_t)(i * 7 + 3)) {
+            found += 1;
+        } else {
+            unexpected += 1;
+        }
+        ls_release(probe);
+    }
+    CHECK(found == MAP_STRESS_STRING_KEYS - removed);
+    CHECK(unexpected == 0);
+
+    unexpected = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        LsString* key;
+        int64_t value;
+        if ((i % MAP_STRESS_STRING_REMOVE_DIVISOR) != 0) {
+            continue;
+        }
+        map_stress_key(buffer, sizeof buffer, "stress-key-", i);
+        key = ls_str_cstr(buffer);
+        value = (int64_t)(i * 7 + 1003);
+        if (ls_map_insert(&table, &key, &value, NULL)) {
+            unexpected += 1;
+        }
+    }
+    CHECK(unexpected == 0);
+    CHECK(table.len == MAP_STRESS_STRING_KEYS);
+    CHECK(ls_rt_test_live_allocations() ==
+          base + MAP_STRESS_STRING_KEYS);
+    found = 0;
+    for (i = 0; i < MAP_STRESS_STRING_KEYS; i += 1) {
+        LsString* probe;
+        void* slot = NULL;
+        int64_t expected =
+            (i % MAP_STRESS_STRING_REMOVE_DIVISOR) == 0
+                ? (int64_t)(i * 7 + 1003)
+                : (int64_t)(i * 7 + 3);
+        map_stress_key(buffer, sizeof buffer, "stress-key-", i);
+        probe = ls_str_cstr(buffer);
+        if (ls_map_get_ptr(&table, &probe, &slot) && slot != NULL &&
+            *(const int64_t*)slot == expected) {
+            found += 1;
+        }
+        ls_release(probe);
+    }
+    CHECK(found == MAP_STRESS_STRING_KEYS);
+
+    ls_map_clear(&table);
+    CHECK(table.len == 0);
+    CHECK(ls_rt_test_live_allocations() == base);
+    for (cycle = 0; cycle < MAP_STRESS_GROW_CYCLES; cycle += 1) {
+        unexpected = 0;
+        for (i = 0; i < MAP_STRESS_GROW_KEYS; i += 1) {
+            LsString* key;
+            int64_t value = (int64_t)(i + cycle * MAP_STRESS_GROW_KEYS);
+            map_stress_key(buffer, sizeof buffer, "cycle-key-", i);
+            key = ls_str_cstr(buffer);
+            if (ls_map_insert(&table, &key, &value, NULL)) {
+                unexpected += 1;
+            }
+        }
+        CHECK(unexpected == 0);
+        CHECK(table.len == MAP_STRESS_GROW_KEYS);
+        CHECK(ls_rt_test_live_allocations() == base + MAP_STRESS_GROW_KEYS);
+        unexpected = 0;
+        for (i = 0; i < MAP_STRESS_GROW_KEYS; i += 1) {
+            LsString* probe;
+            if ((i % 2) != 0) {
+                continue;
+            }
+            map_stress_key(buffer, sizeof buffer, "cycle-key-", i);
+            probe = ls_str_cstr(buffer);
+            if (!ls_map_remove(&table, &probe, NULL)) {
+                unexpected += 1;
+            }
+            ls_release(probe);
+        }
+        CHECK(unexpected == 0);
+        CHECK(table.len == MAP_STRESS_GROW_KEYS / 2);
+        ls_map_clear(&table);
+        CHECK(table.len == 0);
+        CHECK(ls_rt_test_live_allocations() == base);
+    }
+    map_free_arrays(&table);
+    CHECK(ls_rt_test_live_allocations() == base);
+}
+
+/* Adversarial table states. The struct is public, so the tests can construct
+ * the two defensive probe outcomes that the load-factor invariant otherwise
+ * makes unreachable:
+ *   1. every slot occupied, no empty slot and no tombstone: a probe runs for
+ *      exactly cap steps and returns SIZE_MAX, which forces a grow;
+ *   2. every slot used by occupied entries and tombstones but no empty slot,
+ *      while len + 1 is still within the load limit: the probe returns the
+ *      first tombstone and the insert fills it without growing.
+ * Both paths must stay in bounds and keep every existing entry addressable. */
+static void test_map_adversarial_states(void) {
+    LsMapTable table;
+    size_t i;
+    size_t slot;
+    size_t dummy;
+    int64_t key;
+    int64_t value;
+    void* value_ptr = NULL;
+
+    /* (1) Full table without tombstones: insert falls back to a grow. */
+    map_init_i64_i64(&table);
+    for (i = 0; i < 6; i += 1) {
+        key = (int64_t)i;
+        value = (int64_t)i * 10;
+        CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    }
+    CHECK(table.cap == 8);
+    CHECK(table.len == 6);
+    slot = 0;
+    dummy = 0;
+    while (dummy < 2) {
+        if (table.states[slot] == MAP_TEST_EMPTY) {
+            key = 1000 + (int64_t)dummy;
+            value = 9000 + (int64_t)dummy;
+            memcpy(table.keys + slot * sizeof(int64_t), &key, sizeof key);
+            memcpy(table.values + slot * sizeof(int64_t), &value, sizeof value);
+            table.states[slot] = MAP_TEST_OCCUPIED;
+            table.len += 1;
+            dummy += 1;
+        }
+        slot += 1;
+    }
+    CHECK(table.len == 8);
+    key = 500;
+    value = 5000;
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    CHECK(table.cap == 16);
+    CHECK(table.len == 9);
+    value_ptr = NULL;
+    CHECK(ls_map_get_ptr(&table, &key, &value_ptr));
+    CHECK(value_ptr != NULL && *(const int64_t*)value_ptr == 5000);
+    dummy = 0;
+    for (i = 0; i < 6; i += 1) {
+        int64_t existing = (int64_t)i;
+        value_ptr = NULL;
+        if (ls_map_get_ptr(&table, &existing, &value_ptr) &&
+            value_ptr != NULL && *(const int64_t*)value_ptr == (int64_t)i * 10) {
+            dummy += 1;
+        }
+    }
+    CHECK(dummy == 6);
+    ls_map_clear(&table);
+    CHECK(table.len == 0);
+    map_free_arrays(&table);
+
+    /* (2) No empty slot, five tombstones, len + 1 == 3/4 load limit. */
+    map_init_i64_i64(&table);
+    for (i = 0; i < 11; i += 1) {
+        key = (int64_t)i;
+        value = (int64_t)i * 10;
+        CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    }
+    CHECK(table.cap == 16);
+    CHECK(table.len == 11);
+    for (i = 0; i < 5; i += 1) {
+        key = (int64_t)i;
+        CHECK(ls_map_remove(&table, &key, NULL));
+    }
+    CHECK(table.len == 6);
+    slot = 0;
+    dummy = 0;
+    while (dummy < 5) {
+        if (table.states[slot] == MAP_TEST_EMPTY) {
+            key = 2000 + (int64_t)dummy;
+            value = 9500 + (int64_t)dummy;
+            memcpy(table.keys + slot * sizeof(int64_t), &key, sizeof key);
+            memcpy(table.values + slot * sizeof(int64_t), &value, sizeof value);
+            table.states[slot] = MAP_TEST_OCCUPIED;
+            dummy += 1;
+        }
+        slot += 1;
+    }
+    table.len = 11;
+    CHECK(table.cap == 16);
+    key = 777;
+    value = 7770;
+    CHECK(!ls_map_insert(&table, &key, &value, NULL));
+    CHECK(table.cap == 16); /* 11 + 1 == 3/4 load: no grow needed */
+    CHECK(table.len == 12);
+    value_ptr = NULL;
+    CHECK(ls_map_get_ptr(&table, &key, &value_ptr));
+    CHECK(value_ptr != NULL && *(const int64_t*)value_ptr == 7770);
+    dummy = 0;
+    for (i = 5; i < 11; i += 1) {
+        int64_t existing = (int64_t)i;
+        value_ptr = NULL;
+        if (ls_map_get_ptr(&table, &existing, &value_ptr) &&
+            value_ptr != NULL) {
+            dummy += 1;
+        }
+    }
+    CHECK(dummy == 6);
+    ls_map_clear(&table);
+    CHECK(table.len == 0);
+    map_free_arrays(&table);
+}
+
+/* ====================================================================== */
 /* Modes                                                                  */
 /* ====================================================================== */
 
@@ -1412,6 +3035,10 @@ static void run_all(const char* io_path) {
     test_orc_referenced_cycle();
     test_orc_automatic_collection();
     test_orc_live_edge();
+    test_orc_stress_many_cycles();
+    test_orc_stress_large_cycle();
+    test_orc_stress_live_edges();
+    test_orc_stress_random_churn();
     test_strings();
     test_cow();
     test_search_transform();
@@ -1419,6 +3046,17 @@ static void run_all(const char* io_path) {
     test_parse();
     test_vec_string();
     test_vec_primitives();
+    test_map_hash_primitives();
+    test_map_int_basics();
+    test_map_iteration_order();
+    test_map_growth_iteration();
+    test_map_key_types();
+    test_map_string_keys();
+    test_map_string_values();
+    test_map_callback_balance();
+    test_map_stress_i64();
+    test_map_stress_string_keys();
+    test_map_adversarial_states();
     test_formatting();
     test_format_specs();
     test_option_result();

@@ -49,6 +49,7 @@ pub enum TokenKind {
     KwSelfTy,
     KwPub,
     KwMove,
+    KwTrait,
     // Punctuation
     LParen,
     RParen,
@@ -159,6 +160,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::KwSelfTy => write!(f, "Self"),
             TokenKind::KwPub => write!(f, "pub"),
             TokenKind::KwMove => write!(f, "move"),
+            TokenKind::KwTrait => write!(f, "trait"),
             TokenKind::LParen => write!(f, "("),
             TokenKind::RParen => write!(f, ")"),
             TokenKind::LBrace => write!(f, "{{"),
@@ -433,6 +435,7 @@ impl<'a> Lexer<'a> {
             "Self" => TokenKind::KwSelfTy,
             "pub" => TokenKind::KwPub,
             "move" => TokenKind::KwMove,
+            "trait" => TokenKind::KwTrait,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Ident(text.to_string()),
         };
@@ -1117,7 +1120,7 @@ mod tests {
     #[test]
     fn identifiers_and_keywords() {
         let source = "fn let mut const struct enum impl type if else match while loop for in \
-                      return break continue true false as self Self pub move";
+                      return break continue true false as self Self pub move trait";
         let expected = vec![
             TokenKind::KwFn,
             TokenKind::KwLet,
@@ -1144,9 +1147,29 @@ mod tests {
             TokenKind::KwSelfTy,
             TokenKind::KwPub,
             TokenKind::KwMove,
+            TokenKind::KwTrait,
             TokenKind::Eof,
         ];
         assert_eq!(kinds(source), expected);
+    }
+
+    #[test]
+    fn trait_keyword_is_reserved() {
+        use TokenKind::*;
+        // 'trait' is a keyword and can never be an identifier.
+        assert_eq!(kinds("trait"), vec![KwTrait, Eof]);
+        // Words that merely contain the keyword stay identifiers.
+        assert_eq!(
+            kinds("traitx traits xtrait"),
+            vec![
+                Ident("traitx".to_string()),
+                Ident("traits".to_string()),
+                Ident("xtrait".to_string()),
+                Eof,
+            ]
+        );
+        assert_eq!(KwTrait.to_string(), "trait");
+        assert_eq!(KwTrait.describe(), "trait");
     }
 
     #[test]

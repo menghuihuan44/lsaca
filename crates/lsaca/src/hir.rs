@@ -48,6 +48,11 @@ pub struct Program {
     pub drop_enums: Vec<Option<FnId>>,
 }
 
+/// User-facing name of a type item: internal prelude items lose their prefix.
+fn user_type_name(name: &str) -> String {
+    name.strip_prefix("__lsaca_").unwrap_or(name).to_string()
+}
+
 impl Program {
     /// Display name of a type, resolving struct and enum ids.
     pub fn type_name(&self, ty: &Ty) -> String {
@@ -55,17 +60,24 @@ impl Program {
             Ty::Struct(id) => self
                 .structs
                 .get(*id)
-                .map(|item| item.name.clone())
+                .map(|item| user_type_name(&item.name))
                 .unwrap_or_else(|| format!("struct#{}", id)),
             Ty::Enum(id) => self
                 .enums
                 .get(*id)
-                .map(|item| item.name.clone())
+                .map(|item| user_type_name(&item.name))
                 .unwrap_or_else(|| format!("enum#{}", id)),
             Ty::Vec(inner) => format!("Vec<{}>", self.type_name(inner)),
             Ty::Option(inner) => format!("Option<{}>", self.type_name(inner)),
             Ty::Result(ok, err) => {
                 format!("Result<{}, {}>", self.type_name(ok), self.type_name(err))
+            }
+            Ty::HashMap(key, value) => {
+                format!(
+                    "HashMap<{}, {}>",
+                    self.type_name(key),
+                    self.type_name(value)
+                )
             }
             Ty::Tuple(elems) => {
                 let inner = elems
@@ -176,7 +188,9 @@ impl Program {
     pub fn is_copy(&self, ty: &Ty) -> bool {
         match ty {
             Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::Ref { .. } => true,
-            Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) => false,
+            Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) | Ty::HashMap(_, _) => {
+                false
+            }
             Ty::Option(inner) => self.is_copy(inner),
             Ty::Result(ok, err) => self.is_copy(ok) && self.is_copy(err),
             Ty::Tuple(elems) => elems.iter().all(|elem| self.is_copy(elem)),
@@ -250,6 +264,10 @@ impl Program {
             // propagates through these indirections.
             Ty::Vec(inner) | Ty::Box(inner) => self.has_drop_glue_guarded(inner, structs, enums),
             Ty::Option(inner) => self.has_drop_glue_guarded(inner, structs, enums),
+            Ty::HashMap(key, value) => {
+                self.has_drop_glue_guarded(key, structs, enums)
+                    || self.has_drop_glue_guarded(value, structs, enums)
+            }
             Ty::Result(ok, err) => {
                 self.has_drop_glue_guarded(ok, structs, enums)
                     || self.has_drop_glue_guarded(err, structs, enums)
@@ -272,7 +290,11 @@ impl Program {
 /// A user struct with named fields.
 #[derive(Debug, Clone)]
 pub struct HStruct {
+    /// Display name, for user-written structs the source name and for
+    /// monomorphized generic instances "`Pair<i64>`" style text.
     pub name: String,
+    /// Unique C identifier of the concrete struct type ("Pair_i64").
+    pub c_name: String,
     pub fields: Vec<HField>,
     pub span: Span,
 }
@@ -286,7 +308,11 @@ pub struct HField {
 /// A user enum.
 #[derive(Debug, Clone)]
 pub struct HEnum {
+    /// Display name, for user-written enums the source name and for
+    /// monomorphized generic instances "`Slot<i64>`" style text.
     pub name: String,
+    /// Unique C identifier of the concrete enum type ("Slot_i64").
+    pub c_name: String,
     pub variants: Vec<HVariant>,
     pub span: Span,
 }
@@ -522,6 +548,16 @@ pub enum HExprKind {
         vec: Box<HExpr>,
         body: HBlock,
     },
+    /// A for loop over a user iterator (a type implementing `Iterator<T>`).
+    /// The iterator value is evaluated once, moved into a local, and polled
+    /// through next_fn; it is released exactly once when the loop exits.
+    ForIter {
+        iter: Box<HExpr>,
+        /// FnId of the instantiated Iterator::next method.
+        next_fn: usize,
+        pat: HPat,
+        body: HBlock,
+    },
     StructLit {
         struct_id: StructId,
         /// Field index and value, in source order.
@@ -696,6 +732,17 @@ pub enum HBuiltinMethod {
     // Box
     BoxGet,
     BoxSet,
+    // HashMap
+    MapInsert,
+    MapGet,
+    MapGetWith,
+    MapContainsKey,
+    MapRemove,
+    MapLen,
+    MapIsEmpty,
+    MapClear,
+    MapKeys,
+    MapValues,
     // Auto-derived Clone
     Clone,
 }
@@ -751,6 +798,16 @@ impl HBuiltinMethod {
             RcStrongCount => "strong_count",
             BoxGet => "get",
             BoxSet => "set",
+            MapInsert => "insert",
+            MapGet => "get",
+            MapGetWith => "get_with",
+            MapContainsKey => "contains_key",
+            MapRemove => "remove",
+            MapLen => "len",
+            MapIsEmpty => "is_empty",
+            MapClear => "clear",
+            MapKeys => "keys",
+            MapValues => "values",
             Clone => "clone",
         }
     }
@@ -771,6 +828,8 @@ pub enum HBuiltinAssoc {
     RcNew,
     /// `Box::<T>::new(value)`
     BoxNew,
+    /// `HashMap::<K, V>::new()`
+    HashMapNew,
 }
 
 /// Builtin free functions.

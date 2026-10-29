@@ -11,6 +11,7 @@
  *   lsaca_rt_string.c  LsString objects, search/transform, split, parse
  *   lsaca_rt_vec.c     generic vector primitives, LsVec_String
  *   lsaca_rt_fmt.c     format builder, float formatting, output/printing
+ *   lsaca_rt_map.c     hash map table, hashing/equality primitives
  */
 
 #ifndef LSACA_RT_INTERNAL_H

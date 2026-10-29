@@ -6,7 +6,7 @@
 //! with include_str! and written out next to the generated main.c when a
 //! project is emitted.
 //!
-//! The runtime is split into four translation units so that the build back end
+//! The runtime is split into five translation units so that the build back end
 //! can compile them in parallel:
 //!
 //! * `lsaca_rt.c` — allocations/ORC collector, lifetime, panics, checked
@@ -14,6 +14,8 @@
 //! * `lsaca_rt_string.c` — `LsString` objects, search/transform, split, parse.
 //! * `lsaca_rt_vec.c` — generic vector primitives, `LsVec_String`.
 //! * `lsaca_rt_fmt.c` — format builder, float formatting, output/printing.
+//! * `lsaca_rt_map.c` — the builtin HashMap table, hashing and equality
+//!   primitives.
 //!
 //! lsaca_rt_internal.h is the private contract shared by those translation
 //! units; generated code only ever includes the public lsaca_rt.h.
@@ -40,18 +42,22 @@ pub const RUNTIME_VEC_C: &str = include_str!("../../../runtime/lsaca_rt_vec.c");
 /// The contents of runtime/lsaca_rt_fmt.c.
 pub const RUNTIME_FMT_C: &str = include_str!("../../../runtime/lsaca_rt_fmt.c");
 
+/// The contents of runtime/lsaca_rt_map.c.
+pub const RUNTIME_MAP_C: &str = include_str!("../../../runtime/lsaca_rt_map.c");
+
 /// Every runtime file name, in the order the compiler must write them out.
 ///
 /// Headers come first, then the translation units. Every file ending in ".c"
 /// is compiled as its own translation unit and linked with the generated
 /// program; the two headers are included by those translation units.
-pub const RUNTIME_FILES: [&str; 6] = [
+pub const RUNTIME_FILES: [&str; 7] = [
     "lsaca_rt.h",
     "lsaca_rt_internal.h",
     "lsaca_rt.c",
     "lsaca_rt_string.c",
     "lsaca_rt_vec.c",
     "lsaca_rt_fmt.c",
+    "lsaca_rt_map.c",
 ];
 
 /// The runtime source files, as (file name, contents) pairs.
@@ -67,6 +73,7 @@ pub fn sources() -> &'static [(&'static str, &'static str)] {
         ("lsaca_rt_string.c", RUNTIME_STRING_C),
         ("lsaca_rt_vec.c", RUNTIME_VEC_C),
         ("lsaca_rt_fmt.c", RUNTIME_FMT_C),
+        ("lsaca_rt_map.c", RUNTIME_MAP_C),
     ]
 }
 

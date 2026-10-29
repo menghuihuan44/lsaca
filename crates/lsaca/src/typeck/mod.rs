@@ -6,12 +6,16 @@ mod check;
 mod consts;
 mod exhaust;
 mod exprs;
+mod generics;
+mod hash_map;
 mod items;
+mod iterators;
 mod itype;
 mod lower;
 mod ownership;
 mod patterns;
 mod refs;
+mod traits;
 mod tree;
 
 use std::path::Path;
@@ -21,6 +25,7 @@ use crate::span::SourceFile;
 use crate::{ast, hir};
 
 use self::check::Checker;
+use self::generics::DefOrigin;
 use self::itype::ITy;
 
 /// Type check a parsed program and lower it to the fully typed HIR.
@@ -42,8 +47,38 @@ pub fn check_reporting(
     program: &ast::Program,
     file: &SourceFile,
 ) -> (Result<hir::Program, Diagnostics>, Diagnostics) {
+    check_reporting_with_prelude(program, None, file)
+}
+
+/// Type check a user program together with the standard-library prelude.
+///
+/// The prelude (when present) is registered as generic items only: it is never
+/// type checked unless a user expression instantiates something from it, and
+/// unused prelude items never reach the HIR. Diagnostics produced while
+/// checking an instantiated prelude body are reported as internal
+/// standard-library errors.
+pub fn check_with_prelude(
+    program: &ast::Program,
+    prelude: Option<&ast::Program>,
+    file: &SourceFile,
+) -> Result<hir::Program, Diagnostics> {
+    check_reporting_with_prelude(program, prelude, file).0
+}
+
+/// Like [check_with_prelude] but also returns the warnings of a successful
+/// check.
+pub fn check_reporting_with_prelude(
+    program: &ast::Program,
+    prelude: Option<&ast::Program>,
+    file: &SourceFile,
+) -> (Result<hir::Program, Diagnostics>, Diagnostics) {
     let mut checker = Checker::new(file);
-    checker.collect_items(program);
+    checker.collect_items_only(program, DefOrigin::User);
+    if let Some(prelude) = prelude {
+        checker.collect_items_only(prelude, DefOrigin::Prelude);
+    }
+    checker.register_pending_impls();
+    checker.resolve_all_types();
     for id in 0..checker.consts.len() {
         checker.ensure_const(id);
     }
@@ -213,6 +248,27 @@ mod tests {
         }
     }
 
+    fn check_source_with_prelude(source: &str) -> Result<hir::Program, Diagnostics> {
+        let (program, file, diagnostics) = parse_source(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected parse errors: {:?}",
+            messages(&diagnostics)
+        );
+        let prelude = crate::prelude::program().expect("the embedded prelude must parse");
+        check_with_prelude(&program, Some(prelude), &file)
+    }
+
+    fn expect_ok_with_prelude(source: &str) -> hir::Program {
+        match check_source_with_prelude(source) {
+            Ok(program) => program,
+            Err(diagnostics) => panic!(
+                "expected the program to type check, got: {:?}",
+                messages(&diagnostics)
+            ),
+        }
+    }
+
     fn analyze(source: &str) -> Diagnostics {
         let (program, file, parse_diagnostics) = parse_source(source);
         assert!(
@@ -221,7 +277,9 @@ mod tests {
             messages(&parse_diagnostics)
         );
         let mut checker = Checker::new(&file);
-        checker.collect_items(&program);
+        checker.collect_items_only(&program, DefOrigin::User);
+        checker.register_pending_impls();
+        checker.resolve_all_types();
         for id in 0..checker.consts.len() {
             checker.ensure_const(id);
         }
@@ -542,12 +600,23 @@ fn main() {
 
     #[test]
     fn checks_binary_operators() {
-        let diagnostics = expect_errors(
+        // User structs get a derived field-wise == in v1.5 (DESIGN §5.4).
+        expect_ok(
             r#"struct P { x: i64 }
 fn main() {
     let a = P { x: 1 };
     let b = P { x: 2 };
     let equal = a == b;
+    println!("{}", equal);
+}"#,
+        );
+        // Function values have no derived equality.
+        let diagnostics = expect_errors(
+            r#"fn add(value: i64) -> i64 { return value + 1; }
+fn main() {
+    let first = add;
+    let second = add;
+    let equal = first == second;
     println!("{}", equal);
 }"#,
         );
@@ -2846,8 +2915,9 @@ impl Display for Point {}
 
 fn main() {}"#,
         );
+        assert!(has_code(&diagnostics, "E0405"));
         assert!(
-            has_message(&diagnostics, "traits are not supported except Drop"),
+            has_message(&diagnostics, "cannot find trait 'Display'"),
             "{:?}",
             messages(&diagnostics)
         );
@@ -2876,7 +2946,7 @@ fn main() {}"#,
             messages(&diagnostics)
         );
         assert!(
-            has_message(&diagnostics, "is reserved in version 1.4: clone is derived"),
+            has_message(&diagnostics, "clone is derived"),
             "{:?}",
             messages(&diagnostics)
         );
@@ -3019,10 +3089,7 @@ fn main() {
             messages(&diagnostics)
         );
         assert!(
-            has_message(
-                &diagnostics,
-                "implements Drop and cannot be cloned in version 1.4; use references instead"
-            ),
+            has_message(&diagnostics, "implements Drop and cannot be cloned"),
             "{:?}",
             messages(&diagnostics)
         );
@@ -3102,7 +3169,7 @@ fn main() {
             "{:?}",
             messages(&diagnostics)
         );
-        assert!(has_message(&diagnostics, "implements Drop in version 1.4"));
+        assert!(has_message(&diagnostics, "implements Drop"));
     }
 
     #[test]
@@ -3347,10 +3414,7 @@ fn main() {
             messages(&diagnostics)
         );
         assert!(
-            has_message(
-                &diagnostics,
-                "implements Drop and cannot be cloned in version 1.4"
-            ),
+            has_message(&diagnostics, "implements Drop and cannot be cloned"),
             "{:?}",
             messages(&diagnostics)
         );
@@ -3382,7 +3446,7 @@ fn main() {
             messages(&diagnostics)
         );
         assert!(
-            has_message(&diagnostics, "implements Drop in version 1.4"),
+            has_message(&diagnostics, "implements Drop"),
             "{:?}",
             messages(&diagnostics)
         );
@@ -3525,6 +3589,447 @@ fn main() {
     }
 
     // -----------------------------------------------------------------
+    // Version 1.5 inference and equality regressions
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn infers_closure_return_types_for_comparisons() {
+        // The binary operator result type (bool) must not leak into the
+        // operands of a comparison: a closure body compared inside a context
+        // expecting bool used to unify its operands with bool (E0308).
+        expect_ok(
+            r#"fn accepts(predicate: fn(i64) -> bool) -> bool {
+    return predicate(4);
+}
+fn main() {
+    println!("{}", accepts(|value: i64| value > 2));
+    let total = accepts(|value: i64| value + 1 > 0);
+    println!("{}", total);
+}"#,
+        );
+        // Comparison of a reference parameter stays inferred as well.
+        expect_ok(
+            r#"fn keeps(predicate: fn(&String) -> bool, text: &String) -> bool {
+    return predicate(text);
+}
+fn main() {
+    let name = String::from("lsaca");
+    println!("{}", keeps(|text: &String| text.len() > 2, &name));
+}"#,
+        );
+    }
+
+    #[test]
+    fn derives_equality_for_aggregates() {
+        expect_ok(
+            r#"struct Point { x: i64, y: i64 }
+enum Kind { Empty, Value(i64) }
+fn main() {
+    let left = vec![1, 2];
+    let right = vec![1, 2];
+    println!("{}", left == right);
+    let some: Option<i64> = Some(3);
+    println!("{}", some == Some(3));
+    let ok: Result<i64, String> = Ok(1);
+    println!("{}", ok == Ok(1));
+    let pair = (1, true);
+    println!("{}", pair == (1, true));
+    let first = Point { x: 1, y: 2 };
+    let second = Point { x: 1, y: 2 };
+    println!("{}", first == second);
+    println!("{}", Kind::Empty == Kind::Empty);
+    let text = String::from("same");
+    println!("{}", &text == &text);
+    println!("{}", Box::new(5) == Box::new(5));
+    let map: HashMap<String, i64> = HashMap::new();
+    println!("{}", map == map);
+}"#,
+        );
+    }
+
+    #[test]
+    fn derives_to_string_alias_for_strings() {
+        let program = expect_ok(
+            r#"fn main() {
+    let text = String::from("lsaca");
+    let copy = text.to_string();
+    println!("{}", copy);
+}"#,
+        );
+        let main = main_fn(&program);
+        let HStmt::Let {
+            init: Some(init), ..
+        } = &main.body.stmts[1]
+        else {
+            panic!("expected the second statement to be a let");
+        };
+        assert!(
+            matches!(
+                init.kind,
+                HExprKind::BuiltinMethod {
+                    method: HBuiltinMethod::Clone,
+                    ..
+                }
+            ),
+            "String::to_string() should lower to the derived clone, got {:?}",
+            init.kind
+        );
+    }
+
+    #[test]
+    fn rejects_hash_map_get_with_reference_results() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let mut map: HashMap<String, String> = HashMap::new();
+    map.insert(String::from("key"), String::from("value"));
+    let borrowed = map.get_with(String::from("key"), |value: &String| value);
+    println!("{:?}", borrowed);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "references cannot be stored"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn reports_nested_tuple_pattern_mismatch() {
+        // A valid nested tuple pattern is decomposed element-wise.
+        expect_ok(
+            r#"fn main() {
+    let pair = (1, (2, 3));
+    let (first, (inner, last)) = pair;
+    println!("{} {} {}", first, inner, last);
+}"#,
+        );
+        // A mis-typed nested pattern reports one mismatch instead of letting
+        // every binding below degrade into an E0282 cascade.
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let triple = ((1, (2, 3)), 4);
+    let (first, (inner, last)) = triple;
+    println!("{} {} {}", first, inner, last);
+}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "mismatched types"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn generic_parameters_are_in_scope_in_signatures() {
+        expect_ok(
+            r#"struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn new(first: T, second: T) -> Pair<T> {
+        return Pair { first: first, second: second };
+    }
+    fn swapped(self) -> Self {
+        return Self { first: self.second, second: self.first };
+    }
+}
+fn identity<T>(value: T) -> T {
+    return value;
+}
+fn main() {
+    let pair = Pair::new(1, 2);
+    let swapped = pair.swapped();
+    println!("{} {}", swapped.first, swapped.second);
+    println!("{}", identity(7));
+}"#,
+        );
+    }
+
+    #[test]
+    fn validates_trait_impls_against_their_own_self_type() {
+        expect_ok(
+            r#"trait Describe<T> { fn describe(&self, extra: T) -> String; }
+struct Point { x: i64, y: i64 }
+struct Tag { label: String }
+impl Describe<i64> for Point {
+    fn describe(&self, extra: i64) -> String {
+        return format!("point({}, {}) + {}", self.x, self.y, extra);
+    }
+}
+impl Describe<String> for Tag {
+    fn describe(&self, extra: String) -> String {
+        return self.label + ":" + extra;
+    }
+}
+fn main() {
+    let point = Point { x: 1, y: 2 };
+    println!("{}", point.describe(3));
+    let tag = Tag { label: String::from("t") };
+    println!("{}", tag.describe(String::from("v")));
+}"#,
+        );
+    }
+
+    #[test]
+    fn accepts_user_iterator_implementations() {
+        expect_ok_with_prelude(
+            r#"struct Counter { value: i64 }
+impl Iterator<i64> for Counter {
+    fn next(&mut self) -> Option<i64> {
+        if self.value >= 3 {
+            return None;
+        }
+        self.value = self.value + 1;
+        return Some(self.value);
+    }
+}
+fn main() {
+    let first = Counter { value: 0 };
+    for value in first {
+        println!("{}", value);
+    }
+    let second = Counter { value: 0 };
+    for value in second.map(|number| number * 2) {
+        println!("{}", value);
+    }
+}"#,
+        );
+    }
+
+    #[test]
+    fn rejects_trait_impls_for_builtin_targets() {
+        // A trait can only be implemented for a user-defined struct or enum:
+        // builtin types cannot gain trait methods.
+        let diagnostics = expect_errors(
+            r#"trait Tag { fn tag(&self) -> i64; }
+impl Tag for Vec<i64> {
+    fn tag(&self) -> i64 { return 1; }
+}
+impl Tag for i64 {
+    fn tag(&self) -> i64 { return 2; }
+}
+impl Tag for (i64, i64) {
+    fn tag(&self) -> i64 { return 3; }
+}
+fn main() {}"#,
+        );
+        assert!(has_code(&diagnostics, "E0118"));
+        assert!(has_message(
+            &diagnostics,
+            "impl target must be a struct or enum type defined in this program, found Vec<i64>"
+        ));
+        assert!(has_message(
+            &diagnostics,
+            "impl target must be a struct or enum type defined in this program, found i64"
+        ));
+        assert!(has_message(
+            &diagnostics,
+            "impl target must be a struct or enum type defined in this program, found (i64, i64)"
+        ));
+    }
+
+    #[test]
+    fn rejects_generic_impls_for_builtin_targets() {
+        let diagnostics = expect_errors(
+            r#"impl<T> Vec<T> {
+    fn weird(&self) -> i64 { return 0; }
+}
+impl i64 {
+    fn odd(&self) -> i64 { return 1; }
+}
+fn main() {}"#,
+        );
+        assert!(has_code(&diagnostics, "E0118"));
+        assert!(has_message(&diagnostics, "found Vec<T>"));
+        assert!(has_message(
+            &diagnostics,
+            "impl target must be a struct or enum type defined in this program, found i64"
+        ));
+    }
+
+    #[test]
+    fn rejected_trait_impls_do_not_provide_methods() {
+        let diagnostics = expect_errors(
+            r#"trait Tag { fn tag(&self) -> i64; }
+impl Tag for i64 {
+    fn tag(&self) -> i64 { return 1; }
+}
+fn main() {
+    let value = 2;
+    println!("{}", value.tag());
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0118"));
+        assert!(has_code(&diagnostics, "E0599"));
+        assert!(has_message(&diagnostics, "no method named tag"));
+    }
+
+    #[test]
+    fn accepts_generic_impls_for_user_types() {
+        expect_ok(
+            r#"trait Describe { fn describe(&self) -> i64; }
+struct Boxed<T> { inner: T }
+impl<T> Describe for Boxed<T> {
+    fn describe(&self) -> i64 { return 7; }
+}
+impl<T> Boxed<T> {
+    fn value_of(&self) -> T { return self.inner.clone(); }
+}
+fn main() {
+    let boxed: Boxed<i64> = Boxed { inner: 5 };
+    println!("{}", boxed.describe());
+    println!("{}", boxed.value_of());
+}"#,
+        );
+    }
+
+    #[test]
+    fn rejects_turbofish_on_non_generic_methods() {
+        let diagnostics = expect_errors(
+            r#"trait Shape { fn area(&self) -> i64; }
+struct Point { x: i64 }
+struct Square { side: i64 }
+impl Point {
+    fn get(&self) -> i64 { return self.x; }
+}
+impl Shape for Square {
+    fn area(&self) -> i64 { return self.side * self.side; }
+}
+fn main() {
+    let point = Point { x: 1 };
+    let _value = point.get::<i64>();
+    let square = Square { side: 2 };
+    let _area = square.area::<i64>();
+    let values = vec![1, 2];
+    let _length = values.len::<i64>();
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0107"));
+        assert!(has_message(
+            &diagnostics,
+            "method get takes 0 generic arguments but 1 was supplied"
+        ));
+        assert!(has_message(
+            &diagnostics,
+            "method area takes 0 generic arguments but 1 was supplied"
+        ));
+        assert!(has_message(
+            &diagnostics,
+            "method len takes 0 generic arguments but 1 was supplied"
+        ));
+    }
+
+    #[test]
+    fn keeps_turbofish_for_parse_and_collect() {
+        expect_ok_with_prelude(
+            r#"fn main() {
+    let parsed = String::from("42").parse::<i64>();
+    println!("{}", parsed);
+    let doubled: Vec<i64> = vec![1, 2, 3].iter().map(|value| value * 2).collect::<Vec<i64>>();
+    println!("{:?}", doubled);
+}"#,
+        );
+    }
+
+    #[test]
+    fn reports_hash_map_key_errors_once() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let mut map: HashMap<Vec<i64>, i64> = HashMap::new();
+    map.insert(vec![1], 2);
+    println!("{}", map.len());
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0277"));
+        assert!(has_message(
+            &diagnostics,
+            "HashMap keys must be one of i64, u64, bool or String, found Vec<i64>"
+        ));
+        assert!(has_note(
+            &diagnostics,
+            "only the listed key types are supported; use a struct field or a String key instead"
+        ));
+        let key_errors = messages(&diagnostics)
+            .iter()
+            .filter(|message| {
+                message.contains("HashMap keys must be one of i64, u64, bool or String")
+            })
+            .count();
+        assert_eq!(
+            key_errors,
+            1,
+            "the invalid key type must be reported exactly once: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn infers_unannotated_closure_arguments_for_callable_bounds() {
+        expect_ok(
+            r#"fn apply_twice<F: Fn(i64) -> i64>(f: F, value: i64) -> i64 {
+    return f(f(value));
+}
+fn apply_value<T, F: Fn(T) -> T>(value: T, f: F) -> T {
+    return f(value);
+}
+fn apply_predicate<F: Fn(i64) -> bool>(f: F, value: i64) -> bool {
+    return f(value);
+}
+fn main() {
+    println!("{}", apply_twice(|x| x * 2, 3));
+    println!("{}", apply_value(4, |x| x + 1));
+    println!("{}", apply_twice(|x: i64| x - 1, 5));
+    println!("{}", apply_predicate(|n| n > 1, 7));
+}"#,
+        );
+    }
+
+    #[test]
+    fn diagnostics_do_not_leak_prelude_names() {
+        // Unsupported adapter methods are rejected with a message naming the
+        // receiver type. The receiver may be a prelude adapter, whose internal
+        // `__lsaca_` prefix is an implementation detail that must never reach
+        // a user-facing diagnostic.
+        let (program, file, parse_diagnostics) = parse_source(
+            r#"fn main() {
+    let values: Vec<i64> = vec![1, 2, 3];
+    let zipped = values.iter().zip(vec![4, 5, 6].iter());
+    println!("{}", zipped.count());
+}"#,
+        );
+        assert!(
+            !parse_diagnostics.has_errors(),
+            "unexpected parse errors: {:?}",
+            messages(&parse_diagnostics)
+        );
+        let prelude = crate::prelude::program().expect("the embedded prelude must parse");
+        let (result, _warnings) = check_reporting_with_prelude(&program, Some(prelude), &file);
+        let diagnostics = match result {
+            Ok(_) => panic!(".zip() must be rejected as an unsupported iterator method"),
+            Err(diagnostics) => diagnostics,
+        };
+        assert!(
+            has_code(&diagnostics, "E0599"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        let rendered = diagnostics.render(&file);
+        assert!(
+            !rendered.contains("__lsaca_"),
+            "diagnostics must not leak internal prelude identifiers:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("VecIter<i64>"),
+            "the public adapter name should be shown instead of the internal one:\n{}",
+            rendered
+        );
+    }
+
+    // -----------------------------------------------------------------
     // End-to-end fixture corpus
     // -----------------------------------------------------------------
 
@@ -3542,6 +4047,27 @@ fn main() {
             "expected the e2e fixture corpus, found {} files",
             paths.len()
         );
+        let prelude = match crate::prelude::program() {
+            Ok(prelude) => prelude,
+            Err(diagnostics) => panic!(
+                "the embedded prelude must parse: {:?}",
+                messages(&diagnostics)
+            ),
+        };
+        // Fixtures that intentionally exercise a rejected program but keep a
+        // descriptive name: the gate asserts both the rejection and the exact
+        // diagnostic the fixture demonstrates, so it cannot silently start
+        // passing for the wrong reason.
+        const EXPECTED_REJECT: [(&str, &str); 2] = [
+            (
+                "iter_collect_no_type.ls",
+                ".collect() requires a known Vec<T> result type",
+            ),
+            (
+                "iter_sum_non_numeric.ls",
+                "cannot sum an iterator of type String",
+            ),
+        ];
         let mut failures: Vec<String> = Vec::new();
         for path in paths {
             let name = path
@@ -3558,8 +4084,27 @@ fn main() {
                 if rejected_at_parse {
                     continue;
                 }
-                let accepted = check(&program, &file).is_ok();
+                let accepted = check_with_prelude(&program, Some(prelude), &file).is_ok();
                 assert!(!accepted, "{} should be rejected by the type checker", name);
+                continue;
+            }
+            if let Some((_, expected_message)) =
+                EXPECTED_REJECT.iter().find(|(fixture, _)| *fixture == name)
+            {
+                if rejected_at_parse {
+                    continue;
+                }
+                let diagnostics = match check_with_prelude(&program, Some(prelude), &file) {
+                    Ok(_) => panic!("{} should be rejected by the type checker", name),
+                    Err(diagnostics) => diagnostics,
+                };
+                assert!(
+                    has_message(&diagnostics, expected_message),
+                    "{} should report a diagnostic containing {:?}, got: {:?}",
+                    name,
+                    expected_message,
+                    messages(&diagnostics)
+                );
                 continue;
             }
             let mut parse_messages = messages(&lex_diagnostics);
@@ -3571,7 +4116,7 @@ fn main() {
                 ));
                 continue;
             }
-            if let Err(diagnostics) = check(&program, &file) {
+            if let Err(diagnostics) = check_with_prelude(&program, Some(prelude), &file) {
                 failures.push(format!(
                     "{} should type check, got: {:?}",
                     name,
@@ -3583,7 +4128,7 @@ fn main() {
         // the Lead) can be done in one pass instead of one panic at a time.
         assert!(
             failures.is_empty(),
-            "{} fixture(s) do not satisfy the version 1.4 static rules:\n{}",
+            "{} fixture(s) do not satisfy the static ownership rules:\n{}",
             failures.len(),
             failures.join("\n")
         );

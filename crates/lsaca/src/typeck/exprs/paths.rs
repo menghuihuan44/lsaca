@@ -25,6 +25,17 @@ impl<'a> Checker<'a> {
                     "E0107",
                 );
             }
+            if self.generic_fn_by_name.contains_key(&name) {
+                self.error_code(
+                    format!(
+                        "generic function {} cannot be used as a value; call it with type arguments",
+                        name
+                    ),
+                    span,
+                    "E0423",
+                );
+                return self.never_expr(span);
+            }
             return self.check_simple_value(&name, path.span, hint);
         }
         if segments.len() == 2 {
@@ -77,6 +88,61 @@ impl<'a> Checker<'a> {
                     span,
                     "E0423",
                 );
+                return self.never_expr(span);
+            }
+            // A unit variant of a generic enum needs a concrete instance from
+            // the turbofish arguments or from the expected type.
+            if self.generic_enum_by_name.contains_key(&type_name) {
+                let explicit = segments[0].generics.clone();
+                let instance = if !explicit.is_empty() {
+                    self.resolve_generic_instance(&type_name, &explicit, segments[0].span)
+                } else {
+                    self.hinted_instance_of(&type_name, hint)
+                };
+                if let Some(ITy::Enum(enum_id)) = instance {
+                    self.ensure_enum_variants(enum_id);
+                    let enum_name = self.enum_name(enum_id);
+                    if let Some(variant) = self.find_variant(enum_id, &item) {
+                        let fields = self.variant_fields(enum_id, variant);
+                        if !fields.is_empty() {
+                            self.error_code(
+                                format!(
+                                    "enum variant {}::{} takes arguments; construct it with {}::{}(...)",
+                                    enum_name, item, enum_name, item
+                                ),
+                                span,
+                                "E0532",
+                            );
+                            return self.never_expr(span);
+                        }
+                        let ty = ITy::Enum(enum_id);
+                        self.apply_hint(&ty, hint);
+                        return TExpr::new(
+                            ty,
+                            TExprKind::EnumLit {
+                                enum_id,
+                                variant,
+                                args: Vec::new(),
+                            },
+                            span,
+                        );
+                    }
+                    let mut candidates: Vec<String> = Vec::new();
+                    for index in 0..self.variant_count(enum_id) {
+                        candidates.push(self.variant_name(enum_id, index));
+                    }
+                    candidates.sort();
+                    let refs: Vec<&str> = candidates.iter().map(|name| name.as_str()).collect();
+                    let suggestion = closest_name(&item, &refs);
+                    self.error_suggest(
+                        format!("enum {} has no variant named {}", enum_name, item),
+                        suggestion,
+                        span,
+                        "E0599",
+                    );
+                    return self.never_expr(span);
+                }
+                self.error_code("type annotations needed".to_string(), span, "E0282");
                 return self.never_expr(span);
             }
             if let Some(enum_id) = self.lookup_enum_for_path(&type_name, segments[0].span) {
@@ -318,6 +384,19 @@ impl<'a> Checker<'a> {
 
     pub fn lookup_enum_for_path(&mut self, name: &str, span: Span) -> Option<usize> {
         if name == "Self" {
+            // Generic impl methods keep their concrete self type in the generic
+            // environment only, so consult that first for enum instances.
+            if let Some(ITy::Enum(enum_id)) = self.current_self_ty() {
+                return Some(enum_id);
+            }
+            if let Some(ITy::Struct(_)) = self.current_self_ty() {
+                self.error_code(
+                    "expected an enum, found a struct".to_string(),
+                    span,
+                    "E0532",
+                );
+                return None;
+            }
             return match self.current_self_key() {
                 Some(TypeKey::Enum(enum_id)) => Some(enum_id),
                 Some(TypeKey::Struct(_)) => {
@@ -343,6 +422,15 @@ impl<'a> Checker<'a> {
 
     pub fn lookup_type_key(&mut self, name: &str, span: Span) -> Option<TypeKey> {
         if name == "Self" {
+            // Generic impl methods carry their concrete self type in the
+            // generic environment rather than in the methods map.
+            if let Some(self_ty) = self.current_self_ty() {
+                match self_ty {
+                    ITy::Struct(struct_id) => return Some(TypeKey::Struct(struct_id)),
+                    ITy::Enum(enum_id) => return Some(TypeKey::Enum(enum_id)),
+                    _ => {}
+                }
+            }
             return match self.current_self_key() {
                 Some(key) => Some(key),
                 None => {
@@ -388,7 +476,11 @@ impl<'a> Checker<'a> {
         );
         candidates.sort();
         candidates.dedup();
-        let refs: Vec<&str> = candidates.iter().map(|name| name.as_str()).collect();
+        let refs: Vec<&str> = candidates
+            .iter()
+            .map(|name| name.as_str())
+            .filter(|name| !name.starts_with("__lsaca_"))
+            .collect();
         closest_name(name, &refs)
     }
 
@@ -408,7 +500,11 @@ impl<'a> Checker<'a> {
         candidates.extend(self.consts.iter().map(|item| item.decl.name.clone()));
         candidates.sort();
         candidates.dedup();
-        let refs: Vec<&str> = candidates.iter().map(|name| name.as_str()).collect();
+        let refs: Vec<&str> = candidates
+            .iter()
+            .map(|name| name.as_str())
+            .filter(|name| !name.starts_with("__lsaca_"))
+            .collect();
         closest_name(name, &refs)
     }
 }

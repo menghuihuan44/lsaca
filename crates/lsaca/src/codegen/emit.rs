@@ -706,6 +706,12 @@ impl<'a> Gen<'a> {
             HExprKind::ForVec { pat, vec, body } => {
                 self.gen_for_vec(pat, vec, body, &expr.ty, target)
             }
+            HExprKind::ForIter {
+                iter,
+                next_fn,
+                pat,
+                body,
+            } => self.gen_for_iter(iter, *next_fn, pat, body, &expr.ty, target),
             HExprKind::StructLit { struct_id, fields } => {
                 self.gen_struct_lit(*struct_id, fields, &expr.ty, target)
             }

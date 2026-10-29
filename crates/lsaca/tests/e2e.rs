@@ -442,6 +442,206 @@ fn cases() -> Vec<Case> {
             stderr_contains: &[],
         },
         Case {
+            name: "iter_basic",
+            source: include_str!("programs/iter_basic.ls"),
+            args: &[],
+            stdout: "total 10\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_any_all_find",
+            source: include_str!("programs/iter_any_all_find.ls"),
+            args: &[],
+            stdout: "any true\nall true\nfound 9\nlong hello\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_capture",
+            source: include_str!("programs/iter_capture.ls"),
+            args: &[],
+            stdout: "[\"3!\", \"6!\", \"9!\"]\ntotal 60\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_fold_count_sum",
+            source: include_str!("programs/iter_fold_count_sum.ls"),
+            args: &[],
+            stdout: "total 15\njoined ab\ncount 3\nints 6\nfloats 3.75\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "trait_dispatch",
+            source: include_str!("programs/trait_dispatch.ls"),
+            args: &[],
+            stdout: "rex says woof (inherent)\n3\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "option_scalar_fields",
+            source: include_str!("programs/option_scalar_fields.ls"),
+            args: &[],
+            stdout: "5\n1 true\nnone\n7\n8 false\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "fn_in_aggregates",
+            source: include_str!("programs/fn_in_aggregates.ls"),
+            args: &[],
+            stdout: "double 10\ntriple 15\n10\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "self_new",
+            source: include_str!("programs/self_new.ls"),
+            args: &[],
+            stdout: "2 2\n3\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "pub_fields",
+            source: include_str!("programs/pub_fields.ls"),
+            args: &[],
+            stdout: "main 2\nfast\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "generics_closure_infer",
+            source: include_str!("programs/generics_closure_infer.ls"),
+            args: &[],
+            stdout: "12\n5\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_map_filter",
+            source: include_str!("programs/iter_map_filter.ls"),
+            args: &[],
+            stdout: "6\n12\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_collect",
+            source: include_str!("programs/iter_collect.ls"),
+            args: &[],
+            stdout: "[2, 4, 6]\n[\"a!\", \"b!\"]\n[2, 4, 6]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_take_skip_enumerate",
+            source: include_str!("programs/iter_take_skip_enumerate.ls"),
+            args: &[],
+            stdout: "20\n30\n40\n0 a\n1 b\n2 c\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_chain",
+            source: include_str!("programs/iter_chain.ls"),
+            args: &[],
+            stdout: "0 16\n1 25\n2 36\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_for_user_type",
+            source: include_str!("programs/iter_for_user_type.ls"),
+            args: &[],
+            stdout: "1\n2\n3\n2\n4\n6\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_noncopy",
+            source: include_str!("programs/iter_noncopy.ls"),
+            args: &[],
+            stdout: "[5, 2, 5]\n[2, 1, 3]\n[\"hello\", \"hey\"]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iter_lazy_local",
+            source: include_str!("programs/iter_lazy_local.ls"),
+            args: &[],
+            stdout: "8\n10\n12\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "generics_basic",
+            source: include_str!("programs/generics_basic.ls"),
+            args: &[],
+            stdout: "1 2\n2 1\nleft right\n3\n9 0\nhere\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "generics_traits",
+            source: include_str!("programs/generics_traits.ls"),
+            args: &[],
+            stdout: "point(1, 2) + 3\n2\nt:v\n1\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "hashmap_basic",
+            source: include_str!("programs/hashmap_basic.ls"),
+            args: &[],
+            stdout: "2 3\nhas b\nSome(3)\n1 false\ntrue false\nfalse\ntrue 0\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "hashmap_advanced",
+            source: include_str!("programs/hashmap_advanced.ls"),
+            args: &[],
+            stdout: "x=10\nNone\n2\n2\n30\ntrue false\n1 2\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "borrow_hashmap_owner",
+            source: include_str!("programs/borrow_hashmap_owner.ls"),
+            args: &[],
+            stdout: "v=7\na\n1\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "tuples_nested",
+            source: include_str!("programs/tuples_nested.ls"),
+            args: &[],
+            stdout: "((1, 2), (3, 4))\n1 2 3 4\n(1, (2, 3))\n1 2\n3\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "aggregate_equality",
+            source: include_str!("programs/aggregate_equality.ls"),
+            args: &[],
+            stdout: "true false\ntrue false\ntrue false\ntrue false\ntrue false\ntrue false\ntrue\ntrue\nequality ok\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iterators",
+            source: include_str!("../../../examples/iterators.ls"),
+            args: &[],
+            stdout: "sum of evens: 12\nlengths: [5, 4]\ncountdown sum: 6\njoined: ab\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
             name: "format_specs",
             source: include_str!("programs/format_specs.ls"),
             args: &[],
@@ -700,6 +900,30 @@ fn cases() -> Vec<Case> {
             source: include_str!("programs/result_clone.ls"),
             args: &[],
             stdout: "21\n21\n21\n-1\ntrue\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "closure_ref_local",
+            source: include_str!("programs/closure_ref_local.ls"),
+            args: &[],
+            stdout: "lsaca\nalpha\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "borrow_in_loop",
+            source: include_str!("programs/borrow_in_loop.ls"),
+            args: &[],
+            stdout: "alpha\n20 2\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "ref_field_chain",
+            source: include_str!("programs/ref_field_chain.ls"),
+            args: &[],
+            stdout: "2\n2 4\n",
             exit: 0,
             stderr_contains: &[],
         },
@@ -1047,6 +1271,22 @@ fn borrow_errors_are_reported() {
                 "cannot return a reference to local variable x",
             ],
         ),
+        (
+            "bad_borrow_then_move_in_branch",
+            include_str!("programs/bad_borrow_then_move_in_branch.ls"),
+            &[
+                "error[E0505]",
+                "cannot move out of text because it is borrowed",
+            ],
+        ),
+        (
+            "bad_match_borrow_then_move",
+            include_str!("programs/bad_match_borrow_then_move.ls"),
+            &[
+                "error[E0505]",
+                "cannot move out of maybe because it is borrowed",
+            ],
+        ),
     ];
     let mut problems: Vec<String> = Vec::new();
     for (name, source, expected) in programs {
@@ -1128,6 +1368,169 @@ fn move_errors_are_reported() {
                     "{}: diagnostics do not mention {:?}:\n{}",
                     name, needle, rendered
                 ));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        panic!("{}", problems.join("\n\n"));
+    }
+}
+
+/// v1.5 features reject ill-formed programs with targeted diagnostics:
+/// generic arity, trait conformance (missing/extra/mis-typed members,
+/// duplicate impls), trait objects, unsatisfied bounds, HashMap key
+/// restrictions, reference storage and iterator adaptor misuse.
+#[test]
+fn v15_feature_errors_are_reported() {
+    let programs: &[(&str, &str, &[&str])] = &[
+        (
+            "bad_generic_arity",
+            include_str!("programs/bad_generic_arity.ls"),
+            &[
+                "error[E0107]",
+                "struct Pair takes 1 type argument but 2 were supplied",
+            ],
+        ),
+        (
+            "bad_trait_missing",
+            include_str!("programs/bad_trait_missing.ls"),
+            &["error[E0046]", "not all trait items implemented"],
+        ),
+        (
+            "bad_trait_extra",
+            include_str!("programs/bad_trait_extra.ls"),
+            &["error[E0407]"],
+        ),
+        (
+            "bad_trait_type",
+            include_str!("programs/bad_trait_type.ls"),
+            &["error[E0412]", "trait objects are not supported"],
+        ),
+        (
+            "bad_trait_duplicate",
+            include_str!("programs/bad_trait_duplicate.ls"),
+            &["error[E0119]"],
+        ),
+        (
+            "bad_trait_signature",
+            include_str!("programs/bad_trait_signature.ls"),
+            &["error[E0053]"],
+        ),
+        (
+            "bad_generic_bound",
+            include_str!("programs/bad_generic_bound.ls"),
+            &[
+                "error[E0277]",
+                "the trait bound (i64: Sized2) is not satisfied",
+            ],
+        ),
+        (
+            "bad_hashmap_key",
+            include_str!("programs/bad_hashmap_key.ls"),
+            &[
+                "error[E0277]",
+                "HashMap keys must be one of i64, u64, bool or String, found f64",
+            ],
+        ),
+        (
+            "bad_hashmap_get_with_ref",
+            include_str!("programs/bad_hashmap_get_with_ref.ls"),
+            &["error[E0498]", "references cannot be stored"],
+        ),
+        (
+            "bad_store_hash_map_value_ref",
+            include_str!("programs/bad_store_hash_map_value_ref.ls"),
+            &["error[E0498]", "references cannot be stored"],
+        ),
+        (
+            "bad_store_hash_map_key_ref",
+            include_str!("programs/bad_store_hash_map_key_ref.ls"),
+            &[
+                "error[E0277]",
+                "HashMap keys must be one of i64, u64, bool or String",
+            ],
+        ),
+        (
+            "bad_store_vec_ref",
+            include_str!("programs/bad_store_vec_ref.ls"),
+            &["error[E0498]", "references cannot be stored"],
+        ),
+        (
+            "bad_store_option_ref_field",
+            include_str!("programs/bad_store_option_ref_field.ls"),
+            &["error[E0498]", "references cannot be stored"],
+        ),
+        (
+            "bad_store_tuple_ref_map_value",
+            include_str!("programs/bad_store_tuple_ref_map_value.ls"),
+            &["error[E0498]", "references cannot be stored"],
+        ),
+        (
+            "bad_store_generic_struct_ref",
+            include_str!("programs/bad_store_generic_struct_ref.ls"),
+            &["error[E0498]", "references cannot be stored"],
+        ),
+        (
+            "bad_store_closure_ref_field",
+            include_str!("programs/bad_store_closure_ref_field.ls"),
+            &["error[E0498]", "references cannot be captured"],
+        ),
+        (
+            "iter_collect_no_type",
+            include_str!("programs/iter_collect_no_type.ls"),
+            &[
+                "error[E0282]",
+                ".collect() requires a known Vec<T> result type",
+            ],
+        ),
+        (
+            "iter_sum_non_numeric",
+            include_str!("programs/iter_sum_non_numeric.ls"),
+            &["error[E0277]", ".sum() is only supported"],
+        ),
+        (
+            "bad_trait_impl_target_builtin",
+            include_str!("programs/bad_trait_impl_target_builtin.ls"),
+            &[
+                "error[E0118]",
+                "impl target must be a struct or enum type defined in this program, found Vec<i64>",
+            ],
+        ),
+        (
+            "bad_method_turbofish",
+            include_str!("programs/bad_method_turbofish.ls"),
+            &[
+                "error[E0107]",
+                "method get takes 0 generic arguments but 1 was supplied",
+            ],
+        ),
+        (
+            "bad_iter_zip",
+            include_str!("programs/bad_iter_zip.ls"),
+            &[
+                "error[E0599]",
+                "no method named zip found for type VecIter<i64>",
+            ],
+        ),
+    ];
+    let mut problems: Vec<String> = Vec::new();
+    for (name, source, expected) in programs {
+        let frontend = Frontend::new(format!("{}.ls", name), *source);
+        match frontend.check() {
+            Ok(_) => problems.push(format!(
+                "{}: expected a compile error, but the program was accepted",
+                name
+            )),
+            Err(diagnostics) => {
+                let rendered = diagnostics.render(frontend.file());
+                for message in *expected {
+                    if !rendered.contains(message) {
+                        problems.push(format!(
+                            "{}: diagnostics do not mention {:?}:\n{}",
+                            name, message, rendered
+                        ));
+                    }
+                }
             }
         }
     }

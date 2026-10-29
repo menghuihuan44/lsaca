@@ -1,11 +1,11 @@
 # Optional weekly quick benchmark smoke run.
 #
-# The benchmark harness lives in scripts/bench.py and is owned by a separate
-# workstream. It needs this repository's release compiler and a C toolchain:
-# the harness compiles reference programs and runs both implementations, but it
-# never invokes cargo itself, so the workflow builds the CLI first.
+# The benchmark harness lives in scripts/bench.py. It needs this repository's
+# release compiler and a C toolchain: the harness compiles reference programs
+# and runs both implementations, but it never invokes cargo itself, so the
+# workflow builds the CLI first.
 #
-# This workflow must stay green while scripts/bench.py does not exist yet, so it
+# The harness is kept optional: if scripts/bench.py is missing the workflow
 # skips gracefully instead of failing every week.
 #
 # Trigger it manually from the Actions tab ("Run workflow") or wait for the

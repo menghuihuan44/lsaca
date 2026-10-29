@@ -2,12 +2,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::generics::{DefOrigin, GEnumDef, GFnDef, GStructDef, ImplInfo};
 use super::items::{
     AliasInfo, ConstItem, ConstState, ConstVal, EnumInfo, FnInfo, StructInfo, TypeKey,
 };
 use super::itype::{ITy, Infer};
 use super::refs::Provenance;
+use super::traits::TraitInfo;
 use super::tree::{TBlock, TClosure, TExpr, TStmt};
+use crate::ast::ImplBlock;
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::span::{SourceFile, Span};
 use crate::types::{SelfKind, Ty};
@@ -124,6 +127,52 @@ pub struct Checker<'a> {
     /// pattern currently being checked. A by-value binding of a type with drop
     /// glue below such a layer is E0509.
     pub pattern_nesting: usize,
+    /// Generic struct declarations, instantiated on demand.
+    pub generic_structs: Vec<GStructDef>,
+    /// Generic enum declarations, instantiated on demand.
+    pub generic_enums: Vec<GEnumDef>,
+    /// Generic function definitions (free functions and generic impl methods).
+    pub generic_fns: Vec<GFnDef>,
+    /// Registered impl blocks (inherent generic and trait impls).
+    pub impls: Vec<ImplInfo>,
+    /// Impl blocks waiting to be registered once every program (user and
+    /// prelude) has registered its type and trait names. Deferring them lets
+    /// user impls name traits that come from the prelude (for example
+    /// `Iterator`) regardless of collection order.
+    pub pending_impls: Vec<(ImplBlock, DefOrigin)>,
+    /// Registered trait declarations.
+    pub traits: Vec<TraitInfo>,
+    pub trait_by_name: HashMap<String, usize>,
+    /// Generic struct declarations by name.
+    pub generic_struct_by_name: HashMap<String, usize>,
+    /// Generic enum declarations by name.
+    pub generic_enum_by_name: HashMap<String, usize>,
+    /// Generic free functions by name.
+    pub generic_fn_by_name: HashMap<String, usize>,
+    /// Generic parameter environments, innermost last. Also holds "Self" for
+    /// instantiated impl methods.
+    pub generic_env: Vec<HashMap<String, ITy>>,
+    /// Instantiated generic function ids whose bodies still need checking.
+    pub pending_fns: Vec<usize>,
+    /// Origin assigned to items registered right now.
+    pub collecting_origin: DefOrigin,
+    /// True while resolving a type only to build an expression hint; generic
+    /// instantiations with unknown arguments degrade to a fresh variable
+    /// instead of reporting E0282.
+    pub probing: bool,
+    /// True while probing candidate impls: shape mismatches are not reported.
+    pub probe_quiet: bool,
+    /// Key types of invalid HashMap instantiations that already produced a
+    /// diagnostic. A HashMap type is validated both where it is annotated and
+    /// where a value is created, but only one diagnostic is reported.
+    pub reported_hash_map_key_errors: HashSet<String>,
+}
+
+/// Internal standard-library items are prefixed so user code cannot collide
+/// with them (the prefix is reserved by the embedded prelude). It never belongs
+/// in a user-facing diagnostic, so it is stripped when a name is rendered.
+fn diagnostic_item_name(name: &str) -> String {
+    name.strip_prefix("__lsaca_").unwrap_or(name).to_string()
 }
 
 impl<'a> Checker<'a> {
@@ -158,6 +207,22 @@ impl<'a> Checker<'a> {
             drop_structs: Vec::new(),
             drop_enums: Vec::new(),
             pattern_nesting: 0,
+            generic_structs: Vec::new(),
+            generic_enums: Vec::new(),
+            generic_fns: Vec::new(),
+            impls: Vec::new(),
+            pending_impls: Vec::new(),
+            traits: Vec::new(),
+            trait_by_name: HashMap::new(),
+            generic_struct_by_name: HashMap::new(),
+            generic_enum_by_name: HashMap::new(),
+            generic_fn_by_name: HashMap::new(),
+            generic_env: Vec::new(),
+            pending_fns: Vec::new(),
+            collecting_origin: DefOrigin::User,
+            probing: false,
+            probe_quiet: false,
+            reported_hash_map_key_errors: HashSet::new(),
         }
     }
 
@@ -170,6 +235,21 @@ impl<'a> Checker<'a> {
     pub fn error_code(&mut self, message: String, span: Span, code: &'static str) {
         self.diagnostics
             .push(Diagnostic::error(message, span).with_code(code));
+    }
+
+    /// Report a coded error with one explanatory note.
+    pub fn error_code_note(
+        &mut self,
+        message: String,
+        span: Span,
+        code: &'static str,
+        note: impl Into<String>,
+    ) {
+        self.diagnostics.push(
+            Diagnostic::error(message, span)
+                .with_code(code)
+                .with_note(note),
+        );
     }
 
     pub fn warning_code(&mut self, message: String, span: Span, code: &'static str) {
@@ -235,17 +315,21 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Display name of a struct for diagnostics. The embedded standard library
+    /// is an implementation detail, so its internal `__lsaca_` prefix is not
+    /// part of any user-visible message (adapters show as `VecIter<i64>`).
     pub fn struct_name(&self, id: usize) -> String {
         self.structs
             .get(id)
-            .map(|info| info.name.clone())
+            .map(|info| diagnostic_item_name(&info.name))
             .unwrap_or_else(|| "?".to_string())
     }
 
+    /// Display name of an enum for diagnostics; see [Checker::struct_name].
     pub fn enum_name(&self, id: usize) -> String {
         self.enums
             .get(id)
-            .map(|info| info.name.clone())
+            .map(|info| diagnostic_item_name(&info.name))
             .unwrap_or_else(|| "?".to_string())
     }
 
@@ -313,6 +397,11 @@ impl<'a> Checker<'a> {
                 "Result<{}, {}>",
                 self.describe_resolved(ok),
                 self.describe_resolved(err)
+            ),
+            ITy::HashMap(key, value) => format!(
+                "HashMap<{}, {}>",
+                self.describe_resolved(key),
+                self.describe_resolved(value)
             ),
             ITy::Tuple(elems) => {
                 let parts: Vec<String> = elems
@@ -464,7 +553,7 @@ impl<'a> Checker<'a> {
         }
         if self.type_contains_ref(ty) {
             self.error_code(
-                "references cannot be captured by closures in v1.3".to_string(),
+                "references cannot be captured by closures".to_string(),
                 span,
                 "E0498",
             );
@@ -534,10 +623,21 @@ impl<'a> Checker<'a> {
 
     // -- function bodies ----------------------------------------------------
 
-    /// Check every function body in source order.
+    /// Check every function body: first all concrete user functions, then every
+    /// function instantiated from a generic body, in instantiation order.
     pub fn check_all_fns(&mut self) {
-        for id in 0..self.fns.len() {
-            self.check_fn(id);
+        let mut id = 0;
+        while id < self.fns.len() {
+            if self.fns[id].generic.is_none() {
+                self.check_fn(id);
+            }
+            id += 1;
+        }
+        let mut cursor = 0;
+        while cursor < self.pending_fns.len() {
+            let fn_id = self.pending_fns[cursor];
+            cursor += 1;
+            self.check_fn(fn_id);
         }
     }
 
@@ -552,7 +652,25 @@ impl<'a> Checker<'a> {
         let decl = self.fns[id].decl.clone();
         let param_cnames = self.fns[id].param_cnames.clone();
         let self_kind = self.fns[id].self_kind;
+        let origin = self.fns[id].origin;
+        let generic = self.fns[id].generic.clone();
+        let self_ty = self.fns[id].self_ty.clone();
+        let diagnostics_before = self.diagnostics.len();
         self.current_fn = id;
+        let mut pushed_env = false;
+        if let Some(instance) = generic
+            && let Some(def) = self.generic_fns.get(instance.def_id).cloned()
+        {
+            let mut env = HashMap::new();
+            for (param, arg) in def.generics.iter().zip(instance.args.iter()) {
+                env.insert(param.name.clone(), arg.clone());
+            }
+            if let Some(self_ty) = self_ty {
+                env.insert("Self".to_string(), self_ty);
+            }
+            self.push_generic_env(env);
+            pushed_env = true;
+        }
         self.ref_local_sources.clear();
         let mut frame = Frame::new(sig.ret.clone());
         for (index, param) in decl.params.iter().enumerate() {
@@ -578,6 +696,9 @@ impl<'a> Checker<'a> {
         self.frames.push(frame);
         let mut body = self.check_block(&decl.body, Some(&sig.ret));
         self.frames.pop();
+        if pushed_env {
+            self.pop_generic_env();
+        }
         // Coercions apply to return expressions, and the implicit return is the
         // tail expression of the body block.
         if let Some(tail) = body.tail.take() {
@@ -595,6 +716,21 @@ impl<'a> Checker<'a> {
             self.check_returned_reference(&tail, source, tail.span);
         }
         self.fns[id].checked = Some(body);
+        if origin.is_prelude() {
+            // Diagnostics produced while checking a std-library body are
+            // compiler bugs from the user's point of view: report them as
+            // internal standard-library errors without prelude spans.
+            let collected = std::mem::replace(&mut self.diagnostics, Diagnostics::new());
+            let mut items = collected.into_vec();
+            let tail = items.split_off(diagnostics_before.min(items.len()));
+            for diagnostic in items {
+                self.diagnostics.push(diagnostic);
+            }
+            for diagnostic in tail {
+                self.diagnostics
+                    .push(crate::prelude::internal_error(diagnostic));
+            }
+        }
     }
 
     /// Check a block, opening a fresh scope for its statements.

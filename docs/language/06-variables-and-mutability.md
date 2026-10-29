@@ -430,7 +430,7 @@ const NAME: Type = constant_expression;
 ```
 
 The type must be a scalar type or `String`. Structs, enums, `Vec`, `Option`,
-`Result`, `Rc` and `Box` cannot be constant types in 1.4.0; a structurally
+`Result`, `Rc` and `Box` cannot be constant types in 1.5.0; a structurally
 constant `Point` value is rejected even if all its fields are literals. The
 initializer must be a constant expression:
 
@@ -498,7 +498,7 @@ error: expected '=' in constant declaration, found integer literal 10
 lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
 ```
 
-Comparison is not constant-foldable in 1.4.0:
+Comparison is not constant-foldable in 1.5.0:
 
 ```ls,compile-fail
 const SMALL: bool = 1 < 2;
@@ -562,7 +562,7 @@ cell passed around explicitly.
 Function parameters are immutable bindings owned by the function body. A
 move-only argument is moved into the parameter, so the caller cannot use its
 binding afterwards (see [Functions](09-functions.md#calls-and-argument-checking)).
-Writing `mut` on a parameter parses but has no effect in 1.4.0: assigning to the
+Writing `mut` on a parameter parses but has no effect in 1.5.0: assigning to the
 parameter is still rejected with `E0596` (see the example in
 [Memory model](05-memory-model.md)). To modify a value, take the value and
 return the new one, pass an `Rc` cell, or take a mutable reference to a builtin
@@ -570,7 +570,7 @@ heap type (`&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>`).
 
 The variable bound by a `for` loop is a normal, immutable binding, and it may be
 declared `mut`: `for mut i in 0..3` parses and permits reassigning `i` inside the
-loop body. This is a lenient corner of the 1.4.0 parser rather than a design
+loop body. This is a lenient corner of the 1.5.0 parser rather than a design
 feature; iterating with a separate mutable accumulator is clearer (see
 [Statements and control flow](08-statements-and-control-flow.md)).
 

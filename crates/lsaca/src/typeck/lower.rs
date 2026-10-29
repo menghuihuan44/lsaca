@@ -119,6 +119,7 @@ impl<'a> Checker<'a> {
             }
             out.push(HStruct {
                 name: info.name.clone(),
+                c_name: info.c_name.clone(),
                 fields,
                 span: info.span,
             });
@@ -145,6 +146,7 @@ impl<'a> Checker<'a> {
             }
             out.push(HEnum {
                 name: info.name.clone(),
+                c_name: info.c_name.clone(),
                 variants,
                 span: info.span,
             });
@@ -441,6 +443,17 @@ impl<'a> Checker<'a> {
             TExprKind::ForVec { pat, vec, body } => HExprKind::ForVec {
                 pat: self.lower_pat(pat),
                 vec: Box::new(self.lower_expr(vec)),
+                body: self.lower_block(body),
+            },
+            TExprKind::ForIter {
+                iter,
+                next_fn,
+                pat,
+                body,
+            } => HExprKind::ForIter {
+                iter: Box::new(self.lower_expr(iter)),
+                next_fn: *next_fn,
+                pat: self.lower_pat(pat),
                 body: self.lower_block(body),
             },
             TExprKind::StructLit { struct_id, fields } => HExprKind::StructLit {

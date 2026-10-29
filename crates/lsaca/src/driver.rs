@@ -71,7 +71,18 @@ impl Frontend {
         if diagnostics.has_errors() {
             return Err(diagnostics);
         }
-        let (result, type_diagnostics) = typeck::check_reporting(&ast, &self.file);
+        // The standard-library prelude is embedded in the compiler and parsed
+        // once per process. Its spans are already zeroed, so prelude-origin
+        // diagnostics never point into the file being checked.
+        let prelude = match crate::prelude::program() {
+            Ok(program) => Some(program),
+            Err(errors) => {
+                diagnostics.extend(errors);
+                return Err(diagnostics);
+            }
+        };
+        let (result, type_diagnostics) =
+            typeck::check_reporting_with_prelude(&ast, prelude, &self.file);
         match result {
             Ok(program) => {
                 diagnostics.extend(type_diagnostics);

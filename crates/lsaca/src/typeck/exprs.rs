@@ -5,6 +5,7 @@
 
 mod calls;
 mod combinators;
+mod generic_calls;
 mod ops;
 mod paths;
 
@@ -276,24 +277,81 @@ impl<'a> Checker<'a> {
         }
         let iter_expr = self.check_expr(iter, None);
         let iter_ty = self.infer.resolve(&iter_expr.ty);
-        let elem_ty = match &iter_ty {
-            ITy::Vec(elem) => (**elem).clone(),
-            ITy::Never => ITy::Unit,
-            _ => {
-                let described = self.describe_resolved(&iter_ty);
-                self.error_code(
-                    format!(
-                        "cannot iterate over a value of type {}; for loops require a range or Vec<T>",
-                        described
-                    ),
+        if let ITy::Vec(elem) = &iter_ty {
+            let elem_ty = (**elem).clone();
+            self.push_scope();
+            let pat = self.check_irrefutable_pattern(pat, &elem_ty, pat.span);
+            self.bump_loop_depth(1);
+            let body = self.check_block(body, None);
+            self.bump_loop_depth(-1);
+            self.pop_scope();
+            return TExpr::new(
+                ITy::unit(),
+                TExprKind::ForVec {
+                    pat,
+                    vec: Box::new(iter_expr),
+                    body,
+                },
+                span,
+            );
+        }
+        if !matches!(iter_ty, ITy::Never) {
+            let mut next_fn = None;
+            let mut item_ty = ITy::Unit;
+            if let Some((impl_id, impl_args)) = self.find_trait_impl(&iter_ty, "Iterator") {
+                self.check_impl_coherence(impl_id, span);
+                let info = self.impls[impl_id].clone();
+                self.validate_generic_bounds(&info.generics, &impl_args, span);
+                if let Some(trait_args) = self.trait_impl_args(impl_id, &impl_args)
+                    && let Some(first) = trait_args.first().cloned()
+                {
+                    item_ty = first;
+                }
+                let next_gfn = info
+                    .methods
+                    .iter()
+                    .find(|method| method.name == "next")
+                    .map(|method| method.gfn_id);
+                if let Some(gfn_id) = next_gfn {
+                    next_fn = self.instantiate_generic_fn(gfn_id, impl_args, span);
+                }
+            }
+            if let Some(next_fn) = next_fn {
+                self.push_scope();
+                let pat = self.check_irrefutable_pattern(pat, &item_ty, pat.span);
+                self.bump_loop_depth(1);
+                let body = self.check_block(body, None);
+                self.bump_loop_depth(-1);
+                self.pop_scope();
+                return TExpr::new(
+                    ITy::unit(),
+                    TExprKind::ForIter {
+                        iter: Box::new(iter_expr),
+                        next_fn,
+                        pat,
+                        body,
+                    },
+                    span,
+                );
+            }
+            let described = self.describe_resolved(&iter_ty);
+            let message = format!(
+                "cannot iterate over a value of type {}; for loops require a range, a Vec<T>, or a type that implements Iterator<T>",
+                described
+            );
+            if matches!(iter_ty, ITy::HashMap(_, _)) {
+                self.error_code_note(
+                    message,
                     iter.span,
                     "E0277",
+                    "call keys() or values() to get a Vec and iterate over that",
                 );
-                ITy::Unit
+            } else {
+                self.error_code(message, iter.span, "E0277");
             }
-        };
+        }
         self.push_scope();
-        let pat = self.check_irrefutable_pattern(pat, &elem_ty, pat.span);
+        let pat = self.check_irrefutable_pattern(pat, &ITy::Unit, pat.span);
         self.bump_loop_depth(1);
         let body = self.check_block(body, None);
         self.bump_loop_depth(-1);
@@ -871,7 +929,7 @@ impl<'a> Checker<'a> {
         span: Span,
         hint: Option<&ITy>,
     ) -> TExpr {
-        let struct_id = match self.resolve_struct_path(path) {
+        let struct_id = match self.resolve_struct_path(path, hint) {
             Some(struct_id) => struct_id,
             None => {
                 for field in fields {
@@ -944,20 +1002,42 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolve the path of a struct literal to a struct id.
-    pub fn resolve_struct_path(&mut self, path: &ast::PathExpr) -> Option<usize> {
+    pub fn resolve_struct_path(
+        &mut self,
+        path: &ast::PathExpr,
+        hint: Option<&ITy>,
+    ) -> Option<usize> {
         let span = path.span;
-        let name = match path.simple_name() {
-            Some(name) => name.to_string(),
-            None => {
-                self.error_code(
-                    "struct literals must use a single struct name".to_string(),
-                    span,
-                    "E0422",
-                );
-                return None;
-            }
+        let (name, explicit) = if path.segments.len() == 1 {
+            (
+                path.segments[0].name.clone(),
+                path.segments[0].generics.clone(),
+            )
+        } else {
+            self.error_code(
+                "struct literals must use a single struct name".to_string(),
+                span,
+                "E0422",
+            );
+            return None;
         };
         if name == "Self" {
+            // Generic impl methods keep the concrete self type in the generic
+            // environment, so consult that before the concrete methods map.
+            if let Some(self_ty) = self.current_self_ty() {
+                match self_ty {
+                    ITy::Struct(struct_id) => return Some(struct_id),
+                    ITy::Enum(_) => {
+                        self.error_code(
+                            "expected a struct literal, found an enum".to_string(),
+                            span,
+                            "E0532",
+                        );
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
             return match self.current_self_key() {
                 Some(TypeKey::Struct(id)) => Some(id),
                 Some(TypeKey::Enum(_)) => {
@@ -974,6 +1054,30 @@ impl<'a> Checker<'a> {
                         span,
                         "E0411",
                     );
+                    None
+                }
+            };
+        }
+        // A generic struct literal is instantiated from turbofish arguments or
+        // from the expected type; otherwise its arguments cannot be known.
+        if self.generic_struct_by_name.contains_key(&name) {
+            let instance = if !explicit.is_empty() {
+                self.resolve_generic_instance(&name, &explicit, span)
+            } else {
+                self.hinted_instance_of(&name, hint)
+            };
+            return match instance {
+                Some(ITy::Struct(struct_id)) => Some(struct_id),
+                Some(ITy::Enum(_)) => {
+                    self.error_code(
+                        format!("expected a struct literal, found enum {}", name),
+                        span,
+                        "E0532",
+                    );
+                    None
+                }
+                _ => {
+                    self.error_code("type annotations needed".to_string(), span, "E0282");
                     None
                 }
             };

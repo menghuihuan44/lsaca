@@ -112,9 +112,92 @@ fn emit_rc_decls(w: &mut CWriter, registry: &TypeRegistry, inner: &Ty) {
     ));
 }
 
+/// Declarations of the helper family of one HashMap instantiation. The world
+/// visible map value is a pointer to an ORC managed wrapper around the
+/// runtime's byte table; keys and values are stored in place with generated
+/// copy/drop callbacks.
+fn emit_map_decls(w: &mut CWriter, registry: &TypeRegistry, key: &Ty, value: &Ty) {
+    let names = registry.names();
+    let ty = Ty::hash_map(key.clone(), value.clone());
+    let Some(suffix) = names.map_suffix(&ty) else {
+        return;
+    };
+    let cell = names.tag(&ty);
+    let cell_ptr = format!("{}*", cell);
+    let key_ty = names.ctype(key);
+    let value_ty = names.ctype(value);
+    let key_vec = format!("{}*", names.ctype(&Ty::vec(key.clone())));
+    let value_vec = format!("{}*", names.ctype(&Ty::vec(value.clone())));
+
+    w.line(format!("{} lsaca_map_new_{}(void);", cell_ptr, suffix));
+    w.line(format!("void lsaca_map_drop_{}(void* payload);", suffix));
+    w.line(format!(
+        "void lsaca_map_trace_{}(const void* payload, LsTraceVisit visit);",
+        suffix
+    ));
+    w.line(format!(
+        "{} {}(const {} other);",
+        cell_ptr,
+        ops::copy_fn_name(names, &ty),
+        cell_ptr
+    ));
+    w.line(format!(
+        "bool lsaca_map_insert_{}({} self, {} key, {} value, {}* out_old);",
+        suffix, cell_ptr, key_ty, value_ty, value_ty
+    ));
+    w.line(format!(
+        "bool lsaca_map_get_{}({} self, {} key, {}* out);",
+        suffix, cell_ptr, key_ty, value_ty
+    ));
+    w.line(format!(
+        "bool lsaca_map_get_ptr_{}({} self, {} key, {}** out);",
+        suffix, cell_ptr, key_ty, value_ty
+    ));
+    w.line(format!(
+        "bool lsaca_map_contains_{}({} self, {} key);",
+        suffix, cell_ptr, key_ty
+    ));
+    w.line(format!(
+        "bool lsaca_map_remove_{}({} self, {} key, {}* out);",
+        suffix, cell_ptr, key_ty, value_ty
+    ));
+    w.line(format!(
+        "int64_t lsaca_map_len_{}({} self);",
+        suffix, cell_ptr
+    ));
+    w.line(format!(
+        "bool lsaca_map_is_empty_{}({} self);",
+        suffix, cell_ptr
+    ));
+    w.line(format!(
+        "void lsaca_map_clear_{}({} self);",
+        suffix, cell_ptr
+    ));
+    w.line(format!(
+        "{} lsaca_map_keys_{}({} self);",
+        key_vec, suffix, cell_ptr
+    ));
+    w.line(format!(
+        "{} lsaca_map_values_{}({} self);",
+        value_vec, suffix, cell_ptr
+    ));
+    w.line(format!(
+        "void lsaca_map_debug_{}(const {}* self, LsString** out);",
+        suffix, cell
+    ));
+    w.line(format!(
+        "bool lsaca_map_eq_{}(const {}* a, const {}* b);",
+        suffix, cell, cell
+    ));
+}
+
 fn helper_decls(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry) {
     let names = registry.names();
     for ty in compound_types(program, registry) {
+        if let Ty::HashMap(key, value) = &ty {
+            emit_map_decls(w, registry, key, value);
+            continue;
+        }
         let c_ty = names.ctype(&ty);
         let suffix = names.mangle(&ty);
         if is_managed(&ty) {

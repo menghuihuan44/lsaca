@@ -6,6 +6,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::check::Checker;
+use super::generics::{
+    DefOrigin, EnumInstance, FnInstance, GEnumDef, GFnDef, GStructDef, GenericOwner, ImplInfo,
+    ImplMethod, StructInstance,
+};
 use super::itype::ITy;
 use super::tree::TBlock;
 use crate::ast::{
@@ -33,6 +37,10 @@ pub struct StructField {
 #[derive(Clone, Debug)]
 pub struct StructInfo {
     pub name: String,
+    /// Unique C identifier for this type (generic instances get a mangled name).
+    pub c_name: String,
+    /// Set for monomorphized generic instances.
+    pub generic: Option<StructInstance>,
     pub span: Span,
     pub decl_fields: Vec<FieldDef>,
     pub fields: Vec<StructField>,
@@ -49,6 +57,10 @@ pub struct VariantInfo {
 #[derive(Clone, Debug)]
 pub struct EnumInfo {
     pub name: String,
+    /// Unique C identifier for this type (generic instances get a mangled name).
+    pub c_name: String,
+    /// Set for monomorphized generic instances.
+    pub generic: Option<EnumInstance>,
     pub span: Span,
     pub decl_variants: Vec<VariantDef>,
     pub variants: Vec<VariantInfo>,
@@ -116,6 +128,14 @@ pub struct FnInfo {
     pub display: String,
     pub c_name: String,
     pub decl: FnDecl,
+    /// Which program declared this function (user code or the std prelude).
+    pub origin: DefOrigin,
+    /// Set for functions instantiated from a generic definition.
+    pub generic: Option<FnInstance>,
+    /// Instantiated impl self type of a method, if any.
+    pub self_ty: Option<ITy>,
+    /// Monomorphization depth, used for the E0275 recursion limit.
+    pub instantiation_depth: usize,
     pub owner: Option<TypeKey>,
     pub self_kind: Option<SelfKind>,
     pub sig: Option<FnSig>,
@@ -321,28 +341,44 @@ fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
 // ---------------------------------------------------------------------------
 
 impl<'a> Checker<'a> {
-    pub fn collect_items(&mut self, program: &Program) {
+    /// Register every item of one program. Call [Checker::resolve_all_types]
+    /// once after all programs (user and prelude) have been collected.
+    pub fn collect_items_only(&mut self, program: &Program, origin: DefOrigin) {
+        self.collecting_origin = origin;
         let items = gather_items(program);
         for item in &items {
             match item {
                 Item::Struct(decl) => self.register_struct(decl),
                 Item::Enum(decl) => self.register_enum(decl),
                 Item::TypeAlias(decl) => self.register_alias(decl),
+                Item::Trait(decl) => self.register_trait_decl(decl),
                 _ => {}
             }
         }
         for item in &items {
             match item {
                 Item::Fn(decl) => self.register_free_fn(decl),
-                Item::Impl(block) => self.register_impl(block),
+                Item::Impl(block) => self.pending_impls.push((block.clone(), origin)),
                 Item::Const(decl) => self.register_const(decl),
                 _ => {}
             }
         }
-        self.resolve_all_types();
+        self.collecting_origin = DefOrigin::User;
     }
 
-    fn type_name_conflict(&self, name: &str) -> Option<Span> {
+    /// Register every deferred impl block. Called after all programs (user and
+    /// prelude) have been collected, so impls can name traits declared by any
+    /// of them.
+    pub fn register_pending_impls(&mut self) {
+        let pending = std::mem::take(&mut self.pending_impls);
+        for (block, origin) in pending {
+            self.collecting_origin = origin;
+            self.register_impl(&block);
+        }
+        self.collecting_origin = DefOrigin::User;
+    }
+
+    pub fn type_name_conflict(&self, name: &str) -> Option<Span> {
         if let Some(id) = self.struct_by_name.get(name) {
             return self.structs.get(*id).map(|info| info.span);
         }
@@ -351,6 +387,15 @@ impl<'a> Checker<'a> {
         }
         if let Some(id) = self.alias_by_name.get(name) {
             return self.aliases.get(*id).map(|info| info.span);
+        }
+        if let Some(id) = self.generic_struct_by_name.get(name) {
+            return self.generic_structs.get(*id).map(|info| info.span);
+        }
+        if let Some(id) = self.generic_enum_by_name.get(name) {
+            return self.generic_enums.get(*id).map(|info| info.span);
+        }
+        if let Some(id) = self.trait_by_name.get(name) {
+            return self.traits.get(*id).map(|info| info.span);
         }
         None
     }
@@ -372,9 +417,26 @@ impl<'a> Checker<'a> {
             self.report_duplicate_type(&decl.name, decl.name_span);
             return;
         }
+        if !decl.generics.is_empty() {
+            self.validate_generic_params(&decl.generics);
+            let def_id = self.generic_structs.len();
+            self.generic_structs.push(GStructDef {
+                name: decl.name.clone(),
+                span: decl.span,
+                generics: decl.generics.clone(),
+                decl: decl.clone(),
+                instances: HashMap::new(),
+            });
+            self.generic_struct_by_name
+                .insert(decl.name.clone(), def_id);
+            return;
+        }
         let id = self.structs.len();
+        let c_name = self.alloc_c_name(sanitize_c_ident(&decl.name));
         self.structs.push(StructInfo {
             name: decl.name.clone(),
+            c_name,
+            generic: None,
             span: decl.span,
             decl_fields: decl.fields.clone(),
             fields: Vec::new(),
@@ -390,9 +452,25 @@ impl<'a> Checker<'a> {
             self.report_duplicate_type(&decl.name, decl.name_span);
             return;
         }
+        if !decl.generics.is_empty() {
+            self.validate_generic_params(&decl.generics);
+            let def_id = self.generic_enums.len();
+            self.generic_enums.push(GEnumDef {
+                name: decl.name.clone(),
+                span: decl.span,
+                generics: decl.generics.clone(),
+                decl: decl.clone(),
+                instances: HashMap::new(),
+            });
+            self.generic_enum_by_name.insert(decl.name.clone(), def_id);
+            return;
+        }
         let id = self.enums.len();
+        let c_name = self.alloc_c_name(sanitize_c_ident(&decl.name));
         self.enums.push(EnumInfo {
             name: decl.name.clone(),
+            c_name,
+            generic: None,
             span: decl.span,
             decl_variants: decl.variants.clone(),
             variants: Vec::new(),
@@ -403,10 +481,55 @@ impl<'a> Checker<'a> {
         self.enum_by_name.insert(decl.name.clone(), id);
     }
 
+    /// Validate the shape of a generic parameter list (duplicate names E0403).
+    pub fn validate_generic_params(&mut self, generics: &[ast::GenericParam]) {
+        let mut seen: HashMap<String, Span> = HashMap::new();
+        for param in generics {
+            if let Some(previous) = seen.get(&param.name) {
+                let previous = *previous;
+                let diag = Diagnostic::error(
+                    format!(
+                        "the name '{}' is already used for a generic parameter",
+                        param.name
+                    ),
+                    param.name_span,
+                )
+                .with_code("E0403")
+                .with_label(previous, format!("previous use of '{}' here", param.name));
+                self.diagnostics.push(diag);
+            }
+            seen.insert(param.name.clone(), param.name_span);
+        }
+    }
+
+    /// Reject the reserved method names drop and clone in inherent impls.
+    fn check_method_name_reserved(&mut self, _type_name: &str, func: &FnDecl) {
+        if func.name == "drop" {
+            self.error_at(
+                "the method name 'drop' is reserved for the Drop trait; rename the method"
+                    .to_string(),
+                func.name_span,
+            );
+        } else if func.name == "clone" {
+            self.error_at(
+                "the method name 'clone' is reserved: clone is derived automatically for every type"
+                    .to_string(),
+                func.name_span,
+            );
+        }
+    }
+
     fn register_alias(&mut self, decl: &TypeAliasDecl) {
         if self.type_name_conflict(&decl.name).is_some() {
             self.report_duplicate_type(&decl.name, decl.name_span);
             return;
+        }
+        if !decl.generics.is_empty() {
+            self.error_code(
+                "type aliases cannot be generic".to_string(),
+                decl.name_span,
+                "E0001",
+            );
         }
         let id = self.aliases.len();
         self.aliases.push(AliasInfo {
@@ -420,19 +543,30 @@ impl<'a> Checker<'a> {
     }
 
     fn register_free_fn(&mut self, decl: &FnDecl) {
-        if self.fn_by_name.contains_key(&decl.name) {
-            let previous = self.fn_by_name[&decl.name];
-            let previous_span = self.fns[previous].name_span;
-            let diag = Diagnostic::error(
-                format!("the name '{}' is defined multiple times", decl.name),
-                decl.name_span,
-            )
-            .with_code("E0428")
-            .with_label(
-                previous_span,
-                format!("previous definition of '{}' here", decl.name),
-            );
-            self.diagnostics.push(diag);
+        if let Some(previous) = self.fn_by_name.get(&decl.name).copied() {
+            self.report_duplicate_fn(decl, self.fns[previous].name_span);
+            return;
+        }
+        if self.generic_fn_by_name.contains_key(&decl.name) {
+            self.report_duplicate_fn(decl, decl.name_span);
+            return;
+        }
+        if !decl.generics.is_empty() {
+            self.validate_generic_params(&decl.generics);
+            let def_id = self.generic_fns.len();
+            self.generic_fns.push(GFnDef {
+                name: decl.name.clone(),
+                name_span: decl.name_span,
+                span: decl.span,
+                generics: decl.generics.clone(),
+                decl: decl.clone(),
+                owner: GenericOwner::Free,
+                instances: HashMap::new(),
+                origin: self.collecting_origin,
+                c_name_base: format!("lsaca_fn_{}", sanitize_c_ident(&decl.name)),
+                display_base: decl.name.clone(),
+            });
+            self.generic_fn_by_name.insert(decl.name.clone(), def_id);
             return;
         }
         let id = self.fns.len();
@@ -442,6 +576,10 @@ impl<'a> Checker<'a> {
             display: decl.name.clone(),
             c_name,
             decl: decl.clone(),
+            origin: self.collecting_origin,
+            generic: None,
+            self_ty: None,
+            instantiation_depth: 0,
             owner: None,
             self_kind: None,
             sig: None,
@@ -453,34 +591,55 @@ impl<'a> Checker<'a> {
         self.fn_by_name.insert(decl.name.clone(), id);
     }
 
+    fn report_duplicate_fn(&mut self, decl: &FnDecl, previous_span: Span) {
+        let diag = Diagnostic::error(
+            format!("the name '{}' is defined multiple times", decl.name),
+            decl.name_span,
+        )
+        .with_code("E0428")
+        .with_label(
+            previous_span,
+            format!("previous definition of '{}' here", decl.name),
+        );
+        self.diagnostics.push(diag);
+    }
+
     fn register_impl(&mut self, block: &ImplBlock) {
+        self.validate_impl_generics(&block.generics);
+        self.reject_generic_methods(block);
+        if let Some(trait_ref) = &block.trait_name {
+            match trait_ref.name.as_str() {
+                "Drop" => {
+                    if block.generics.is_empty() {
+                        if let Some(owner) = self.resolve_impl_target(block) {
+                            self.register_drop_impl(block, owner, trait_ref);
+                        }
+                    } else {
+                        self.register_generic_drop_impl(block, trait_ref);
+                    }
+                }
+                "Copy" | "Clone" => self.error_at(
+                    format!(
+                        "the trait '{}' is derived automatically; remove this impl block",
+                        trait_ref.name
+                    ),
+                    trait_ref.span,
+                ),
+                _ => self.register_trait_impl_block(block, trait_ref),
+            }
+            return;
+        }
+        if !block.generics.is_empty() {
+            self.register_generic_inherent_impl(block);
+            return;
+        }
         let owner = match self.resolve_impl_target(block) {
             Some(owner) => owner,
             None => return,
         };
-        // "impl Trait for Type" blocks are validated separately: only Drop has
-        // behaviour in version 1.4 and it records the type drop hook here.
-        if let Some(trait_ref) = &block.trait_name {
-            self.register_trait_impl(block, owner, trait_ref);
-            return;
-        }
         for func in &block.fns {
-            if func.name == "drop" {
-                let type_name = self.type_name(owner);
-                self.error_at(
-                    format!(
-                        "the method name 'drop' is reserved for the Drop trait in version 1.4; implement 'impl Drop for {}' instead",
-                        type_name
-                    ),
-                    func.name_span,
-                );
-            } else if func.name == "clone" {
-                self.error_at(
-                    "the method name 'clone' is reserved in version 1.4: clone is derived automatically for every type"
-                        .to_string(),
-                    func.name_span,
-                );
-            }
+            let type_name = self.type_name(owner);
+            self.check_method_name_reserved(&type_name, func);
             let key = (owner, func.name.clone());
             if let Some(previous) = self.methods.get(&key) {
                 let previous_span = self.fns[*previous].name_span;
@@ -496,7 +655,6 @@ impl<'a> Checker<'a> {
                 self.diagnostics.push(diag);
                 continue;
             }
-            let type_name = self.type_name(owner);
             let display = format!("{}::{}", type_name, func.name);
             let c_name = self.alloc_c_name(format!(
                 "lsaca_fn_{}_{}",
@@ -509,6 +667,10 @@ impl<'a> Checker<'a> {
                 display,
                 c_name,
                 decl: func.clone(),
+                origin: self.collecting_origin,
+                generic: None,
+                self_ty: None,
+                instantiation_depth: 0,
                 owner: Some(owner),
                 self_kind: func.self_kind,
                 sig: None,
@@ -521,29 +683,130 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Validate and register an "impl Trait for Type" block.
-    ///
-    /// Drop is the only trait with behaviour in version 1.4. Copy and Clone are
-    /// derived automatically for every type, so an explicit impl for them is
-    /// rejected, and any other trait is unsupported.
-    fn register_trait_impl(&mut self, block: &ImplBlock, owner: TypeKey, trait_ref: &TraitRef) {
-        match trait_ref.name.as_str() {
-            "Drop" => self.register_drop_impl(block, owner, trait_ref),
-            "Copy" | "Clone" => self.error_at(
-                format!(
-                    "the trait '{}' is derived automatically in version 1.4; remove this impl block",
-                    trait_ref.name
-                ),
-                trait_ref.span,
-            ),
-            other => self.error_at(
-                format!(
-                    "traits are not supported except Drop in version 1.4 (found '{}')",
-                    other
-                ),
-                trait_ref.span,
-            ),
+    /// Register a generic inherent impl block; its methods are instantiated on
+    /// demand when a method or associated function is used.
+    fn register_generic_inherent_impl(&mut self, block: &ImplBlock) {
+        if !self.impl_target_is_user_type(block) {
+            self.report_invalid_impl_target(block);
+            return;
         }
+        let impl_id = self.impls.len();
+        let mut methods = Vec::new();
+        for func in &block.fns {
+            self.check_method_name_reserved(&block.ty_name, func);
+            let gfn_id = self.register_generic_method(
+                impl_id,
+                &block.generics,
+                func,
+                GenericOwner::InherentImpl(impl_id),
+                format!(
+                    "lsaca_fn_{}_{}",
+                    sanitize_c_ident(&block.ty_name),
+                    sanitize_c_ident(&func.name)
+                ),
+                format!("{}::{}", block.ty_name, func.name),
+            );
+            methods.push(ImplMethod {
+                name: func.name.clone(),
+                gfn_id,
+            });
+        }
+        self.impls.push(ImplInfo {
+            id: impl_id,
+            generics: block.generics.clone(),
+            self_ty: block.ty.clone(),
+            trait_ref: None,
+            methods,
+            span: block.span,
+            late_checked: true,
+        });
+    }
+
+    /// Register "impl Drop for Generic<T>"; the drop hook is instantiated for
+    /// every concrete instance of the generic type.
+    fn register_generic_drop_impl(&mut self, block: &ImplBlock, trait_ref: &TraitRef) {
+        if !self.impl_target_is_user_type(block) {
+            self.report_invalid_impl_target(block);
+            return;
+        }
+        let type_name = block.ty_name.clone();
+        if !trait_ref.args.is_empty() {
+            self.error_code(
+                format!(
+                    "trait Drop takes 0 type arguments but {} were supplied",
+                    trait_ref.args.len()
+                ),
+                trait_ref.span,
+                "E0107",
+            );
+            return;
+        }
+        let method = match block.fns.as_slice() {
+            [method] if method.name == "drop" => method,
+            _ => {
+                self.error_at(
+                    format!(
+                        "impl Drop for {} must define exactly one method named 'drop'",
+                        type_name
+                    ),
+                    trait_ref.span,
+                );
+                return;
+            }
+        };
+        let mut valid = true;
+        let takes_self = method.self_kind == Some(SelfKind::RefMut)
+            && method.params.len() == 1
+            && method.params[0].name == "self";
+        if !takes_self {
+            self.error_at(
+                format!(
+                    "the 'drop' method must take '&mut self' as its only parameter (impl Drop for {})",
+                    type_name
+                ),
+                method.name_span,
+            );
+            valid = false;
+        }
+        if !returns_unit(method) {
+            let span = method
+                .ret
+                .as_ref()
+                .map(|ret| ret.span())
+                .unwrap_or(method.name_span);
+            self.error_at(
+                format!(
+                    "the 'drop' method must return unit (impl Drop for {})",
+                    type_name
+                ),
+                span,
+            );
+            valid = false;
+        }
+        if !valid {
+            return;
+        }
+        let impl_id = self.impls.len();
+        let gfn_id = self.register_generic_method(
+            impl_id,
+            &block.generics,
+            method,
+            GenericOwner::TraitImpl(impl_id),
+            format!("lsaca_fn_Drop_{}", sanitize_c_ident(&type_name)),
+            "Drop::drop".to_string(),
+        );
+        self.impls.push(ImplInfo {
+            id: impl_id,
+            generics: block.generics.clone(),
+            self_ty: block.ty.clone(),
+            trait_ref: Some(trait_ref.clone()),
+            methods: vec![ImplMethod {
+                name: method.name.clone(),
+                gfn_id,
+            }],
+            span: block.span,
+            late_checked: true,
+        });
     }
 
     /// Validate "impl Drop for Type" and record the drop hook for the type.
@@ -638,6 +901,10 @@ impl<'a> Checker<'a> {
             display,
             c_name,
             decl: func.clone(),
+            origin: self.collecting_origin,
+            generic: None,
+            self_ty: None,
+            instantiation_depth: 0,
             owner: Some(owner),
             self_kind: func.self_kind,
             sig: None,
@@ -691,16 +958,40 @@ impl<'a> Checker<'a> {
     // Type name resolution
     // -----------------------------------------------------------------------
 
+    /// Whether the target of an impl block names a user-defined struct or
+    /// enum. Builtin types (`String`, `Vec<T>`, tuples, ...) can never be impl
+    /// targets: they cannot gain inherent methods or trait implementations.
+    pub fn impl_target_is_user_type(&self, block: &ImplBlock) -> bool {
+        match &block.ty {
+            TypeExpr::Path { name, .. } => {
+                self.struct_by_name.contains_key(name)
+                    || self.enum_by_name.contains_key(name)
+                    || self.generic_struct_by_name.contains_key(name)
+                    || self.generic_enum_by_name.contains_key(name)
+            }
+            _ => false,
+        }
+    }
+
+    /// Report an impl block whose target is not a user-defined struct or enum.
+    pub fn report_invalid_impl_target(&mut self, block: &ImplBlock) {
+        self.error_code(
+            format!(
+                "impl target must be a struct or enum type defined in this program, found {}",
+                block.ty.describe()
+            ),
+            block.ty_span,
+            "E0118",
+        );
+    }
+
     pub fn resolve_impl_target(&mut self, block: &ImplBlock) -> Option<TypeKey> {
         let resolved = self.resolve_ty(&block.ty, None);
         match resolved {
             Some(ITy::Struct(id)) => Some(TypeKey::Struct(id)),
             Some(ITy::Enum(id)) => Some(TypeKey::Enum(id)),
             Some(_) => {
-                self.error_at(
-                    "impl target must be a struct or enum type".to_string(),
-                    block.ty_span,
-                );
+                self.report_invalid_impl_target(block);
                 None
             }
             None => None,
@@ -746,18 +1037,36 @@ impl<'a> Checker<'a> {
         generics: &[TypeExpr],
         self_key: Option<TypeKey>,
     ) -> Option<ITy> {
+        // Generic parameters in scope shadow every type name.
+        if name != "Self"
+            && let Some(ty) = self.lookup_generic_env(name)
+        {
+            if !generics.is_empty() {
+                self.error_code(
+                    format!("generic parameter '{}' does not take type arguments", name),
+                    span,
+                    "E0107",
+                );
+            }
+            return Some(ty);
+        }
         match name {
-            "Self" => match self_key {
-                Some(TypeKey::Struct(id)) => Some(ITy::Struct(id)),
-                Some(TypeKey::Enum(id)) => Some(ITy::Enum(id)),
-                None => {
-                    self.error_at(
-                        "Self is only available inside an impl block".to_string(),
-                        span,
-                    );
-                    None
+            "Self" => {
+                if let Some(ty) = self.lookup_generic_env("Self") {
+                    return Some(ty);
                 }
-            },
+                match self_key {
+                    Some(TypeKey::Struct(id)) => Some(ITy::Struct(id)),
+                    Some(TypeKey::Enum(id)) => Some(ITy::Enum(id)),
+                    None => {
+                        self.error_at(
+                            "Self is only available inside an impl block".to_string(),
+                            span,
+                        );
+                        None
+                    }
+                }
+            }
             "()" => {
                 if generics.is_empty() {
                     Some(ITy::Unit)
@@ -800,6 +1109,16 @@ impl<'a> Checker<'a> {
                 let err = self.resolve_ty(&generics[1], self_key)?;
                 Some(ITy::result(ok, err))
             }
+            "HashMap" => {
+                if generics.len() != 2 {
+                    self.arity_error(2, span, generics.len());
+                    return None;
+                }
+                let key = self.resolve_ty(&generics[0], self_key)?;
+                let value = self.resolve_ty(&generics[1], self_key)?;
+                self.validate_hash_map_type(&key, &value, span);
+                Some(ITy::hash_map(key, value))
+            }
             _ => {
                 if let Some(&id) = self.alias_by_name.get(name) {
                     if !generics.is_empty() {
@@ -810,6 +1129,9 @@ impl<'a> Checker<'a> {
                     }
                     return self.ensure_alias(id);
                 }
+                if let Some(&def_id) = self.generic_struct_by_name.get(name) {
+                    return self.instantiate_generic_struct_path(def_id, generics, self_key, span);
+                }
                 if let Some(&id) = self.struct_by_name.get(name) {
                     if !generics.is_empty() {
                         self.error_at(
@@ -819,6 +1141,9 @@ impl<'a> Checker<'a> {
                     }
                     return Some(ITy::Struct(id));
                 }
+                if let Some(&def_id) = self.generic_enum_by_name.get(name) {
+                    return self.instantiate_generic_enum_path(def_id, generics, self_key, span);
+                }
                 if let Some(&id) = self.enum_by_name.get(name) {
                     if !generics.is_empty() {
                         self.error_at(
@@ -827,6 +1152,17 @@ impl<'a> Checker<'a> {
                         );
                     }
                     return Some(ITy::Enum(id));
+                }
+                if self.trait_by_name.contains_key(name) {
+                    self.error_code(
+                        format!(
+                            "trait ({}) cannot be used as a type; trait objects are not supported",
+                            name
+                        ),
+                        span,
+                        "E0412",
+                    );
+                    return None;
                 }
                 let mut diag =
                     Diagnostic::error(format!("cannot find type '{}' in this scope", name), span)
@@ -838,6 +1174,110 @@ impl<'a> Checker<'a> {
                 None
             }
         }
+    }
+
+    fn instantiate_generic_struct_path(
+        &mut self,
+        def_id: usize,
+        generics: &[TypeExpr],
+        self_key: Option<TypeKey>,
+        span: Span,
+    ) -> Option<ITy> {
+        let def = self.generic_structs.get(def_id)?.clone();
+        let arity = def.generics.len();
+        if generics.len() != arity {
+            self.error_code(
+                format!(
+                    "struct {} takes {} type argument{} but {} were supplied",
+                    def.name,
+                    arity,
+                    if arity == 1 { "" } else { "s" },
+                    generics.len()
+                ),
+                span,
+                "E0107",
+            );
+            return None;
+        }
+        let mut args = Vec::with_capacity(arity);
+        let mut unresolved = false;
+        for expr in generics {
+            let resolved = self.resolve_ty(expr, self_key)?;
+            match self.normalize_instance_arg(&resolved) {
+                Some(arg) => args.push(arg),
+                None => {
+                    if self.probing {
+                        args.push(self.infer.fresh_var());
+                    } else {
+                        self.error_code(
+                            "type annotations needed".to_string(),
+                            expr.span(),
+                            "E0282",
+                        );
+                        unresolved = true;
+                    }
+                }
+            }
+        }
+        if unresolved {
+            return None;
+        }
+        if self.probing && args.iter().any(|arg| matches!(arg, ITy::Var(_))) {
+            return Some(self.infer.fresh_var());
+        }
+        self.instantiate_struct(def_id, args, span).map(ITy::Struct)
+    }
+
+    fn instantiate_generic_enum_path(
+        &mut self,
+        def_id: usize,
+        generics: &[TypeExpr],
+        self_key: Option<TypeKey>,
+        span: Span,
+    ) -> Option<ITy> {
+        let def = self.generic_enums.get(def_id)?.clone();
+        let arity = def.generics.len();
+        if generics.len() != arity {
+            self.error_code(
+                format!(
+                    "enum {} takes {} type argument{} but {} were supplied",
+                    def.name,
+                    arity,
+                    if arity == 1 { "" } else { "s" },
+                    generics.len()
+                ),
+                span,
+                "E0107",
+            );
+            return None;
+        }
+        let mut args = Vec::with_capacity(arity);
+        let mut unresolved = false;
+        for expr in generics {
+            let resolved = self.resolve_ty(expr, self_key)?;
+            match self.normalize_instance_arg(&resolved) {
+                Some(arg) => args.push(arg),
+                None => {
+                    if self.probing {
+                        args.push(self.infer.fresh_var());
+                    } else {
+                        self.error_code(
+                            "type annotations needed".to_string(),
+                            expr.span(),
+                            "E0282",
+                        );
+                        unresolved = true;
+                    }
+                }
+            }
+        }
+        if unresolved {
+            return None;
+        }
+        if self.probing && args.iter().any(|arg| matches!(arg, ITy::Var(_))) {
+            return Some(self.infer.fresh_var());
+        }
+        self.instantiate_enum(def_id, args, span).map(ITy::Enum)
     }
 
     fn arity_error(&mut self, expected: usize, span: Span, found: usize) {
@@ -863,7 +1303,12 @@ impl<'a> Checker<'a> {
         candidates.extend(self.struct_by_name.keys().map(|name| name.as_str()));
         candidates.extend(self.enum_by_name.keys().map(|name| name.as_str()));
         candidates.extend(self.alias_by_name.keys().map(|name| name.as_str()));
+        candidates.extend(self.generic_struct_by_name.keys().map(|name| name.as_str()));
+        candidates.extend(self.generic_enum_by_name.keys().map(|name| name.as_str()));
         candidates.sort_unstable();
+        // Internal standard-library names are not a part of the language the
+        // user writes: never suggest one.
+        candidates.retain(|candidate| !candidate.starts_with("__lsaca_"));
         closest_name(name, &candidates)
     }
 

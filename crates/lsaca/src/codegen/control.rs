@@ -351,8 +351,13 @@ impl<'a> Gen<'a> {
             match &then_block.tail {
                 Some(tail) => self.gen_move_into(tail, target),
                 None => {
-                    let zero = self.zero_expr(ty);
-                    self.w.line(format!("{} = {};", target, zero));
+                    // A unit completion value is never observed, and a
+                    // diverging `if` in a value position must not store a
+                    // unit aggregate into a differently typed slot.
+                    if !ty.is_unit() {
+                        let zero = self.zero_expr(ty);
+                        self.w.line(format!("{} = {};", target, zero));
+                    }
                 }
             }
         }
@@ -721,8 +726,13 @@ impl<'a> Gen<'a> {
     pub(crate) fn gen_loop(&mut self, body: &HBlock, ty: &Ty, target: &str) {
         let break_label = self.fresh_label("loop_end");
         let continue_label = self.fresh_label("loop_next");
-        let zero = self.zero_expr(ty);
-        self.w.line(format!("{} = {};", target, zero));
+        // A loop completion value of unit type is never observed; storing it
+        // would also be ill-typed when the enclosing slot has another type
+        // (for example a diverging loop used as a function tail).
+        if !ty.is_unit() {
+            let zero = self.zero_expr(ty);
+            self.w.line(format!("{} = {};", target, zero));
+        }
         self.loops.push(LoopCtx {
             break_label: break_label.clone(),
             continue_label: continue_label.clone(),
@@ -732,7 +742,7 @@ impl<'a> Gen<'a> {
         });
         self.w.line("for (;;) {");
         self.w.indent();
-        self.gen_loop_body(body, None, &continue_label);
+        self.gen_loop_body(body, None, &continue_label, None);
         self.w.dedent();
         self.w.line("}");
         let used_break = self
@@ -751,8 +761,13 @@ impl<'a> Gen<'a> {
     pub(crate) fn gen_while(&mut self, cond: &HExpr, body: &HBlock, ty: &Ty, target: &str) {
         let break_label = self.fresh_label("while_end");
         let continue_label = self.fresh_label("while_next");
-        let zero = self.zero_expr(ty);
-        self.w.line(format!("{} = {};", target, zero));
+        // A loop completion value of unit type is never observed; storing it
+        // would also be ill-typed when the enclosing slot has another type
+        // (for example a diverging loop used as a function tail).
+        if !ty.is_unit() {
+            let zero = self.zero_expr(ty);
+            self.w.line(format!("{} = {};", target, zero));
+        }
         self.loops.push(LoopCtx {
             break_label: break_label.clone(),
             continue_label: continue_label.clone(),
@@ -780,7 +795,7 @@ impl<'a> Gen<'a> {
             return;
         }
         self.w.line(format!("if (!{}) break;", condition));
-        self.gen_loop_body(body, None, &continue_label);
+        self.gen_loop_body(body, None, &continue_label, None);
         self.w.dedent();
         self.w.line("}");
         let used_break = self
@@ -811,8 +826,13 @@ impl<'a> Gen<'a> {
     ) {
         let break_label = self.fresh_label("for_end");
         let continue_label = self.fresh_label("for_next");
-        let zero = self.zero_expr(ty);
-        self.w.line(format!("{} = {};", target, zero));
+        // A loop completion value of unit type is never observed; storing it
+        // would also be ill-typed when the enclosing slot has another type
+        // (for example a diverging loop used as a function tail).
+        if !ty.is_unit() {
+            let zero = self.zero_expr(ty);
+            self.w.line(format!("{} = {};", target, zero));
+        }
         let start_value = self.gen_owned(start);
         let end_value = self.gen_owned(end);
         let index = self.new_plain_of("int64_t", "i");
@@ -833,7 +853,12 @@ impl<'a> Gen<'a> {
             format!("{} >= (int64_t)({})", index, end_value)
         };
         self.w.line(format!("if ({}) break;", stop));
-        self.gen_loop_body(body, Some((pat, index.as_str(), false)), &continue_label);
+        self.gen_loop_body(
+            body,
+            Some((pat, index.as_str(), false)),
+            &continue_label,
+            None,
+        );
         if inclusive {
             self.w.line(format!("if ({} == INT64_MAX) break;", index));
         }
@@ -863,8 +888,13 @@ impl<'a> Gen<'a> {
     ) {
         let break_label = self.fresh_label("for_end");
         let continue_label = self.fresh_label("for_next");
-        let zero = self.zero_expr(ty);
-        self.w.line(format!("{} = {};", target, zero));
+        // A loop completion value of unit type is never observed; storing it
+        // would also be ill-typed when the enclosing slot has another type
+        // (for example a diverging loop used as a function tail).
+        if !ty.is_unit() {
+            let zero = self.zero_expr(ty);
+            self.w.line(format!("{} = {};", target, zero));
+        }
         // The iterable is consumed: the vector is moved into an owned
         // temporary and each non-Copy element is transferred out of it into
         // the loop binding. When the loop ends the shell is emptied so that
@@ -885,7 +915,12 @@ impl<'a> Gen<'a> {
         self.w
             .line(format!("if ({} >= ({}).len) break;", index, vec_value));
         let element = format!("({}).data[{}]", vec_value, index);
-        self.gen_loop_body(body, Some((pat, element.as_str(), true)), &continue_label);
+        self.gen_loop_body(
+            body,
+            Some((pat, element.as_str(), true)),
+            &continue_label,
+            None,
+        );
         self.w.line(format!("{} += 1;", index));
         self.w.dedent();
         self.w.line("}");
@@ -929,11 +964,102 @@ impl<'a> Gen<'a> {
 
     /// Emit the `{ ... }` block of a loop body, binding the loop pattern (if
     /// any) to `pat_source` before the statements.
+    /// Emit a lazy `for ... in iterator` loop.
+    ///
+    /// The iterator value is evaluated once, moved into a local temporary and
+    /// polled through the instantiated `next` method. The iterator and the
+    /// polled option live in a dedicated frame so that every exit path releases
+    /// the iterator exactly once: a normal exit and a `break` both fall through
+    /// to the frame cleanup after the loop, a `continue` keeps the frame alive,
+    /// and an early `return` releases every frame including this one. Panics
+    /// abort the process and need no cleanup.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn gen_for_iter(
+        &mut self,
+        iter: &HExpr,
+        next_fn: usize,
+        pat: &HPat,
+        body: &HBlock,
+        ty: &Ty,
+        target: &str,
+    ) {
+        let break_label = self.fresh_label("for_end");
+        let continue_label = self.fresh_label("for_next");
+        // A loop completion value of unit type is never observed; storing it
+        // would also be ill-typed when the enclosing slot has another type
+        // (for example a diverging loop used as a function tail).
+        if !ty.is_unit() {
+            let zero = self.zero_expr(ty);
+            self.w.line(format!("{} = {};", target, zero));
+        }
+        let Some((next_c_name, option_ty, param_ty)) = self.program.fns.get(next_fn).map(|item| {
+            (
+                item.c_name.clone(),
+                item.ret.clone(),
+                item.params.first().map(|param| param.ty.clone()),
+            )
+        }) else {
+            return;
+        };
+        self.push_frame();
+        let frame = self.frames.len() - 1;
+        let iterator = self.declare_temp(&iter.ty);
+        self.gen_move_into(iter, &iterator);
+        let polled = self.declare_temp(&option_ty);
+        let self_ty = match param_ty {
+            Some(param_ty) => param_ty.ref_inner().cloned().unwrap_or(param_ty),
+            None => iter.ty.clone(),
+        };
+        let pointer_ctype = format!("{}*", self.ctype(&self_ty));
+        self.loops.push(LoopCtx {
+            break_label: break_label.clone(),
+            continue_label: continue_label.clone(),
+            body_frame: self.frames.len(),
+            used_break: false,
+            used_continue: false,
+        });
+        self.w.line("for (;;) {");
+        self.w.indent();
+        self.w.line(format!(
+            "{} = {}(({})(&({})));",
+            polled, next_c_name, pointer_ctype, iterator
+        ));
+        let tag = format!("({}).{}", polled, types::TAG_FIELD);
+        let payload = format!(
+            "({}).{}.{}",
+            polled,
+            types::UNION_FIELD,
+            types::OPTION_SOME_MEMBER
+        );
+        self.w.line(format!("if ({} == 0) break;", tag));
+        self.gen_loop_body(
+            body,
+            Some((pat, payload.as_str(), true)),
+            &continue_label,
+            Some(tag.as_str()),
+        );
+        self.w.dedent();
+        self.w.line("}");
+        let used_break = self
+            .loops
+            .last()
+            .map(|context| context.used_break)
+            .unwrap_or(false);
+        self.loops.pop();
+        if used_break {
+            self.w.line(format!("{}:;", break_label));
+        }
+        self.frame_cleanup(frame);
+        self.pop_frame();
+        self.block_terminated = false;
+        self.fn_terminated = false;
+    }
     fn gen_loop_body(
         &mut self,
         body: &HBlock,
         pat: Option<(&HPat, &str, bool)>,
         continue_label: &str,
+        clear_slot: Option<&str>,
     ) {
         self.w.line("{");
         self.w.indent();
@@ -947,6 +1073,13 @@ impl<'a> Gen<'a> {
                 self.bind_owned_pattern(pattern, &source);
             } else {
                 self.bind_pattern(pattern, &source);
+            }
+            // A lazy loop scrutinee (the Option returned by the instantiated
+            // next method) transferred its payload into the binding above.
+            // Clearing the discriminant keeps the scrutinee from releasing the
+            // payload a second time when its scope ends.
+            if let Some(slot) = clear_slot {
+                self.w.line(format!("{} = 0;", slot));
             }
         }
         self.gen_stmts(&body.stmts);

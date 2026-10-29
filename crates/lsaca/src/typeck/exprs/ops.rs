@@ -134,7 +134,21 @@ impl<'a> Checker<'a> {
                 span,
             );
         }
-        let left = self.check_expr(lhs, hint);
+        // Comparison and equality operators produce bool, so the expression
+        // hint (the result type) must not be passed to the operands: a closure
+        // with an inferred return type would otherwise unify its return type
+        // with bool. Arithmetic/bitwise operators return the same type as
+        // their operands, so the hint stays useful there.
+        let comparison = matches!(
+            op,
+            AstBinaryOp::Eq
+                | AstBinaryOp::Ne
+                | AstBinaryOp::Lt
+                | AstBinaryOp::Le
+                | AstBinaryOp::Gt
+                | AstBinaryOp::Ge
+        );
+        let left = self.check_expr(lhs, if comparison { None } else { hint });
         let right = self.check_expr(rhs, Some(&left.ty));
         let (hop, result) = self.check_binary_op_semantics(op, &left.ty, &right.ty, span);
         self.apply_hint(&result, hint);
@@ -259,29 +273,18 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            AstBinaryOp::Eq | AstBinaryOp::Ne => match &unified {
-                // Rc<T> handles compare by identity: the generated code compares
-                // the cell pointers, so comparing the handles of a cycle is safe.
-                // Box<T> is an owned value, so comparing two boxes compares
-                // their payloads, like comparing the values in Rust.
-                ITy::Bool
-                | ITy::Int(_)
-                | ITy::Float(_)
-                | ITy::String
-                | ITy::Rc(_)
-                | ITy::Box(_)
-                | ITy::Never => (hop, ITy::bool_()),
-                _ if self.is_int_literal_var(&unified) => (hop, ITy::bool_()),
-                _ if self.is_float_literal_var(&unified) => (hop, ITy::bool_()),
-                _ => {
-                    if self.is_general_var(&unified) {
-                        self.e0282_operands(op, span);
-                    } else {
-                        self.report_operator_error(op, &left, &right, span);
-                    }
-                    (hop, ITy::bool_())
+            AstBinaryOp::Eq | AstBinaryOp::Ne => {
+                // == is derived for scalars, String, references (compare the
+                // referent), Vec, Option, Result, tuples, user structs/enums,
+                // HashMap and Box (compare the payload). Rc<T> compares by
+                // identity; function values stay unsupported (E0369).
+                if self.is_general_var(&unified) {
+                    self.e0282_operands(op, span);
+                } else if !self.equality_supported(&unified) {
+                    self.report_operator_error(op, &left, &right, span);
                 }
-            },
+                (hop, ITy::bool_())
+            }
             AstBinaryOp::Lt | AstBinaryOp::Le | AstBinaryOp::Gt | AstBinaryOp::Ge => match &unified
             {
                 ITy::Int(_) | ITy::Float(_) | ITy::String | ITy::Never => (hop, ITy::bool_()),

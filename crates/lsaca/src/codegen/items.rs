@@ -245,6 +245,18 @@ impl<'a> Gen<'a> {
                 self.w.line("};");
                 self.w.blank();
             }
+            TypeDef::HashMap(_, _) => {
+                // The runtime owns the byte table; the generated wrapper is a
+                // managed allocation so that the cycle collector can trace
+                // keys and values held through the map.
+                let c_name = self.registry.tag(ty);
+                self.w.line(format!("struct {} {{", c_name));
+                self.w.indent();
+                self.w.line("LsMapTable table;");
+                self.w.dedent();
+                self.w.line("};");
+                self.w.blank();
+            }
             TypeDef::Rc(elem) | TypeDef::Box(elem) => {
                 let c_name = self.registry.tag(ty);
                 let payload = self.registry.ctype(&elem);
@@ -327,6 +339,11 @@ impl<'a> Gen<'a> {
             for (index, capture) in closure.captures.iter().enumerate() {
                 let capture_type = self.registry.ctype(&capture.ty);
                 self.w.line(format!("{} c{};", capture_type, index));
+            }
+            if closure.captures.is_empty() {
+                // ISO C requires a struct to have at least one member; an
+                // environment holding no captures still needs a stable size.
+                self.w.line("unsigned char _pad;");
             }
             self.w.dedent();
             self.w.line(format!("}} LsEnv_{};", closure.id));

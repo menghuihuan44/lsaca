@@ -10,6 +10,7 @@ use crate::typeck::builtins::{
 };
 use crate::typeck::check::Checker;
 use crate::typeck::items::{TypeKey, closest_name};
+use crate::typeck::iterators::is_iterator_sugar_name;
 use crate::typeck::itype::{ITy, VarKind};
 use crate::typeck::tree::{TExpr, TExprKind, TFormatPart, TFormatPartKind, TMacroCall};
 use crate::types::{IntTy, SelfKind};
@@ -79,6 +80,10 @@ impl<'a> Checker<'a> {
         if segments.len() == 1 {
             let name = segments[0].name.clone();
             if !segments[0].generics.is_empty() {
+                if let Some(def_id) = self.generic_fn_by_name.get(&name).copied() {
+                    let explicit = segments[0].generics.clone();
+                    return self.check_generic_free_call(def_id, &explicit, args, span, hint);
+                }
                 self.error_code(
                     "generic arguments are not allowed here".to_string(),
                     segments[0].span,
@@ -105,6 +110,9 @@ impl<'a> Checker<'a> {
             if let Some(fn_id) = self.fn_by_name.get(&name).copied() {
                 return self.check_direct_call(fn_id, None, args, span, hint);
             }
+            if let Some(def_id) = self.generic_fn_by_name.get(&name).copied() {
+                return self.check_generic_free_call(def_id, &[], args, span, hint);
+            }
             if builtin_fn(&name).is_some() {
                 return self.check_builtin_fn_call(&name, args, span, hint);
             }
@@ -124,6 +132,19 @@ impl<'a> Checker<'a> {
             let type_name = segments[0].name.clone();
             let item = segments[1].name.clone();
             let generics = segments[0].generics.clone();
+            if type_name == "Self"
+                && let Some(expr) = self.check_self_assoc_call(&item, args, span, hint)
+            {
+                return expr;
+            }
+            if self.generic_enum_by_name.contains_key(&type_name) {
+                return self
+                    .check_generic_enum_call(&type_name, &generics, &item, args, span, hint);
+            }
+            if self.generic_struct_by_name.contains_key(&type_name) {
+                return self
+                    .check_generic_assoc_call(&type_name, &generics, &item, args, span, hint);
+            }
             if !segments[1].generics.is_empty() {
                 self.error_code(
                     "generic arguments are not allowed here".to_string(),
@@ -270,7 +291,7 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn finish_enum_variant_call(
+    pub fn finish_enum_variant_call(
         &mut self,
         enum_id: usize,
         variant: usize,
@@ -628,6 +649,57 @@ impl<'a> Checker<'a> {
                     span,
                 )
             }
+            HBuiltinAssoc::HashMapNew => {
+                let mut explicit: Vec<ITy> = Vec::new();
+                for generic in generics {
+                    let resolved = self
+                        .resolve_ty(generic, self.current_self_key())
+                        .unwrap_or_else(|| self.infer.fresh_var());
+                    explicit.push(resolved);
+                }
+                let hint_ty = hint.map(|hint| self.infer.resolve(hint));
+                let (key, value) = match explicit.as_slice() {
+                    [key, value] => (key.clone(), value.clone()),
+                    [] => match hint_ty {
+                        Some(ITy::HashMap(key, value)) => ((*key).clone(), (*value).clone()),
+                        _ => {
+                            // Without a turbofish or an expected type the key and
+                            // value types cannot be inferred.
+                            self.error_code(
+                                "type annotations needed for HashMap key and value types"
+                                    .to_string(),
+                                span,
+                                "E0282",
+                            );
+                            (self.infer.fresh_var(), self.infer.fresh_var())
+                        }
+                    },
+                    other => {
+                        self.error_code(
+                            format!(
+                                "HashMap takes 2 type arguments but {} were supplied",
+                                other.len()
+                            ),
+                            span,
+                            "E0107",
+                        );
+                        (self.infer.fresh_var(), self.infer.fresh_var())
+                    }
+                };
+                let arg_exprs = self.check_call_args(&[], args, span);
+                self.validate_hash_map_type(&key, &value, span);
+                let ret = ITy::hash_map(key.clone(), value.clone());
+                self.apply_hint(&ret, hint);
+                TExpr::new(
+                    ret,
+                    TExprKind::BuiltinAssoc {
+                        func,
+                        args: arg_exprs,
+                        type_args: vec![key, value],
+                    },
+                    span,
+                )
+            }
         }
     }
 
@@ -790,6 +862,43 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
+        // Generic methods do not exist in this language version: a turbofish on
+        // any method is rejected before method lookup, otherwise a non-generic
+        // inherent method would silently ignore the type arguments. The
+        // exceptions are .parse::<T>() and the iterator sugar methods, which
+        // take the type arguments of their prelude function.
+        if !turbofish.is_empty() && method != "parse" && !is_iterator_sugar_name(method) {
+            let count = turbofish.len();
+            self.error_code(
+                format!(
+                    "method {} takes 0 generic arguments but {} {} supplied",
+                    method,
+                    count,
+                    if count == 1 { "was" } else { "were" }
+                ),
+                method_span,
+                "E0107",
+            );
+            for arg in args {
+                let _ = self.check_expr(arg, None);
+            }
+            return self.never_expr(span);
+        }
+        if method == "parse" && turbofish.len() > 1 {
+            let count = turbofish.len();
+            self.error_code(
+                format!(
+                    "method parse takes 1 generic argument but {} were supplied",
+                    count
+                ),
+                method_span,
+                "E0107",
+            );
+            for arg in args {
+                let _ = self.check_expr(arg, None);
+            }
+            return self.never_expr(span);
+        }
         let owner = match &receiver_ty {
             ITy::Struct(id) => Some(TypeKey::Struct(*id)),
             ITy::Enum(id) => Some(TypeKey::Enum(*id)),
@@ -824,47 +933,65 @@ impl<'a> Checker<'a> {
             let receiver_expr = self.wrap_derefs(receiver_expr);
             return self.check_direct_call(fn_id, Some(receiver_expr), args, span, hint);
         }
-        if !turbofish.is_empty() {
-            if method == "parse" && turbofish.len() == 1 && matches!(receiver_ty, ITy::String) {
-                let target = self
-                    .resolve_ty(&turbofish[0], self.current_self_key())
-                    .unwrap_or_else(|| self.infer.fresh_var());
-                if let Some((builtin, ret)) = parse_alias(&target) {
-                    let arg_exprs = self.check_call_args(&[], args, span);
-                    self.apply_hint(&ret, hint);
-                    let receiver_expr = self.wrap_derefs(receiver_expr);
-                    return TExpr::new(
-                        ret,
-                        TExprKind::BuiltinMethod {
-                            receiver: Box::new(receiver_expr),
-                            method: builtin,
-                            args: arg_exprs,
-                        },
-                        span,
-                    );
-                }
-                let described = self.describe_resolved(&target);
-                self.error_code(
-                    format!("unsupported type argument for parse: {}", described),
-                    method_span,
-                    "E0107",
+        // Only .parse::<T>() consumes a method turbofish: every other turbofish
+        // form was rejected above (generic methods do not exist and the iterator
+        // sugar owns its own type arguments).
+        if !turbofish.is_empty()
+            && method == "parse"
+            && turbofish.len() == 1
+            && matches!(receiver_ty, ITy::String)
+        {
+            let target = self
+                .resolve_ty(&turbofish[0], self.current_self_key())
+                .unwrap_or_else(|| self.infer.fresh_var());
+            if let Some((builtin, ret)) = parse_alias(&target) {
+                let arg_exprs = self.check_call_args(&[], args, span);
+                self.apply_hint(&ret, hint);
+                let receiver_expr = self.wrap_derefs(receiver_expr);
+                return TExpr::new(
+                    ret,
+                    TExprKind::BuiltinMethod {
+                        receiver: Box::new(receiver_expr),
+                        method: builtin,
+                        args: arg_exprs,
+                    },
+                    span,
                 );
-                for arg in args {
-                    let _ = self.check_expr(arg, None);
-                }
-                return self.never_expr(span);
             }
+            let described = self.describe_resolved(&target);
             self.error_code(
-                "generic arguments are only supported for .parse::<T>()".to_string(),
+                format!("unsupported type argument for parse: {}", described),
                 method_span,
                 "E0107",
             );
+            for arg in args {
+                let _ = self.check_expr(arg, None);
+            }
+            return self.never_expr(span);
         }
-        // .clone() is derived automatically for every type in version 1.4. It
-        // takes no arguments and clones the referent through any number of
-        // references. Types with drop glue cannot be cloned because the copy
-        // would run a user destructor a second time.
-        if method == "clone" {
+        // Trait and generic inherent methods were deferred during collection.
+        // They are resolved before the derived .clone() and before builtin
+        // methods so that a user type implementing Iterator<T> with its own
+        // next()/count() keeps them; Vec/String have no trait impls, so their
+        // builtin methods still resolve below.
+        if let Some(result) = self.check_impl_method_call(
+            &receiver_expr,
+            &receiver_ty,
+            &raw_ty,
+            method,
+            method_span,
+            args,
+            span,
+            hint,
+        ) {
+            return result;
+        }
+        // .clone() is derived automatically for every type. It takes no
+        // arguments and clones the referent through any number of references.
+        // Types with drop glue cannot be cloned because the copy would run a
+        // user destructor a second time.
+        // String::to_string() is a convenient alias of the derived clone.
+        if method == "clone" || (method == "to_string" && matches!(receiver_ty, ITy::String)) {
             let clone_ty = receiver_ty.clone();
             let arg_exprs = self.check_call_args(&[], args, span);
             self.apply_hint(&clone_ty, hint);
@@ -872,7 +999,7 @@ impl<'a> Checker<'a> {
                 let described = self.describe_resolved(&clone_ty);
                 self.error_code(
                     format!(
-                        "type {} implements Drop and cannot be cloned in version 1.4; use references instead",
+                        "type {} implements Drop and cannot be cloned; use references instead",
                         described
                     ),
                     method_span,
@@ -893,6 +1020,58 @@ impl<'a> Checker<'a> {
         if is_combinator_method(&receiver_ty, method) {
             let receiver_expr = self.wrap_derefs(receiver_expr);
             return self.check_combinator_method(receiver_expr, method, args, span, hint);
+        }
+        // Iterator method sugar lowers to calls of the instantiated prelude
+        // helpers. It runs after inherent/trait dispatch (so user methods win)
+        // and before the builtin method table.
+        if let Some(result) = self.check_iterator_sugar(
+            &receiver_expr,
+            &receiver_ty,
+            method,
+            method_span,
+            turbofish,
+            args,
+            span,
+            hint,
+        ) {
+            return result;
+        }
+        // HashMap methods are resolved here because their signatures depend on
+        // the concrete key and value types (and on whether the value type can
+        // be cloned).
+        if let ITy::HashMap(key, value) = &receiver_ty
+            && let Some(info) = self.hash_map_method(key, value, method, method_span)
+        {
+            if info.mutable_receiver {
+                self.require_mutable_receiver(
+                    &receiver_expr,
+                    &raw_ty,
+                    receiver.span,
+                    "mutate through this receiver",
+                );
+            }
+            let arg_exprs = self.check_call_args(&info.params, args, span);
+            // MapGetWith returns the closure result by moving it out of the
+            // map. References would point into the map and could dangle after
+            // the map is mutated or dropped, so only storable owned values are
+            // accepted.
+            if matches!(info.method, HBuiltinMethod::MapGetWith) {
+                let resolved_ret = self.infer.resolve(&info.ret);
+                if let ITy::Option(result) = &resolved_ret {
+                    self.validate_storage_type(result, method_span);
+                }
+            }
+            self.apply_hint(&info.ret, hint);
+            let receiver_expr = self.wrap_derefs(receiver_expr);
+            return TExpr::new(
+                info.ret,
+                TExprKind::BuiltinMethod {
+                    receiver: Box::new(receiver_expr),
+                    method: info.method,
+                    args: arg_exprs,
+                },
+                span,
+            );
         }
         if let Some(info) = builtin_method(&receiver_ty, method) {
             if info.mutable_receiver {
@@ -935,7 +1114,7 @@ impl<'a> Checker<'a> {
 
     /// Require that the receiver of a mutating method can be mutated: either it
     /// is an assignable place, or it goes through a mutable reference.
-    fn require_mutable_receiver(
+    pub fn require_mutable_receiver(
         &mut self,
         receiver: &TExpr,
         receiver_ty: &ITy,
@@ -1188,11 +1367,66 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn equality_supported(&self, ty: &ITy) -> bool {
-        matches!(
-            ty,
-            ITy::Bool | ITy::Int(_) | ITy::Float(_) | ITy::String | ITy::Never | ITy::Var(_)
-        )
+    /// Whether `==`/!= can be applied to a value of this type. Scalars,
+    /// String, references (compare the referent), Vec, Option, Result, tuples,
+    /// user structs/enums, HashMap and Box (compare the payload) support
+    /// equality; Rc compares by identity; function values do not support it.
+    pub fn equality_supported(&self, ty: &ITy) -> bool {
+        let mut structs = vec![false; self.structs.len()];
+        let mut enums = vec![false; self.enums.len()];
+        self.equality_supported_inner(ty, &mut structs, &mut enums)
+    }
+
+    fn equality_supported_inner(&self, ty: &ITy, structs: &mut [bool], enums: &mut [bool]) -> bool {
+        match self.infer.resolve(ty) {
+            ITy::Bool | ITy::Int(_) | ITy::Float(_) | ITy::String | ITy::Never | ITy::Var(_) => {
+                true
+            }
+            // Rc<T> handles compare by identity (the generated code compares
+            // the cell pointers), so the pointee never matters.
+            ITy::Rc(_) => true,
+            ITy::Box(inner) | ITy::Ref { inner, .. } | ITy::Vec(inner) | ITy::Option(inner) => {
+                self.equality_supported_inner(&inner, structs, enums)
+            }
+            ITy::Result(ok, err) => {
+                self.equality_supported_inner(&ok, structs, enums)
+                    && self.equality_supported_inner(&err, structs, enums)
+            }
+            ITy::Tuple(elems) => elems
+                .iter()
+                .all(|elem| self.equality_supported_inner(elem, structs, enums)),
+            // Two maps compare equal when their key/value pairs support ==.
+            ITy::HashMap(key, value) => {
+                self.equality_supported_inner(&key, structs, enums)
+                    && self.equality_supported_inner(&value, structs, enums)
+            }
+            // Recursive types are compared through their Box/pointer layers;
+            // cycle protection keeps the classification terminating.
+            ITy::Struct(id) => {
+                if structs.get(id).copied().unwrap_or(true) {
+                    return true;
+                }
+                structs[id] = true;
+
+                self.structs[id]
+                    .fields
+                    .iter()
+                    .all(|field| self.equality_supported_inner(&field.ty, structs, enums))
+            }
+            ITy::Enum(id) => {
+                if enums.get(id).copied().unwrap_or(true) {
+                    return true;
+                }
+                enums[id] = true;
+                self.enums[id].variants.iter().all(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .all(|field| self.equality_supported_inner(field, structs, enums))
+                })
+            }
+            _ => false,
+        }
     }
 
     /// Classify an already type checked format argument so that format

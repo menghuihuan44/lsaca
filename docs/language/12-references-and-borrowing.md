@@ -30,7 +30,7 @@ not keep its referent alive on its own, and the compiler only accepts a borrow w
 owner provably outlives its last use. There are no lifetime annotations — a borrow ends at
 the last point where the reference is used — and the checker is conservative inside a
 single expression (two mutable borrows there are rejected even when Rust would accept
-them; see [Known limitations](#known-limitations-in-version-140)). Since 1.4 the ownership
+them; see [Known limitations](#known-limitations-in-version-150)). Since 1.4 the ownership
 and move checks (E0382, E0507, E0505) run alongside the reference checks, so moving a
 value while a borrow of it is live is rejected too.
 
@@ -1211,8 +1211,10 @@ They may **not** be:
 | stored in a tuple, `Vec<T>`, `Option<T>`, `Result<T, E>` or `Box<T>` | error E0498 |
 | captured by a closure | error E0498 |
 | returned from a function that cannot name its source | error E0106 |
-| compared with `==` | error E0369 |
 | used as the `for` iterator | error E0277 |
+
+Since 1.5.0 references can be compared with `==`; the comparison reads the
+pointed-to values, so `a == b` is the same as `*a == *b`.
 
 Some examples of the storage and capture errors:
 
@@ -1227,13 +1229,13 @@ fn main() {
 
 Error:
 ```text
-error[E0498]: references cannot be stored in this type in version 1.4 (found &i64)
+error[E0498]: references cannot be stored in this type (found &i64)
   --> example-44.ls:1:17
    |
  1 | struct Holder { value: &i64 }
    |                 ^^^^^
 
-error[E0498]: references cannot be stored in this type in version 1.4 (found &i64)
+error[E0498]: references cannot be stored in this type (found &i64)
   --> example-44.ls:4:34
    |
  4 |     let holder = Holder { value: &n };
@@ -1244,8 +1246,7 @@ lsaca: example-44.ls: could not compile example-44.ls due to previous error(s)
 
 A closure may take references as parameters, but it may not capture one: closures
 capture by value, references cannot be stored in the captured environment
-(`E0498`), and the closure could outlive the borrowed value. (The compiler's message
-still says "in v1.3"; the wording has not been updated in 1.4.)
+(`E0498`), and the closure could outlive the borrowed value.
 
 ```ls,compile-fail
 fn main() {
@@ -1258,7 +1259,7 @@ fn main() {
 
 Error:
 ```text
-error[E0498]: references cannot be captured by closures in v1.3
+error[E0498]: references cannot be captured by closures
   --> example-45.ls:4:17
    |
  4 |     let f = || *r;
@@ -1267,7 +1268,7 @@ error[E0498]: references cannot be captured by closures in v1.3
 lsaca: example-45.ls: could not compile example-45.ls due to previous error(s)
 ```
 
-Mutable references to owned heap types are supported in version 1.4: a
+Mutable references to owned heap types are supported in version 1.5.0: a
 `&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>` can be a parameter, a
 local binding or a return value, and the callee mutates the payload in place:
 
@@ -1306,7 +1307,7 @@ fn main() {
 
 Error:
 ```text
-error[E0277]: cannot iterate over a value of type &Vec<{integer}>; for loops require a range or Vec<T>
+error[E0277]: cannot iterate over a value of type &Vec<{integer}>; for loops require a range, a Vec<T>, or a type that implements Iterator<T>
   --> example-47.ls:4:18
    |
  4 |     for value in r {
@@ -1458,8 +1459,8 @@ stays alive.
 | Code | Message (abbreviated) | Typical cause |
 | --- | --- | --- |
 | E0106 | `missing lifetime specifier` | a function returns a reference but has zero or two or more reference parameters |
-| E0498 | `references cannot be stored in this type in version 1.4 (found &T)` | `&T` inside a struct, enum, tuple, `Vec`, `Option`, `Result` or `Box` |
-| E0498 | `references cannot be captured by closures in v1.3` (compiler wording retained verbatim from 1.3) | a closure body uses a captured reference |
+| E0498 | `references cannot be stored in this type (found &T)` | `&T` inside a struct, enum, tuple, `Vec`, `Option`, `Result` or `Box` |
+| E0498 | `references cannot be captured by closures` | a closure body uses a captured reference |
 | E0499 | `cannot borrow X as mutable more than once at a time` | two overlapping mutable borrows, including two mutable borrows inside one expression |
 | E0502 | `cannot borrow X as immutable because it is also borrowed as mutable` | shared borrow while a mutable borrow is alive |
 | E0506 | `cannot assign to X because it is borrowed` | assignment while a borrow is still in use |
@@ -1476,10 +1477,10 @@ stays alive.
 Errors without a code (parser level): `reference patterns are not supported; match a
 reference scrutinee directly, bindings become references`.
 
-## Known limitations in version 1.4.0
+## Known limitations in version 1.5.0
 
-Version 1.3.0 introduced references, and 1.4.0 adds ownership and moves on top of them.
-The current restrictions are:
+Version 1.3.0 introduced references, 1.4.0 added ownership and moves on top of
+them, and 1.5.0 added `==` between references. The current restrictions are:
 
 1. **No lifetime syntax.** Only the two elision rules (receiver, single reference
    parameter) are available; there are no explicit `'a` annotations, labels or `'static`.
@@ -1497,8 +1498,8 @@ The current restrictions are:
    reference scrutinee directly and the bindings become references.
 6. **Vector borrows are container-granular**: two mutable references to different
    elements conflict. Struct fields are per-field.
-7. **No references in `for` loops** (`for x in &vec` is an error), no `==` on references,
-   and no indexing a `&String`.
+7. **No references in `for` loops** (`for x in &vec` is an error) and no indexing a
+   `&String`; `==` on references compares the pointed-to values.
 8. **No raw pointers and no casts to or from references.**
 9. **The borrow checker is conservative inside a single expression.** Two mutable
    borrows written in one expression (for example `side(&mut c) || side(&mut c)`)
@@ -1523,9 +1524,10 @@ The current restrictions are:
   `self` inside a method follows the same rule.
 - References never retain or release ORC allocations and cannot create cycles; ORC
   remains the only owner.
-- References cannot be stored in aggregates, captured by closures or compared with
-  `==`; mutable references to `String`, `Vec`, `Rc` and `Box` *are* allowed as
-  parameters, locals and return values in version 1.4.
+- References cannot be stored in aggregates or captured by closures; they can be
+  compared with `==` since 1.5.0 (the comparison reads the pointed-to values).
+  Mutable references to `String`, `Vec`, `Rc` and `Box` *are* allowed as
+  parameters, locals and return values in version 1.5.0.
 
 ## What next
 
@@ -1540,5 +1542,5 @@ The current restrictions are:
   into.
 - [Roadmap](16-roadmap.md) — what is still planned (reference fields, lifetimes,
   generics, traits and iterators).
-- [Benchmarks](17-benchmarks.md) — measured performance of the reference and ORC
+- [Benchmarks](21-benchmarks.md) — measured performance of the reference and ORC
   runtime.

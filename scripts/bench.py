@@ -127,6 +127,37 @@ PROGRAMS = {
                        "pixel; checksum is the sum of iteration counts",
         "workload": {"width": 600, "height": 400, "max_iterations": 100},
     },
+    "iterator_pipeline": {
+        "expected": "checksum=166666166667000000",
+        "description": "run 1,000,000 i64 values through the lazy chain "
+                       "filter(even).map(x * x).fold(0, add) and print the folded sum; "
+                       "measures iterator adapter overhead against a hand-written loop",
+        "workload": {"values": 1000000, "pipeline": "iter().filter(even).map(x * x).fold(0, add)"},
+    },
+    "hashmap_wordcount": {
+        "expected": "checksum=9766208,4096,49",
+        "description": "count 200,000 deterministic words drawn from a 4,096-word alphabet in "
+                       "a hash map, then fold the squared counts; checksum is the sum of "
+                       "squared counts, the number of distinct keys and the highest frequency "
+                       "(order-independent)",
+        "workload": {"tokens": 200000, "alphabet": 4096, "key_type": "String",
+                     "value_type": "i64"},
+    },
+    "generic_stack": {
+        "expected": "checksum=499999500000,5900",
+        "description": "the same generic stack instantiated for i64 and for String: push/pop "
+                       "1,000,000 integers and 1,000 strings; checksum is integer sum and "
+                       "total string byte length",
+        "workload": {"integers": 1000000, "strings": 1000, "instantiations": ["i64", "String"]},
+    },
+    "fn_pipeline": {
+        "expected": "checksum=53637,22",
+        "description": "rule records that carry a label String and a fn(i64) -> i64 value in "
+                       "one struct, applied 1,000 times each plus a clone of the first rule; "
+                       "checksum is the result sum and total label byte length",
+        "workload": {"rules": 3, "iterations": 1000, "clone_iterations": 500,
+                     "fn_field": "fn(i64) -> i64", "non_copy_field": "String"},
+    },
     "compile_large": {
         "expected": "checksum=14655037",
         "description": "generated 4,511-line lsaca source (450 functions) used to measure "

@@ -1,7 +1,9 @@
 # Continuous integration for the lsaca compiler workspace.
 #
-# The compiler emits C17 code and drives CMake/Ninja, so every test runner needs
-# a C toolchain, CMake and Ninja in addition to a Rust toolchain.
+# The compiler emits C17 code and by default builds it with the system C
+# compiler directly (CMake is an optional backend behind `--cmake`), so every
+# test runner needs a C toolchain in addition to a Rust toolchain; the CMake
+# jobs below install CMake and Ninja as well.
 #
 # Jobs:
 #   fmt          rustfmt check
@@ -158,13 +160,15 @@ jobs:
         run: |
           gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -I runtime \
             runtime/test/main.c runtime/lsaca_rt.c runtime/lsaca_rt_string.c \
-            runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c -lm -o rt-test
+            runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c \
+            -lm -o rt-test
           ./rt-test
       - name: Build and run the smoke test (debug build with leak tracking)
         run: |
           gcc -std=c17 -Wall -Wextra -Werror -O0 -g -DLSACA_DEBUG -DLSACA_DEBUG_RC \
             -I runtime runtime/test/main.c runtime/lsaca_rt.c runtime/lsaca_rt_string.c \
-            runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c -lm -o rt-test-debug
+            runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c \
+            -lm -o rt-test-debug
           ./rt-test-debug
       # Panic paths call exit(101); a bash script must not treat that as an
       # unhandled failure before inspecting the output.
@@ -223,7 +227,7 @@ jobs:
           gcc -std=c17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
             -fno-omit-frame-pointer -I runtime runtime/test/main.c \
             runtime/lsaca_rt.c runtime/lsaca_rt_string.c runtime/lsaca_rt_vec.c \
-            runtime/lsaca_rt_fmt.c -lm -o rt-test-san
+            runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c -lm -o rt-test-san
           ./rt-test-san
           ./rt-test-san --orc-shutdown
           ./rt-test-san --leak
@@ -307,8 +311,8 @@ jobs:
           # The runtime is split into several translation units; every emitted
           # project must contain all of them (the driver writes runtime::sources()).
           units=$(ls "$workdir/hello"/lsaca_rt*.c | wc -l)
-          if [ "$units" -ne 4 ]; then
-            echo "expected 4 emitted runtime translation units, found $units"
+          if [ "$units" -ne 5 ]; then
+            echo "expected 5 emitted runtime translation units, found $units"
             exit 1
           fi
           cmake -S "$workdir/hello" -B "$workdir/hello/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -318,30 +322,20 @@ jobs:
       # ownership protocol, so a discarded-qualifier, unused-variable or
       # missing-helper regression in generated C fails here even when the
       # compiler's own unit tests do not cover the corresponding fixture.
-      - name: Emit, compile and run the borrowing, ORC and ownership fixtures
+      # scripts/check_generated_c.py is the exhaustive generated-C gate: it
+      # emits every example and every positive fixture twice (byte-identical
+      # determinism), validates the emitted project file set, compiles with
+      # -std=c17 -Wall -Wextra -Wpedantic -Werror in the release AND debug
+      # profiles, then runs each program requiring exit code 0 and an empty
+      # stderr (so leaked reference-counted allocations fail as well). Known
+      # negative fixtures are annotated inside the script.
+      - name: Emit, compile and run every program in both profiles
         run: |
           set -euo pipefail
-          workdir="$(mktemp -d)"
-          shopt -s nullglob
-          fixtures=(crates/lsaca/tests/programs/refs_*.ls crates/lsaca/tests/programs/rc_*.ls
-                    crates/lsaca/tests/programs/box_*.ls crates/lsaca/tests/programs/drop_*.ls
-                    crates/lsaca/tests/programs/clone_*.ls crates/lsaca/tests/programs/move_*.ls
-                    crates/lsaca/tests/programs/for_vec_move.ls
-                    crates/lsaca/tests/programs/closure_capture_move.ls
-                    crates/lsaca/tests/programs/logical_ops.ls
-                    crates/lsaca/tests/programs/vec_extend.ls
-                    crates/lsaca/tests/programs/result_clone.ls)
-          for fixture in "${fixtures[@]}"; do
-            name="$(basename "$fixture" .ls)"
-            out="$workdir/$name"
-            echo "::group::Generating $name"
-            ./target/release/lsaca emit-c -r -o "$out" "$fixture"
-            gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -I "$out" \
-              "$out/main.c" "$out"/lsaca_rt*.c -lm -o "$out/$name"
-            "$out/$name" > /dev/null
-            echo "::endgroup::"
-          done
-          echo "compiled and ran ${#fixtures[@]} borrowing/ORC fixtures"
+          python scripts/check_generated_c.py \
+            --bin ./target/release/lsaca \
+            --profile both \
+            --json target/generated-c-report.json
 
   site:
     name: Documentation site

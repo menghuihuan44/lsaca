@@ -349,9 +349,11 @@ type:
 * `Rc<T>` compares by **identity** — two handles are equal when they point at the
   same cell;
 * `Box<T>` compares by payload, structurally;
-* tuples, structs, enums, `Vec<T>`, `Option<T>` and `Result<T, E>` do **not**
-  support `==` in version 1.4.0, and the compiler reports `E0369`. Compare them
-  by pattern matching instead;
+* since 1.5.0, tuples, user structs and enums, `Vec<T>`, `Option<T>`, `Result<T,
+  E>`, references and `HashMap<K, V>` also support `==` and compare structurally
+  (a reference compares the pointed-to value; a map compares contents ignoring
+  insertion order);
+* function values do **not** support `==`; the compiler reports `E0369`;
 * `()` does not support `==` either.
 
 ```ls
@@ -367,6 +369,13 @@ fn main() {
 
     println!("{} {}", 1 == 1, 1 != 2);
     println!("{}", "abc" == "abc");
+
+    let left = vec![1, 2, 3];
+    let right = vec![1, 2, 3];
+    println!("{} {}", left == right, Some(4) == Some(4));
+
+    let pair = (1, "x");
+    println!("{} {}", pair == (1, "x"), 4 == 5);
 }
 ```
 
@@ -376,25 +385,29 @@ true false
 true
 true true
 true
+true true
+true false
 ```
 
-Using `==` on a container type is rejected:
+Using `==` on a type that does not implement equality is rejected. The unit
+type is the simplest example (the aggregate types above all gained `==` in
+1.5.0):
 
 ```ls,compile-fail
 fn main() {
-    let a = vec![1, 2, 3];
-    let b = vec![1, 2, 3];
-    println!("{}", a == b);
+    let left = ();
+    let right = ();
+    println!("{}", left == right);
 }
 ```
 
 Error:
 ```text
-error[E0369]: binary operation == cannot be applied to type Vec<{integer}>
+error[E0369]: binary operation == cannot be applied to type ()
   --> example-15.ls:4:20
    |
- 4 |     println!("{}", a == b);
-   |                    ^^^^^^
+ 4 |     println!("{}", left == right);
+   |                    ^^^^^^^^^^^^^
 
 lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
 ```
@@ -415,9 +428,9 @@ binds tighter than every binary operator, so `*r + 1` means `(*r) + 1`, while
 
 Field access, method calls and indexing auto-dereference, so `r.field` reads
 or writes a field through a `&mut` reference and `r[i]` indexes through it;
-the explicit `(*r).field = value` form is equivalent. References cannot be
-compared with `==` and cannot be converted with `as`; compare the *values* they
-point to with `*a == *b`.
+the explicit `(*r).field = value` form is equivalent. References can be
+compared with `==` since 1.5.0 — the comparison reads the pointed-to values, so
+`a == b` means `*a == *b` — but they cannot be converted with `as`.
 
 ```ls
 fn main() {

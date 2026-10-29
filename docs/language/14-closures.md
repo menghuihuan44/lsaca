@@ -7,7 +7,9 @@ semantic difference from Rust is that lsaca captures **by value**: each variable
 the closure mentions is copied if it is `Copy` and **moved** into the closure
 otherwise, so using a move-only variable after the closure is created is a
 compile error (`E0382`) — clone it first if both are needed. A closure never
-holds references to captured variables.
+holds references to captured variables. Since 1.5.0 closures and function values
+can also be stored in structs, enums, tuples, `Vec`, `Box` and as HashMap values;
+see [Storing closures in aggregates](#storing-closures-in-aggregates).
 
 ## Syntax
 
@@ -197,11 +199,51 @@ Output:
 21 70
 ```
 
+### Storing closures in aggregates
+
+Since version 1.5.0 a closure or function value can be stored in a struct
+field, an enum variant, a tuple, `Vec<T>`, `Box<T>` and as a HashMap value. The
+value stays **move-only**: moving it into the aggregate consumes it, and an
+aggregate that holds a function value is itself move-only. Calling a stored
+value borrows it, so the field or element stays usable:
+
+```ls
+struct Rule {
+    limit: i64,
+    accepts: fn(i64) -> bool,
+}
+
+fn main() {
+    let rule = Rule {
+        limit: 3,
+        accepts: |value| value < 5,
+    };
+    println!("{} {}", rule.limit, (rule.accepts)(4));
+
+    let steps: Vec<fn(i64) -> i64> = vec![|x| x + 1, |x| x * 2];
+    println!("{} {}", (steps[0])(41), (steps[1])(21));
+}
+```
+
+Output:
+```text
+3 true
+42 42
+```
+
+An aggregate holding a function value is move-only. `.clone()` on the closure
+or on the aggregate clones the **handle** and shares the captured environment
+(its reference count goes up); it does not deep-copy captured values. For an
+`Rc<T>` captured by the closure, both handles therefore see the same cell, and
+the environment is released when the last handle is dropped.
+
 ### Inference
 
 A closure's parameter and return types are usually inferred. The compiler uses
-the annotation on the binding, the type expected where the closure is used, and
-— for a closure that is never annotated — the argument types of its first call:
+the annotation on the binding, the type expected where the closure is used — a
+`fn` parameter type, or a generic parameter with an `Fn(..) -> ..` bound (see
+[Bounds](17-generics.md#bounds)) — and, for a closure that has no annotation and
+no expected type, the argument types of its first call:
 
 ```ls
 fn main() {
@@ -233,13 +275,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-09.ls:4:29
+  --> example-10.ls:4:29
    |
  4 |     println!("{}", identity(3.5));
    |                             ^^^
    = note: expected {integer}, found {float}
 
-lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
+lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
 ```
 
 Some closure bodies use the parameter in a way that needs a concrete type before
@@ -256,12 +298,12 @@ fn main() {
 Error:
 ```text
 error[E0282]: type annotations needed for the operand of unary -
-  --> example-10.ls:2:22
+  --> example-11.ls:2:22
    |
  2 |     let negate = |x| -x;
    |                      ^^
 
-lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
+lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 ```
 
 Adding an annotation fixes it:
@@ -282,19 +324,17 @@ Function values and closures do not support `==` (`E0369`), and a closure cannot
 call itself — there is no way to name it from inside its own body. To write a
 recursive function value, use a named `fn`.
 
-## Known limitations in 1.4.0
+## Known limitations in 1.5.0
 
-Two restrictions come from the C backend rather than the type checker:
-
-* closures and function values **cannot be stored in struct fields or in a
-  `Vec`**; the generated C does not have a representation for function values in
-  those positions;
-* closures and function values cannot be compared with `==`.
-
-Closures capture by value only (Copy values are copied, move-only values are
-moved); there is no borrow capture and no `FnMut`/`FnOnce` distinction. A
-closure is an ordinary move-only value, so clone it to keep using it after
-passing it somewhere by value.
+* closures and function values are move-only and cannot be compared with `==`
+  (`E0369`);
+* capture is by value only: there is no borrow capture (`E0498`) and no
+  `FnMut`/`FnOnce` distinction. The `move` keyword is accepted but changes
+  nothing;
+* a closure cannot call itself because there is no way to name it inside its
+  own body — use a named `fn` for recursive function values;
+* `.clone()` on a closure or on an aggregate holding one shares the captured
+  environment instead of copying it (see above).
 
 See [Roadmap](16-roadmap.md) for the full list.
 

@@ -166,7 +166,7 @@ impl<'a> Checker<'a> {
             let described = self.describe_resolved(&binding_ty);
             let diag = Diagnostic::error(
                 format!(
-                    "cannot move out of a value of type {} in a pattern because it implements Drop in version 1.4; use references instead",
+                    "cannot move out of a value of type {} in a pattern because it implements Drop; use references instead",
                     described
                 ),
                 span,
@@ -297,7 +297,14 @@ impl<'a> Checker<'a> {
         } else if matches!(expected, ITy::Var(_)) {
             let elems: Vec<ITy> = pats.iter().map(|_| self.infer.fresh_var()).collect();
             let tuple_ty = ITy::tuple(elems);
-            let _ = self.infer.unify(&expected, &tuple_ty);
+            if self.infer.unify(&expected, &tuple_ty).is_err() {
+                // The pattern shapes a tuple where the scrutinee is already
+                // known to be something else (for example an integer literal
+                // variable); report the mismatch once instead of letting every
+                // binding below degrade into an E0282 cascade.
+                let expected_before = self.infer.resolve(&expected);
+                self.report_mismatch(&expected_before, &tuple_ty, span);
+            }
             expected = tuple_ty;
         } else {
             let found_elems: Vec<ITy> = pats.iter().map(|_| self.infer.fresh_var()).collect();
@@ -325,7 +332,7 @@ impl<'a> Checker<'a> {
         span: Span,
         overrides: Option<&HashMap<String, BindingInfo>>,
     ) -> TPat {
-        let struct_id = match self.resolve_pattern_struct(path, span) {
+        let struct_id = match self.resolve_pattern_struct(path, expected, span) {
             Some(id) => id,
             None => return TPat::new(expected.clone(), TPatKind::Wild, span),
         };
@@ -563,14 +570,42 @@ impl<'a> Checker<'a> {
         let type_name = path.segments[path.segments.len() - 2].name.clone();
         let variant_name = path.segments[path.segments.len() - 1].name.clone();
         let enum_id = if type_name == "Self" {
-            match self.current_self_key() {
-                Some(TypeKey::Enum(id)) => Some(id),
-                _ => {
-                    self.error_code(
-                        "Self is only available inside an impl block".to_string(),
-                        span,
-                        "E0411",
-                    );
+            if let Some(ITy::Enum(id)) = self.current_self_ty() {
+                Some(id)
+            } else {
+                match self.current_self_key() {
+                    Some(TypeKey::Enum(id)) => Some(id),
+                    _ => {
+                        self.error_code(
+                            "Self is only available inside an impl block".to_string(),
+                            span,
+                            "E0411",
+                        );
+                        None
+                    }
+                }
+            }
+        } else if let Some(&def_id) = self.generic_enum_by_name.get(&type_name) {
+            // A generic enum pattern inherits its instance from the scrutinee.
+            let resolved = self.infer.resolve(expected);
+            match resolved {
+                ITy::Enum(id)
+                    if self
+                        .enums
+                        .get(id)
+                        .and_then(|info| info.generic.as_ref())
+                        .map(|instance| instance.def_id == def_id)
+                        .unwrap_or(false) =>
+                {
+                    Some(id)
+                }
+                ITy::Var(_) => {
+                    self.error_code("type annotations needed".to_string(), span, "E0282");
+                    None
+                }
+                other => {
+                    let found = self.infer.fresh_var();
+                    self.report_mismatch(&other, &found, span);
                     None
                 }
             }
@@ -725,17 +760,21 @@ impl<'a> Checker<'a> {
         TPat::new(expected.clone(), TPatKind::Or(checked), span)
     }
 
-    fn resolve_pattern_struct(&mut self, path: &ast::PathExpr, span: Span) -> Option<usize> {
-        let name = match path.simple_name() {
-            Some(name) => name.to_string(),
-            None => {
-                self.error_code(
-                    "expected a struct pattern path".to_string(),
-                    path.span,
-                    "E0532",
-                );
-                return None;
-            }
+    fn resolve_pattern_struct(
+        &mut self,
+        path: &ast::PathExpr,
+        expected: &ITy,
+        span: Span,
+    ) -> Option<usize> {
+        let name = if path.segments.len() == 1 {
+            path.segments[0].name.clone()
+        } else {
+            self.error_code(
+                "expected a struct pattern path".to_string(),
+                path.span,
+                "E0532",
+            );
+            return None;
         };
         if path
             .segments
@@ -752,6 +791,9 @@ impl<'a> Checker<'a> {
             return Some(id);
         }
         if name == "Self" {
+            if let Some(ITy::Struct(id)) = self.current_self_ty() {
+                return Some(id);
+            }
             if let Some(TypeKey::Struct(id)) = self.current_self_key() {
                 return Some(id);
             }
@@ -760,6 +802,28 @@ impl<'a> Checker<'a> {
                 span,
                 "E0411",
             );
+            return None;
+        }
+        // The concrete instance of a generic struct in a pattern is determined
+        // by the scrutinee type; patterns never take turbofish arguments.
+        if let Some(&def_id) = self.generic_struct_by_name.get(&name) {
+            let resolved = self.infer.resolve(expected);
+            if let ITy::Struct(struct_id) = resolved
+                && self
+                    .structs
+                    .get(struct_id)
+                    .and_then(|info| info.generic.as_ref())
+                    .map(|instance| instance.def_id == def_id)
+                    .unwrap_or(false)
+            {
+                return Some(struct_id);
+            }
+            if matches!(resolved, ITy::Var(_)) {
+                self.error_code("type annotations needed".to_string(), span, "E0282");
+            } else {
+                let found = self.infer.fresh_var();
+                self.report_mismatch(&resolved, &found, span);
+            }
             return None;
         }
         if self.enum_by_name.contains_key(&name) {

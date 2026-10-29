@@ -1,14 +1,16 @@
 # Standard library
 
 lsaca has no imports and no module system: everything in this page is a builtin
-that is always in scope. Builtin generic types are `Vec<T>`, `Option<T>`,
-`Result<T, E>`, `Rc<T>` and `Box<T>`; `String` and the scalar types are
-non-generic. The `fn main()` program can use all of them without declarations.
+that is always in scope. Builtin generic types are `Vec<T>`, `HashMap<K, V>`,
+`Option<T>`, `Result<T, E>`, `Rc<T>` and `Box<T>`; `String` and the scalar types
+are non-generic. The `fn main()` program can use all of them without
+declarations. This page describes the library of version 1.5.0.
 
 The page is organised by builtin: formatting first, because every example in the
-documentation uses it, then `String`, `Vec`, `Option` (including its
-combinators), `Result` (including its combinators and the `?` operator), `Rc`,
-`Box`, the free functions and finally the panic and exit-code rules.
+documentation uses it, then `String`, `Vec`, iterators, `HashMap`, `Option`
+(including its combinators), `Result` (including its combinators and the `?`
+operator), `Rc`, `Box`, the free functions and finally the panic and exit-code
+rules.
 
 ## Formatting and printing
 
@@ -284,12 +286,13 @@ an integer in another base — write a helper function if you need one.
 
 | Builtin | Created with | Treated by ORC as |
 | --- | --- | --- |
-| `String` | literal, `String::from` | move-only refcounted buffer, copy-on-write |
-| `Vec<T>` | `vec![…]`, `Vec::new()` | move-only refcounted buffer, copy-on-write |
+| `String` | literal, `String::from` | move-only refcounted buffer; `.clone()` copies the text |
+| `Vec<T>` | `vec![…]`, `Vec::new()` | move-only refcounted buffer; `.clone()` copies the elements |
 | `Option<T>` | `Some(v)`, `None` | handle if `T` is a handle |
 | `Result<T, E>` | `Ok(v)`, `Err(e)` | handle if payload is a handle |
 | `Rc<T>` | `Rc::new(v)` | refcounted shared cell |
-| `Box<T>` | `Box::new(v)` | move-only refcounted owned box; `.clone()` deep-copies |
+| `Box<T>` | `Box::new(v)` | move-only owned box; `.clone()` deep-copies the value |
+| `HashMap<K, V>` | `HashMap::new()` | move-only table that owns its keys and values |
 
 ## String
 
@@ -406,10 +409,10 @@ message is `"invalid integer"` or `"invalid float"`.
 ## Vec
 
 A `Vec<T>` is a growable array. Elements are stored contiguously and the vector
-is a refcounted handle: copies share the buffer until one is modified
-(copy-on-write). Create one with `Vec::new()`, with the `vec![…]` macro, or with
-`Vec::with_capacity(n)` when you already know roughly how large the vector will
-grow:
+is a move-only value type: assigning it or passing it by value moves it, and
+`.clone()` produces an independent copy. Create one with `Vec::new()`, with the
+`vec![…]` macro, or with `Vec::with_capacity(n)` when you already know roughly
+how large the vector will grow:
 
 ```ls
 fn main() {
@@ -523,6 +526,81 @@ index out of bounds: the len is 3 but the index is 5
 vector whose element type is itself a handle (`Vec<Vec<i64>>`, `Vec<String>`,
 `Vec<Rc<T>>`, `Vec<Box<T>>`) works; nested `Vec` display is structural.
 
+## Iterators
+
+Version 1.5 introduced lazy iterators. Asking a vector for an iterator with
+`.iter()` consumes the vector (the iterator owns it), and adapters such as
+`map`, `filter`, `take`, `skip` and `enumerate` build new iterators; terminal
+operations such as `collect`, `sum`, `count`, `fold`, `any`, `all` and `find`
+consume the iterator and produce a value.
+
+| Item | Description |
+| --- | --- |
+| `.iter()` | consumes a `Vec<T>` and returns an iterator over its elements |
+| `map(f)` | applies `f: Fn(T) -> U`, producing `U` values |
+| `filter(p)` | keeps values for which `p: Fn(&T) -> bool` returns true |
+| `take(n)` / `skip(n)` | first `n` values / all but the first `n` values |
+| `enumerate()` | yields `(i64, T)` index/value pairs |
+| `collect()` | collects into a `Vec<T>`; the target type must be known |
+| `fold(init, f)` | folds with `f: Fn(U, T) -> U` |
+| `count()` / `sum()` | number of values (i64) / sum of numbers |
+| `any(p)` / `all(p)` | short-circuit boolean tests with `p: Fn(&T) -> bool` |
+| `find(p)` | first value satisfying `p`, as `Option<T>` |
+
+```ls
+fn main() {
+    let values = vec![1, 2, 3, 4, 5, 6];
+    let even_squares: Vec<i64> = values.iter().filter(|value| *value % 2 == 0).map(|value| value * value).collect();
+    println!("{:?}", even_squares);
+}
+```
+
+Output:
+```text
+[4, 16, 36]
+```
+
+Full details, user-defined iterators and the exact rules are on
+[Iterators](19-iterators.md).
+
+## HashMap<K, V>
+
+A `HashMap` is a builtin map from keys to values added in 1.5. Keys are limited
+to `i64`, `u64`, `bool` and `String`; values may be any value type. A map is
+move-only and owns its keys and values; `.clone()` produces an independent copy
+when the key and value types are cloneable.
+
+```ls
+fn main() {
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    counts.insert(String::from("a"), 1);
+    counts.insert(String::from("b"), 2);
+    counts.insert(String::from("a"), 3);
+    println!("{:?}", counts.get(String::from("a")));
+    println!("{} {}", counts.len(), counts.contains_key(String::from("b")));
+}
+```
+
+Output:
+```text
+Some(3)
+2 true
+```
+
+| Method | Description |
+| --- | --- |
+| `HashMap::new()` | creates an empty map; type arguments come from context or the turbofish |
+| `insert(key, value)` | moves both in, returns the previous value |
+| `get(key)` | returns `Option<V>` (the stored value is cloned) |
+| `get_with(key, f)` | applies `f: Fn(&V) -> U` to the stored value, returns `Option<U>` |
+| `contains_key(key)` | true when the key is present |
+| `remove(key)` | removes the entry, returns `Option<V>` |
+| `len()` / `is_empty()` | number of entries / emptiness |
+| `clear()` | removes every entry |
+| `keys()` / `values()` | clones the keys/values into a `Vec` |
+
+Full details, ownership rules and limitations are on [HashMap](20-hashmap.md).
+
 ## Option
 
 `Option<T>` is `Some(value)` or `None`. It is the return type used by `find`,
@@ -607,7 +685,8 @@ function calls, so their arguments are evaluated eagerly: the `default` of
 example `some.map(double)`.
 
 Printing an `Option` shows its structure: `Some(42)` or `None`. Access the
-payload with `match`/`if let`/`unwrap`; there is no `==` for `Option`.
+payload with `match`/`if let`/`unwrap`; since 1.5.0 `==` compares `Option`
+payloads structurally.
 `unwrap`, `expect` and `unwrap_or` consume the `Option`, so clone it first if
 the payload is move-only and the original is needed afterwards.
 
@@ -694,7 +773,8 @@ have one either); match on the result, or use `map`/`map_err`/`and_then`.
 Error values are not modified by `map`, so the error type of `good.map(double)`
 stays `String`.
 
-Like `Option`, `Result` has no `==`; match on it.
+Like `Option`, `Result` compares structurally with `==` since 1.5.0; match on
+it to handle the variants.
 
 ## Error propagation with `?`
 
@@ -769,9 +849,11 @@ None
 ```
 
 Only one call is recorded even though the operand fails: `?` desugars to a
-`match` on the operand value, not to a re-evaluation. Attach `?` to a call,
-method call or variable; the parser currently rejects `?` written directly
-after a block expression.
+`match` on the operand value, not to a re-evaluation. Attach `?` to any
+expression — a call, a method call, a variable, or a block-like expression such
+as `if`/`else`, `match` or a plain block (1.5.0 accepts these; 1.4.0 did not).
+Wrapping a block-like operand in parentheses usually reads better:
+`let value = (if ok { Ok(1) } else { Err(String::from("e")) })?;`.
 
 The same works for `Result`; an error early-return keeps its type:
 
@@ -849,13 +931,13 @@ fn main() {
 Error:
 ```text
 error[E0277]: the ? operator can only be used in a function that returns Option, but this function returns ()
-  --> example-25.ls:3:17
+  --> example-27.ls:3:17
    |
  3 |     let inner = value?;
    |                 ^^^^^^
    = note: propagate the value with an explicit match, or change the function to return Option
 
-lsaca: example-25.ls: could not compile example-25.ls due to previous error(s)
+lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -871,13 +953,13 @@ fn main() {}
 Error:
 ```text
 error[E0277]: the ? operator can only be applied to Option or Result values, but found i64
-  --> example-26.ls:3:17
+  --> example-28.ls:3:17
    |
  3 |     let inner = value?;
    |                 ^^^^^^
    = note: the ? operator propagates None or Err out of the enclosing function
 
-lsaca: example-26.ls: could not compile example-26.ls due to previous error(s)
+lsaca: example-28.ls: could not compile example-28.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -893,13 +975,13 @@ fn main() {}
 Error:
 ```text
 error[E0308]: the ? operator cannot convert error types: expected String, found i64
-  --> example-27.ls:3:17
+  --> example-29.ls:3:17
    |
  3 |     let value = other?;
    |                 ^^^^^^
    = note: the ? operator requires the error types to match exactly; use map_err or an explicit match to convert
 
-lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
+lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -915,13 +997,13 @@ fn main() {
 Error:
 ```text
 error[E0277]: the ? operator requires the enclosing closure to declare an Option return type
-  --> example-28.ls:3:21
+  --> example-30.ls:3:21
    |
  3 |         let inner = value?;
    |                     ^^^^^^
    = note: add an explicit return type such as -> Option<i64> to this closure
 
-lsaca: example-28.ls: could not compile example-28.ls due to previous error(s)
+lsaca: example-30.ls: could not compile example-30.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -935,18 +1017,18 @@ fn main() {
 Error:
 ```text
 error[E0015]: the ? operator is not allowed in a constant initializer
-  --> example-29.ls:1:20
+  --> example-31.ls:1:20
    |
  1 | const VALUE: i64 = 1?;
    |                    ^^
 
 error[E0015]: constant initializer must be a constant expression
-  --> example-29.ls:1:20
+  --> example-31.ls:1:20
    |
  1 | const VALUE: i64 = 1?;
    |                    ^^
 
-lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
+lsaca: example-31.ls: could not compile example-31.ls due to previous error(s)
 ```
 
 A closure can use `?` when its return type is known, for example through a
@@ -1227,20 +1309,20 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-39.ls:2:24
+  --> example-41.ls:2:24
    |
  2 |     println!("{}", pow(2, 10));
    |                        ^
    = note: expected f64, found {integer}
 
 error[E0308]: mismatched types
-  --> example-39.ls:2:27
+  --> example-41.ls:2:27
    |
  2 |     println!("{}", pow(2, 10));
    |                           ^^
    = note: expected f64, found {integer}
 
-lsaca: example-39.ls: could not compile example-39.ls due to previous error(s)
+lsaca: example-41.ls: could not compile example-41.ls due to previous error(s)
 ```
 
 ## assert and vec macros
@@ -1295,7 +1377,7 @@ fn main() {
 
 Panic:
 ```text
-thread 'main' panicked at example-41.ls:3:20:
+thread 'main' panicked at example-43.ls:3:20:
 called `Option::unwrap()` on a `None` value
 ```
 
@@ -1307,7 +1389,7 @@ fn main() {
 
 Panic:
 ```text
-thread 'main' panicked at example-42.ls:2:5:
+thread 'main' panicked at example-44.ls:2:5:
 explicit panic
 ```
 
@@ -1345,7 +1427,9 @@ the compiler is invoked with `LSACA_DEBUG_RC=1`; see
 
 ## What next
 
-* How the refcounting and copy-on-write behave:
-  [Memory model](05-memory-model.md).
+* How ownership, moves, Drop and ORC behave: [Memory model](05-memory-model.md).
+* Lazy iterators in depth: [Iterators](19-iterators.md).
+* Hash maps in depth: [HashMap](20-hashmap.md).
+* User-defined generic types: [Generics](17-generics.md).
 * Formatting inside user types: [Structs, enums and impl](10-structs-enums-and-impl.md#printing-and-equality).
 * Every known gap of this library: [Roadmap](16-roadmap.md).

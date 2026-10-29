@@ -17,9 +17,9 @@ Whitespace is insignificant outside literals, and the file is processed from
 beginning to end by the parser. An empty file is a syntactically valid
 compilation unit, but the type checker rejects it because it has no `main`.
 
-## The six item kinds
+## The seven item kinds
 
-At the top level a file contains a sequence of **items**. There are exactly six
+At the top level a file contains a sequence of **items**. There are exactly seven
 kinds:
 
 | Item | Keyword | Purpose |
@@ -29,6 +29,7 @@ kinds:
 | Enum | `enum` | A tagged union of unit or tuple variants. |
 | Impl | `impl` | Methods and associated functions for a struct or enum type. |
 | Constant | `const` | A compile-time constant with a required type annotation. |
+| Trait | `trait` | A trait declaration: method signatures with receivers only; implemented for a user struct or enum with `impl Trait for Type`. Added in 1.5.0. |
 | Type alias | `type` | A new name for an existing type. |
 
 Items may also appear **inside a block** — inside a function body, an `if`
@@ -39,9 +40,9 @@ Anything else at the top level is a syntax error: expressions, `let` statements,
 `if`, `match`, `return` and so on only exist inside function bodies. There is no
 top-level executable code and no initializer hook.
 
-`pub` is accepted on top-level items and ignored: there is no visibility system
-and no modules, so everything in the file is visible everywhere in the file.
-`pub` is not accepted in front of struct fields.
+`pub` is accepted on top-level items, struct fields, enum variants and trait
+methods, and ignored: there is no visibility system and no modules, so
+everything in the file is visible everywhere in the file.
 
 ## Order does not matter
 
@@ -67,6 +68,16 @@ impl Point {
     }
 }
 
+trait Doubled {
+    fn doubled(&self) -> i64;
+}
+
+impl Doubled for Point {
+    fn doubled(&self) -> i64 {
+        self.x * 2
+    }
+}
+
 type Meters = i64;
 
 const SCALE: i64 = 2;
@@ -88,6 +99,7 @@ fn main() {
     println!("length squared = {}", p.length_squared());
     println!("scale = {}", SCALE);
     println!("scaled length squared = {}", p.length_squared() * SCALE);
+    println!("doubled = {}", p.doubled());
     println!("area(circle 2) = {:.3}", area(Shape::Circle(2.0)));
     let height: Meters = 12;
     println!("height = {} m", height);
@@ -99,11 +111,12 @@ Output:
 length squared = 25
 scale = 2
 scaled length squared = 50
+doubled = 6
 area(circle 2) = 12.566
 height = 12 m
 ```
 
-The example uses all six item kinds, and the `impl` block appears before the
+The example uses all seven item kinds, and the `impl` block appears before the
 `Point` definition is complete textually — item order does not matter. Note the
 restriction on constants: the type of a `const` must be a scalar type or
 `String`, and the initializer must be a constant expression. A struct-typed
@@ -292,7 +305,7 @@ fn main() {
 
 Error:
 ```text
-error: expected an item (fn, struct, enum, impl, const or type), found let
+error: expected an item (fn, struct, enum, impl, const, type or trait), found let
   --> example-07.ls:1:1
    |
  1 | let answer = 42;
@@ -329,70 +342,62 @@ Output:
 5
 ```
 
-`pub` is **not** accepted on struct fields. The field list grammar does not
-include it, so the parser stops at the unexpected keyword:
+`pub` is also accepted, and ignored, on struct fields and enum variants;
+neither has visibility in lsaca. Writing the keyword changes nothing:
 
-```ls,compile-fail
-struct Point {
+```ls
+pub struct Point {
     pub x: i64,
     pub y: i64,
 }
 
+pub enum Shape {
+    Empty,
+    pub Circle(f64),
+}
+
 fn main() {
-    let p = Point { x: 1, y: 2 };
-    println!("{}", p.x);
+    let point = Point { x: 1, y: 2 };
+    println!("{} {}", point.x, point.y);
+    match Shape::Circle(2.0) {
+        Shape::Empty => println!("empty"),
+        Shape::Circle(radius) => println!("circle {}", radius),
+    }
 }
 ```
 
-Error:
+Output:
 ```text
-error: expected field name, found pub
-  --> example-09.ls:2:5
-   |
- 2 |     pub x: i64,
-   |     ^^^
-
-error: expected ':' after field name, found identifier x
-  --> example-09.ls:2:9
-   |
- 2 |     pub x: i64,
-   |         ^
-
-error: expected '}', found :
-  --> example-09.ls:2:10
-   |
- 2 |     pub x: i64,
-   |          ^
-
-error: expected an item (fn, struct, enum, impl, const or type), found :
-  --> example-09.ls:2:10
-   |
- 2 |     pub x: i64,
-   |          ^
-
-lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
+1 2
+circle 2
 ```
 
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 1.4.0 parser. Optional parts
+The grammar below is the authoritative EBNF of the 1.5.0 parser. Optional parts
 are written with `[...]`, repetitions with `*` and `+`, and alternatives with
 `|`. It is reproduced here for reference; the individual pages explain each
 construct in detail.
 
 ```ebnf
 program      = item* EOF ;
-item         = fnItem | structItem | enumItem | implItem | constItem | typeItem ;
-fnItem       = [ "pub" ] "fn" IDENT "(" params? ")" ( "->" type )? block ;
+item         = fnItem | structItem | enumItem | implItem | traitItem | constItem | typeItem ;
+fnItem       = [ "pub" ] "fn" IDENT genericParams? "(" params? ")" ( "->" type )? block ;
+genericParams= "<" genericParam ( "," genericParam )* ","? ">" ;
+genericParam = IDENT ( ":" bound ( "+" bound )* )? ;
+bound        = callableBound | pathType ;
+callableBound= "Fn" "(" typeArgs? ")" ( "->" type )? ;
 params       = param ( "," param )* ","? ;
 param        = "self" | "&" "self" | "&" "mut" "self" | IDENT ":" type ;
-structItem   = [ "pub" ] "struct" IDENT "{" fieldDefs? "}" ;
+structItem   = [ "pub" ] "struct" IDENT genericParams? "{" fieldDefs? "}" ;
 fieldDefs    = fieldDef ( "," fieldDef )* ","? ;
-fieldDef     = IDENT ":" type ;
-enumItem     = [ "pub" ] "enum" IDENT "{" variants? "}" ;
+fieldDef     = [ "pub" ] IDENT ":" type ;
+enumItem     = [ "pub" ] "enum" IDENT genericParams? "{" variants? "}" ;
 variants     = variant ( "," variant )* ","? ;
-variant      = IDENT ( "(" typeArgs? ")" )? ;
-implItem     = [ "pub" ] "impl" type "{" fnItem* "}" ;
+variant      = [ "pub" ] IDENT ( "(" typeArgs? ")" )? ;
+implItem     = [ "pub" ] "impl" genericParams? type ( "for" type )? "{" fnItem* "}" ;
+traitItem    = [ "pub" ] "trait" IDENT genericParams? "{" traitFnItem* "}" ;
+traitFnItem  = [ "pub" ] "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
 constItem    = [ "pub" ] "const" IDENT ":" type "=" expr ";" ;
 typeItem     = [ "pub" ] "type" IDENT "=" type ";" ;
 
@@ -426,7 +431,7 @@ primary      = INT | FLOAT | STRING | "true" | "false"
              | path | structLiteral | vecExpr | macroCall
              | ifExpr | matchExpr | loopExpr | whileExpr | forExpr | block
              | closure | "break" expr? | "continue" | "return" expr? ;
-path         = pathIdent ( "::" pathIdent )* ( "::" "<" typeArgs ">" )? ;
+path         = pathIdent ( ( "::" pathIdent ) | ( "::" "<" typeArgs ">" ) )* ;
 pathIdent    = IDENT | "self" | "Self" ;
 tupleExpr    = "(" expr "," ")" | "(" expr ( "," expr )+ ","? ")" ;
 structLiteral= path "{" ( fieldInit ( "," fieldInit )* ","? )? "}" ;
@@ -466,8 +471,9 @@ typeArgs     = type ( "," type )* ","? ;
 
 A few productions deserve a warning because the parser is more permissive than
 the type checker: `methodCall` parses `::<...>` (turbofish) after the method
-name, but the type checker rejects generic methods; and `break expr` /
-`return expr` parse even where a value cannot be carried.
+name, but the type checker rejects generic methods (traits have no generic
+methods in 1.5.0); and `break expr` / `return expr` parse even where a value
+cannot be carried.
 
 Or-patterns (`orPattern`) and match guards (the optional `if` in `matchArm`) are
 fully implemented since 1.1.0: every alternative of an or-pattern is tested, and a
@@ -492,7 +498,102 @@ Output:
 small big other
 ```
 
-The full rules are in [Pattern matching](13-pattern-matching.md#or-patterns).
+## Syntax added in 1.5
+
+The grammar above already contains the productions added for generics and
+traits. This section collects those forms, the turbofish, and the
+syntax restrictions that the parser and the item collector enforce.
+
+### Generic parameter lists and bounds
+
+A generic item writes its parameters in angle brackets after its name:
+`struct Pair<T>`, `enum Tree<T>`, `fn largest<T>(…)`, `impl<T> Pair<T>`,
+`trait Iterator<T>`. Each parameter is an identifier with an optional
+`:`-introduced bound list:
+
+* a trait path, with optional type arguments: `T: Greet`, `T: Iterator<i64>`;
+* the special `Drop` bound: `T: Drop`;
+* the callable form `Fn(A, B) -> C` (the parentheses are part of the bound; the
+  spaced `fn(A) -> B` form is a type, not a bound).
+
+Bounds are separated by `+` (`T: Greet + Drop`), a trailing comma is allowed,
+and a `>>` that closes two nested argument lists is split into two `>` tokens.
+An empty list `<>` is rejected with `E0001`, and generic type aliases are
+parsed but rejected with `E0001` (their message says type aliases cannot be
+generic); type aliases are not generic.
+
+### Trait declarations and implementations
+
+A trait declaration contains method signatures only:
+
+```ebnf
+traitItem    = [ "pub" ] "trait" IDENT genericParams? "{" traitFnItem* "}" ;
+traitFnItem  = [ "pub" ] "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
+```
+
+Every method ends in `;` — there is no body — and its first parameter must be a
+receiver (`self`, `&self` or `&mut self`). `pub` before a trait or a method is
+accepted and ignored. The following shapes are rejected with `E0001`:
+
+| Shape | Restriction |
+| --- | --- |
+| `fn greet(&self) -> String { … }` | default method bodies are not supported |
+| `fn name() -> String;` | trait methods must take a self receiver |
+| `fn convert<T>(&self, value: T) -> i64;` | trait methods cannot be generic |
+| `trait A: B { … }` | supertraits are not supported |
+
+An implementation writes `impl Trait<Args> for Type { … }`; the `for` clause is
+only for trait implementations (inherent impls are `impl Type { … }`) and the
+target must be a user struct or enum. Implementations may be generic
+(`impl<T> Iterator<T> for VecIter<T>`), and every signature must match the
+declaration. `impl Drop`, `impl Copy` and `impl Clone` keep their special
+forms (see [Ownership and moves](11-ownership-and-moves.md) and
+[Structs, enums and impl](10-structs-enums-and-impl.md#drop-hooks)).
+
+### Turbofish
+
+Explicit type arguments are written with the Rust-style turbofish `::<…>`:
+
+* a generic function: `largest::<i64>(values)`;
+* a generic associated function: `Pair::<i64>::new(3, 4)` and
+  `HashMap::<String, i64>::new()`;
+* a generic struct literal: `Pair::<i64> { first: 3, second: 4 }`;
+* a method call: `value.method::<i64>()` parses, but generic methods do not
+  exist in 1.5.0, so the type checker rejects the turbofish with `E0107`
+  (`method get takes 0 generic arguments but 1 was supplied`).
+
+In expression position use the turbofish; in type position the arguments are
+written without `::`: `let pair: Pair<i64> = Pair::<i64>::new(1, 2);`.
+
+### `Self` in expression position
+
+Inside an `impl` block, `Self` names the implementing type. Besides `-> Self`
+and parameter types it can construct values: `Self { field: value }` and
+`Self::new(args)`; both work in generic and non-generic impls.
+
+### `?` after block-like expressions
+
+The postfix `?` operator may follow any expression, including block-like ones
+(`if`/`else`, `match`, and plain blocks). Parentheses are optional; wrapping a
+block-like operand usually reads better:
+
+```ls
+fn parse(flag: bool) -> Result<i64, String> {
+    let value = (if flag { Ok(1) } else { Err(String::from("no")) })?;
+    Ok(value + 1)
+}
+
+fn main() {
+    println!("{:?}", parse(true));
+    println!("{:?}", parse(false));
+}
+```
+
+Output:
+```text
+Ok(2)
+Err("no")
+```
 
 ## What next
 

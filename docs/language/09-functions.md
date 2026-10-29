@@ -136,10 +136,12 @@ runaway recursion crashes the process.
 
 A function name used as a value has the type `fn(ArgTypes) -> ReturnType`. Such
 values are first-class: they can be bound to a variable, passed to another
-function, returned from a function, and called. A `fn` value is **move-only** in
-1.4.0: binding, passing or returning it moves it, and `.clone()` keeps a second
-usable handle. A closure with no captures can be used wherever a `fn` value is
-expected ([Closures](14-closures.md)).
+function, returned from a function, and called. A `fn` value is **move-only**:
+binding, passing or returning it moves it, and `.clone()` keeps a second usable
+handle. A call borrows the value, so the same binding can be called repeatedly.
+Since 1.5.0 function values can also be stored in structures (see
+[Closures](14-closures.md#storing-closures-in-aggregates)). A closure with no
+captures can be used wherever a `fn` value is expected ([Closures](14-closures.md)).
 
 ```ls
 fn inc(n: i64) -> i64 {
@@ -187,13 +189,8 @@ Output:
 8 13
 ```
 
-Two limitations apply in 1.4.0:
-
-* function values **cannot be stored in struct fields or in a `Vec`** — the C
-  backend does not generate a valid representation for them there; using them
-  only as parameters, locals and return values is supported;
-* function values do **not** support `==`; comparing two of them is an error
-  (`E0369`):
+One limitation remains in 1.5.0: function values do **not** support `==`, so
+comparing two of them is an error (`E0369`):
 
 ```ls,compile-fail
 fn inc(n: i64) -> i64 { n + 1 }
@@ -216,6 +213,50 @@ error[E0369]: binary operation == cannot be applied to type fn(i64) -> i64
 
 lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
 ```
+
+## Generic functions
+
+Function declarations can be generic since 1.5.0. Type parameters are written
+in angle brackets after the name, and each can carry inline bounds. Generic
+functions are static: the compiler instantiates and checks the body once per
+concrete set of type arguments (see
+[Generics](17-generics.md#how-generics-are-compiled)). Type arguments
+come from the arguments and the expected type, or from an explicit turbofish:
+
+```ls
+fn identity<T>(value: T) -> T {
+    value
+}
+
+fn apply_twice<F: Fn(i64) -> i64>(f: F, value: i64) -> i64 {
+    f(f(value))
+}
+
+fn main() {
+    println!("{}", identity(7));
+    let text: String = identity(String::from("lsaca"));
+    println!("{}", text);
+    println!("{}", apply_twice(|x| x + 1, 20));
+    println!("{}", identity::<i64>(9));
+}
+```
+
+Output:
+```text
+7
+lsaca
+22
+9
+```
+
+The closure passed to `apply_twice` is written without a parameter
+annotation: its type comes from the `F: Fn(i64) -> i64` bound on the function
+parameter.
+
+Bounds are checked per instantiation: calling a bounded generic function with
+a type that does not implement the bound is an error (`E0277`). See
+[Generics](17-generics.md) for multiple parameters, bounds, `Self` and the
+turbofish.
 
 ## Calls and argument checking
 
@@ -265,12 +306,12 @@ fn main() {
 Error:
 ```text
 error[E0061]: this function takes 2 argument(s) but 1 were supplied
-  --> example-10.ls:6:20
+  --> example-11.ls:6:20
    |
  6 |     println!("{}", add(1));
    |                    ^^^^^^
 
-lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
+lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -286,13 +327,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-11.ls:6:27
+  --> example-12.ls:6:27
    |
  6 |     println!("{}", add(1, 2.5));
    |                           ^^^
    = note: expected i64, found {float}
 
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 ```
 
 Calling something that is not a function is a compile error as well:
@@ -307,12 +348,12 @@ fn main() {
 Error:
 ```text
 error[E0618]: call expression requires a function, found {integer}
-  --> example-12.ls:3:20
+  --> example-13.ls:3:20
    |
  3 |     println!("{}", n());
    |                    ^^^
 
-lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
 ```
 
 Similarly, two functions with the same name are rejected even when their
@@ -330,13 +371,13 @@ fn main() {
 Error:
 ```text
 error[E0428]: the name 'double' is defined multiple times
-  --> example-13.ls:2:4
+  --> example-14.ls:2:4
    |
  2 | fn double(f: f64) -> f64 { f * 2.0 }
    |    ^^^^^^
-   = note: example-13.ls:1:4: previous definition of 'double' here
+   = note: example-14.ls:1:4: previous definition of 'double' here
 
-lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
 ## Reference parameters and returns
@@ -439,13 +480,13 @@ fn main() {
 Error:
 ```text
 error[E0106]: missing lifetime specifier
-  --> example-17.ls:1:41
+  --> example-18.ls:1:41
    |
  1 | fn choose(first: &i64, second: &i64) -> &i64 {
    |                                         ^
    = note: this function's return type contains a borrowed value, but the signature does not say which parameter it is borrowed from
 
-lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
+lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
 ```
 
 At calls, returns and `let` bindings, a few reference coercions happen

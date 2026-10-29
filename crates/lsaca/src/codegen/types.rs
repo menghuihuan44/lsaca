@@ -20,8 +20,11 @@ pub struct TypeNames {
 impl TypeNames {
     pub fn from_program(program: &hir::Program) -> TypeNames {
         TypeNames {
-            structs: program.structs.iter().map(|s| s.name.clone()).collect(),
-            enums: program.enums.iter().map(|e| e.name.clone()).collect(),
+            // C identifiers come from `c_name`: monomorphized generic
+            // instances ("Pair<i64>") only differ in their display names, so
+            // mangling the display name would collide in generated C.
+            structs: program.structs.iter().map(|s| s.c_name.clone()).collect(),
+            enums: program.enums.iter().map(|e| e.c_name.clone()).collect(),
         }
     }
 
@@ -76,6 +79,9 @@ impl TypeNames {
             }
             Ty::Struct(index) => self.user_struct(*index),
             Ty::Enum(index) => self.user_enum(*index),
+            Ty::HashMap(key, value) => {
+                format!("Map_{}_{}", self.mangle(key), self.mangle(value))
+            }
         }
     }
 
@@ -86,6 +92,17 @@ impl TypeNames {
         format!("Ls{}", self.mangle(ty))
     }
 
+    /// The suffix of the generated helper family of a HashMap instantiation:
+    /// the mangled key and value names joined by an underscore (for example
+    /// `i64_String`). The helper names put it after the operation name, while
+    /// `mangle` prefixes the whole map type with `Map_`.
+    pub fn map_suffix(&self, ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::HashMap(key, value) => Some(format!("{}_{}", self.mangle(key), self.mangle(value))),
+            _ => None,
+        }
+    }
+
     /// The C type used to store a value of this type.
     pub fn ctype(&self, ty: &Ty) -> String {
         match ty {
@@ -94,8 +111,8 @@ impl TypeNames {
             Ty::Int(int_ty) => int_ty.c_type().to_string(),
             Ty::Float(float_ty) => float_ty.c_type().to_string(),
             Ty::String => String::from("LsString*"),
-            // Rc and Box values are pointers to their managed cells.
-            Ty::Rc(_) | Ty::Box(_) => format!("Ls{}*", self.mangle(ty)),
+            // Rc, Box and HashMap values are pointers to managed cells.
+            Ty::Rc(_) | Ty::Box(_) | Ty::HashMap(_, _) => format!("Ls{}*", self.mangle(ty)),
             // References are non-owning pointers to the referent value.
             //
             // The referent may already be const-qualified (a reference to a
@@ -132,6 +149,7 @@ pub enum TypeDef {
     Result(Ty, Ty),
     Tuple(Vec<Ty>),
     Fn(Vec<Ty>, Ty),
+    HashMap(Ty, Ty),
 }
 
 impl TypeDef {
@@ -294,6 +312,17 @@ impl TypeRegistry {
             }
             Ty::Vec(_) => {}
             Ty::Rc(elem) | Ty::Box(elem) => push_if_compound(&mut deps, elem),
+            // The map table stores keys and values in byte buffers, but the
+            // generated accessor helpers pass keys and values by value, so
+            // their definitions must be complete first.
+            Ty::HashMap(key, value) => {
+                push_if_compound(&mut deps, key);
+                push_if_compound(&mut deps, value);
+                // keys()/values() helpers return Vec<K>/Vec<V>, whose shells
+                // are part of the emitted helpers even without direct use.
+                push_if_compound(&mut deps, &Ty::vec((**key).clone()));
+                push_if_compound(&mut deps, &Ty::vec((**value).clone()));
+            }
             _ => {}
         }
         deps
@@ -301,10 +330,23 @@ impl TypeRegistry {
 }
 
 fn push_if_compound(deps: &mut Vec<Ty>, ty: &Ty) {
-    // Rc<T> and Box<T> are pointers to their cells, so a value that contains
-    // one only needs the forward declaration of the cell, never its complete
-    // definition.
-    if !ty.is_bitwise_copy() && !ty.is_rc() && !ty.is_box() && !deps.contains(ty) {
+    // Rc<T>, Box<T> and HashMap<K, V> are pointers to their managed cells, so a
+    // value that contains one only needs the forward declaration of the cell,
+    // never its complete definition. Scalars need no definition either. Every
+    // other type is a by-value aggregate: even bitwise copyable ones (a tuple
+    // of scalars, Option<i64>, a Copy user struct) need a complete definition
+    // when stored inside another type, so they must stay in the graph.
+    if ty.is_unit()
+        || ty.is_bool()
+        || ty.is_integer()
+        || ty.is_float()
+        || ty.is_rc()
+        || ty.is_box()
+        || ty.is_hash_map()
+    {
+        return;
+    }
+    if !deps.contains(ty) {
         deps.push(ty.clone());
     }
 }
@@ -380,6 +422,15 @@ impl<'a> Collector<'a> {
                     self.visit_ty(param);
                 }
                 self.visit_ty(ret);
+            }
+            Ty::HashMap(key, value) => {
+                self.visit_ty(key);
+                self.visit_ty(value);
+                // The map helper family materialises keys()/values() as fresh
+                // Vec<K>/Vec<V> cells even when the program never names those
+                // vectors, so their definitions must exist unconditionally.
+                self.visit_ty(&Ty::vec((**key).clone()));
+                self.visit_ty(&Ty::vec((**value).clone()));
             }
             _ => {}
         }
@@ -541,6 +592,13 @@ impl<'a> Collector<'a> {
                 self.visit_expr(vec);
                 self.visit_block(body);
             }
+            HExprKind::ForIter {
+                iter, pat, body, ..
+            } => {
+                self.visit_expr(iter);
+                self.visit_pat(pat);
+                self.visit_block(body);
+            }
             HExprKind::StructLit { fields, .. } => {
                 for (_, value) in fields {
                     self.visit_expr(value);
@@ -610,6 +668,7 @@ impl TypeRegistry {
             Ty::Result(ok, err) => TypeDef::Result((**ok).clone(), (**err).clone()),
             Ty::Tuple(elems) => TypeDef::Tuple(elems.clone()),
             Ty::Fn(params, ret) => TypeDef::Fn(params.clone(), (**ret).clone()),
+            Ty::HashMap(key, value) => TypeDef::HashMap((**key).clone(), (**value).clone()),
             // References are never registered through `insert_ty`; they have no
             // generated definition. This arm only keeps the match exhaustive.
             Ty::Ref { .. } => TypeDef::Scalar,
@@ -661,7 +720,7 @@ impl TypeNames {
             Ty::Float(float_ty) => crate::codegen::util::float_literal(0.0, *float_ty),
             Ty::String => String::from("ls_str_new()"),
             Ty::Vec(_) => format!("(({}){{0, 0, NULL}})", self.ctype(ty)),
-            Ty::Rc(_) | Ty::Box(_) | Ty::Ref { .. } => {
+            Ty::Rc(_) | Ty::Box(_) | Ty::HashMap(_, _) | Ty::Ref { .. } => {
                 format!("(({})NULL)", self.ctype(ty))
             }
             Ty::Option(elem) => {

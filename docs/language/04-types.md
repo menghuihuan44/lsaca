@@ -13,19 +13,23 @@ type, and describes inference and conversions.
 | `i8` `i16` `i32` `i64` | Signed integers. | Two's complement; `i64` is the default integer type and the type of all lengths and indices. |
 | `u8` `u16` `u32` `u64` | Unsigned integers. | Values are kept in the corresponding C unsigned type. |
 | `f32` `f64` | IEEE-754 binary floating point. | `f64` is the default float type. |
-| `String` | Owned UTF-8 string. | Move-only refcounted buffer; `.clone()` shares until written (copy-on-write); `len()` is a byte count. |
+| `String` | Owned UTF-8 string. | Move-only refcounted buffer; `.clone()` produces an independent copy; `len()` is a byte count. |
 | `Vec<T>` | Growable array. | Builtin generic, move-only; `.clone()` deep-copies. |
+| `HashMap<K, V>` | Hash table. | Added in 1.5.0; builtin generic, move-only; keys are `i64`, `u64`, `bool` or `String`; `==` compares contents. |
 | `Option<T>` | `Some(T)` or `None`. | Builtin generic. |
 | `Result<T, E>` | `Ok(T)` or `Err(E)`. | Builtin generic. |
 | `Rc<T>` | Shared, mutable heap cell. | Move-only handle; `.clone()` shares one payload; `get()`/`set()`. |
 | `Box<T>` | Owned heap indirection. | Added in 1.1.0; move-only; `.clone()` deep-copies the payload. |
 | `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. Cannot be stored in aggregates (mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4); see [References and borrowing](12-references-and-borrowing.md). |
-| `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; only flat tuples are supported by the current code generator. |
-| `fn(A, B) -> R` | Function type. | Values of this type are first-class; see [Functions](09-functions.md). |
-| `Name` | User struct or enum. | Declared with `struct`/`enum`. `Copy` when every field is `Copy` and there is no `Drop` impl; otherwise move-only. `.clone()` is derived for every type; `impl Drop for Name` adds a destructor hook. |
+| `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; tuples can nest. |
+| `fn(A, B) -> R` | Function type. | Values of this type are first-class but move-only; since 1.5 they can be stored in aggregates. See [Functions](09-functions.md). |
+| `Name` | User struct or enum. | Declared with `struct`/`enum`; generic types are written `Name<T, ...>` since 1.5. `Copy` when every kind of field is `Copy` and there is no `Drop` impl; otherwise move-only. `.clone()` is derived automatically unless the type implements `Drop`; `impl Drop for Name` adds a destructor hook. |
 | `Alias` | Type alias. | `type Alias = T;` introduces no new type. |
 
-There is no `usize`, `isize`, `char`, raw pointer type, array type or slice type.
+There is no `usize`, `isize`, `char`, raw pointer type, array type or slice
+type. Generic user types are written with type arguments, `Name<T, ...>` (see
+[Generics](17-generics.md)); a trait name is not a type, and using one as a type
+is `E0412` because there are no trait objects (see [Traits](18-traits.md)).
 References are written `&T` (shared) and `&mut T` (mutable); they are
 **non-owning** views of an existing place, added in 1.3.0, and cannot be stored
 in aggregates. They are described in [References and
@@ -117,11 +121,11 @@ is occasionally useful in generic-looking code.
 
 ## Strings and Vecs
 
-`String` and `Vec<T>` are the two owned container types. Both are
-reference-counted with copy-on-write: `.clone()` copies a handle and shares the
-buffer, and mutating one clone copies the buffer first if it is still shared.
-Assigning or passing a `String` or `Vec` by value moves it, so clone first when
-both sides must stay usable. Both are indexed by `i64`, and `String` methods
+`String`, `Vec<T>` and `HashMap<K, V>` are the owned container types. All three
+are **move-only**: assigning or passing one by value moves it, so clone first
+when both sides must stay usable. `.clone()` produces an independent copy (the
+runtime may share storage internally until one side is modified, but you cannot
+observe that). Both are indexed by `i64`, and `String` methods
 use **byte** offsets. They are described in
 [Memory model](05-memory-model.md) and their full API is in
 [Standard library](15-standard-library.md).
@@ -148,8 +152,8 @@ Output:
 `Some(value)` or `None`; `Result<T, E>` is either `Ok(value)` or `Err(error)`.
 They are the idiomatic way to express a missing value or an operation that can
 fail, and they support pattern matching and the methods listed in
-[Standard library](15-standard-library.md). Neither type supports `==` in
-version 1.4.0: compare them by pattern matching.
+[Standard library](15-standard-library.md). Both types support `==` since
+1.5.0, comparing payloads structurally.
 
 ```ls
 fn classify(n: i64) -> Result<String, String> {
@@ -251,8 +255,8 @@ Field access, method calls and indexing automatically dereference a reference,
 so `r.field` and `r.method()` work without an explicit `*`; writes through a
 reference need either `*r = value` for a whole place or `(*r).field = value`
 for a field. References cannot be stored in structs, enums, tuples, `Vec`,
-`Option`, `Result`, `Box` or closures, cannot be compared with `==`, and cannot
-be converted with `as`.
+`Option`, `Result`, `Box` or closures and cannot be converted with `as`; since
+1.5.0 `==` compares the pointed-to values.
 
 * `&T` — shared reference: any number of shared references may exist; reads only.
 * `&mut T` — mutable reference: exactly one at a time, and no shared reference
@@ -269,11 +273,9 @@ A tuple groups a fixed number of values of possibly different types:
 tuple. Elements are accessed by index (`t.0`, `t.1`, ...) or destructured in a
 `let`. Tuples are held by value and copied element-wise.
 
-**Current limitation:** the C code generator only handles *flat* tuples. A tuple
-nested inside another tuple, whether as a value or as a type of a struct field,
-generates invalid C and fails at the C compiler, so avoid nested tuples in
-1.4.0. Tuples with other element types (including `String`, `Rc<T>`,
-`Option<String>`) work.
+Tuples can nest: a tuple may contain another tuple as a value, as a struct
+field, or as a pattern (`let (a, (b, c)) = (1, (2, 3));`). Tuples with element
+types such as `String`, `Rc<T>` or `Option<String>` work too.
 
 ```ls
 fn main() {
@@ -302,10 +304,13 @@ Output:
 
 A function value has a type written `fn(A, B) -> R`, with the return type
 omitted for `()`. Functions can be stored in `let` bindings, passed to other
-functions and returned from functions; they cannot be compared with `==` and
-are not supported as fields of structs or elements of `Vec` by the current code
-generator (see [Functions](09-functions.md)). Function types may mention
-references, for example `fn(&i64) -> i64` or `fn(&i64) -> &i64`.
+functions and returned from functions. Like closures they are **move-only**:
+`let g = f;` moves `f` unless you write `f.clone()`, and a call borrows the
+handle, so the same value stays callable. Since 1.5.0 they can be stored in
+struct fields, enums, tuples, `Vec`, `Box` and as HashMap values; `==` is
+`E0369`, and `{:?}`/`{}` print a symbol such as `fn(...)`. Function types may
+mention references, for example `fn(&i64) -> i64` or `fn(&i64) -> &i64`; see
+[Functions](09-functions.md) and [Closures](14-closures.md).
 
 ```ls
 fn inc(x: i64) -> i64 {
@@ -390,8 +395,13 @@ Rules that matter in practice:
   annotate the binding or use turbofish. An unannotated `let v = Vec::new();`
   is rejected because the element type cannot be inferred from the initializer.
 * Turbofish writes the type arguments after the path: `Vec::<i64>::new()`,
-  `Rc::<Option<String>>::new(None)`. It is also accepted after a method name
-  syntactically, but generic methods do not exist, so it is only useful on paths.
+  `Rc::<Option<String>>::new(None)`, `Pair::<i64>::new(3, 4)`,
+  `pair::<i64>(1, 2)`. It is also accepted after a method name syntactically,
+  but generic methods do not exist, so it is only useful on paths.
+* Generic functions and generic methods resolve their type parameters from the
+  arguments and the expected type. When neither fixes them the compiler
+  reports `E0282` or `E0283` and the turbofish is the way out; see
+  [Generics](17-generics.md).
 
 ```ls
 fn main() {

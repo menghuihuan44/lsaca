@@ -73,6 +73,9 @@ impl<'a> Checker<'a> {
             ITy::Result(ok, err) => {
                 self.has_drop_glue_inner(ok, visiting) || self.has_drop_glue_inner(err, visiting)
             }
+            ITy::HashMap(key, value) => {
+                self.has_drop_glue_inner(key, visiting) || self.has_drop_glue_inner(value, visiting)
+            }
             ITy::Tuple(elems) => elems
                 .iter()
                 .any(|elem| self.has_drop_glue_inner(elem, visiting)),
@@ -89,11 +92,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Whether the type may be borrowed mutably in version 1.4.
+    /// Whether the type may be borrowed mutably.
     ///
-    /// In addition to plain values (which imply the old `&mut` support), the
-    /// mutable references to heap types that version 1.4 legalises are allowed:
-    /// `&mut String`, `&mut Vec<T>`, `&mut Rc<T>` and `&mut Box<T>`.
+    /// In addition to plain values, mutable references to heap types are
+    /// allowed: `&mut String`, `&mut Vec<T>`, `&mut Rc<T>` and `&mut Box<T>`.
     pub fn is_mutable_reference_target(&mut self, ty: &ITy) -> bool {
         let ty = self.infer.resolve(ty);
         match &ty {

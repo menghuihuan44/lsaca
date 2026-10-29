@@ -874,11 +874,9 @@ impl<'a> Gen<'a> {
                 if let Ty::Rc(inner) = &receiver.ty {
                     let place = self.place_through_reference(receiver);
                     let suffix = self.names.mangle(inner);
-                    let ctype = self.ctype(ty);
-                    self.line(format!(
-                        "{} = ({})lsaca_rc_get_{}({});",
-                        target, ctype, suffix, place
-                    ));
+                    // The helper already returns the payload C type, so a cast
+                    // would be a no-op (and is illegal for aggregate payloads).
+                    self.line(format!("{} = lsaca_rc_get_{}({});", target, suffix, place));
                 } else {
                     let zero = self.zero_expr(ty);
                     self.line(format!("{} = {};", target, zero));
@@ -913,11 +911,10 @@ impl<'a> Gen<'a> {
                 if let Ty::Box(inner) = &receiver.ty {
                     let place = self.place_through_reference(receiver);
                     let suffix = self.names.mangle(inner);
-                    let ctype = self.ctype(ty);
-                    self.line(format!(
-                        "{} = ({})lsaca_box_get_{}({});",
-                        target, ctype, suffix, place
-                    ));
+                    // See RcGet: the helper's return type is already the
+                    // payload C type; casting an aggregate to itself is invalid
+                    // ISO C and pedantic gcc rejects it.
+                    self.line(format!("{} = lsaca_box_get_{}({});", target, suffix, place));
                 } else {
                     let zero = self.zero_expr(ty);
                     self.line(format!("{} = {};", target, zero));
@@ -961,6 +958,212 @@ impl<'a> Gen<'a> {
                 self.store_option_some(target, ty, &value);
                 self.w.dedent();
                 self.line("}");
+            }
+            HBuiltinMethod::MapInsert => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if let (Ty::HashMap(_, value), Some(key_arg), Some(value_arg)) =
+                    (&map_ty, args.first(), args.get(1))
+                {
+                    let value_ty = (**value).clone();
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    let key_value = self.gen_owned_move(key_arg);
+                    let value_value = self.gen_owned_move(value_arg);
+                    let old = self.declare_temp(&value_ty);
+                    self.line(format!(
+                        "if (lsaca_map_insert_{}({}, {}, {}, &{})) {{",
+                        suffix, place, key_value, value_value, old
+                    ));
+                    self.w.indent();
+                    self.store_option_some(target, ty, &old);
+                    self.w.dedent();
+                    self.line("} else {");
+                    self.w.indent();
+                    let zero = self.zero_expr(ty);
+                    self.line(format!("{} = {};", target, zero));
+                    self.w.dedent();
+                    self.line("}");
+                    // The cell adopted both arguments on success; on failure the
+                    // temporaries still hold a zero payload.
+                    self.mark_moved(&key_value);
+                    self.mark_moved(&value_value);
+                    self.mark_moved(&old);
+                }
+            }
+            HBuiltinMethod::MapGet => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if let (Ty::HashMap(_, value), Some(key_arg)) = (&map_ty, args.first()) {
+                    let value_ty = (**value).clone();
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    // Lookup copies the key: the map never takes ownership here.
+                    let key_value = self.gen_owned(key_arg);
+                    let out = self.declare_temp(&value_ty);
+                    self.line(format!(
+                        "if (lsaca_map_get_{}({}, {}, &{})) {{",
+                        suffix, place, key_value, out
+                    ));
+                    self.w.indent();
+                    self.store_option_some(target, ty, &out);
+                    self.w.dedent();
+                    self.line("} else {");
+                    self.w.indent();
+                    let zero = self.zero_expr(ty);
+                    self.line(format!("{} = {};", target, zero));
+                    self.w.dedent();
+                    self.line("}");
+                    self.mark_moved(&out);
+                }
+            }
+            HBuiltinMethod::MapGetWith => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if let (Ty::HashMap(_, value), Some(key_arg), Some(closure_arg)) =
+                    (&map_ty, args.first(), args.get(1))
+                {
+                    let value_ty = (**value).clone();
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    let key_value = self.gen_owned(key_arg);
+                    let closure = self.gen_owned_move(closure_arg);
+                    let value_ptr_ctype = format!("{}*", self.ctype(&value_ty));
+                    let slot = self.new_plain_of(&value_ptr_ctype, "slot");
+                    self.line(format!(
+                        "if (!lsaca_map_get_ptr_{}({}, {}, &{})) {{",
+                        suffix, place, key_value, slot
+                    ));
+                    self.w.indent();
+                    let zero = self.zero_expr(ty);
+                    self.line(format!("{} = {};", target, zero));
+                    self.w.dedent();
+                    self.line("} else {");
+                    self.w.indent();
+                    let result_ty = match ty {
+                        Ty::Option(inner) => (**inner).clone(),
+                        _ => match &closure_arg.ty {
+                            Ty::Fn(_, ret) => (**ret).clone(),
+                            _ => Ty::Unit,
+                        },
+                    };
+                    let param_ctype = match &closure_arg.ty {
+                        Ty::Fn(params, _) => params
+                            .first()
+                            .map(|param| self.ctype(param))
+                            .unwrap_or_else(|| value_ptr_ctype.clone()),
+                        _ => value_ptr_ctype.clone(),
+                    };
+                    let result = self.declare_temp(&result_ty);
+                    self.line(format!(
+                        "{} = ({}).{}(({}).{}, ({})({}));",
+                        result,
+                        closure,
+                        types::FN_PTR_FIELD,
+                        closure,
+                        types::FN_ENV_FIELD,
+                        param_ctype,
+                        slot
+                    ));
+                    self.store_option_some(target, ty, &result);
+                    self.mark_moved(&result);
+                    self.w.dedent();
+                    self.line("}");
+                    // The closure is only called, never adopted: the frame
+                    // cleanup releases its environment at the end of the
+                    // statement through the owning temporary.
+                }
+            }
+            HBuiltinMethod::MapContainsKey => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if let (Ty::HashMap(_, _), Some(key_arg)) = (&map_ty, args.first()) {
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    let key_value = self.gen_owned(key_arg);
+                    self.line(format!(
+                        "{} = lsaca_map_contains_{}({}, {});",
+                        target, suffix, place, key_value
+                    ));
+                }
+            }
+            HBuiltinMethod::MapRemove => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if let (Ty::HashMap(_, value), Some(key_arg)) = (&map_ty, args.first()) {
+                    let value_ty = (**value).clone();
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    let key_value = self.gen_owned(key_arg);
+                    let out = self.declare_temp(&value_ty);
+                    self.line(format!(
+                        "if (lsaca_map_remove_{}({}, {}, &{})) {{",
+                        suffix, place, key_value, out
+                    ));
+                    self.w.indent();
+                    self.store_option_some(target, ty, &out);
+                    self.w.dedent();
+                    self.line("} else {");
+                    self.w.indent();
+                    let zero = self.zero_expr(ty);
+                    self.line(format!("{} = {};", target, zero));
+                    self.w.dedent();
+                    self.line("}");
+                    self.mark_moved(&out);
+                }
+            }
+            HBuiltinMethod::MapLen => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if map_ty.is_hash_map() {
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    self.line(format!(
+                        "{} = (int64_t)lsaca_map_len_{}({});",
+                        target, suffix, place
+                    ));
+                }
+            }
+            HBuiltinMethod::MapIsEmpty => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if map_ty.is_hash_map() {
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    self.line(format!(
+                        "{} = lsaca_map_is_empty_{}({});",
+                        target, suffix, place
+                    ));
+                }
+            }
+            HBuiltinMethod::MapClear => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if map_ty.is_hash_map() {
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    self.line(format!("lsaca_map_clear_{}({});", suffix, place));
+                    self.assign_unit(target);
+                }
+            }
+            HBuiltinMethod::MapKeys => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if map_ty.is_hash_map() {
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    let vec_ctype = self.ctype(ty);
+                    let shell = self.new_plain_of(&format!("{}*", vec_ctype), "keys");
+                    self.line(format!("{} = lsaca_map_keys_{}({});", shell, suffix, place));
+                    self.line(format!("{} = *{};", target, shell));
+                    self.line(format!("ls_release((void*)({}));", shell));
+                }
+            }
+            HBuiltinMethod::MapValues => {
+                let map_ty = self.receiver_value_ty(receiver);
+                if map_ty.is_hash_map() {
+                    let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+                    let place = self.map_place(receiver);
+                    let vec_ctype = self.ctype(ty);
+                    let shell = self.new_plain_of(&format!("{}*", vec_ctype), "values");
+                    self.line(format!(
+                        "{} = lsaca_map_values_{}({});",
+                        shell, suffix, place
+                    ));
+                    self.line(format!("{} = *{};", target, shell));
+                    self.line(format!("ls_release((void*)({}));", shell));
+                }
             }
         }
     }
@@ -1015,6 +1218,12 @@ impl<'a> Gen<'a> {
                         "{} = ({})lsaca_box_new_{}({});",
                         target, ctype, suffix, value
                     ));
+                }
+            }
+            HBuiltinAssoc::HashMapNew => {
+                if let Ty::HashMap(_, _) = ty {
+                    let suffix = self.names.map_suffix(ty).unwrap_or_default();
+                    self.line(format!("{} = lsaca_map_new_{}();", target, suffix));
                 }
             }
             HBuiltinAssoc::VecNew => {
@@ -1230,6 +1439,24 @@ impl<'a> Gen<'a> {
     fn assign_unit(&mut self, target: &str) {
         let zero = self.zero_expr(&Ty::Unit);
         self.line(format!("{} = {};", target, zero));
+    }
+
+    /// The value type behind a builtin method receiver reference chain.
+    fn receiver_value_ty(&self, receiver: &HExpr) -> Ty {
+        let mut ty = receiver.ty.clone();
+        while let Ty::Ref { inner, .. } = ty {
+            ty = *inner;
+        }
+        ty
+    }
+
+    /// The C place of a map receiver: the wrapper pointer behind its reference
+    /// layers. Every generated map helper takes the wrapper pointer by value.
+    fn map_place(&mut self, receiver: &HExpr) -> String {
+        let value_ty = self.receiver_value_ty(receiver);
+        let cell_ctype = self.ctype(&value_ty);
+        let place = self.place_through_reference(receiver);
+        format!("(({})({}))", cell_ctype, place)
     }
 
     fn string_predicate(&mut self, receiver: &HExpr, args: &[HExpr], func: &str, target: &str) {

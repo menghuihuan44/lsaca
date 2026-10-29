@@ -33,6 +33,14 @@ const SUGAR_VARIANT_NAMES: [&str; 4] = ["None", "Some", "Ok", "Err"];
 /// 2 MiB stack of a test thread; no sane program comes close.
 const MAX_NESTING_DEPTH: usize = 64;
 
+/// Diagnostic code used for the syntax restrictions that target/v15/DESIGN.md
+/// specifies as E0001: empty generic parameter lists, generic type aliases,
+/// trait declaration shape violations and unsupported trait paths.
+const E_SYNTAX: &str = "E0001";
+
+/// Maximum number of tokens scanned to find the top-level 'for' of an impl head.
+const MAX_IMPL_HEAD_TOKENS: usize = 128;
+
 /// A prefix operator collected by parse_unary before its operand is parsed.
 /// Prefix operators are right associative, so they are folded from the
 /// innermost one outwards after the postfix operand has been parsed.
@@ -180,6 +188,13 @@ impl<'a> Parser<'a> {
 
     fn error(&mut self, message: impl Into<String>, span: Span) {
         self.diagnostics.push(Diagnostic::error(message, span));
+    }
+
+    /// Push an error that carries the stable E0001 code used by the v1.5
+    /// syntax restrictions named in the design contract.
+    fn error_coded(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
+        self.diagnostics
+            .push(Diagnostic::error(message, span).with_code(code));
     }
 
     fn token_text(&self, span: Span) -> String {
@@ -344,6 +359,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwImpl
                     | TokenKind::KwConst
                     | TokenKind::KwType
+                    | TokenKind::KwTrait
             ),
             None => false,
         }
@@ -415,13 +431,14 @@ impl<'a> Parser<'a> {
             TokenKind::KwImpl => Some(Item::Impl(self.parse_impl_block())),
             TokenKind::KwConst => Some(Item::Const(self.parse_const_decl())),
             TokenKind::KwType => Some(Item::TypeAlias(self.parse_type_alias())),
+            TokenKind::KwTrait => Some(Item::Trait(self.parse_trait_decl())),
             TokenKind::Eof => None,
             _ => {
                 let found = self.peek_kind().describe();
                 let span = self.span();
                 self.error(
                     format!(
-                        "expected an item (fn, struct, enum, impl, const or type), found {}",
+                        "expected an item (fn, struct, enum, impl, const, type or trait), found {}",
                         found
                     ),
                     span,
@@ -441,6 +458,11 @@ impl<'a> Parser<'a> {
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
         let (name, name_span) = self.expect_ident("function name");
+        let generics = if self.at(TokenKind::Lt) {
+            self.parse_generic_params()
+        } else {
+            Vec::new()
+        };
         let (params, self_kind) = self.parse_params(impl_ty);
         let ret = if self.eat(TokenKind::Arrow).is_some() {
             Some(self.parse_type())
@@ -458,6 +480,7 @@ impl<'a> Parser<'a> {
         FnDecl {
             name,
             name_span,
+            generics,
             params,
             ret,
             body,
@@ -559,6 +582,11 @@ impl<'a> Parser<'a> {
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
         let (name, name_span) = self.expect_ident("struct name");
+        let generics = if self.at(TokenKind::Lt) {
+            self.parse_generic_params()
+        } else {
+            Vec::new()
+        };
         let mut fields = Vec::new();
         self.expect(TokenKind::LBrace, "'{'");
         loop {
@@ -566,6 +594,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
+            // A written `pub` on a field is accepted and ignored: version 1.5
+            // has no field visibility.
+            self.eat(TokenKind::KwPub);
             let (field_name, field_span) = self.expect_ident("field name");
             self.expect(TokenKind::Colon, "':' after field name");
             let ty = self.parse_type();
@@ -587,6 +618,7 @@ impl<'a> Parser<'a> {
         StructDecl {
             name,
             name_span,
+            generics,
             fields,
             span: start.join(end),
         }
@@ -598,6 +630,11 @@ impl<'a> Parser<'a> {
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
         let (name, name_span) = self.expect_ident("enum name");
+        let generics = if self.at(TokenKind::Lt) {
+            self.parse_generic_params()
+        } else {
+            Vec::new()
+        };
         let mut variants = Vec::new();
         self.expect(TokenKind::LBrace, "'{'");
         loop {
@@ -605,6 +642,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
+            // A written `pub` on a variant is accepted and ignored: version
+            // 1.5 has no variant visibility.
+            self.eat(TokenKind::KwPub);
             let (variant_name, variant_span) = self.expect_ident("variant name");
             let mut fields = Vec::new();
             let mut end = variant_span;
@@ -645,6 +685,7 @@ impl<'a> Parser<'a> {
         EnumDecl {
             name,
             name_span,
+            generics,
             variants,
             span: start.join(end),
         }
@@ -655,8 +696,12 @@ impl<'a> Parser<'a> {
         let start = impl_token
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
-        let trait_name = self.parse_impl_trait_ref();
-        let ty = self.parse_type();
+        let generics = if self.at(TokenKind::Lt) {
+            self.parse_generic_params()
+        } else {
+            Vec::new()
+        };
+        let (trait_name, ty) = self.parse_impl_head();
         let ty_span = ty.span();
         let ty_name = match &ty {
             TypeExpr::Path { name, .. } => name.clone(),
@@ -697,6 +742,7 @@ impl<'a> Parser<'a> {
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
         ImplBlock {
+            generics,
             ty,
             ty_name,
             ty_span,
@@ -706,88 +752,298 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse the optional `Trait for` prefix of an impl block. Returns Some for
-    /// a trait impl (`impl Trait for Type`) and None for an inherent impl
-    /// (`impl Type`). Only the shape of the trait reference is checked here;
-    /// the type checker decides which trait names are meaningful (only Drop has
-    /// behaviour in version 1.4) and validates the body.
-    fn parse_impl_trait_ref(&mut self) -> Option<TraitRef> {
+    /// Parse the head of an impl block: an optional trait reference followed by
+    /// "for" and the self type, or just the inherent self type.
+    fn parse_impl_head(&mut self) -> (Option<TraitRef>, TypeExpr) {
         if self.at(TokenKind::KwFor) {
-            // 'impl for T': the trait name (or type) is missing. Recover by
-            // skipping the stray 'for' and parsing T as the implemented type.
             let span = self.span();
-            let found = self.peek_kind().describe();
-            self.bump();
+            let found = self.token_text(span);
             self.error(
                 format!("expected a type or trait name, found {}", found),
                 span,
             );
-            return None;
+            // Recovery: the stray 'for' is skipped and the next type is taken
+            // as the inherent impl self type.
+            self.bump();
+            return (None, self.parse_type());
         }
-        let (name, name_span) = match self.kind() {
-            TokenKind::Ident(name) => (name.clone(), self.span()),
-            _ => return None,
+        let for_offset = match self.find_impl_head_for() {
+            Some(offset) => offset,
+            None => return (None, self.parse_type()),
         };
-        match self.peek_kind_at(1) {
-            Some(TokenKind::KwFor) => {
-                // The common form: 'impl Drop for Point'.
-                self.bump(); // trait name
-                self.bump(); // 'for'
-                Some(TraitRef {
-                    name,
-                    span: name_span,
-                })
-            }
-            Some(TokenKind::ColonColon) | Some(TokenKind::Lt) => {
-                // A path or a generic argument list follows the first
-                // identifier. If a top level 'for' follows it, this is a trait
-                // impl whose trait reference is malformed for version 1.4:
-                // trait names must be a single identifier without generic
-                // arguments. Reject it instead of parsing the whole path as an
-                // inherent impl type followed by a stray 'for'.
-                let (spec_span, for_pos) = self.find_malformed_impl_trait()?;
-                self.error(
-                    "traits are not supported except Drop in version 1.4; a trait impl must name the trait with a single identifier and no generic arguments",
-                    spec_span,
-                );
-                while self.pos < for_pos {
-                    self.bump();
-                }
-                self.bump(); // 'for'
-                None
-            }
-            _ => None,
+        if !matches!(self.kind(), TokenKind::Ident(_)) {
+            let span = self.span();
+            let found = self.token_text(span);
+            self.error(
+                format!(
+                    "a trait impl must name the trait with a single identifier, found {}",
+                    found
+                ),
+                span,
+            );
+            self.skip_impl_head_to_for(for_offset);
+            return (None, self.parse_type());
+        }
+        let (name, name_span) = self.expect_ident("trait name");
+        let args = if self.at(TokenKind::Lt) {
+            self.parse_type_args()
+        } else {
+            Vec::new()
+        };
+        let head_end = if args.is_empty() {
+            name_span
+        } else {
+            // Include the closing '>' of the argument list in the span.
+            self.prev_span()
+        };
+        let trait_ref = TraitRef {
+            name,
+            name_span,
+            args,
+            span: name_span.join(head_end),
+        };
+        // find_impl_head_for found a top-level for, so it is the current token
+        // unless a malformed argument list already consumed it; the skip helper
+        // re-synchronizes either way.
+        if self.at(TokenKind::KwFor) {
+            self.bump();
+            return (Some(trait_ref), self.parse_type());
+        }
+        let span = self.span();
+        self.error_coded(
+            E_SYNTAX,
+            "trait paths are not supported in impl blocks; a trait impl must name the trait with a single identifier",
+            span,
+        );
+        self.skip_impl_head_to_for(for_offset);
+        (None, self.parse_type())
+    }
+
+    /// Advance to the previously located top-level for keyword and consume it.
+    fn skip_impl_head_to_for(&mut self, for_offset: usize) {
+        while self.pos < for_offset && !self.at_eof() {
+            self.bump();
+        }
+        if self.at(TokenKind::KwFor) {
+            self.bump();
         }
     }
 
-    /// Look ahead from the first token of impl trait reference for a top level
-    /// `for` keyword before the impl body starts. Returns the span of the
-    /// malformed trait reference (from the first identifier through the token
-    /// before `for`) and the token index of the `for` keyword.
-    fn find_malformed_impl_trait(&self) -> Option<(Span, usize)> {
-        /// Do not scan arbitrarily far into a malformed item.
-        const MAX_LOOKAHEAD: usize = 128;
-        let mut depth = 0i32;
-        let mut spec_span = self.span();
-        let mut offset = 1usize;
-        while let Some(token) = self.tokens.get(self.pos + offset) {
-            if offset > MAX_LOOKAHEAD {
-                return None;
-            }
-            match token.kind {
-                TokenKind::KwFor if depth == 0 => return Some((spec_span, self.pos + offset)),
-                TokenKind::Lt => depth += 1,
-                TokenKind::Gt => depth = (depth - 1).max(0),
-                TokenKind::Shr => depth = (depth - 2).max(0),
-                TokenKind::LBrace | TokenKind::RBrace | TokenKind::Semi | TokenKind::Eof => {
+    /// Locate the top-level for that separates a trait reference from the self
+    /// type in an impl head. Returns the absolute token index of for, or None
+    /// when the head is an inherent impl (no top-level for before the body).
+    fn find_impl_head_for(&self) -> Option<usize> {
+        let mut offset = 0usize;
+        let mut angle_depth = 0i32;
+        while offset < MAX_IMPL_HEAD_TOKENS {
+            let kind = self.peek_kind_at(offset)?;
+            match kind {
+                TokenKind::Lt => angle_depth += 1,
+                TokenKind::Gt => angle_depth = (angle_depth - 1).max(0),
+                TokenKind::Shr => angle_depth = (angle_depth - 2).max(0),
+                TokenKind::KwFor if angle_depth == 0 => return Some(self.pos + offset),
+                TokenKind::LBrace | TokenKind::RBrace | TokenKind::Semi | TokenKind::Eof
+                    if angle_depth == 0 =>
+                {
                     return None;
                 }
                 _ => {}
             }
-            spec_span = spec_span.join(token.span);
             offset += 1;
         }
         None
+    }
+
+    /// Parse a trait declaration. Version 1.5 traits only carry method
+    /// signatures: every method takes a receiver and ends with a semicolon.
+    fn parse_trait_decl(&mut self) -> TraitDecl {
+        let start = self.span();
+        self.expect(TokenKind::KwTrait, "'trait'");
+        let (name, name_span) = self.expect_ident("trait name");
+        let generics = if self.at(TokenKind::Lt) {
+            self.parse_generic_params()
+        } else {
+            Vec::new()
+        };
+        if self.at(TokenKind::Colon) {
+            let span = self.span();
+            self.error_coded(
+                E_SYNTAX,
+                "supertraits are not supported; declare the inherited methods in this trait instead",
+                span,
+            );
+            while !self.at(TokenKind::LBrace)
+                && !self.at(TokenKind::RBrace)
+                && !self.at(TokenKind::Semi)
+                && !self.at_eof()
+            {
+                self.bump();
+            }
+        }
+        let mut methods = Vec::new();
+        if self
+            .expect(TokenKind::LBrace, "'{' after trait name")
+            .is_none()
+        {
+            let end = self.prev_span();
+            return TraitDecl {
+                name,
+                name_span,
+                generics,
+                methods,
+                span: start.join(end),
+            };
+        }
+        loop {
+            if self.at(TokenKind::RBrace) || self.at_eof() {
+                break;
+            }
+            let before = self.pos;
+            // A written pub before a trait method is accepted and ignored.
+            self.eat(TokenKind::KwPub);
+            if self.at(TokenKind::KwFn) {
+                methods.push(self.parse_trait_method());
+            } else {
+                let span = self.span();
+                self.error("expected a method signature in trait body", span);
+                while !self.at(TokenKind::RBrace)
+                    && !self.at(TokenKind::KwFn)
+                    && !self.at(TokenKind::KwPub)
+                    && !self.at_eof()
+                {
+                    self.bump();
+                }
+            }
+            self.ensure_progress(before);
+        }
+        let end = self.prev_span();
+        self.expect(TokenKind::RBrace, "'}' after trait body");
+        TraitDecl {
+            name,
+            name_span,
+            generics,
+            methods,
+            span: start.join(end),
+        }
+    }
+
+    /// Parse one trait method signature, which must end with a semicolon.
+    fn parse_trait_method(&mut self) -> TraitMethod {
+        let start = self.span();
+        self.expect(TokenKind::KwFn, "'fn'");
+        let (name, name_span) = self.expect_ident("trait method name");
+        if self.at(TokenKind::Lt) {
+            let span = self.span();
+            self.error_coded(
+                E_SYNTAX,
+                "trait methods cannot be generic; remove the type parameters from the method signature",
+                span,
+            );
+            let _ = self.parse_generic_params();
+        }
+        let (params, self_kind) = self.parse_trait_params(name_span);
+        let ret = if self.eat(TokenKind::Arrow).is_some() {
+            Some(self.parse_type())
+        } else {
+            None
+        };
+        if self.at(TokenKind::LBrace) {
+            let span = self.span();
+            self.error_coded(
+                E_SYNTAX,
+                "default method bodies are not supported; end the signature with ';' and write the body in each impl block",
+                span,
+            );
+            let _ = self.parse_block();
+        } else if self.eat(TokenKind::Semi).is_none() {
+            let span = self.span();
+            self.error("expected ';' after trait method signature", span);
+        }
+        let end = self.prev_span();
+        TraitMethod {
+            name,
+            name_span,
+            params,
+            ret,
+            self_kind,
+            span: start.join(end),
+        }
+    }
+
+    /// Parse the parameter list of a trait method. The first parameter must be
+    /// a receiver; a missing receiver is reported once per method.
+    fn parse_trait_params(&mut self, method_span: Span) -> (Vec<Param>, Option<SelfKind>) {
+        let mut params = Vec::new();
+        let mut self_kind = None;
+        let mut reported_missing_receiver = false;
+        if self
+            .expect(TokenKind::LParen, "'(' after trait method name")
+            .is_none()
+        {
+            return (params, self_kind);
+        }
+        let mut first = true;
+        loop {
+            if self.at(TokenKind::RParen) || self.at_eof() {
+                break;
+            }
+            let before = self.pos;
+            if first {
+                if self.at(TokenKind::KwSelf) {
+                    let token = self.bump();
+                    self_kind = Some(SelfKind::Value);
+                    params.push(Param {
+                        name: "self".to_string(),
+                        name_span: token.span,
+                        ty: self_type(token.span),
+                    });
+                } else if self.at(TokenKind::Amp) {
+                    let amp = self.bump();
+                    let mutable = self.eat(TokenKind::KwMut).is_some();
+                    self.expect(TokenKind::KwSelf, "'self' after '&' in receiver");
+                    self_kind = Some(if mutable {
+                        SelfKind::RefMut
+                    } else {
+                        SelfKind::Ref
+                    });
+                    params.push(Param {
+                        name: "self".to_string(),
+                        name_span: amp.span,
+                        ty: TypeExpr::Ref {
+                            mutable,
+                            inner: Box::new(self_type(amp.span)),
+                            span: amp.span,
+                        },
+                    });
+                } else {
+                    let span = self.span();
+                    self.error_coded(
+                        E_SYNTAX,
+                        "trait methods must take a self receiver; add '&self', '&mut self', or 'self' as the first parameter",
+                        span,
+                    );
+                    reported_missing_receiver = true;
+                    params.push(self.parse_param());
+                }
+                first = false;
+            } else {
+                params.push(self.parse_param());
+            }
+            self.ensure_progress(before);
+            if self.eat(TokenKind::Comma).is_some() {
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::RParen, "')' after trait method parameters");
+        if self_kind.is_none() && !reported_missing_receiver {
+            self.error_coded(
+                E_SYNTAX,
+                "trait methods must take a self receiver; add '&self', '&mut self', or 'self' as the first parameter",
+                method_span,
+            );
+        }
+        (params, self_kind)
     }
 
     fn parse_const_decl(&mut self) -> ConstDecl {
@@ -819,6 +1075,18 @@ impl<'a> Parser<'a> {
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
         let (name, name_span) = self.expect_ident("type alias name");
+        let generics = if self.at(TokenKind::Lt) {
+            self.parse_generic_params()
+        } else {
+            Vec::new()
+        };
+        if let (Some(first), Some(last)) = (generics.first(), generics.last()) {
+            self.error_coded(
+                E_SYNTAX,
+                "type aliases cannot be generic; remove the type parameters from the alias",
+                first.name_span.join(last.name_span),
+            );
+        }
         self.expect(TokenKind::Eq, "'=' in type alias");
         let ty = self.parse_type();
         let end = self
@@ -828,6 +1096,7 @@ impl<'a> Parser<'a> {
         TypeAliasDecl {
             name,
             name_span,
+            generics,
             ty,
             span: start.join(end),
         }
@@ -878,32 +1147,16 @@ impl<'a> Parser<'a> {
         }
         if self.at(TokenKind::KwFn) {
             let fn_token = self.bump();
-            let mut params = Vec::new();
-            self.expect(TokenKind::LParen, "'(' in function type");
-            loop {
-                if self.at(TokenKind::RParen) || self.at_eof() {
-                    break;
-                }
-                let before = self.pos;
-                params.push(self.parse_type());
-                self.ensure_progress(before);
-                if self.eat(TokenKind::Comma).is_some() {
-                    continue;
-                }
-                break;
-            }
-            self.expect(TokenKind::RParen, "')' in function type");
-            let ret = if self.eat(TokenKind::Arrow).is_some() {
-                self.parse_type()
-            } else {
-                self.unit_type_here()
-            };
-            let span = fn_token.span.join(ret.span());
-            return TypeExpr::Fn {
-                params,
-                ret: Box::new(ret),
-                span,
-            };
+            return self.parse_callable_type(fn_token.span);
+        }
+        // The callable type / bound form Fn(A, B) -> C: an identifier Fn
+        // immediately followed by '(' is the callable form, while a bare Fn
+        // stays a path type (and lowercase fn(..) keeps the keyword form).
+        if matches!(self.kind(), TokenKind::Ident(name) if name == "Fn")
+            && matches!(self.peek_kind_at(1), Some(TokenKind::LParen))
+        {
+            let token = self.bump();
+            return self.parse_callable_type(token.span);
         }
         if self.at(TokenKind::LParen) {
             let lp = self.bump();
@@ -996,6 +1249,103 @@ impl<'a> Parser<'a> {
             self.error("expected '>' to close type arguments", span);
         }
         args
+    }
+
+    /// Parse the parameter and return type of a callable type after its fn or
+    /// Fn name token has been consumed. Used for the lowercase fn(..) type form
+    /// and for the Fn(A, B) -> C bound form.
+    fn parse_callable_type(&mut self, start: Span) -> TypeExpr {
+        let mut params = Vec::new();
+        self.expect(TokenKind::LParen, "'(' in function type");
+        loop {
+            if self.at(TokenKind::RParen) || self.at_eof() {
+                break;
+            }
+            let before = self.pos;
+            params.push(self.parse_type());
+            self.ensure_progress(before);
+            if self.eat(TokenKind::Comma).is_some() {
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::RParen, "')' in function type");
+        let ret = if self.eat(TokenKind::Arrow).is_some() {
+            self.parse_type()
+        } else {
+            self.unit_type_here()
+        };
+        let span = start.join(ret.span());
+        TypeExpr::Fn {
+            params,
+            ret: Box::new(ret),
+            span,
+        }
+    }
+
+    /// Parse a generic parameter list: <T, U: Bound + Bound2>.
+    ///
+    /// The caller has checked that the current token is '<'. An empty list is
+    /// rejected with E0001; a trailing comma is allowed. Bounds are parsed as
+    /// type expressions so that trait paths with arguments (Iterator<i64>), the
+    /// builtin Drop bound and the callable form Fn(A, B) -> C all go through the
+    /// normal type parser.
+    fn parse_generic_params(&mut self) -> Vec<GenericParam> {
+        let mut params = Vec::new();
+        if self
+            .expect(TokenKind::Lt, "'<' before generic parameters")
+            .is_none()
+        {
+            return params;
+        }
+        if self.at_gt() {
+            let span = self.span();
+            self.error_coded(
+                E_SYNTAX,
+                "generic parameter lists must not be empty; write <T> with at least one parameter",
+                span,
+            );
+            self.eat_gt();
+            return params;
+        }
+        loop {
+            if self.at_gt() || self.at_eof() {
+                break;
+            }
+            let before = self.pos;
+            let (name, name_span) = self.expect_ident("generic parameter name");
+            let mut bounds = Vec::new();
+            if self.eat(TokenKind::Colon).is_some() {
+                loop {
+                    let bound_start = self.pos;
+                    bounds.push(self.parse_type());
+                    self.ensure_progress(bound_start);
+                    if self.eat(TokenKind::Plus).is_none() {
+                        break;
+                    }
+                    if self.at_gt() || self.at(TokenKind::Comma) || self.at_eof() {
+                        let span = self.span();
+                        self.error("expected a trait bound after '+'", span);
+                        break;
+                    }
+                }
+            }
+            params.push(GenericParam {
+                name,
+                name_span,
+                bounds,
+            });
+            self.ensure_progress(before);
+            if self.eat(TokenKind::Comma).is_some() {
+                continue;
+            }
+            break;
+        }
+        if self.eat_gt().is_none() {
+            let span = self.span();
+            self.error("expected '>' to close the generic parameter list", span);
+        }
+        params
     }
 
     // ---------------------------------------------------------------------
@@ -1673,10 +2023,12 @@ impl<'a> Parser<'a> {
         //     (lo, hi)
         // parse as a for statement followed by a tuple tail.
         //
-        // The check looks at the leading token, not at the finished node, so a
-        // parenthesized form such as (if c { f } else { g }).call() still gets
-        // its postfixes; only a block-like primary used directly is affected.
-        let starts_block_like = matches!(
+        // The exception is the postfix '?' operator: version 1.5 accepts
+        // (if c { Ok(1) } else { Err("e") })?. The check looks at the leading
+        // token, not at the finished node, so a parenthesized form such as
+        // (if c { f } else { g }).call() still gets its postfixes; only a
+        // block-like primary used directly is affected.
+        let mut block_like = matches!(
             self.peek_kind(),
             TokenKind::KwIf
                 | TokenKind::KwMatch
@@ -1686,10 +2038,12 @@ impl<'a> Parser<'a> {
                 | TokenKind::LBrace
         );
         let mut expr = self.parse_primary();
-        if starts_block_like {
-            return expr;
-        }
         loop {
+            // Only '?' may follow a block-like expression directly.
+            if block_like && !self.at(TokenKind::Question) {
+                break;
+            }
+            block_like = false;
             if self.at(TokenKind::LParen) {
                 let (args, rparen) = self.parse_call_args();
                 let span = expr.span.join(rparen);
@@ -1913,6 +2267,13 @@ impl<'a> Parser<'a> {
             TokenKind::KwSelf | TokenKind::KwSelfTy => {
                 let path = self.parse_path();
                 let span = path.span;
+                // Self { .. } is a struct literal like any other named struct:
+                // keep it in expression position whenever struct literals are
+                // allowed, so Self::new / Self { .. } resolve through the impl
+                // self type in typeck.
+                if self.allow_struct_literal && self.at(TokenKind::LBrace) {
+                    return self.parse_struct_literal(path);
+                }
                 Expr::new(ExprKind::Path(path), span)
             }
             TokenKind::Ident(name) => {
@@ -2489,6 +2850,16 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The synthesized type of a trait method receiver. The type checker replaces
+/// it with the concrete impl type when it dispatches a trait method call.
+fn self_type(span: Span) -> TypeExpr {
+    TypeExpr::Path {
+        name: "Self".to_string(),
+        name_span: span,
+        generics: Vec::new(),
+    }
+}
+
 fn unit_type(span: Span) -> TypeExpr {
     TypeExpr::Tuple {
         elems: Vec::new(),
@@ -2833,7 +3204,7 @@ impl Drop for Point {
     #[test]
     fn parses_non_drop_trait_impl_for_typeck_validation() {
         // The parser accepts any single identifier as a trait name; only the
-        // type checker decides which traits are meaningful in version 1.4.
+        // type checker decides which traits are meaningful.
         let source = r#"struct Point { x: i64 }
 impl Other for Point {
     fn method(&self) -> i64 { self.x }
@@ -2873,25 +3244,26 @@ impl Other for Point {
     }
 
     #[test]
-    fn rejects_generic_trait_impl() {
+    fn parses_generic_trait_impl() {
         let source = "struct Point { x: i64 }\nimpl Trait<i64> for Point { }";
-        let (program, diagnostics) = parse_source(source);
-        let messages = messages(&diagnostics);
-        assert!(
-            diagnostics.has_errors(),
-            "expected a parse error, got {:?}",
-            messages
-        );
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.contains("single identifier")),
-            "expected a malformed trait reference diagnostic, got {:?}",
-            messages
-        );
+        let program = parse_ok(source);
         let implementation = first_impl_block(&program);
-        assert!(implementation.trait_name.is_none());
         assert_eq!(implementation.ty_name, "Point");
+        let trait_ref = implementation
+            .trait_name
+            .as_ref()
+            .expect("expected a trait reference");
+        assert_eq!(trait_ref.name, "Trait");
+        assert_eq!(trait_ref.args.len(), 1);
+        assert!(matches!(
+            &trait_ref.args[0],
+            TypeExpr::Path { name, .. } if name == "i64"
+        ));
+        // The trait reference span covers the name and its arguments.
+        assert_eq!(
+            &source[trait_ref.span.start as usize..trait_ref.span.end as usize],
+            "Trait<i64>"
+        );
     }
 
     #[test]
@@ -2915,6 +3287,488 @@ impl Other for Point {
         let implementation = first_impl_block(&program);
         assert!(implementation.trait_name.is_none());
         assert_eq!(implementation.ty_name, "Point");
+    }
+
+    #[test]
+    fn parses_generic_function_parameters_and_bounds() {
+        let source = r#"
+fn make<T, U: Iterator<i64> + Drop>(seed: T, other: U) -> U {
+    other
+}
+"#;
+        let program = parse_ok(source);
+        let function = fn_named(&program, "make");
+        assert_eq!(function.generics.len(), 2);
+        assert_eq!(function.generics[0].name, "T");
+        assert!(function.generics[0].bounds.is_empty());
+        assert_eq!(function.generics[1].name, "U");
+        assert_eq!(function.generics[1].bounds.len(), 2);
+        assert!(matches!(
+            &function.generics[1].bounds[0],
+            TypeExpr::Path { name, generics, .. } if name == "Iterator" && generics.len() == 1
+        ));
+        assert!(matches!(
+            &function.generics[1].bounds[1],
+            TypeExpr::Path { name, .. } if name == "Drop"
+        ));
+    }
+
+    #[test]
+    fn parses_fn_callable_type_and_fn_bound() {
+        let source = r#"
+fn apply<T: Fn(i64, String) -> bool>(value: i64, callback: fn(i64) -> bool) -> bool {
+    callback(value)
+}
+"#;
+        let program = parse_ok(source);
+        let function = fn_named(&program, "apply");
+        match &function.generics[0].bounds[0] {
+            TypeExpr::Fn { params, ret, .. } => {
+                assert_eq!(params.len(), 2);
+                assert!(matches!(ret.as_ref(), TypeExpr::Path { name, .. } if name == "bool"));
+            }
+            other => panic!("expected a callable bound, got {:?}", other),
+        }
+        assert!(matches!(
+            &function.params[1].ty,
+            TypeExpr::Fn { params, .. } if params.len() == 1
+        ));
+    }
+
+    #[test]
+    fn parses_generic_struct_enum_and_impl() {
+        let source = r#"
+struct Pair<T> { first: T, second: T }
+enum Maybe<T> { Some(T), None }
+impl<T> Pair<T> {
+    fn first(&self) -> T { self.first }
+}
+"#;
+        let program = parse_ok(source);
+        let struct_decl = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected a struct declaration");
+        assert_eq!(struct_decl.generics.len(), 1);
+        assert_eq!(struct_decl.generics[0].name, "T");
+        let enum_decl = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Enum(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected an enum declaration");
+        assert_eq!(enum_decl.generics.len(), 1);
+        let implementation = first_impl_block(&program);
+        assert_eq!(implementation.generics.len(), 1);
+        assert_eq!(implementation.generics[0].name, "T");
+        assert_eq!(implementation.ty_name, "Pair");
+    }
+
+    #[test]
+    fn rejects_empty_generic_parameter_list() {
+        for source in ["struct Empty<> { }", "fn f<>() { }", "impl<> Point { }"] {
+            let (_, diagnostics) = parse_source(source);
+            assert!(
+                diagnostics.has_errors(),
+                "expected an error for {:?}",
+                source
+            );
+            assert!(
+                messages(&diagnostics)
+                    .iter()
+                    .any(|message| message.contains("must not be empty")),
+                "expected an empty generic list diagnostic for {:?}, got {:?}",
+                source,
+                messages(&diagnostics)
+            );
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == Some("E0001")),
+                "expected code E0001 for {:?}",
+                source
+            );
+        }
+    }
+
+    #[test]
+    fn generic_parameter_lists_allow_a_trailing_comma() {
+        let program = parse_ok("fn f<T,>(value: T) -> T { value }");
+        let function = fn_named(&program, "f");
+        assert_eq!(function.generics.len(), 1);
+    }
+
+    #[test]
+    fn parses_trait_declaration_with_receivers() {
+        let source = r#"
+pub trait Shape<T> {
+    pub fn area(&self) -> i64;
+    fn rotate(&mut self);
+    fn into_id(self) -> i64;
+}
+"#;
+        let program = parse_ok(source);
+        let trait_decl = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Trait(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected a trait declaration");
+        assert_eq!(trait_decl.name, "Shape");
+        assert_eq!(trait_decl.generics.len(), 1);
+        assert_eq!(trait_decl.methods.len(), 3);
+        assert_eq!(trait_decl.methods[0].name, "area");
+        assert!(matches!(
+            trait_decl.methods[0].self_kind,
+            Some(SelfKind::Ref)
+        ));
+        assert!(trait_decl.methods[0].ret.is_some());
+        assert_eq!(trait_decl.methods[0].params.len(), 1);
+        match &trait_decl.methods[0].params[0].ty {
+            TypeExpr::Ref { mutable, inner, .. } => {
+                assert!(!*mutable);
+                assert!(matches!(inner.as_ref(), TypeExpr::Path { name, .. } if name == "Self"));
+            }
+            other => panic!("expected a reference receiver type, got {:?}", other),
+        }
+        assert!(matches!(
+            trait_decl.methods[1].self_kind,
+            Some(SelfKind::RefMut)
+        ));
+        assert!(matches!(
+            trait_decl.methods[2].self_kind,
+            Some(SelfKind::Value)
+        ));
+        assert_eq!(trait_decl.methods[1].params.len(), 1);
+        assert_eq!(trait_decl.methods[2].params.len(), 1);
+    }
+
+    #[test]
+    fn rejects_default_trait_method_body() {
+        let source = "trait Shape { fn area(&self) -> i64 { 1 } }";
+        let (program, diagnostics) = parse_source(source);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("default method bodies are not supported")),
+            "expected a default body diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+        let trait_decl = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Trait(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected a trait declaration");
+        assert_eq!(trait_decl.methods.len(), 1);
+    }
+
+    #[test]
+    fn rejects_generic_trait_method() {
+        let source = "trait Shape { fn convert<T>(&self, value: T); }";
+        let (_, diagnostics) = parse_source(source);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("cannot be generic")),
+            "expected a generic method diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+    }
+
+    #[test]
+    fn rejects_trait_method_without_receiver() {
+        let source = "trait Shape { fn area(width: i64) -> i64; }";
+        let (program, diagnostics) = parse_source(source);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("must take a self receiver")),
+            "expected a missing receiver diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+        let trait_decl = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Trait(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected a trait declaration");
+        assert!(trait_decl.methods[0].self_kind.is_none());
+    }
+
+    #[test]
+    fn rejects_supertraits() {
+        let source = "trait A: B { fn run(&self); }";
+        let (program, diagnostics) = parse_source(source);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("supertraits are not supported")),
+            "expected a supertrait diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+        let trait_decl = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Trait(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected a trait declaration");
+        assert_eq!(trait_decl.methods.len(), 1);
+    }
+
+    #[test]
+    fn generic_type_alias_is_rejected() {
+        let source = "type Pair<T> = Vec<T>;";
+        let (_, diagnostics) = parse_source(source);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("cannot be generic")),
+            "expected a generic type alias diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+    }
+
+    #[test]
+    fn syntax_restriction_messages_do_not_mention_a_version() {
+        let sources = [
+            "trait A: B { fn run(&self); }",
+            "trait Shape { fn convert<T>(&self, value: T); }",
+            "trait Shape { fn area(&self) -> i64 { 1 } }",
+            "trait Shape { fn area(width: i64) -> i64; }",
+            "type Pair<T> = Vec<T>;",
+        ];
+        for source in sources {
+            let (_, diagnostics) = parse_source(source);
+            assert!(
+                diagnostics.has_errors(),
+                "expected syntax diagnostics for {source:?}"
+            );
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == Some("E0001")),
+                "expected an E0001 diagnostic for {source:?}, got {:?}",
+                messages(&diagnostics)
+            );
+            for message in messages(&diagnostics) {
+                assert!(
+                    !message.contains("version"),
+                    "syntax restriction message should not mention a version: {message:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_pub_on_fields_variants_and_trait_methods() {
+        let source = r#"
+pub struct Point { pub x: i64, pub y: i64 }
+pub enum Maybe<T> { pub Some(T), pub None }
+pub trait Shape { pub fn area(&self) -> i64; }
+pub fn make() -> Point { Point { x: 0, y: 0 } }
+"#;
+        parse_ok(source);
+    }
+
+    #[test]
+    fn parses_turbofish_calls_struct_literals_and_associated_items() {
+        let source = r#"
+struct Wrap<T> { value: T }
+impl<T> Wrap<T> {
+    fn value(&self) -> T { self.value }
+}
+fn wrap<T>(value: T) -> Wrap<T> { Wrap { value } }
+fn main() {
+    let wrapped = wrap::<i64>(1);
+    let literal = Wrap::<i64> { value: 2 };
+    let value = Wrap::<i64>::value(&wrapped);
+    let chained = wrapped.value::<i64>();
+    let computed = literal.value;
+}
+"#;
+        parse_ok(source);
+    }
+
+    #[test]
+    fn parses_impl_of_generic_trait_for_generic_type() {
+        let source = r#"
+trait IntoValue<T> { fn into_value(&self) -> T; }
+struct Wrap<T> { value: T }
+impl<T> IntoValue<T> for Wrap<T> {
+    fn into_value(&self) -> T { self.value }
+}
+"#;
+        let program = parse_ok(source);
+        let implementation = first_impl_block(&program);
+        assert_eq!(implementation.ty_name, "Wrap");
+        assert_eq!(implementation.generics.len(), 1);
+        let trait_ref = implementation
+            .trait_name
+            .as_ref()
+            .expect("expected a trait reference");
+        assert_eq!(trait_ref.name, "IntoValue");
+        assert_eq!(trait_ref.args.len(), 1);
+    }
+
+    #[test]
+    fn parses_nested_angle_arguments_in_impl_trait_ref() {
+        // The impl head scan must split a '>>' token into two closing angle
+        // brackets when the trait reference has nested generic arguments.
+        let source = r#"trait Collect<T> {
+    fn collect_into(self) -> T;
+}
+struct Wrap<T> {
+    value: T,
+}
+impl<T> Collect<Vec<i64>> for Wrap<T> {
+    fn collect_into(self) -> Vec<i64> {
+        vec![]
+    }
+}"#;
+        let program = parse_ok(source);
+        let implementation = first_impl_block(&program);
+        assert_eq!(implementation.generics.len(), 1);
+        let trait_ref = implementation.trait_name.as_ref().expect("trait reference");
+        assert_eq!(trait_ref.name, "Collect");
+        assert_eq!(trait_ref.args.len(), 1);
+        match &trait_ref.args[0] {
+            TypeExpr::Path { name, generics, .. } => {
+                assert_eq!(name, "Vec");
+                assert_eq!(generics.len(), 1);
+            }
+            other => panic!("expected a Vec<i64> trait argument, got {:?}", other),
+        }
+        assert_eq!(implementation.ty_name, "Wrap");
+    }
+
+    #[test]
+    fn parses_drop_impl_for_generic_type() {
+        let source = r#"
+struct Pair<T> { first: T }
+impl Drop for Pair<i64> {
+    fn drop(&mut self) { }
+}
+"#;
+        let program = parse_ok(source);
+        let implementation = first_impl_block(&program);
+        let trait_ref = implementation
+            .trait_name
+            .as_ref()
+            .expect("expected a trait reference");
+        assert_eq!(trait_ref.name, "Drop");
+        assert!(trait_ref.args.is_empty());
+        assert_eq!(implementation.ty_name, "Pair");
+    }
+
+    #[test]
+    fn try_operator_is_allowed_after_block_like_expressions() {
+        let source = r#"
+fn pick_if(flag: bool) -> i64 {
+    if flag { Ok(1) } else { Err(2) }?
+}
+
+fn pick_match(flag: bool) -> i64 {
+    match flag { true => Ok(1), false => Err(2) }?
+}
+
+fn pick_let(flag: bool) -> i64 {
+    let from_if = if flag { Ok(1) } else { Err(2) }?;
+    let from_match = match flag { true => Ok(1), false => Err(2) }?;
+    from_if + from_match
+}
+"#;
+        let program = parse_ok(source);
+        for name in ["pick_if", "pick_match"] {
+            let function = fn_named(&program, name);
+            let tail = function
+                .body
+                .tail
+                .as_ref()
+                .unwrap_or_else(|| panic!("expected a tail expression in {}", name));
+            assert!(
+                matches!(&tail.kind, ExprKind::Try { .. }),
+                "expected a try expression as the tail of {}",
+                name
+            );
+        }
+        let function = fn_named(&program, "pick_let");
+        let mut inits = Vec::new();
+        for stmt in &function.body.stmts {
+            if let Stmt::Let(let_stmt) = stmt
+                && let Some(init) = &let_stmt.init
+            {
+                inits.push(init);
+            }
+        }
+        assert_eq!(inits.len(), 2);
+        assert!(matches!(&inits[0].kind, ExprKind::Try { .. }));
+        assert!(matches!(&inits[1].kind, ExprKind::Try { .. }));
+    }
+
+    #[test]
+    fn for_patterns_allow_mut_bindings() {
+        let source = "fn main() { for mut value in values { value = 1; } }";
+        let program = parse_ok(source);
+        let body = &fn_named(&program, "main").body;
+        let for_expr = body
+            .tail
+            .as_deref()
+            .or_else(|| {
+                body.stmts.iter().find_map(|stmt| match stmt {
+                    Stmt::Expr(expr) => Some(expr),
+                    _ => None,
+                })
+            })
+            .expect("expected a for expression");
+        match &for_expr.kind {
+            ExprKind::For { pat, .. } => {
+                assert!(matches!(
+                    &pat.kind,
+                    PatternKind::Binding { mutable, .. } if *mutable
+                ));
+            }
+            other => panic!("expected a for expression, got {:?}", other),
+        }
     }
 
     #[test]
@@ -4320,6 +5174,51 @@ impl Point {
     }
 
     #[test]
+    fn parses_self_struct_literals_and_associated_items() {
+        // Self in expression position: Self { .. } is a struct literal and
+        // Self::new(..) is an associated function path inside impls.
+        let source = r#"struct Counter {
+    value: i64,
+}
+impl Counter {
+    fn new(value: i64) -> Self {
+        Self { value: value }
+    }
+    fn bump(&mut self) -> Self {
+        Self::new(self.value)
+    }
+}"#;
+        let program = parse_ok(source);
+        let implementation = first_impl_block(&program);
+        let new_fn = implementation
+            .fns
+            .iter()
+            .find(|function| function.name == "new")
+            .expect("new method");
+        match new_fn.body.tail.as_deref().map(|expr| &expr.kind) {
+            Some(ExprKind::StructLit { path, fields }) => {
+                assert_eq!(path.display_name(), "Self");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].name, "value");
+            }
+            other => panic!("expected a Self struct literal tail, got {:?}", other),
+        }
+
+        let bump = implementation
+            .fns
+            .iter()
+            .find(|function| function.name == "bump")
+            .expect("bump method");
+        match bump.body.tail.as_deref().map(|expr| &expr.kind) {
+            Some(ExprKind::Call { callee, args }) => {
+                assert_eq!(as_path_name(callee), "Self::new");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected a Self::new call tail, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn parses_path_expressions() {
         let program = parse_ok("fn main() { Foo::BAR; Point::new(1.0, 2.0); }");
         let stmts = main_stmts(&program);
@@ -4513,6 +5412,27 @@ impl Point {
             count >= 7,
             "expected at least 7 example programs, found {}",
             count
+        );
+    }
+
+    #[test]
+    fn parses_the_shipped_prelude() {
+        // The standard prelude ships as library source; it must always be
+        // accepted by the parser. This guards against syntax regressions in
+        // both the prelude and the parser.
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let prelude = manifest_dir.join("src").join("prelude.ls");
+        let source = std::fs::read_to_string(&prelude)
+            .unwrap_or_else(|error| panic!("failed to read {prelude:?}: {error}"));
+        let (program, diagnostics) = parse_source(&source);
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics in {prelude:?}: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            !program.items.is_empty(),
+            "no items parsed from {prelude:?}"
         );
     }
 

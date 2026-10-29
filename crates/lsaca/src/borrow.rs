@@ -24,6 +24,16 @@
 //! here. The ORC runtime could copy the handle, but the source binding would be
 //! dead while the reference still points into it.
 //!
+//! Version 1.5 refines one control-flow detail for the lazy iterators in
+//! `prelude.ls`: the condition of an `if` is a temporary scope in Rust, so a
+//! borrow created while evaluating the condition ends before either branch
+//! runs. That is what makes the `if (pred)(&item) { return Some(item); }` shape
+//! legal - borrow a loop binding, then move it. Only ownerless loans created
+//! in the condition are closed there; every other temporary keeps its earlier
+//! statement-scoped region, so a reference that outlives the branch still
+//! reports E0505. As elsewhere the analysis stays conservative: `while`
+//! conditions keep their previous loop-wide region.
+//!
 //! The analysis is a single forward pass over the HIR per function and per
 //! closure. Every borrow expression creates a loan over a Target: a local, a
 //! borrowed parameter or a captured variable, plus a projection path of
@@ -1499,11 +1509,13 @@ impl<'a> FnChecker<'a> {
                 }
             }
             HExprKind::BuiltinAssoc { func, args, .. } => {
-                // String::from clones its argument (documented copy
-                // semantics); every other builtin constructor moves its
-                // payload.
-                for arg in args {
-                    if builtin_assoc_arg_moves(*func) {
+                // Only Rc::new and Box::new take ownership of their
+                // payload. String::from clones its argument (documented
+                // copy semantics), Vec::with_capacity only reads the
+                // capacity and HashMap::new takes no arguments, so those
+                // constructors never record a move.
+                for (index, arg) in args.iter().enumerate() {
+                    if builtin_assoc_arg_moves(*func, index) {
                         self.walk_consumed(arg);
                     } else {
                         self.walk_expr(arg);
@@ -1547,7 +1559,14 @@ impl<'a> FnChecker<'a> {
                 then_block,
                 else_expr,
             } => {
+                // The condition is a temporary scope: a borrow taken while
+                // evaluating it ends before either branch runs. This is what
+                // lets prelude filter/find borrow a loop item for the
+                // predicate and then move the item into the result.
+                let pending = self.loans.len();
                 self.walk_expr(cond);
+                let end = self.tick();
+                self.finalize_inline(pending, end);
                 self.walk_block(then_block);
                 if let Some(else_expr) = else_expr {
                     self.walk_expr(else_expr);
@@ -1581,6 +1600,16 @@ impl<'a> FnChecker<'a> {
             HExprKind::ForVec { pat, vec, body } => {
                 // `for x in <vec>` moves the vector into the loop.
                 self.walk_consumed(vec);
+                self.walk_for(pat, body);
+            }
+            HExprKind::ForIter {
+                iter, pat, body, ..
+            } => {
+                // `for x in <iterator>` moves the iterator value into the
+                // hidden iteration local. The local itself is synthetic and
+                // has no user-visible name, so it stays outside the loan
+                // table; the value the user wrote is still consumed here.
+                self.walk_consumed(iter);
                 self.walk_for(pat, body);
             }
             HExprKind::StructLit { fields, .. } => {
@@ -1769,6 +1798,9 @@ fn builtin_method_mutates(method: HBuiltinMethod) -> bool {
             | HBuiltinMethod::VecReverse
             | HBuiltinMethod::RcSet
             | HBuiltinMethod::BoxSet
+            | HBuiltinMethod::MapInsert
+            | HBuiltinMethod::MapRemove
+            | HBuiltinMethod::MapClear
     )
 }
 
@@ -1786,24 +1818,36 @@ fn builtin_method_consumes_receiver(method: HBuiltinMethod) -> bool {
 }
 
 /// Builtin method arguments that are moved into the callee by value.
+///
+/// Mirrors the consuming-context table of the move checker so both
+/// analyses agree on which arguments are gone after the call: the single
+/// payload of the consuming builtins, both halves of `HashMap::insert`
+/// and the by-value closure of `HashMap::get_with`. Map keys are copied
+/// by the compiler and the closure handles of the iterator adapters are
+/// ordinary by-value arguments.
 fn builtin_method_arg_moves(method: HBuiltinMethod, index: usize) -> bool {
     match method {
-        HBuiltinMethod::VecPush
+        HBuiltinMethod::OptUnwrapOr
+        | HBuiltinMethod::ResUnwrapOr
+        | HBuiltinMethod::VecPush
         | HBuiltinMethod::VecExtend
         | HBuiltinMethod::RcSet
-        | HBuiltinMethod::BoxSet
-        | HBuiltinMethod::OptUnwrapOr
-        | HBuiltinMethod::ResUnwrapOr => true,
-        HBuiltinMethod::VecInsert => index == 1,
+        | HBuiltinMethod::BoxSet => index == 0,
+        HBuiltinMethod::VecInsert | HBuiltinMethod::MapGetWith => index == 1,
+        HBuiltinMethod::MapInsert => index <= 1,
         _ => false,
     }
 }
 
 /// Builtin constructor payload arguments that are moved into the new value.
-fn builtin_assoc_arg_moves(func: HBuiltinAssoc) -> bool {
-    // String::from clones its argument, so it keeps the documented copy
-    // semantics instead of moving it.
-    !matches!(func, HBuiltinAssoc::StringFrom)
+fn builtin_assoc_arg_moves(func: HBuiltinAssoc, index: usize) -> bool {
+    // Rc::new and Box::new own their payload. String::from clones its
+    // argument, Vec::with_capacity only reads the capacity and
+    // HashMap::new takes no arguments, so they record no move.
+    matches!(
+        (func, index),
+        (HBuiltinAssoc::RcNew | HBuiltinAssoc::BoxNew, 0)
+    )
 }
 
 #[cfg(test)]
@@ -1820,6 +1864,13 @@ mod tests {
             .map(|diagnostic| diagnostic.message.clone())
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    /// Render diagnostics with source context so a failing test shows where
+    /// the unexpected error was reported.
+    fn rendered(source: &str, diagnostics: &Diagnostics) -> String {
+        let file = SourceFile::new("test.ls", source);
+        diagnostics.render(&file)
     }
 
     /// Front end and type check a program. The borrow checker is part of the
@@ -1845,7 +1896,10 @@ mod tests {
     fn expect_accepted(source: &str) {
         let program = match check_source(source) {
             Ok(program) => program,
-            Err(diagnostics) => panic!("valid program was rejected: {}", messages(&diagnostics)),
+            Err(diagnostics) => panic!(
+                "valid program was rejected:\n{}",
+                rendered(source, &diagnostics)
+            ),
         };
         // The pipeline has already run the borrow checker; running it again
         // on the accepted HIR pins down that it is a pure read-only pass.
@@ -1877,6 +1931,49 @@ mod tests {
             found,
             "expected a {} diagnostic, got: {}",
             code,
+            messages(&diagnostics)
+        );
+    }
+
+    /// Parse one source string into an AST, panicking on lexer or parser
+    /// errors. The prelude-aware helpers below need the prelude AST too.
+    fn parse_ast(source: &str, file: &SourceFile) -> crate::ast::Program {
+        let (tokens, lex_diagnostics) = lexer::tokenize(source);
+        assert!(
+            !lex_diagnostics.has_errors(),
+            "lexer errors: {}",
+            messages(&lex_diagnostics)
+        );
+        let (program, parse_diagnostics) = parser::parse(&tokens, file);
+        assert!(
+            !parse_diagnostics.has_errors(),
+            "parser errors: {}",
+            messages(&parse_diagnostics)
+        );
+        program
+    }
+
+    /// Front end and type check a program against the v1.5 prelude. Iterator
+    /// chains only exist once the prelude is registered, so those tests need
+    /// this entry point instead of [check_source].
+    fn check_source_with_prelude(source: &str) -> Result<hir::Program, Diagnostics> {
+        let file = SourceFile::new("test.ls", source);
+        let program = parse_ast(source, &file);
+        let prelude_file = SourceFile::new(crate::prelude::FILE_NAME, crate::prelude::SOURCE);
+        let prelude = parse_ast(crate::prelude::SOURCE, &prelude_file);
+        typeck::check_with_prelude(&program, Some(&prelude), &file)
+    }
+
+    fn expect_accepted_with_prelude(source: &str) {
+        let program = match check_source_with_prelude(source) {
+            Ok(program) => program,
+            Err(diagnostics) => panic!("valid program was rejected: {}", messages(&diagnostics)),
+        };
+        // Pin down that the borrow checker stays a pure read-only pass.
+        let diagnostics = check(&program);
+        assert!(
+            !diagnostics.has_errors(),
+            "borrow checker rejected valid program: {}",
             messages(&diagnostics)
         );
     }
@@ -2622,6 +2719,341 @@ mod tests {
                  let s = String::from(\"hi\");
                  let n = s.len();
                  let gone = s;
+             }",
+        );
+    }
+
+    // -- version 1.5: an if condition is a temporary scope ----------------
+    //
+    // The prelude iterators borrow a loop item for their predicate and then
+    // move it into the returned value:
+    //
+    //     if (self.pred)(&item) { return Some(item); }
+    //
+    // A borrow created while evaluating the condition ends with the
+    // condition, so the move in the then branch does not leave a dangling
+    // reference behind.
+
+    #[test]
+    fn if_condition_borrow_then_move_is_accepted() {
+        expect_accepted(
+            "fn is_long(s: &String) -> bool {
+                 s.len() > 2
+             }
+             fn main() {
+                 let text = String::from(\"lsaca\");
+                 if is_long(&text) {
+                     let moved = text;
+                     println!(\"{}\", moved);
+                 }
+             }",
+        );
+    }
+
+    #[test]
+    fn closure_condition_borrow_then_move_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let text = String::from(\"lsaca\");
+                 let keep = |value: &String| -> bool { value.len() > 2 };
+                 if keep(&text) {
+                     let moved = text;
+                     println!(\"{}\", moved);
+                 }
+             }",
+        );
+    }
+
+    #[test]
+    fn if_condition_mutable_borrow_then_move_is_accepted() {
+        expect_accepted(
+            "fn bump(r: &mut String) -> bool {
+                 r.push_str(\"!\");
+                 r.len() > 2
+             }
+             fn main() {
+                 let mut text = String::from(\"lsaca\");
+                 if bump(&mut text) {
+                     let moved = text;
+                     println!(\"{}\", moved);
+                 }
+             }",
+        );
+    }
+
+    #[test]
+    fn if_condition_borrow_then_move_inside_loop_is_accepted() {
+        expect_accepted(
+            "fn is_long(s: &String) -> bool {
+                 s.len() > 3
+             }
+             fn main() {
+                 let words = vec![String::from(\"alpha\"), String::from(\"b\")];
+                 for word in words {
+                     if is_long(&word) {
+                         let owned = word;
+                         println!(\"{}\", owned);
+                     }
+                 }
+             }",
+        );
+    }
+
+    #[test]
+    fn else_branch_move_after_condition_borrow_is_accepted() {
+        expect_accepted(
+            "fn is_long(s: &String) -> bool {
+                 s.len() > 3
+             }
+             fn main() {
+                 let text = String::from(\"lsaca\");
+                 if is_long(&text) {
+                     println!(\"long\");
+                 } else {
+                     let moved = text;
+                     println!(\"{}\", moved);
+                 }
+             }",
+        );
+    }
+
+    #[test]
+    fn borrow_ending_in_condition_then_move_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let text = String::from(\"lsaca\");
+                 let borrowed = &text;
+                 if borrowed.len() > 2 {
+                     let moved = text;
+                     println!(\"{}\", moved);
+                 }
+             }",
+        );
+    }
+
+    #[test]
+    fn predicate_borrow_then_move_through_closure_is_accepted() {
+        // The exact shape prelude filter/find are written with: borrow the
+        // item for the predicate call, then move it into the result.
+        expect_accepted(
+            "fn find_item(item: String, pred: fn(&String) -> bool) -> Option<String> {
+                 if pred(&item) {
+                     return Some(item);
+                 }
+                 None
+             }
+             fn main() {
+                 let keep = |value: &String| -> bool { value.len() < 5 };
+                 let found = find_item(String::from(\"abc\"), keep);
+                 match found {
+                     Some(value) => println!(\"{}\", value),
+                     None => println!(\"none\"),
+                 }
+             }",
+        );
+    }
+
+    #[test]
+    fn move_while_borrow_is_used_in_branch_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let text = String::from(\"hi\");
+                 let borrowed = &text;
+                 if borrowed.len() > 0 {
+                     let moved = text;
+                     let n = borrowed.len();
+                 }
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn match_scrutinee_borrow_then_move_is_rejected() {
+        // A match scrutinee temporary lives through the arms, so moving the
+        // scrutinee while a pattern binding borrows it is still an error.
+        expect_rejected(
+            "fn main() {
+                 let maybe = Some(String::from(\"hi\"));
+                 match &maybe {
+                     Some(value) => {
+                         let moved = maybe;
+                         let n = value.len();
+                     }
+                     None => {}
+                 }
+             }",
+            "E0505",
+        );
+    }
+
+    // -- version 1.5: HashMap ownership rules ------------------------------
+    //
+    // insert takes ownership of both halves, so it moves them; the map
+    // receiver itself is only borrowed mutably, and the read-only methods
+    // (len in the test below) never move the map.
+
+    #[test]
+    fn map_insert_moves_borrowed_key_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let key = String::from(\"k\");
+                 let borrowed = &key;
+                 let mut scores: HashMap<String, i64> = HashMap::new();
+                 scores.insert(key, 1);
+                 let n = borrowed.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn map_insert_moves_borrowed_value_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let value = String::from(\"v\");
+                 let borrowed = &value;
+                 let mut entries: HashMap<String, String> = HashMap::new();
+                 entries.insert(String::from(\"k\"), value);
+                 let n = borrowed.len();
+             }",
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn map_insert_while_map_is_borrowed_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let mut scores: HashMap<String, i64> = HashMap::new();
+                 let borrowed = &scores;
+                 scores.insert(String::from(\"k\"), 1);
+                 let n = borrowed.len();
+             }",
+            "E0506",
+        );
+    }
+
+    #[test]
+    fn map_read_receiver_then_move_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let scores: HashMap<String, i64> = HashMap::new();
+                 let n = scores.len();
+                 let moved = scores;
+                 println!(\"{}\", n);
+                 let empty = moved.is_empty();
+                 println!(\"{}\", empty);
+             }",
+        );
+    }
+
+    // -- version 1.5: NLL edges around HashMap and iterator chains ---------
+    //
+    // The prelude iterators and the HashMap methods create short-lived
+    // borrows. These tests pin down that a loan only lives until its last
+    // use, so mutating or moving the owner afterwards is accepted, while
+    // mutating it before that last use is still E0506.
+
+    #[test]
+    fn map_get_with_then_mutate_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let mut counts: HashMap<String, i64> = HashMap::new();
+                 counts.insert(String::from(\"a\"), 1);
+                 let doubled = counts.get_with(String::from(\"a\"), |value: &i64| -> i64 { *value * 2 });
+                 counts.insert(String::from(\"b\"), 2);
+                 println!(\"{}\", doubled.unwrap());
+             }",
+        );
+    }
+
+    #[test]
+    fn map_get_then_mutate_after_shared_borrow_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let mut scores: HashMap<String, i64> = HashMap::new();
+                 scores.insert(String::from(\"k\"), 1);
+                 let borrowed = &scores;
+                 let value = scores.get(String::from(\"k\"));
+                 let n = borrowed.len();
+                 scores.insert(String::from(\"j\"), 2);
+                 println!(\"{}\", value.unwrap() + n);
+             }",
+        );
+    }
+
+    #[test]
+    fn map_clear_while_shared_borrowed_is_rejected() {
+        expect_rejected(
+            "fn main() {
+                 let mut scores: HashMap<String, i64> = HashMap::new();
+                 let borrowed = &scores;
+                 scores.clear();
+                 let n = borrowed.len();
+                 println!(\"{}\", n);
+             }",
+            "E0506",
+        );
+    }
+
+    #[test]
+    fn map_move_after_shared_borrow_ends_is_accepted() {
+        expect_accepted(
+            "fn main() {
+                 let mut scores: HashMap<String, i64> = HashMap::new();
+                 scores.insert(String::from(\"k\"), 1);
+                 let borrowed = &scores;
+                 let n = borrowed.len();
+                 let moved = scores;
+                 println!(\"{}\", n);
+                 println!(\"{}\", moved.len());
+             }",
+        );
+    }
+
+    #[test]
+    fn iterator_chain_capture_and_body_borrow_of_same_local_is_accepted() {
+        expect_accepted_with_prelude(
+            "fn main() {
+                 let numbers: Vec<i64> = vec![1, 2, 3];
+                 let offset = 10;
+                 let boosted: Vec<i64> = numbers.iter().map(|item: i64| -> i64 { item + offset }).collect();
+                 for value in boosted.iter() {
+                     let borrowed = &offset;
+                     println!(\"{}\", value + *borrowed);
+                 }
+             }",
+        );
+    }
+
+    #[test]
+    fn for_iter_loop_body_borrow_then_move_after_loop_is_accepted() {
+        expect_accepted_with_prelude(
+            "fn main() {
+                 let numbers: Vec<i64> = vec![1, 2, 3];
+                 let label = String::from(\"n\");
+                 for value in numbers.iter() {
+                     let borrowed = &label;
+                     println!(\"{}{}\", borrowed, value);
+                 }
+                 let moved = label;
+                 println!(\"{}\", moved);
+             }",
+        );
+    }
+
+    #[test]
+    fn two_disjoint_borrows_of_different_locals_in_one_call_is_accepted() {
+        expect_accepted(
+            "fn combine(left: &String, right: &String) -> i64 {
+                 left.len() + right.len()
+             }
+             fn main() {
+                 let left = String::from(\"ab\");
+                 let right = String::from(\"cde\");
+                 let total = combine(&left, &right);
+                 println!(\"{}\", total);
              }",
         );
     }

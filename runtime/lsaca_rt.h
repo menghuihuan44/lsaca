@@ -1,5 +1,5 @@
-/* lsaca C17 runtime: reference counting (ORC), strings, vectors, formatting,
- * checked integer arithmetic, panics, process/IO and math helpers.
+/* lsaca C17 runtime: reference counting (ORC), strings, vectors, hash maps,
+ * formatting, checked integer arithmetic, panics, process/IO and math helpers.
  *
  * This header is the ABI contract between generated C code and the runtime.
  * See README.md ("Memory management (ORC)") and the section comments below for
@@ -369,6 +369,119 @@ static inline LsRes_String_String ls_res_string_err(LsString* err) {
     r.u.err = err;
     return r;
 }
+
+/* ====================================================================== */
+/* Hash maps (builtin HashMap<K, V>)                                      */
+/* ====================================================================== */
+/* LsMapTable is a by-value byte container with six code-generator supplied
+ * callbacks. Generated code wraps it in an ORC managed payload
+ * (typedef struct LsMap_K_V { LsMapTable table; }) and never touches the table
+ * internals directly; the runtime owns only the three slot arrays.
+ *
+ * Algorithm (frozen contract, see DESIGN 5.5):
+ *   - Open addressing with linear probing, power-of-two capacity, load factor
+ *     3/4 and tombstones. The capacity starts at 8 with the first insert and
+ *     doubles when an insert would exceed the load factor.
+ *   - Hash: FNV-1a 64 over the bytes (offset basis 0xcbf29ce484222325, prime
+ *     0x100000001b3) followed by the splitmix64 finalizer
+ *     (x ^= x >> 30; x *= 0xbf58476d1ce4e5b9; x ^= x >> 27;
+ *      x *= 0x94d049bb133111eb; x ^= x >> 31 over uint64_t). i64/u64/bool hash
+ *     their 64-bit value (bool as 0/1) through the same finalizer; strings hash
+ *     their bytes. There is no randomized seed: hashes are deterministic for a
+ *     given runtime version.
+ *   - Iteration walks slot indices in order. That order is deterministic for a
+ *     given sequence of operations but is an implementation detail, not part of
+ *     the language contract.
+ *
+ * Ownership: an occupied slot owns its key and value byte blobs.
+ *   - ls_map_insert() adopts (moves) both incoming blobs. If the key already
+ *     exists, the stored value is copied through copy_value() into
+ *     out_old_value (when non-NULL) and released, the incoming value is
+ *     adopted, and the caller's duplicate key is released through drop_key()
+ *     (ownership of it was transferred to the map). The function returns true
+ *     iff an old value was written out.
+ *   - ls_map_remove() moves the stored value bytes into out_value (or releases
+ *     the value when out_value is NULL) and releases the stored key.
+ *   - ls_map_clear() releases every stored key and value but keeps capacity.
+ *   - ls_map_get_ptr() and ls_map_iter_next() return borrowed views that are
+ *     valid until the next mutation of the table.
+ *   - copy_key()/copy_value() are never called on the adoption path; code
+ *     generation uses copy_key() for the keys() snapshot and copy_value() for
+ *     get() and old-value outputs.
+ * The generated wrapper's drop helper must call ls_map_clear() and then free()
+ * keys, values and states; all three pointers are NULL before the first insert.
+ *
+ * Preconditions: the ls_map_init() callbacks are all non-NULL and key_size /
+ * value_size are the non-zero C sizeof of the language key/value types. The
+ * table is neither thread safe nor reentrant (callbacks must not mutate the
+ * same table). All operations are O(1) expected; no operation allocates except
+ * insert, which allocates only when the table grows (or on the first insert). */
+
+typedef struct LsMapTable {
+    unsigned char* keys;      /* slot array, cap * key_size bytes   */
+    unsigned char* values;    /* slot array, cap * value_size bytes */
+    unsigned char* states;    /* 0 empty, 1 occupied, 2 tombstone   */
+    size_t len;
+    size_t cap;               /* power of two, 0 before first insert */
+    size_t key_size;
+    size_t value_size;
+    uint64_t (*hash_key)(const void* key_bytes);
+    bool (*eq_key)(const void* a, const void* b);
+    void (*copy_key)(void* out, const void* in);
+    void (*drop_key)(void* key_bytes);
+    void (*copy_value)(void* out, const void* in);
+    void (*drop_value)(void* value_bytes);
+} LsMapTable;
+
+typedef struct LsMapIter { const LsMapTable* table; size_t index; } LsMapIter;
+
+/* Initialize an empty table. No memory is allocated until the first insert.
+ * key_size/value_size are the C sizeof of the key/value types. */
+void ls_map_init(LsMapTable* table, size_t key_size, size_t value_size,
+                 uint64_t (*hash_key)(const void*),
+                 bool (*eq_key)(const void*, const void*),
+                 void (*copy_key)(void*, const void*),
+                 void (*drop_key)(void*),
+                 void (*copy_value)(void*, const void*),
+                 void (*drop_value)(void*));
+/* Release every stored key and value; keeps the slot arrays and capacity. */
+void ls_map_clear(LsMapTable* table);
+/* Insert a key/value pair, or overwrite the value of an existing key. Adopts
+ * (moves) key and value. For an existing key the previous value is copied into
+ * out_old_value when out_old_value is non-NULL, and the caller's duplicate key
+ * is released. Returns true iff an old value was returned. */
+bool ls_map_insert(LsMapTable* table, const void* key, const void* value,
+                   void* out_old_value);
+/* Borrowed pointer to the stored value bytes (valid until the next mutation of
+ * the table); returns false when the key is absent. */
+bool ls_map_get_ptr(const LsMapTable* table, const void* key,
+                    void** out_value_ptr);
+/* Remove an entry: moves its value into out_value (or releases the value when
+ * out_value is NULL) and releases the stored key. Returns false when absent. */
+bool ls_map_remove(LsMapTable* table, const void* key, void* out_value);
+size_t ls_map_len(const LsMapTable* table);
+bool ls_map_is_empty(const LsMapTable* table);
+void ls_map_iter_init(LsMapIter* iter, const LsMapTable* table);
+/* Write borrowed key/value pointers for the next occupied slot and return true,
+ * or return false when the iteration is finished. */
+bool ls_map_iter_next(LsMapIter* iter, const void** key_ptr,
+                      const void** value_ptr);
+
+/* Deterministic hashing/equality callbacks for the frozen key types of the
+ * builtin HashMap. The hash functions take a pointer to the stored key bytes
+ * and return the frozen hash described above. ls_hash_string_slot() interprets
+ * the slot as an LsString* handle (NULL hashes as 0) and hashes the string
+ * bytes. The eq functions take two key byte pointers and compare the language
+ * values; strings compare content (NULL only equals NULL). */
+uint64_t ls_hash_bytes(const void* data, size_t len);
+uint64_t ls_hash_i64(const void* slot);
+uint64_t ls_hash_u64(const void* slot);
+uint64_t ls_hash_bool(const void* slot);
+uint64_t ls_hash_string_slot(const void* slot);
+bool ls_eq_i64(const void* a, const void* b);
+bool ls_eq_u64(const void* a, const void* b);
+bool ls_eq_bool(const void* a, const void* b);
+bool ls_eq_string_slot(const void* a, const void* b);
 
 /* ====================================================================== */
 /* Formatting                                                             */

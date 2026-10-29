@@ -2,8 +2,9 @@
 
 Portable C17 runtime for programs compiled by `lsaca`. Generated C links against
 it, so the language's memory management (ORC: reference counting plus a cycle
-collector), `String`, `Vec`, formatting, panics, checked integer arithmetic,
-process/IO helpers and math all behave the same on every supported platform.
+collector), `String`, `Vec`, the builtin `HashMap` table, formatting, panics,
+checked integer arithmetic, process/IO helpers and math all behave the same on
+every supported platform.
 
 The runtime is written carefully against the C17 standard: no compiler-specific
 extensions, no VLAs, no GNU statement expressions, no threads, no third-party
@@ -14,13 +15,14 @@ code. It compiles warning-free with
 
 | File | Role |
 | --- | --- |
-| `lsaca_rt.h` | Public ABI. The only runtime header generated code includes. Frozen function signatures and frozen layouts of `LsString`, `LsVec_String`, `LsOpt_String`, `LsRes_String_String`. |
+| `lsaca_rt.h` | Public ABI. The only runtime header generated code includes. Frozen function signatures and frozen layouts of `LsString`, `LsVec_String`, `LsOpt_String`, `LsRes_String_String`, `LsMapTable`, `LsMapIter`. |
 | `lsaca_rt_internal.h` | Private contract shared by the translation units (private allocation header layout, cross-unit helpers). Generated code never includes it. |
 | `lsaca_rt.c` | Core: reference counted allocator, ORC cycle collector, leak report, panics, checked integer arithmetic, process/IO, math. |
 | `lsaca_rt_string.c` | `LsString` objects: construction, copy-on-write mutation, search/transform, split, parse. |
 | `lsaca_rt_vec.c` | Generic vector primitives and the frozen `LsVec_String` operations. |
 | `lsaca_rt_fmt.c` | Format builder, shortest-round-trip float formatting, precision/width, Debug escaping, print helpers. |
-| `test/main.c` | Runtime self-test suite (`ALL CHECKS PASSED (411 checks)`), including collector, refcount and panic-path tests. |
+| `lsaca_rt_map.c` | Builtin `HashMap` table: open addressing with linear probing, tombstones, power-of-two growth, deterministic FNV-1a/splitmix64 hashing, slot iteration. |
+| `test/main.c` | Runtime self-test suite (`ALL CHECKS PASSED (10200 checks)`), including collector and collector-stress, refcount, panic-path, hash-map and hash-map-stress tests. |
 | `test/bench_runtime.c` | Standalone micro-benchmark driver for the hot paths (not part of the smoke matrix). |
 | `test/run_smoke.ps1` | Windows smoke-test driver: builds release/debug/leak-tracking configurations of the runtime and exercises the panic/leak/IO/stdin/args child-process modes. |
 
@@ -42,6 +44,7 @@ A generated project directory contains:
     lsaca_rt_string.c
     lsaca_rt_vec.c
     lsaca_rt_fmt.c
+    lsaca_rt_map.c
 
 Build configurations:
 
@@ -58,7 +61,8 @@ checked-arithmetic calls are emitted by codegen.
 Build by hand (POSIX shell, from the generated directory):
 
     gcc -std=c17 -O2 -DNDEBUG -Wall -Wextra main.c \
-        lsaca_rt.c lsaca_rt_string.c lsaca_rt_vec.c lsaca_rt_fmt.c -lm -o program
+        lsaca_rt.c lsaca_rt_string.c lsaca_rt_vec.c lsaca_rt_fmt.c \
+        lsaca_rt_map.c -lm -o program
 
 ## Memory model (ORC)
 
@@ -153,6 +157,65 @@ parameter/field. Pass one reference in and take one reference out.
 - Program exit: `ls_exit(code)` flushes stdout/stderr and exits; generated
   `main` calls `ls_runtime_shutdown()` before returning normally.
 
+## Hash maps (builtin `HashMap<K, V>`)
+
+`HashMap` is a builtin table type. The runtime owns only the three slot
+arrays; generated code embeds an `LsMapTable` by value in a managed
+`LsMap_K_V` payload and never allocates the table itself:
+
+    typedef struct LsMapTable {
+        unsigned char* keys;      /* slot array, cap * key_size bytes   */
+        unsigned char* values;    /* slot array, cap * value_size bytes */
+        unsigned char* states;    /* 0 empty, 1 occupied, 2 tombstone   */
+        size_t len;
+        size_t cap;               /* power of two, 0 before first insert */
+        size_t key_size;
+        size_t value_size;
+        uint64_t (*hash_key)(const void*);
+        bool (*eq_key)(const void*, const void*);
+        void (*copy_key)(void*, const void*);
+        void (*drop_key)(void*);
+        void (*copy_value)(void*, const void*);
+        void (*drop_value)(void*);
+    } LsMapTable;
+
+Algorithm: open addressing with linear probing, power-of-two capacity: a 3/4
+load factor and tombstones. The capacity starts at 8 with the first insert and
+doubles when an insert would exceed the load factor. Hash values are
+deterministic: FNV-1a 64 over the key bytes followed by the splitmix64
+finalizer; `i64`/`u64`/`bool` hash their 64-bit value (`bool` as 0/1) through the
+same finalizer, and `String` keys hash their bytes. There is no random seed.
+Iteration walks slot indices in order, which is deterministic for a given
+sequence of operations but is slot order, not insertion order.
+
+Key types: `K` is `i64`, `u64`, `bool` or `String`. Codegen supplies six
+callbacks: scalar keys use typed `memcpy`, a no-op drop and the matching
+`ls_hash_*`/`ls_eq_*` pair; `String` keys use `ls_hash_string_slot` /
+`ls_eq_string_slot` (content equality) with `ls_retain`/`ls_release` for the
+copy/drop callbacks. Values use the generic codegen copy/drop helpers; managed
+values are traced for the ORC cycle collector.
+
+Ownership contract (generated code must follow it):
+
+- `ls_map_insert()` adopts (moves) both incoming blobs. When the key already
+  exists, the stored value is copied through `copy_value` into
+  `out_old_value` (when non-NULL) before the slot is overwritten, and the
+  caller's duplicate key is released through `drop_key`. The function returns
+  true iff an old value was written out.
+- `ls_map_remove()` moves the stored value bytes into `out_value` (or releases
+  the value when `out_value` is NULL) and releases the stored key.
+- `ls_map_clear()` releases every stored key and value but keeps capacity; the
+  generated wrapper's drop helper then `free()`s `keys`, `values` and
+  `states`. All three pointers are NULL before the first insert.
+- `ls_map_get_ptr()` and `ls_map_iter_next()` return borrowed views valid until
+  the next mutation. `copy_key` is only used by codegen for the `keys()`
+  snapshot, and `copy_value` for `get()` and old-value outputs; the adoption
+  path never copies.
+- `ls_map_init()` requires all six callbacks non-NULL and non-zero key/value
+  sizes. All operations are O(1) expected; only `insert` allocates, and only
+  when the table grows (or on the first insert). The table is neither thread
+  safe nor reentrant.
+
 ## Formatting
 
 - `Display` of floats is the shortest round-trip decimal, always expanded
@@ -229,11 +292,18 @@ Runtime suite (release; use `-DLSACA_DEBUG -DLSACA_DEBUG_RC` for the debug
 configuration; run from this directory):
 
     gcc -std=c17 -O2 -DNDEBUG -Wall -Wextra -Wpedantic -I. \
-        test/main.c lsaca_rt.c lsaca_rt_string.c lsaca_rt_vec.c lsaca_rt_fmt.c \
-        -lm -o smoke
+        test/main.c lsaca_rt.c lsaca_rt_string.c lsaca_rt_vec.c \
+        lsaca_rt_fmt.c lsaca_rt_map.c -lm -o smoke
     ./smoke
 
-It prints `print works` and ends with `ALL CHECKS PASSED (411 checks)`.
+It prints `print works` and ends with `ALL CHECKS PASSED (10200 checks)`.
+The suite is also a bounded stress test: the collector cases build 5000 small
+cycles, a 2000-node ring, and live roots pointing into garbage cycles, then
+release 100000 managed objects in deterministic PRNG order with periodic
+collection; the hash-map cases drive 100000 i64 keys and 20000 String keys
+through insert/lookup/remove/reinsert and three clear/refill grow cycles, plus
+hand-built adversarial table states that force the defensive probe outcomes.
+All of that runs in well under a second in the release configuration.
 
 Windows smoke matrix (all configurations, panic/leak/IO/stdin/args child
 processes):
@@ -244,8 +314,12 @@ Benchmarks (best-of-three wall clock per section):
 
     gcc -std=c17 -O2 -DNDEBUG -Wall -Wextra -Wpedantic -I. \
         test/bench_runtime.c lsaca_rt.c lsaca_rt_string.c lsaca_rt_vec.c \
-        lsaca_rt_fmt.c -lm -o bench
+        lsaca_rt_fmt.c lsaca_rt_map.c -lm -o bench
     ./bench
+
+The bench driver ends with hash-map sections (`map_i64_insert`, `map_i64_lookup`,
+`map_i64_miss`, `map_iterate`, `map_string_keys`) that exercise the
+`HashMap` codegen call forms through the public header only.
 
 The Rust embedding contract is tested by:
 

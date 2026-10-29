@@ -27,6 +27,7 @@ pub mod hir;
 pub mod lexer;
 pub mod moveck;
 pub mod parser;
+pub mod prelude;
 pub mod runtime;
 pub mod span;
 pub mod typeck;

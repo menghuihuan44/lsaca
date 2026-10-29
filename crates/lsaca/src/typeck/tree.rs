@@ -148,6 +148,14 @@ pub enum TExprKind {
         vec: Box<TExpr>,
         body: TBlock,
     },
+    /// A loop over a user iterator: the value is moved into the loop and each
+    /// iteration drives the instantiated `Iterator::next` function.
+    ForIter {
+        iter: Box<TExpr>,
+        next_fn: usize,
+        pat: TPat,
+        body: TBlock,
+    },
     StructLit {
         struct_id: usize,
         fields: Vec<(usize, TExpr)>,

@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-140), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-150), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 1.4.0 are:
+The pattern forms available in 1.5.0 are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -42,7 +42,7 @@ The pattern forms available in 1.4.0 are:
 | Boolean literal | `true`, `false` | that boolean |
 | String literal | `"lsaca"`, `"a" \| "b"` | that exact string content, compared byte for byte |
 | Unit | `()` | the unit value |
-| Tuple | `(a, b)`, `()` | a tuple of that length (flat tuples only) |
+| Tuple | `(a, b)`, `()` | a tuple of that length; tuple patterns may nest |
 | Struct | `Point { x, y }`, `Point { x, .. }` | a struct with those fields |
 | Enum variant | `Shape::Empty`, `Shape::Circle(r)` | that variant, binding the payload |
 | Or-pattern | `0 \| 1`, `E::A(x) \| E::B(x)` | at least one alternative matches; every alternative binds the same names |
@@ -198,7 +198,7 @@ fn main() {
 Error:
 
 ```text
-error[E0509]: cannot move out of a value of type Guard in a pattern because it implements Drop in version 1.4; use references instead
+error[E0509]: cannot move out of a value of type Guard in a pattern because it implements Drop; use references instead
    --> example-06.ls:13:17
     |
  13 |     if let Some(value) = Some(guard) {
@@ -210,9 +210,9 @@ lsaca: example-06.ls: could not compile example-06.ls due to previous error(s)
 
 ### Tuple patterns
 
-Tuple patterns match the tuple's arity and bind each component. All tuple
-patterns must be **flat**: nested tuple values and nested tuple patterns are a
-known codegen limitation in 1.4.0 (see [Roadmap](16-roadmap.md)).
+Tuple patterns match the tuple's arity and bind each component. Tuple patterns
+can nest: a pattern such as `(first, (second, third))` matches a tuple whose
+second element is itself a tuple.
 
 ```ls
 fn main() {
@@ -225,6 +225,11 @@ fn main() {
     match triple {
         (a, b, c) => println!("{} {} {}", a, b, c),
     }
+
+    let nested = (1, (2, 3));
+    match nested {
+        (a, (b, c)) => println!("{} {} {}", a, b, c),
+    }
 }
 ```
 
@@ -232,6 +237,7 @@ Output:
 ```text
 1 lsaca
 1 2.5 x
+1 2 3
 ```
 
 ### Struct patterns
@@ -759,7 +765,7 @@ Output:
 7
 ```
 
-Bindings from a `&mut` *aggregate* pattern are writable in version 1.4.0: a struct
+Bindings from a `&mut` *aggregate* pattern are writable in version 1.5.0: a struct
 pattern with several bindings behaves like a single binding, and assignments such as
 `match &mut maybe { Some(value) => { *value = 9; } ... }` compile and update the
 referent (see [References and
@@ -900,14 +906,11 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 1.4.0
+## Known limitations in 1.5.0
 
 Or-patterns, match guards and string-literal patterns are fully supported. The
-pattern restrictions that remain in 1.4.0 are:
+pattern restrictions that remain in 1.5.0 are:
 
-* **Nested tuples** — tuple patterns inside tuple patterns still produce invalid
-  C in the generated project; keep tuple patterns flat and destructure nested
-  pairs in stages.
 * **Guards only in `match`** — `if let` and `while let` take a pattern but no
   guard; nest an `if` inside the body instead.
 * **Limited reference patterns** — there are no `ref` or `&` patterns and no
@@ -917,7 +920,7 @@ pattern restrictions that remain in 1.4.0 are:
   through `*binding`. There are no range or slice patterns at all, for strings
   or integers.
 
-The nested-tuple gap is listed again in [Roadmap](16-roadmap.md) together with
+The remaining restrictions are listed in [Roadmap](16-roadmap.md) together with
 the other known limitations of the release.
 
 ## What next

@@ -143,6 +143,9 @@ impl<'a> Checker<'a> {
                 self.type_contains_ref(&inner)
             }
             ITy::Result(ok, err) => self.type_contains_ref(&ok) || self.type_contains_ref(&err),
+            ITy::HashMap(key, value) => {
+                self.type_contains_ref(&key) || self.type_contains_ref(&value)
+            }
             ITy::Tuple(elems) => elems.iter().any(|elem| self.type_contains_ref(elem)),
             _ => false,
         }
@@ -225,7 +228,7 @@ impl<'a> Checker<'a> {
             let described = self.describe_resolved(ty);
             self.error_code(
                 format!(
-                    "references cannot be stored in this type in version 1.4 (found {})",
+                    "references cannot be stored in this type (found {})",
                     described
                 ),
                 span,
@@ -248,7 +251,7 @@ impl<'a> Checker<'a> {
                     let described = self.describe_resolved(&inner);
                     self.error_code(
                         format!(
-                            "mutable references to {} are not supported in version 1.4; take &{} or restructure the code",
+                            "mutable references to {} are not supported; take &{} or restructure the code",
                             described, described
                         ),
                         span,
@@ -278,6 +281,9 @@ impl<'a> Checker<'a> {
             }
             ITy::Result(ok, err) => {
                 self.validate_storage_type(&ok, span) && self.validate_storage_type(&err, span)
+            }
+            ITy::HashMap(key, value) => {
+                self.validate_storage_type(&key, span) && self.validate_storage_type(&value, span)
             }
             ITy::Tuple(elems) => {
                 let mut valid = true;
@@ -385,7 +391,7 @@ impl<'a> Checker<'a> {
                 let described = self.describe_resolved(&inner_ty);
                 self.error_code(
                     format!(
-                        "mutable references to {} are not supported in version 1.4; take &{} or restructure the code",
+                        "mutable references to {} are not supported; take &{} or restructure the code",
                         described, described
                     ),
                     span,

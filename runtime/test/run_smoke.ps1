@@ -5,9 +5,10 @@
 .DESCRIPTION
     The repository path contains non-ASCII characters, so the runtime sources are
     copied into an ASCII temporary directory before compiling. The runtime is
-    built from its four translation units (lsaca_rt.c, lsaca_rt_string.c,
-    lsaca_rt_vec.c, lsaca_rt_fmt.c) plus the private lsaca_rt_internal.h header,
-    exactly like a generated project links them. Three builds are produced:
+    built from its five translation units (lsaca_rt.c, lsaca_rt_string.c,
+    lsaca_rt_vec.c, lsaca_rt_fmt.c, lsaca_rt_map.c) plus the private
+    lsaca_rt_internal.h header, exactly like a generated project links them.
+    Three builds are produced:
 
         smoke_release.exe   plain -O1 build
         smoke_debug.exe     -DLSACA_DEBUG (checked arithmetic + leak report)
@@ -148,7 +149,8 @@ foreach ($runtimeName in @(
         'lsaca_rt.c',
         'lsaca_rt_string.c',
         'lsaca_rt_vec.c',
-        'lsaca_rt_fmt.c')) {
+        'lsaca_rt_fmt.c',
+        'lsaca_rt_map.c')) {
     Copy-Item -LiteralPath (Join-Path $script:RuntimeDir $runtimeName) -Destination $script:WorkDir
     $script:RtSources += (Join-Path $script:WorkDir $runtimeName)
 }

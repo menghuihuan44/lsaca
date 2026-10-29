@@ -71,9 +71,10 @@ pub fn release_stmt(names: &TypeNames, ty: &Ty, expr: &str) -> Option<String> {
     if !is_managed(ty) {
         return None;
     }
-    if ty.is_string() || ty.is_rc() {
+    if ty.is_string() || ty.is_rc() || ty.is_hash_map() {
         // The void* cast makes the call valid for handle values read through
-        // a shared reference (which are const-qualified).
+        // a shared reference (which are const-qualified). HashMap values are
+        // handles to a runtime-managed allocation as well.
         return Some(format!("ls_release((void*)({}));", expr));
     }
     Some(format!("{}({});", release_fn_name(names, ty), expr))
@@ -103,9 +104,21 @@ pub fn eq_expr(names: &TypeNames, ty: &Ty, a: &str, b: &str) -> String {
             &format!("({})->payload", b),
         )
     } else if ty.is_fn() {
+        // Function values are (env, fn_ptr) handles; equality compares both.
+        // The env pointer is the nullable part: the handle itself is a struct
+        // value, so it can never be compared against NULL.
         format!(
-            "(({}.env == {}.env) && ({} != NULL) && ({}.fn_ptr == {}.fn_ptr))",
+            "(({}.env == {}.env) && ({}.env != NULL) && ({}.fn_ptr == {}.fn_ptr))",
             a, b, a, a, b
+        )
+    } else if ty.is_hash_map() {
+        // Maps compare structurally through their generated helper (same
+        // entries, values compared with the value type's equality).
+        format!(
+            "lsaca_map_eq_{}(({}), ({}))",
+            names.map_suffix(ty).unwrap_or_default(),
+            a,
+            b
         )
     } else {
         format!("{}(({}), ({}))", eq_fn_name(names, ty), a, b)
@@ -168,6 +181,16 @@ pub fn debug_append_statement(
             acc,
             acc,
             util::c_string_literal("()")
+        ));
+    }
+    if ty.is_hash_map() {
+        // The map debug helper appends every entry to the accumulator through
+        // its out parameter, in statement form (DESIGN 5.5).
+        return Some(format!(
+            "lsaca_map_debug_{}(({}), &({}));",
+            names.map_suffix(ty).unwrap_or_default(),
+            value,
+            acc
         ));
     }
     match debug_scalar_kind(ty) {

@@ -1,7 +1,7 @@
 # lsaca cross-language benchmarks
 
 This directory holds the benchmark programs and the measurement harness used for the
-"Benchmarks" page of the language manual (docs/language/17-benchmarks.md).
+"Benchmarks" page of the language manual (docs/language/21-benchmarks.md).
 
 The goal is a *small* but honest comparison: the same workloads implemented
 idiomatically in lsaca, C, Rust, Python and Node.js, with every run validated against an
@@ -11,11 +11,13 @@ compile-only workload measures how the lsaca build scales with source size.
 ## Layout
 
     benchmarks/
-      programs/            one source per (workload, language)
-        fib.ls  fib.c  fib.rs  fib.py  fib.js
-        loop_sum.ls  ...            (and the same for: string_build, vec_memory,
-        sort_i64.ls  ...             matrix_multiply, binary_trees, binary_trees_refs,
-        sieve.ls  ...                string_split, sieve, mandelbrot)
+      programs/            five sources per executed workload (lsaca, C, Rust,
+                           Python, Node.js), e.g. fib.ls fib.c fib.rs fib.py fib.js;
+                           workloads: fib, loop_sum, string_build, vec_memory,
+                           sort_i64, matrix_multiply, binary_trees,
+                           binary_trees_refs, string_split, sieve, mandelbrot,
+                           iterator_pipeline, hashmap_wordcount, generic_stack,
+                           fn_pipeline
         compile_large.ls   generated 4,511-line lsaca source (compile-only workload)
         gen_compile_large.py  stdlib-only generator for compile_large.ls
       results/
@@ -36,8 +38,9 @@ Then run the suite from the repository root:
 
     python scripts/bench.py
 
-That takes roughly 3-5 minutes on a modern laptop (the published run took 3m47s; twelve
-programs, eleven of them executed with 7 runs each, plus the peak-memory runs) and writes:
+That takes several minutes on a modern laptop (the published 1.4 run took 3m47s for
+twelve programs; the suite now has sixteen programs, fifteen of them executed with 7
+runs each, plus the peak-memory runs) and writes:
 
 - benchmarks/results/latest.json  (raw data)
 - benchmarks/results/latest.md    (tables)
@@ -72,6 +75,10 @@ fails; fallback results are labelled in the JSON and in the markdown tables.
 | string_split | string splitting / parsing | build a 194,500-byte comma-separated numeric string, split it, parse every token and sum | checksum=194500,50000,24975000 |
 | sieve | array marking / branches | sieve of Eratosthenes, count primes below 2,000,000 | checksum=148933 |
 | mandelbrot | floating point math | 600x400 Mandelbrot grid, 100 iterations max, sum of iteration counts | checksum=6282265 |
+| iterator_pipeline | lazy iterator pipeline overhead | 1,000,000 i64 values through .iter().filter(even).map(x*x).fold(0, add); checksum is the folded sum | checksum=166666166667000000 |
+| hashmap_wordcount | hash map counting with String keys | 200,000 deterministic words from a 4,096-word alphabet counted in a map; checksum is the sum of squared frequencies, the number of distinct keys and the highest frequency | checksum=9766208,4096,49 |
+| generic_stack | generic type instantiation | one generic Stack<T> instantiated for i64 (1,000,000 push/pop) and String (1,000 strings), same code both times | checksum=499999500000,5900 |
+| fn_pipeline | function values in struct fields, mixed ownership | three Rule{label: String, apply: fn(i64)->i64} records applied 1,000x each plus a clone of the first, 500x; checksum is result sum and label bytes | checksum=53637,22 |
 | compile_large | lsaca build-time scaling (compile-only) | generated 4,511-line lsaca source with 450 functions; built but not executed | checksum=14655037 (not run by the harness) |
 
 Each executed program prints exactly one line (checksum=...) and exits with code 0. The
@@ -126,8 +133,11 @@ page describes the differences:
   has had references (`&T` / `&mut T`) with borrow checking since 1.3; 1.4 adds ownership
   and move semantics on top. binary_trees_refs uses `&Option<Box<Node>>` to traverse the
   tree without copying it, while binary_trees (traversal by value) asks for the deep copy it
-  measures explicitly with .clone(). lsaca has no sort method on Vec and no generics, which
-  is why the workloads stay simple.
+  measures explicitly with .clone(). Since 1.5 the language has user generics (generic
+  structs, enums, functions and impls, monomorphised at compile time), traits, lazy iterator
+  adapters (map/filter/take/skip/enumerate/fold/sum/count/any/all/find/collect) and a builtin
+  HashMap<K, V>; Vec::len() returns i64. lsaca still has no sort method on Vec, which is why
+  sort_i64 keeps its hand-written quicksort.
 - C: a manually resized char buffer for string_build, a malloc'ed array of structs for
   vec_memory.
 - Rust: String::with_capacity plus push, Vec::with_capacity plus push, to_string().
@@ -159,13 +169,35 @@ The newer workloads add these language-specific choices, all described on the do
   sieve, so the memory-access pattern is comparable; the checksum is the prime count.
 - mandelbrot: the same f64 escape-time formula everywhere; the checksum is the integer sum
   of iteration counts, so floating-point rounding cannot change the result.
+- iterator_pipeline: one lazy chain, filter(even).map(x * x).fold(0, add), over
+  1,000,000 i64 values. The lsaca and Rust versions compose real iterator adapters and
+  allocate only the source Vec; Python uses a generator expression; Node.js uses an eager
+  loop (an array filter/map would allocate two intermediate arrays); C writes the plain
+  eager loop. The row isolates the cost of the lazy adapter abstraction against a
+  hand-written loop.
+- hashmap_wordcount: a counting stress test: 200,000 insert/lookup operations over 4,096
+  distinct String keys, checked by the sum of squared frequencies (order-independent), the
+  number of distinct keys and the highest frequency. lsaca uses the builtin
+  HashMap<String, i64>; Rust uses std::collections::HashMap, Python a dict, Node.js a Map,
+  and C a hand-written open-addressing table with FNV-1a hashing and strcmp because C has
+  no map in its standard library.
+- generic_stack: the lsaca stack is a generic struct Stack<T> instantiated for i64 and String
+  from the same source, and the compiler monomorphises both; Rust does the same with a generic
+  struct, Python and Node.js rely on dynamic typing, and C spells the two instantiations out
+  because it has no generics.
+- fn_pipeline: the lsaca Rule record holds a non-Copy label String and a Copy fn(i64) -> i64
+  handle in one struct; run() borrows the rule (&Rule) and calls (rule.apply)(value), and the
+  cloned rule shares nothing but its label copy (fn values are refcounted handles, so copying
+  one does not allocate). Rust stores a fn pointer in the struct, C stores a function pointer,
+  and Python/Node.js store closures in the record. This exercises fn values inside aggregates,
+  which 1.5 made valid C for the first time.
 
 A contiguous array of values (C, Rust, lsaca) and a per-element object (Python, Node.js)
 are both the natural representation in their language; the compiler/VM overhead that
 follows from each choice is part of what the numbers show. Since 1.4 an lsaca program
-copies only where it asks for a copy: the explicit .clone() in binary_trees is the only
-deep copy in these sources. Aggregate literals (struct, tuple, vector, Some/Ok/Err) move
-their operands into place, and every other pass, traversal, call and return moves or
+copies only where it asks for a copy: the explicit .clone() in binary_trees and the single
+Rule clone in fn_pipeline are the only copies requested by these sources. Aggregate
+literals (struct, tuple, vector, Some/Ok/Err) move their operands into place, and every other pass, traversal, call and return moves or
 borrows a value instead of deep-copying it, so the other rows no longer carry the
 implicit-copy overhead that 1.3's value semantics had; the docs page explains the measured
 effect.
@@ -218,7 +250,7 @@ A compile-only workload shows up only in the compile-time table, with its name m
 "(compile-only)"; there is no runtime or peak-memory entry for it.
 
 benchmarks/results/latest.json and latest.md are regenerated by every run. The manual page
-[docs/language/17-benchmarks.md](../docs/language/17-benchmarks.md) quotes the numbers
+[docs/language/21-benchmarks.md](../docs/language/21-benchmarks.md) quotes the numbers
 measured on the reference machine; those tables are generated from
 benchmarks/results/latest.md, and the page explains how to reproduce them. The recorded
 run used the `official` build mode (the normal `lsaca build -r` path, not the fallback);

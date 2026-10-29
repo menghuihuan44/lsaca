@@ -22,6 +22,7 @@ pub enum ITy {
     Box(Box<ITy>),
     Option(Box<ITy>),
     Result(Box<ITy>, Box<ITy>),
+    HashMap(Box<ITy>, Box<ITy>),
     Tuple(Vec<ITy>),
     Fn(Vec<ITy>, Box<ITy>),
     /// A reference type: &T or &mut T.
@@ -78,6 +79,10 @@ impl ITy {
         ITy::Result(Box::new(ok), Box::new(err))
     }
 
+    pub fn hash_map(key: ITy, value: ITy) -> ITy {
+        ITy::HashMap(Box::new(key), Box::new(value))
+    }
+
     pub fn tuple(elems: Vec<ITy>) -> ITy {
         if elems.is_empty() {
             ITy::Unit
@@ -111,6 +116,7 @@ impl ITy {
             Ty::Box(elem) => ITy::box_(ITy::from_ty(elem)),
             Ty::Option(elem) => ITy::option(ITy::from_ty(elem)),
             Ty::Result(ok, err) => ITy::result(ITy::from_ty(ok), ITy::from_ty(err)),
+            Ty::HashMap(key, value) => ITy::hash_map(ITy::from_ty(key), ITy::from_ty(value)),
             Ty::Tuple(elems) => ITy::Tuple(elems.iter().map(ITy::from_ty).collect()),
             Ty::Fn(params, ret) => {
                 ITy::function(params.iter().map(ITy::from_ty).collect(), ITy::from_ty(ret))
@@ -226,6 +232,7 @@ impl Infer {
             ITy::Box(elem) => ITy::box_(self.resolve(elem)),
             ITy::Option(elem) => ITy::option(self.resolve(elem)),
             ITy::Result(ok, err) => ITy::result(self.resolve(ok), self.resolve(err)),
+            ITy::HashMap(key, value) => ITy::hash_map(self.resolve(key), self.resolve(value)),
             ITy::Tuple(elems) => ITy::Tuple(elems.iter().map(|ty| self.resolve(ty)).collect()),
             ITy::Fn(params, ret) => ITy::function(
                 params.iter().map(|ty| self.resolve(ty)).collect(),
@@ -306,6 +313,10 @@ impl Infer {
                 self.unify_resolved(*a_ok, *b_ok)?;
                 self.unify_resolved(*a_err, *b_err)
             }
+            (ITy::HashMap(a_key, a_value), ITy::HashMap(b_key, b_value)) => {
+                self.unify_resolved(*a_key, *b_key)?;
+                self.unify_resolved(*a_value, *b_value)
+            }
             (ITy::Tuple(a), ITy::Tuple(b)) => {
                 if a.len() != b.len() {
                     return Err(());
@@ -382,6 +393,7 @@ impl Infer {
                 self.occurs(id, elem)
             }
             ITy::Result(ok, err) => self.occurs(id, ok) || self.occurs(id, err),
+            ITy::HashMap(key, value) => self.occurs(id, key) || self.occurs(id, value),
             ITy::Tuple(elems) => elems.iter().any(|elem| self.occurs(id, elem)),
             ITy::Fn(params, ret) => {
                 params.iter().any(|param| self.occurs(id, param)) || self.occurs(id, ret)
@@ -435,6 +447,10 @@ impl Infer {
             ITy::Result(ok, err) => Ok(Ty::result(
                 self.finalize_resolved(ok)?,
                 self.finalize_resolved(err)?,
+            )),
+            ITy::HashMap(key, value) => Ok(Ty::hash_map(
+                self.finalize_resolved(key)?,
+                self.finalize_resolved(value)?,
             )),
             ITy::Tuple(elems) => {
                 let mut out = Vec::with_capacity(elems.len());

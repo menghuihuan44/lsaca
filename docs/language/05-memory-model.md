@@ -12,12 +12,14 @@ reclaims `Rc<T>` cycles. Version 1.4 adds `Drop` hooks, so destruction is
 observable: a value runs its `Drop` implementation when it is released. Version
 1.3 added non-owning references with a lightweight borrow checker that enforces
 aliasing (it never owns or frees anything — see [References and
-borrowing](12-references-and-borrowing.md)).
+borrowing](12-references-and-borrowing.md)). Version 1.5 adds user-defined
+generics and traits, lazy iterators, the builtin `HashMap<K, V>`, and extends
+`==` to aggregates, references and maps.
 
 This page is the authoritative description of ownership, moves, `.clone()`,
-`Drop`, copy-on-write mutation, `Rc<T>`, `Box<T>`, cycles and leak tracking. The
-finer rules for moves in expressions are also collected in [Ownership and
-moves](11-ownership-and-moves.md).
+`Drop`, copy-on-write mutation, `Rc<T>`, `Box<T>`, iterator ownership,
+`HashMap<K, V>` ownership, cycles and leak tracking. The finer rules for moves
+in expressions are also collected in [Ownership and moves](11-ownership-and-moves.md).
 
 ## The kinds of value representation
 
@@ -39,13 +41,14 @@ Every lsaca value is represented in one of three ways:
    appears as a field or element of an aggregate.
 
 `Copy` and `Clone` are derived automatically from a type's definition;
-`Drop` is the one trait you can implement. The rules are given in the next
-sections.
+`Drop` is the one builtin trait you can implement (user-defined traits also
+exist since 1.5.0, but they do not change value semantics). The rules are given
+in the next sections.
 
 | Category | Types | What use-by-value does |
 | --- | --- | --- |
 | Copy | `bool`, integers, floats, `()`, `&T`, `&mut T`; tuples, `Option` and `Result` all of whose parts are Copy; user structs and enums whose fields are all Copy and that do not implement `Drop` | Copies the value; the original stays usable |
-| Move-only | `String`, `Vec<T>`, `Rc<T>`, `Box<T>`, function values and closures; any type containing one of them; every type that implements `Drop` | Moves ownership to the new place; using the old binding is an error |
+| Move-only | `String`, `Vec<T>`, `HashMap<K, V>`, `Rc<T>`, `Box<T>`, function values and closures; any type containing one of them; every type that implements `Drop` | Moves ownership to the new place; using the old binding is an error |
 
 ```ls
 struct Point {
@@ -80,7 +83,8 @@ use their value by value and therefore move it when the type is move-only:
 * storing it in an aggregate: a struct or tuple literal field, a `vec!`
   element, `Some`/`Ok`/`Err` payload, an `Rc::new`/`Box::new` payload, or
   `Box::set`/`Rc::set`;
-* pushing it into a `Vec` with `push`, `insert` or `extend`;
+* pushing it into a `Vec` with `push`, `insert` or `extend`, or inserting it
+  into a `HashMap` with `insert` (both key and value are moved);
 * calling a receiver-consuming builtin such as `unwrap`, `expect` or
   `unwrap_or` on it;
 * iterating a `Vec` by value with `for item in values`;
@@ -92,8 +96,9 @@ use their value by value and therefore move it when the type is move-only:
 These positions only borrow and never move their operand: `format!`,
 `println!` and the other formatting macros, `assert!`/`assert_eq!`,
 `==`/`!=`, `&place`/`&mut place`, field reads of Copy fields, method receivers
-of `&self`/`&mut self` methods, and mutating builtin methods such as `push_str`,
-`push`, `set` or the `Option`/`Result` combinators.
+of `&self`/`&mut self` methods, mutating builtin methods such as `push_str`,
+`push`, `set` or the `Option`/`Result` combinators, and the map methods whose
+key is copied (`get`, `get_with`, `contains_key`, `remove`).
 
 After a move the old binding is gone. Using it is the error that makes ownership
 visible:
@@ -241,8 +246,9 @@ alice 10
 
 ## `Drop`
 
-`Drop` is the one trait a program can implement. It declares the hook that runs
-when a value is released:
+`Drop` is the one trait with a builtin implementation form (user-defined traits
+exist since 1.5.0, but they do not change value semantics). It declares the hook
+that runs when a value is released:
 
 ```rust
 impl Drop for TypeName {
@@ -257,8 +263,9 @@ Rules and behaviour:
 * exactly one `Drop` implementation per type (`E0119` on a duplicate); the hook
   must be named `drop`, take `&mut self` as its only parameter and return `()`;
 * a type that implements `Drop` is never `Copy` and cannot be cloned (`E0277`);
-* no other trait can be implemented; `impl Copy` and `impl Clone` are rejected
-  with a message saying those traits are derived automatically;
+* no other builtin trait can be implemented; user-defined traits are allowed
+  since 1.5.0 but are ordinary method collections. `impl Copy` and `impl Clone`
+  are rejected with a message saying those traits are derived automatically;
 * the hook receives a mutable reference to the value, so it can read or modify
   fields before they are released;
 * the hook runs first, then the fields are released in declaration order;
@@ -352,12 +359,30 @@ assignment or moving the value somewhere that releases it. See [Ownership and
 moves](11-ownership-and-moves.md#the-drop-trait) for the full set of rules and
 errors.
 
+## Iterators own the vector they read
+
+`.iter()` consumes a `Vec<T>` and returns an iterator value that owns the
+vector. The iterator is an ordinary move-only value: it lives in a local, is
+passed and returned like any value, and releases its vector (and its elements)
+when it is dropped. Each adapter in a chain such as
+`values.iter().filter(...).map(...)` creates a new iterator value, and a terminal
+operation (`collect`, `fold`, `count`, `sum`, `any`, `all`, `find`) consumes the
+chain and produces an ordinary value. A `for` loop over an iterator releases it
+at loop exit. See [Iterators](19-iterators.md).
+
+## HashMap owns its keys and values
+
+A `HashMap<K, V>` is a managed value like `Vec`: it owns every key and value
+inserted into it, releases them when the map is dropped, and `insert` returns the
+previous value instead of dropping it. `.clone()` produces an independent table
+whose keys and values are cloned too. See [HashMap](20-hashmap.md).
+
 ## Copy-on-write
 
-`String` and `Vec<T>` implement copy-on-write internally so that cloning and
-then mutating one side does not have to duplicate the buffer twice: when a
-buffer is shared and a handle asks to mutate it, the runtime copies the buffer
-first. The language-visible rule is simply that cloned values are independent —
+`String` and `Vec<T>` may share a buffer between a value and its clone and copy
+it lazily on mutation, so cloning and then mutating one side does not have to
+duplicate the buffer twice: when a buffer is shared and a handle asks to mutate
+it, the runtime copies the buffer first. The language-visible rule is simply that cloned values are independent —
 mutating a clone never changes the original, and mutating the original after a
 clone never changes the clone. Moving a value transfers the buffer without any
 copy at all, which is why moves are preferred to clones.
@@ -698,8 +723,13 @@ See [References and borrowing](12-references-and-borrowing.md) for the rules.
 * `Drop` hooks run when a value is released: hook first, then fields, locals in
   reverse order, parameters in reverse order, temporaries at the end of the
   statement. `exit(n)` and panics skip pending drops.
-* `String` and `Vec` clones are independent; the runtime uses copy-on-write
+* `String` and `Vec` clones are independent; the runtime may use copy-on-write
   internally, and moves transfer buffers without copying.
+* Iterator values own the `Vec<T>` they were created from; terminal operations
+  produce ordinary values. A `HashMap<K, V>` owns its keys and values and
+  `.clone()` produces an independent table.
+* Since 1.5.0 `==` compares `Vec`, `Option`, `Result`, tuples, user structs and
+  enums, references and `HashMap` structurally; function values have no `==`.
 * `Rc<T>` provides shared mutable cells; its handles are move-only and
   `.clone()` shares the cell; `==` is identity.
 * `Box<T>` provides owned indirection with deep-clone value semantics; it
@@ -723,3 +753,5 @@ See [References and borrowing](12-references-and-borrowing.md) for the rules.
 * Non-owning views of values and their rules: [References and
   borrowing](12-references-and-borrowing.md).
 * Closures capture by value and move their captures: [Closures](14-closures.md).
+* Generics, traits, iterators and the hash map: [Generics](17-generics.md),
+  [Traits](18-traits.md), [Iterators](19-iterators.md), [HashMap](20-hashmap.md).

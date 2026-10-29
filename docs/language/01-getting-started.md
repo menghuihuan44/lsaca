@@ -36,7 +36,7 @@ cargo build --release
 Expected output:
 
 ```text
-lsaca 1.4.0
+lsaca 1.5.0
 ```
 
 The compiler is a single binary at `target/release/lsaca` (`lsaca.exe` on
@@ -85,16 +85,17 @@ lsaca emit-c hello.ls -o hello-c
 ```
 
 The directory then contains `main.c`, the runtime sources `lsaca_rt.c`,
-`lsaca_rt_string.c`, `lsaca_rt_vec.c` and `lsaca_rt_fmt.c`, the headers
-`lsaca_rt.h` and `lsaca_rt_internal.h`, and a `CMakeLists.txt`. The project is
-standalone: `CMakeLists.txt` lists all five C translation units, so a plain
+`lsaca_rt_string.c`, `lsaca_rt_vec.c`, `lsaca_rt_fmt.c` and `lsaca_rt_map.c`,
+the headers `lsaca_rt.h` and `lsaca_rt_internal.h`, and a `CMakeLists.txt`. The
+project is standalone: `CMakeLists.txt` lists all six C translation units, so a
+plain
 `cmake -S hello-c -B hello-c/build && cmake --build hello-c/build` builds it
 without lsaca.
 
 ## A slightly larger tour
 
 The following program uses a struct, an `impl` block, a `Box<T>`, an `Rc<T>`
-cell, the `?` operator and a format specifier, all verified to work in 1.4.0:
+cell, the `?` operator and a format specifier, all verified to work in 1.5.0:
 
 ```ls
 struct Point {
@@ -166,8 +167,8 @@ area = 12.00
 [     right]
 ```
 
-The tour already uses v1.4 ownership: `Box`, `Rc`, `String` and `Vec` are
-move-only, so `let shared = counter.clone()` keeps the counter usable and
+The tour already uses the ownership model added in 1.4: `Box`, `Rc`, `String`
+and `Vec` are move-only, so `let shared = counter.clone()` keeps the counter usable and
 `boxed.get()` reads an owned copy of the payload. Binding or passing one of those
 values by value moves it; `.clone()` makes an independent second value. See
 [Ownership and moves](11-ownership-and-moves.md).
@@ -284,10 +285,10 @@ Options:
 | `--cmake` | Build through the generated CMake project instead of the built-in direct C compiler backend. Requires CMake 3.16+ and a generator (Ninja or MinGW Makefiles). |
 | `-h`, `--help` | Print the help text. |
 
-The complete help text of version 1.4.0:
+The complete help text of version 1.5.0:
 
 ```console
-lsaca 1.4.0 - a small statically typed language with an ORC memory model
+lsaca 1.5.0 - a small statically typed language with an ORC memory model
 
 USAGE:
     lsaca <COMMAND> [OPTIONS]
@@ -396,7 +397,7 @@ for the chosen profile.
 On this project's development machine, a cold release build of a small program
 like `hello.ls` takes roughly 1-2 s and a cached rebuild a few tens of
 milliseconds; timings vary with the C compiler and the machine. See
-[Benchmarks](17-benchmarks.md) for the measured numbers.
+[Benchmarks](21-benchmarks.md) for the measured numbers.
 
 Environment variables understood by the compiler and the generated runtime:
 
@@ -442,4 +443,6 @@ Environment variables understood by the compiler and the generated runtime:
 * Understand the memory model before writing large programs:
   [Memory model: ORC](05-memory-model.md).
 * Browse the built-in API: [Standard library](15-standard-library.md).
+* Explore the 1.5 features: [Generics](17-generics.md), [Traits](18-traits.md),
+  [Iterators](19-iterators.md) and [HashMap](20-hashmap.md).
 * Compare with Rust and see the roadmap: [Roadmap](16-roadmap.md).
