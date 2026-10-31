@@ -76,6 +76,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -101,11 +102,38 @@ EXPECTED_RUNTIME_C_FILES = (
     "lsaca_rt_vec.c",
     "lsaca_rt_fmt.c",
     "lsaca_rt_map.c",
+    "lsaca_rt_unicode.c",
 )
 EXPECTED_C_FILES = ("main.c",) + EXPECTED_RUNTIME_C_FILES
 EXPECTED_PROJECT_FILES = frozenset(
-    ("CMakeLists.txt", "lsaca_rt.h", "lsaca_rt_internal.h") + EXPECTED_C_FILES
+    ("CMakeLists.txt", "lsaca_rt.h", "lsaca_rt_internal.h", "lsaca_rt_unicode.h")
+    + EXPECTED_C_FILES
 )
+# Large programs are emitted as main.c plus up to 8 deterministic translation
+# units named lsaca_unit_1.c .. lsaca_unit_N.c (see codegen task-42).
+UNIT_PATTERN = re.compile(r"^lsaca_unit_([1-9][0-9]*)\.c$")
+
+
+def split_unit_names(names: Sequence[str]) -> list:
+    """Return the sorted lsaca_unit_N.c names present in a project file list."""
+    numbered = []
+    for name in names:
+        match = UNIT_PATTERN.match(name)
+        if match is not None:
+            numbered.append((int(match.group(1)), name))
+    numbered.sort()
+    if [index for index, _ in numbered] != list(range(1, len(numbered) + 1)):
+        raise StepFailed(
+            "project",
+            "split translation units are not contiguous from lsaca_unit_1.c: "
+            + repr([name for _, name in numbered]),
+        )
+    return [name for _, name in numbered]
+
+
+def project_source_names(names: Sequence[str]) -> list:
+    """main.c first, then split units in order, then the runtime translation units."""
+    return ["main.c"] + split_unit_names(names) + list(EXPECTED_RUNTIME_C_FILES)
 
 # --- build profiles --------------------------------------------------------
 
@@ -158,6 +186,7 @@ EXPECTED_FAILURE_REASONS = {
     "crates/lsaca/tests/programs/panic_bounds.ls": "panic fixture; e2e expects exit 101",
     "crates/lsaca/tests/programs/panic_div.ls": "panic fixture; e2e expects exit 101",
     "crates/lsaca/tests/programs/panic_unwrap.ls": "panic fixture; e2e expects exit 101",
+    "crates/lsaca/tests/programs/panic_substring.ls": "panic fixture; e2e checks the char-boundary message",
     "crates/lsaca/tests/programs/vec_capacity_negative.ls": "panic fixture; e2e expects exit 101",
     "crates/lsaca/tests/programs/iter_collect_no_type.ls": "documented compile-error fixture (collect needs a known Vec<T>)",
     "crates/lsaca/tests/programs/iter_sum_non_numeric.ls": "documented compile-error fixture (sum supports only i64/f64)",
@@ -479,8 +508,10 @@ def validate_project(emit_dir: Path) -> list:
     except OSError as exc:
         raise StepFailed("project", f"cannot list emitted project {emit_dir}: {exc}") from None
     actual = set(names)
+    units = split_unit_names(names)
+    allowed = EXPECTED_PROJECT_FILES | set(units)
     missing = sorted(EXPECTED_PROJECT_FILES - actual)
-    unexpected = sorted(actual - EXPECTED_PROJECT_FILES)
+    unexpected = sorted(actual - allowed)
     if missing or unexpected:
         raise StepFailed(
             "project",
@@ -493,11 +524,14 @@ def validate_project(emit_dir: Path) -> list:
     cmake_sources = parse_cmake_executable_sources(cmake_text)
     if cmake_sources is None:
         raise StepFailed("project", "emitted CMakeLists.txt has no add_executable source list")
-    if len(cmake_sources) != len(set(cmake_sources)) or set(cmake_sources) != set(EXPECTED_C_FILES):
+    expected_sources = project_source_names(names)
+    if len(cmake_sources) != len(set(cmake_sources)) or set(cmake_sources) != set(
+        expected_sources
+    ):
         raise StepFailed(
             "project",
             f"CMake add_executable sources {cmake_sources} do not match the expected "
-            f"translation units {list(EXPECTED_C_FILES)}",
+            f"translation units {expected_sources}",
         )
     return names
 
@@ -557,7 +591,11 @@ def compare_emissions(dir_a: Path, dir_b: Path) -> tuple[str, list]:
 def compile_project(config: Config, emit_dir: Path, executable: Path, profile: str, env: dict) -> int:
     """Compile the generated project; return elapsed milliseconds."""
     flags = PROFILE_FLAGS[profile]
-    sources = [emit_dir / name for name in EXPECTED_C_FILES]
+    try:
+        present = sorted(path.name for path in emit_dir.iterdir() if path.is_file())
+    except OSError as exc:
+        raise StepFailed("gcc-error", f"cannot list emitted project {emit_dir}: {exc}") from None
+    sources = [emit_dir / name for name in project_source_names(present)]
     argv = [
         config.compiler,
         *flags,

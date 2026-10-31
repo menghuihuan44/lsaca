@@ -289,11 +289,12 @@ static void bench_map_destroy(LsMapTable* table)
     ls_map_clear(table);
     free(table->keys);
     free(table->values);
-    free(table->states);
+    free(table->ctrl);
     table->keys = NULL;
     table->values = NULL;
-    table->states = NULL;
+    table->ctrl = NULL;
     table->len = 0;
+    table->growth_left = 0;
     table->cap = 0;
 }
 

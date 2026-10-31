@@ -557,6 +557,27 @@ impl<'a> Checker<'a> {
                     span,
                 )
             }
+            HBuiltinAssoc::StringFromChar => {
+                if !generics.is_empty() {
+                    self.error_code(
+                        "generic arguments are not allowed here".to_string(),
+                        span,
+                        "E0107",
+                    );
+                }
+                let arg_exprs = self.check_call_args(&[ITy::char_()], args, span);
+                let ret = ITy::string();
+                self.apply_hint(&ret, hint);
+                TExpr::new(
+                    ret,
+                    TExprKind::BuiltinAssoc {
+                        func,
+                        args: arg_exprs,
+                        type_args: Vec::new(),
+                    },
+                    span,
+                )
+            }
             HBuiltinAssoc::RcNew => {
                 let mut explicit: Vec<ITy> = Vec::new();
                 for generic in generics {
@@ -576,6 +597,10 @@ impl<'a> Checker<'a> {
                     },
                 };
                 let arg_exprs = self.check_call_args(std::slice::from_ref(&inner), args, span);
+                // The payload may only be inferred from the argument (e.g.
+                // `Rc::new(&text)`), so validate the resolved payload type.
+                let resolved_inner = self.infer.resolve(&inner);
+                self.validate_storage_type(&resolved_inner, span);
                 let ret = ITy::rc(inner.clone());
                 self.apply_hint(&ret, hint);
                 TExpr::new(
@@ -607,6 +632,9 @@ impl<'a> Checker<'a> {
                     },
                 };
                 let arg_exprs = self.check_call_args(std::slice::from_ref(&inner), args, span);
+                // See HBuiltinAssoc::RcNew: validate the inferred payload.
+                let resolved_inner = self.infer.resolve(&inner);
+                self.validate_storage_type(&resolved_inner, span);
                 let ret = ITy::box_(inner.clone());
                 self.apply_hint(&ret, hint);
                 TExpr::new(
@@ -637,6 +665,11 @@ impl<'a> Checker<'a> {
                     Vec::new()
                 };
                 let arg_exprs = self.check_call_args(&params, args, span);
+                // The element type may be inferred later (e.g. a `Vec::new()`
+                // that is pushed a reference into); validating the resolved
+                // element here catches explicit turbofish payloads too.
+                let resolved_elem = self.infer.resolve(&elem);
+                self.validate_storage_type(&resolved_elem, span);
                 let ret = ITy::vec(elem.clone());
                 self.apply_hint(&ret, hint);
                 TExpr::new(
@@ -727,9 +760,14 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
-        self.validate_storage_type(&elem, span);
         let value = self.check_expr(&args[0], Some(&elem));
         let value = self.coerce_to(value, &elem, args[0].span);
+        // The payload type may only become concrete through unification
+        // (e.g. `Some(&text)` with no annotation), so the storage check has to
+        // run after inference; a pre-check on the unresolved variable would
+        // accept a reference payload and crash when the owner moves.
+        let resolved_elem = self.infer.resolve(&elem);
+        self.validate_storage_type(&resolved_elem, args[0].span);
         TExpr::new(
             ITy::option(elem),
             TExprKind::OptionSome(Box::new(value)),
@@ -794,9 +832,12 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
-        self.validate_storage_type(&ok_ty, span);
         let value = self.check_expr(&args[0], Some(&ok_ty));
         let value = self.coerce_to(value, &ok_ty, args[0].span);
+        // Validate after inference: `Ok(&x)` infers the payload as a
+        // reference only while checking the argument.
+        let resolved_ok = self.infer.resolve(&ok_ty);
+        self.validate_storage_type(&resolved_ok, args[0].span);
         TExpr::new(
             ITy::result(ok_ty, err_ty),
             TExprKind::ResultOk(Box::new(value)),
@@ -828,9 +869,11 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
-        self.validate_storage_type(&err_ty, span);
         let value = self.check_expr(&args[0], Some(&err_ty));
         let value = self.coerce_to(value, &err_ty, args[0].span);
+        // See check_result_ok_ctor: the error payload may be inferred.
+        let resolved_err = self.infer.resolve(&err_ty);
+        self.validate_storage_type(&resolved_err, args[0].span);
         TExpr::new(
             ITy::result(ok_ty, err_ty),
             TExprKind::ResultErr(Box::new(value)),
@@ -1051,6 +1094,13 @@ impl<'a> Checker<'a> {
                 );
             }
             let arg_exprs = self.check_call_args(&info.params, args, span);
+            // The key and value types come from the map, but `insert` payloads
+            // can still be inferred when the map type itself is not annotated.
+            // Validate the resolved parameter types so references are rejected.
+            for param in &info.params {
+                let resolved = self.infer.resolve(param);
+                self.validate_storage_type(&resolved, span);
+            }
             // MapGetWith returns the closure result by moving it out of the
             // map. References would point into the map and could dangle after
             // the map is mutated or dropped, so only storable owned values are
@@ -1083,6 +1133,13 @@ impl<'a> Checker<'a> {
                 );
             }
             let arg_exprs = self.check_call_args(&info.params, args, span);
+            // Storing methods (Vec::push/insert/extend, Rc::set, Box::set) take
+            // owned payloads. The element type may be a variable before the
+            // call, so validate the resolved parameter types after inference.
+            for param in &info.params {
+                let resolved = self.infer.resolve(param);
+                self.validate_storage_type(&resolved, span);
+            }
             self.apply_hint(&info.ret, hint);
             let receiver_expr = self.wrap_derefs(receiver_expr);
             return TExpr::new(
@@ -1379,9 +1436,13 @@ impl<'a> Checker<'a> {
 
     fn equality_supported_inner(&self, ty: &ITy, structs: &mut [bool], enums: &mut [bool]) -> bool {
         match self.infer.resolve(ty) {
-            ITy::Bool | ITy::Int(_) | ITy::Float(_) | ITy::String | ITy::Never | ITy::Var(_) => {
-                true
-            }
+            ITy::Bool
+            | ITy::Char
+            | ITy::Int(_)
+            | ITy::Float(_)
+            | ITy::String
+            | ITy::Never
+            | ITy::Var(_) => true,
             // Rc<T> handles compare by identity (the generated code compares
             // the cell pointers), so the pointee never matters.
             ITy::Rc(_) => true,
@@ -1435,6 +1496,7 @@ impl<'a> Checker<'a> {
         match ty {
             ITy::String => FormatValueKind::String,
             ITy::Bool => FormatValueKind::Bool,
+            ITy::Char => FormatValueKind::Char,
             ITy::Int(int_ty) => {
                 if int_ty.is_signed() {
                     FormatValueKind::SignedInt

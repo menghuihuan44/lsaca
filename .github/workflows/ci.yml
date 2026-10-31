@@ -14,7 +14,11 @@
 #   sanitizers   the C runtime and every generated example under ASan + UBSan
 #   generated-c  emit C for every example, compile with -Werror, run hello,
 #                and build one generated project through CMake + Ninja
-#   site         validate the markdown documentation and build the static site
+#   docs-examples run every runnable documentation example against the release
+#                compiler and compare stdout, exit code and panic messages
+#   site         validate the markdown documentation (internal links, external
+#                files, documented version claims, benchmark tables) and build
+#                the static site
 #
 # The Pages deployment lives in pages.yml; the optional benchmark smoke run
 # lives in benchmark-smoke.yml.
@@ -337,6 +341,33 @@ jobs:
             --profile both \
             --json target/generated-c-report.json
 
+  docs-examples:
+    name: Documentation examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install the C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: docs-examples
+      - name: Build the release CLI
+        run: cargo build --release -p lsaca-cli
+      # Every fenced example in docs/ is compiled and run through the official
+      # driver: compile-only examples are type checked, panic examples must
+      # exit 101 with the documented message, release examples are built with
+      # optimisations and args/stdin examples get the documented input, so a
+      # stale expected output or a semantic regression fails this job.
+      - name: Run every documentation example
+        run: python scripts/docs_verify.py --bin ./target/release/lsaca
+
   site:
     name: Documentation site
     runs-on: ubuntu-latest
@@ -350,6 +381,12 @@ jobs:
           python-version: "3.12"
       - name: Validate the documentation links
         run: python scripts/docsite.py --check
+      - name: Check every markdown link
+        run: python scripts/linkcheck.py
+      - name: Check documented version claims
+        run: python scripts/prose_check.py
+      - name: Validate the published benchmark tables
+        run: python scripts/check_bench21.py
       - name: Build the static site
         run: python scripts/docsite.py --output _site
       # Prove the generator actually produced a browsable tree before uploading.

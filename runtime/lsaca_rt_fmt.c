@@ -8,6 +8,7 @@
  */
 
 #include "lsaca_rt_internal.h"
+#include "lsaca_rt_unicode.h"
 
 /* ====================================================================== */
 /* Formatting: builder primitives                                         */
@@ -88,104 +89,375 @@ LsString* ls_fmt_bool(LsString* acc, bool v) {
 /* Formatting: shortest round-trip floating point                         */
 /* ====================================================================== */
 
-/* The shortest decimal representation is found by printing the value with
- * 1, 2, ... significant digits and parsing it back until the bit pattern
- * matches. That is the classic brute-force definition of "shortest round-trip"
- * and needs no big-integer code. */
+/* The shortest decimal representation is computed exactly with a big-integer
+ * free-format digit generator (Burger-Dybvig / Dragon4). The value is written
+ * as an integer rational R/S scaled by a power of ten; digits are emitted
+ * until either truncating or rounding the remainder is guaranteed to parse
+ * back to the same IEEE value, and the final digit is rounded to nearest with
+ * ties to even. This is exact for every finite value, needs no tables, and
+ * replaces the old brute-force snprintf/strtod loop (18.85 us per value). */
 
-static bool ls_rt_f64_same_bits(double a, double b) {
-    uint64_t x;
-    uint64_t y;
-    memcpy(&x, &a, sizeof x);
-    memcpy(&y, &b, sizeof y);
-    return x == y;
+#define LS_RT_BIG_WORDS 36u
+
+/* Fixed-width unsigned big integer, little-endian 64-bit limbs with a used
+ * length. 36 limbs (2304 bits) cover the widest intermediate: the scaled
+ * denominator of the largest double (~2^1996) and the scaled numerator of the
+ * smallest subnormal printed with 17 significant digits (~2^1131). Only the
+ * used limbs are touched, which keeps the common case (about a dozen limbs)
+ * cheap. */
+typedef struct {
+    uint32_t length;
+    uint64_t limb[LS_RT_BIG_WORDS];
+} LsRtBig;
+
+static void ls_rt_big_zero(LsRtBig* x) {
+    x->length = 0;
 }
 
-static bool ls_rt_f32_same_bits(float a, float b) {
-    uint32_t x;
-    uint32_t y;
-    memcpy(&x, &a, sizeof x);
-    memcpy(&y, &b, sizeof y);
-    return x == y;
-}
-
-/* Parse "d.dddde±XX" produced by printf("%.*e") into significant digits and a
- * decimal exponent (value = 0.digits * 10^(exponent+1)). */
-static void ls_rt_parse_scientific(const char* buf, char* digits,
-                                   size_t digits_cap, size_t* out_ndigits,
-                                   int* out_exponent) {
-    const char* p = buf;
-    size_t nd = 0;
-
-    if (*p == '+' || *p == '-') {
-        p += 1;
+static void ls_rt_big_trim(LsRtBig* x) {
+    while (x->length > 0 && x->limb[x->length - 1] == 0) {
+        x->length -= 1;
     }
-    while (*p != '\0' && *p != 'e' && *p != 'E') {
-        if (*p >= '0' && *p <= '9' && nd + 1 < digits_cap) {
-            digits[nd] = *p;
-            nd += 1;
+}
+
+static void ls_rt_big_from_u64(LsRtBig* x, uint64_t v) {
+    ls_rt_big_zero(x);
+    if (v != 0) {
+        x->limb[0] = v;
+        x->length = 1;
+    }
+}
+
+static void ls_rt_big_copy(LsRtBig* dst, const LsRtBig* src) {
+    uint32_t i;
+    dst->length = src->length;
+    for (i = 0; i < src->length; i += 1) {
+        dst->limb[i] = src->limb[i];
+    }
+}
+
+static void ls_rt_big_shl(LsRtBig* x, unsigned bits) {
+    unsigned words = bits / 64u;
+    unsigned rem = bits % 64u;
+    uint32_t i;
+
+    if (x->length == 0) {
+        return;
+    }
+    if (words != 0) {
+        for (i = x->length; i > 0; i -= 1) {
+            x->limb[i - 1u + words] = x->limb[i - 1u];
         }
-        p += 1;
+        for (i = 0; i < words; i += 1) {
+            x->limb[i] = 0;
+        }
+        x->length += words;
     }
-    while (nd > 1 && digits[nd - 1] == '0') {
-        nd -= 1;
+    if (rem != 0) {
+        uint64_t carry = 0;
+        for (i = 0; i < x->length; i += 1) {
+            uint64_t word = x->limb[i];
+            x->limb[i] = (word << rem) | carry;
+            carry = word >> (64u - rem);
+        }
+        if (carry != 0 && x->length < LS_RT_BIG_WORDS) {
+            x->limb[x->length] = carry;
+            x->length += 1;
+        }
     }
-    *out_ndigits = nd;
-    digits[nd] = '\0';
-    if (*p == 'e' || *p == 'E') {
-        p += 1;
-    }
-    *out_exponent = (int)strtol(p, NULL, 10);
 }
 
-static void ls_rt_shortest_f64(double value, char* digits, size_t* out_ndigits,
-                               int* out_exponent) {
-    char buf[64];
-    int precision;
-    bool found = false;
+/* x /= 2, used for the half-width lower boundary of powers of two. */
+static void ls_rt_big_shr1(LsRtBig* x) {
+    uint32_t i;
+    for (i = 0; i + 1 < x->length; i += 1) {
+        x->limb[i] = (x->limb[i] >> 1) | (x->limb[i + 1] << 63);
+    }
+    if (x->length > 0) {
+        x->limb[x->length - 1] >>= 1;
+    }
+    ls_rt_big_trim(x);
+}
 
-    for (precision = 1; precision <= 17; precision += 1) {
-        int written = snprintf(buf, sizeof buf, "%.*e", precision - 1, value);
-        if (written < 0) {
+/* x *= factor; factor must fit in 32 bits. */
+static void ls_rt_big_mul_small(LsRtBig* x, uint32_t factor) {
+    uint64_t carry = 0;
+    uint32_t i;
+
+    for (i = 0; i < x->length; i += 1) {
+        uint64_t word = x->limb[i];
+        uint64_t low = (uint64_t)(uint32_t)word * factor;
+        uint64_t high = (uint64_t)(uint32_t)(word >> 32) * factor;
+        uint64_t middle = (low >> 32) + (uint64_t)(uint32_t)high;
+        uint64_t result_low = (low & 0xFFFFFFFFu) | (middle << 32);
+        uint64_t result_high = (high >> 32) + (middle >> 32);
+        uint64_t sum = result_low + carry;
+        carry = result_high + (sum < result_low ? 1u : 0u);
+        x->limb[i] = sum;
+    }
+    if (carry != 0 && x->length < LS_RT_BIG_WORDS) {
+        x->limb[x->length] = carry;
+        x->length += 1;
+    }
+}
+
+static void ls_rt_big_mul_pow10(LsRtBig* x, int power) {
+    static const uint32_t pow10[10] = {1u,        10u,        100u,
+                                       1000u,     10000u,     100000u,
+                                       1000000u,  10000000u,  100000000u,
+                                       1000000000u};
+    while (power >= 9) {
+        ls_rt_big_mul_small(x, 1000000000u);
+        power -= 9;
+    }
+    if (power > 0) {
+        ls_rt_big_mul_small(x, pow10[power]);
+    }
+}
+
+static int ls_rt_big_cmp(const LsRtBig* a, const LsRtBig* b) {
+    uint32_t i;
+    if (a->length != b->length) {
+        return a->length < b->length ? -1 : 1;
+    }
+    for (i = a->length; i > 0; i -= 1) {
+        if (a->limb[i - 1u] != b->limb[i - 1u]) {
+            return a->limb[i - 1u] < b->limb[i - 1u] ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+/* a -= b; requires a >= b. */
+static void ls_rt_big_sub(LsRtBig* a, const LsRtBig* b) {
+    uint64_t borrow = 0;
+    uint32_t i;
+    for (i = 0; i < a->length; i += 1) {
+        uint64_t low = i < b->length ? b->limb[i] : 0u;
+        uint64_t current = a->limb[i];
+        uint64_t difference = current - low - borrow;
+        borrow = (current < low || (borrow != 0 && current == low)) ? 1u : 0u;
+        a->limb[i] = difference;
+    }
+    ls_rt_big_trim(a);
+}
+
+/* Round the digit string up by one unit in its last position, propagating the
+ * carry; an all-nine string becomes "1" with the decimal exponent bumped. */
+static void ls_rt_digits_round_up(char* digits, size_t* out_ndigits,
+                                  int* out_exponent) {
+    size_t index = *out_ndigits;
+    while (index > 0) {
+        index -= 1;
+        if (digits[index] != '9') {
+            digits[index] = (char)(digits[index] + 1);
+            *out_ndigits = index + 1;
+            return;
+        }
+    }
+    digits[0] = '1';
+    *out_ndigits = 1;
+    *out_exponent += 1;
+}
+
+/* Shortest round-trip significant digits for one finite positive IEEE value.
+ * bits is the raw bit pattern with the sign bit cleared; is_f32 selects the
+ * 24-bit/8-bit-exponent format. On return digits[0..*out_ndigits) holds the
+ * significant digits and value = 0.digits * 10^(*out_exponent + 1). */
+static void ls_rt_shortest_float(uint64_t bits, bool is_f32, char* digits,
+                                 size_t* out_ndigits, int* out_exponent) {
+    uint64_t fraction;
+    uint64_t mantissa;
+    int biased;
+    int exponent;
+    int scale;
+    int max_digits;
+    bool power_of_two;
+    bool inclusive;
+    int attempt;
+    LsRtBig r;
+    LsRtBig s;
+    LsRtBig m_plus;
+    LsRtBig m_minus;
+    LsRtBig s2;
+    LsRtBig s4;
+    LsRtBig s8;
+    size_t ndigits = 0;
+
+    if (is_f32) {
+        fraction = bits & 0x7FFFFFu;
+        biased = (int)((bits >> 23) & 0xFFu);
+        max_digits = 9;
+        if (biased == 0) {
+            mantissa = fraction;
+            exponent = -149;
+        } else {
+            mantissa = fraction | 0x800000u;
+            exponent = biased - 150;
+        }
+    } else {
+        fraction = bits & 0xFFFFFFFFFFFFFULL;
+        biased = (int)((bits >> 52) & 0x7FFu);
+        max_digits = 17;
+        if (biased == 0) {
+            mantissa = fraction;
+            exponent = -1074;
+        } else {
+            mantissa = fraction | 0x10000000000000ULL;
+            exponent = biased - 1075;
+        }
+    }
+    power_of_two = fraction == 0;
+    /* A decimal exactly on the midpoint between two IEEE values parses back to
+     * the value whose significand is even. */
+    inclusive = (mantissa & 1u) == 0;
+
+    {
+        double magnitude;
+        if (is_f32) {
+            uint32_t raw = (uint32_t)bits & 0x7FFFFFFFu;
+            float value32;
+            memcpy(&value32, &raw, sizeof value32);
+            magnitude = (double)value32;
+        } else {
+            double value64;
+            memcpy(&value64, &bits, sizeof value64);
+            magnitude = fabs(value64);
+        }
+        scale = (int)floor(log10(magnitude));
+    }
+
+    for (attempt = 0; attempt < 4; attempt += 1) {
+        /* v = f * 2^e is scaled by 4 so that two extra decimal digits are
+         * available: e >= 0 keeps S = 4 and shifts R by e + 2, while e < 0
+         * shifts S by 2 - e and R by 2. */
+        unsigned shift = exponent >= 0 ? 2u : (unsigned)(-exponent) + 2u;
+
+        ls_rt_big_from_u64(&r, mantissa);
+        ls_rt_big_shl(&r, exponent >= 0 ? (unsigned)exponent + 2u : 2u);
+        ls_rt_big_from_u64(&s, 1u);
+        ls_rt_big_shl(&s, shift);
+        ls_rt_big_from_u64(&m_plus, 1u);
+        ls_rt_big_shl(&m_plus, exponent >= 0 ? (unsigned)exponent + 1u : 1u);
+        ls_rt_big_copy(&m_minus, &m_plus);
+        if (power_of_two && biased > 1) {
+            ls_rt_big_shr1(&m_minus);
+        }
+        if (scale >= 0) {
+            ls_rt_big_mul_pow10(&s, scale);
+        } else {
+            ls_rt_big_mul_pow10(&r, -scale);
+            ls_rt_big_mul_pow10(&m_plus, -scale);
+            ls_rt_big_mul_pow10(&m_minus, -scale);
+        }
+        if (ls_rt_big_cmp(&r, &s) < 0) {
+            scale -= 1;
+            continue;
+        }
+        {
+            LsRtBig s10;
+            ls_rt_big_copy(&s10, &s);
+            ls_rt_big_mul_small(&s10, 10u);
+            if (ls_rt_big_cmp(&r, &s10) >= 0) {
+                scale += 1;
+                continue;
+            }
+        }
+        break;
+    }
+
+    /* S never changes inside the digit loop, so the multiples used to extract
+     * each decimal digit are computed once. */
+    ls_rt_big_copy(&s2, &s);
+    ls_rt_big_shl(&s2, 1u);
+    ls_rt_big_copy(&s4, &s2);
+    ls_rt_big_shl(&s4, 1u);
+    ls_rt_big_copy(&s8, &s4);
+    ls_rt_big_shl(&s8, 1u);
+
+    for (;;) {
+        unsigned digit = 0;
+        bool trunc_ok;
+        bool round_ok;
+        LsRtBig upper_remainder;
+        int low_cmp;
+        int high_cmp;
+
+        if (ls_rt_big_cmp(&r, &s8) >= 0) {
+            ls_rt_big_sub(&r, &s8);
+            digit = 8;
+        }
+        if (ls_rt_big_cmp(&r, &s4) >= 0) {
+            ls_rt_big_sub(&r, &s4);
+            digit += 4;
+        }
+        if (ls_rt_big_cmp(&r, &s2) >= 0) {
+            ls_rt_big_sub(&r, &s2);
+            digit += 2;
+        }
+        if (ls_rt_big_cmp(&r, &s) >= 0) {
+            ls_rt_big_sub(&r, &s);
+            digit += 1;
+        }
+        low_cmp = ls_rt_big_cmp(&r, &m_minus);
+        ls_rt_big_copy(&upper_remainder, &s);
+        ls_rt_big_sub(&upper_remainder, &r);
+        high_cmp = ls_rt_big_cmp(&upper_remainder, &m_plus);
+        trunc_ok = inclusive ? low_cmp <= 0 : low_cmp < 0;
+        round_ok = inclusive ? high_cmp <= 0 : high_cmp < 0;
+        if (trunc_ok || round_ok) {
+            bool round_up;
+            if (trunc_ok && round_ok) {
+                LsRtBig twice;
+                int half_cmp;
+                ls_rt_big_copy(&twice, &r);
+                ls_rt_big_mul_small(&twice, 2u);
+                half_cmp = ls_rt_big_cmp(&twice, &s);
+                if (half_cmp > 0) {
+                    round_up = true;
+                } else if (half_cmp < 0) {
+                    round_up = false;
+                } else {
+                    round_up = (digit & 1u) != 0; /* ties to even digit */
+                }
+            } else {
+                round_up = round_ok;
+            }
+            digits[ndigits] = (char)('0' + (int)digit);
+            ndigits += 1;
+            if (round_up) {
+                ls_rt_digits_round_up(digits, &ndigits, &scale);
+            }
             break;
         }
-        if (ls_rt_f64_same_bits(strtod(buf, NULL), value)) {
-            found = true;
+        if (ndigits + 1 >= (size_t)max_digits) {
+            /* Every representation of max_digits digits round-trips; round the
+             * last generated digit to nearest to stay with printf. */
+            LsRtBig twice;
+            int half_cmp;
+            ls_rt_big_copy(&twice, &r);
+            ls_rt_big_mul_small(&twice, 2u);
+            half_cmp = ls_rt_big_cmp(&twice, &s);
+            digits[ndigits] = (char)('0' + (int)digit);
+            ndigits += 1;
+            if (half_cmp > 0 || (half_cmp == 0 && (digit & 1u) != 0)) {
+                ls_rt_digits_round_up(digits, &ndigits, &scale);
+            }
             break;
         }
+        digits[ndigits] = (char)('0' + (int)digit);
+        ndigits += 1;
+        ls_rt_big_mul_small(&r, 10u);
+        ls_rt_big_mul_small(&m_plus, 10u);
+        ls_rt_big_mul_small(&m_minus, 10u);
     }
-    if (!found) {
-        (void)snprintf(buf, sizeof buf, "%.17e", value);
+    while (ndigits > 1 && digits[ndigits - 1] == '0') {
+        ndigits -= 1;
     }
-    ls_rt_parse_scientific(buf, digits, 24, out_ndigits, out_exponent);
+    *out_ndigits = ndigits;
+    *out_exponent = scale;
 }
 
-static void ls_rt_shortest_f32(float value, char* digits, size_t* out_ndigits,
-                               int* out_exponent) {
-    char buf[64];
-    int precision;
-    bool found = false;
-
-    for (precision = 1; precision <= 9; precision += 1) {
-        int written =
-            snprintf(buf, sizeof buf, "%.*e", precision - 1, (double)value);
-        if (written < 0) {
-            break;
-        }
-        if (ls_rt_f32_same_bits(strtof(buf, NULL), value)) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        (void)snprintf(buf, sizeof buf, "%.9e", (double)value);
-    }
-    ls_rt_parse_scientific(buf, digits, 24, out_ndigits, out_exponent);
-}
-
-/* Render significant digits as Rust's Display (decimal expansion, no
- * exponent) or Debug (decimal for 1e-4 <= |v| < 1e16, exponent otherwise,
- * integral values get a trailing ".0"). */
 static LsString* ls_rt_render_float(LsString* acc, bool negative, bool debug,
                                     const char* digits, size_t ndigits,
                                     int exponent) {
@@ -267,9 +539,16 @@ static LsString* ls_rt_format_float(LsString* acc, bool debug, double value,
         return ls_fmt_append(acc, debug ? "0.0" : "0", debug ? 3 : 1);
     }
     if (is_f32) {
-        ls_rt_shortest_f32((float)value, digits, &ndigits, &exponent);
+        uint32_t bits;
+        float value32 = (float)value;
+        memcpy(&bits, &value32, sizeof bits);
+        ls_rt_shortest_float((uint64_t)(bits & 0x7FFFFFFFu), true, digits,
+                             &ndigits, &exponent);
     } else {
-        ls_rt_shortest_f64(value, digits, &ndigits, &exponent);
+        uint64_t bits;
+        memcpy(&bits, &value, sizeof bits);
+        ls_rt_shortest_float(bits & 0x7FFFFFFFFFFFFFFFULL, false, digits,
+                             &ndigits, &exponent);
     }
     return ls_rt_render_float(acc, negative, debug, digits, ndigits, exponent);
 }
@@ -484,15 +763,25 @@ LsString* ls_fmt_apply_width(LsString* acc, LsString* piece, int64_t width,
     return acc;
 }
 
-/* Rust-style Debug quoting for strings: escape quote, backslash and the
- * common control characters; other control bytes use \u{...}. */
+/* Rust str Debug quoting: double quotes and backslashes are escaped, the short
+ * escapes are used for \t, \r and \n, every scalar Rust considers non-printable
+ * (Cc, Cf, Cs, Co, Cn, Zl, Zp and all mark categories) is written as \u{...},
+ * and everything else is emitted as raw UTF-8. The buffer is always valid UTF-8,
+ * so the loop steps scalar by scalar instead of byte by byte. */
 LsString* ls_fmt_debug_string(LsString* acc, const LsString* v) {
-    size_t i;
+    size_t i = 0;
 
     acc = ls_fmt_append(acc, "\"", 1);
-    for (i = 0; i < v->len; i += 1) {
-        unsigned char c = (unsigned char)v->data[i];
-        switch (c) {
+    while (i < v->len) {
+        const unsigned char* bytes = (const unsigned char*)v->data + i;
+        size_t length = ls_rt_utf8_decode_length(bytes, v->len - i);
+        uint32_t scalar;
+
+        if (length == 0) {
+            length = 1; /* defensive: buffers are always valid UTF-8 */
+        }
+        scalar = ls_rt_utf8_scalar_at(bytes);
+        switch (scalar) {
         case '"':
             acc = ls_fmt_append(acc, "\\\"", 2);
             break;
@@ -509,18 +798,19 @@ LsString* ls_fmt_debug_string(LsString* acc, const LsString* v) {
             acc = ls_fmt_append(acc, "\\t", 2);
             break;
         default:
-            if (c < 0x20 || c == 0x7F) {
+            if (ls_rt_unicode_char_is_printable(scalar)) {
+                acc = ls_fmt_append(acc, (const char*)bytes, length);
+            } else {
                 char buf[16];
-                int written = snprintf(buf, sizeof buf, "\\u{%x}", (unsigned)c);
+                int written =
+                    snprintf(buf, sizeof buf, "\\u{%x}", (unsigned)scalar);
                 if (written > 0) {
                     acc = ls_fmt_append(acc, buf, (size_t)written);
                 }
-            } else {
-                char byte = (char)c;
-                acc = ls_fmt_append(acc, &byte, 1);
             }
             break;
         }
+        i += length;
     }
     return ls_fmt_append(acc, "\"", 1);
 }
@@ -534,7 +824,6 @@ void ls_print(const LsString* s) {
     if (s != NULL && s->len != 0) {
         (void)fwrite(s->data, 1, s->len, stdout);
     }
-    fflush(stdout);
 }
 
 void ls_println(const LsString* s) {
@@ -543,7 +832,6 @@ void ls_println(const LsString* s) {
         (void)fwrite(s->data, 1, s->len, stdout);
     }
     (void)fputc('\n', stdout);
-    fflush(stdout);
 }
 
 void ls_eprint(const LsString* s) {
@@ -551,7 +839,6 @@ void ls_eprint(const LsString* s) {
     if (s != NULL && s->len != 0) {
         (void)fwrite(s->data, 1, s->len, stderr);
     }
-    fflush(stderr);
 }
 
 void ls_eprintln(const LsString* s) {
@@ -560,7 +847,6 @@ void ls_eprintln(const LsString* s) {
         (void)fwrite(s->data, 1, s->len, stderr);
     }
     (void)fputc('\n', stderr);
-    fflush(stderr);
 }
 
 void ls_print_cstr(const char* cstr) {
@@ -568,7 +854,6 @@ void ls_print_cstr(const char* cstr) {
     if (cstr != NULL) {
         (void)fwrite(cstr, 1, strlen(cstr), stdout);
     }
-    fflush(stdout);
 }
 
 void ls_println_cstr(const char* cstr) {
@@ -577,7 +862,6 @@ void ls_println_cstr(const char* cstr) {
         (void)fwrite(cstr, 1, strlen(cstr), stdout);
     }
     (void)fputc('\n', stdout);
-    fflush(stdout);
 }
 
 void ls_eprint_cstr(const char* cstr) {
@@ -585,7 +869,6 @@ void ls_eprint_cstr(const char* cstr) {
     if (cstr != NULL) {
         (void)fwrite(cstr, 1, strlen(cstr), stderr);
     }
-    fflush(stderr);
 }
 
 void ls_eprintln_cstr(const char* cstr) {
@@ -594,7 +877,6 @@ void ls_eprintln_cstr(const char* cstr) {
         (void)fwrite(cstr, 1, strlen(cstr), stderr);
     }
     (void)fputc('\n', stderr);
-    fflush(stderr);
 }
 
 void ls_print_flush(void) {
@@ -602,4 +884,66 @@ void ls_print_flush(void) {
     fflush(stdout);
     fflush(stderr);
 }
+
+/* ====================================================================== */
+/* Characters                                                             */
+/* ====================================================================== */
+
+/* char Display: the scalar encoded as UTF-8, no quotes. Width/alignment is
+ * applied by ls_fmt_apply_width() in the generated code. */
+LsString* ls_fmt_char(LsString* acc, uint32_t v) {
+    char bytes[4];
+    size_t length = ls_rt_utf8_encode_scalar(v, bytes);
+    return ls_fmt_append(acc, bytes, length);
+}
+
+/* True when Rust's char Debug prints the scalar between the quotes without an
+ * escape. Rust escapes Cc, Cf, Cs, Co, Cn, Zl, Zp and the mark categories; the
+ * generated Unicode table in lsaca_rt_unicode.c provides the exact predicate. */
+static bool ls_rt_fmt_char_printable(uint32_t v) {
+    if (v < 0x20u || v == 0x7Fu) {
+        return false;
+    }
+    if (v < 0x7Fu) {
+        return true;
+    }
+    return ls_rt_unicode_char_is_printable(v);
+}
+
+/* char Debug: single quotes with Rust's char escaping rules: the short escapes
+ * for tab, carriage return, newline, backslash and single quote; printable
+ * scalars verbatim as UTF-8; everything else as \u{...}. */
+LsString* ls_fmt_char_debug(LsString* acc, uint32_t v) {
+    char ascii[16];
+    char bytes[4];
+    size_t length;
+    int written;
+
+    acc = ls_fmt_append(acc, "'", 1);
+    switch (v) {
+    case '\t':
+        return ls_fmt_append(acc, "\\t'", 3);
+    case '\r':
+        return ls_fmt_append(acc, "\\r'", 3);
+    case '\n':
+        return ls_fmt_append(acc, "\\n'", 3);
+    case '\\':
+        return ls_fmt_append(acc, "\\\\'", 3);
+    case '\'':
+        return ls_fmt_append(acc, "\\''", 3);
+    default:
+        break;
+    }
+    if (ls_rt_fmt_char_printable(v)) {
+        length = ls_rt_utf8_encode_scalar(v, bytes);
+        acc = ls_fmt_append(acc, bytes, length);
+    } else {
+        written = snprintf(ascii, sizeof ascii, "\\u{%x}", (unsigned)v);
+        if (written > 0) {
+            acc = ls_fmt_append(acc, ascii, (size_t)written);
+        }
+    }
+    return ls_fmt_append(acc, "'", 1);
+}
+
 

@@ -203,7 +203,9 @@ fn program_name(file: &SourceFile) -> String {
 mod tests {
     use super::*;
     use crate::diag::Severity;
-    use crate::hir::{ConstValue, HBuiltinMethod, HExpr, HExprKind, HPatKind, HStmt};
+    use crate::hir::{
+        ConstValue, HBuiltinAssoc, HBuiltinMethod, HExpr, HExprKind, HPatKind, HStmt,
+    };
     use crate::types::{FloatTy, IntTy, SelfKind, Ty};
 
     fn parse_source(source: &str) -> (ast::Program, SourceFile, Diagnostics) {
@@ -2902,6 +2904,11 @@ fn main() {}"#,
             .filter(|message| message.contains("derived automatically"))
             .count();
         assert_eq!(derived, 2, "{:?}", messages(&diagnostics));
+        assert!(
+            has_code(&diagnostics, "E0119"),
+            "the derived-trait rejection must carry a diagnostic code: {:?}",
+            messages(&diagnostics)
+        );
     }
 
     #[test]
@@ -3946,7 +3953,7 @@ fn main() {
         assert!(has_code(&diagnostics, "E0277"));
         assert!(has_message(
             &diagnostics,
-            "HashMap keys must be one of i64, u64, bool or String, found Vec<i64>"
+            "HashMap keys must be one of i64, u64, bool, char or String, found Vec<i64>"
         ));
         assert!(has_note(
             &diagnostics,
@@ -3955,7 +3962,7 @@ fn main() {
         let key_errors = messages(&diagnostics)
             .iter()
             .filter(|message| {
-                message.contains("HashMap keys must be one of i64, u64, bool or String")
+                message.contains("HashMap keys must be one of i64, u64, bool, char or String")
             })
             .count();
         assert_eq!(
@@ -4026,6 +4033,797 @@ fn main() {
             rendered.contains("VecIter<i64>"),
             "the public adapter name should be shown instead of the internal one:\n{}",
             rendered
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Version 1.6: char and UTF-8 String API
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn accepts_char_values_in_all_positions() {
+        let program = expect_ok(
+            r#"struct Glyph { symbol: char, weight: i64 }
+enum Token { Letter(char), Digit(char) }
+fn identify(symbol: char) -> char {
+    return symbol;
+}
+fn pick(flag: bool) -> Option<char> {
+    if flag {
+        return Some('x');
+    }
+    return None;
+}
+fn main() {
+    let symbol: char = 'a';
+    let copied = symbol;
+    println!("{}", copied);
+    let mut mutation = 'a';
+    mutation = 'b';
+    println!("{}", mutation);
+    let glyph = Glyph { symbol: 'b', weight: 1 };
+    println!("{}", glyph.symbol);
+    let letters: Vec<char> = vec!['a', 'b'];
+    println!("{}", letters.len());
+    let picked: Option<char> = pick(true);
+    println!("{}", picked.is_some());
+    let result: Result<char, String> = Ok('z');
+    println!("{}", result.is_ok());
+    let boxed: Box<char> = Box::new('q');
+    let shared: Rc<char> = Rc::new('r');
+    let tuple: (char, i64) = ('t', 2);
+    println!("{}", tuple.0);
+    let token: Token = Token::Letter('k');
+    match token {
+        Token::Letter(letter) => println!("{}", letter),
+        Token::Digit(digit) => println!("{}", digit),
+    }
+    println!("{}", identify('m'));
+}"#,
+        );
+        assert_eq!(program.structs[0].fields[0].ty, Ty::Char);
+        assert_eq!(program.enums[0].variants[0].fields[0], Ty::Char);
+        let mut saw_box_char = false;
+        let mut saw_rc_char = false;
+        for stmt in &main_fn(&program).body.stmts {
+            if let HStmt::Let {
+                init: Some(init), ..
+            } = stmt
+            {
+                if init.ty == Ty::Box(Box::new(Ty::Char)) {
+                    saw_box_char = true;
+                }
+                if init.ty == Ty::Rc(Box::new(Ty::Char)) {
+                    saw_rc_char = true;
+                }
+            }
+        }
+        assert!(saw_box_char, "missing a Box<char> binding");
+        assert!(saw_rc_char, "missing a Rc<char> binding");
+    }
+
+    #[test]
+    fn accepts_char_comparisons() {
+        expect_ok(
+            r#"fn rank(a: char, b: char) -> i64 {
+    if a == b {
+        return 0;
+    }
+    if a != b {
+        return 1;
+    }
+    if a < b {
+        return 2;
+    }
+    if a <= b {
+        return 3;
+    }
+    if a > b {
+        return 4;
+    }
+    if a >= b {
+        return 5;
+    }
+    return 6;
+}
+fn main() {
+    println!("{}", rank('a', 'b'));
+}"#,
+        );
+    }
+
+    #[test]
+    fn rejects_char_arithmetic_and_bitwise_operations() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let left = 'a';
+    let right = 'b';
+    let _sum = left + right;
+    let _difference = left - right;
+    let _product = left * right;
+    let _quotient = left / right;
+    let _remainder = left % right;
+    let _negated = -left;
+    let _inverted = !left;
+    let _anded = left & right;
+    let _ored = left | right;
+    let _xored = left ^ right;
+    let _mixed = left + 1;
+}"#,
+        );
+        let rendered = messages(&diagnostics);
+        let arithmetic = rendered
+            .iter()
+            .filter(|message| message.contains("cannot apply arithmetic to values of type char"))
+            .count();
+        assert_eq!(
+            arithmetic, 6,
+            "arithmetic on char must be rejected for + - * / % and unary -: {:?}",
+            rendered
+        );
+        let bitwise = rendered
+            .iter()
+            .filter(|message| {
+                message.contains("cannot apply a bitwise operation to values of type char")
+            })
+            .count();
+        assert_eq!(
+            bitwise, 4,
+            "bitwise operators ! & | ^ must be rejected for char: {:?}",
+            rendered
+        );
+        assert!(has_code(&diagnostics, "E0308"), "{:?}", rendered);
+        assert!(
+            has_message(&diagnostics, "mismatched types"),
+            "{:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn accepts_char_casts() {
+        let program = expect_ok(
+            r#"fn main() {
+    let symbol = 'A';
+    let as_i8: i8 = symbol as i8;
+    let as_i16: i16 = symbol as i16;
+    let as_i32: i32 = symbol as i32;
+    let as_i64: i64 = symbol as i64;
+    let as_u8: u8 = symbol as u8;
+    let as_u16: u16 = symbol as u16;
+    let as_u32: u32 = symbol as u32;
+    let as_u64: u64 = symbol as u64;
+    let as_f32: f32 = symbol as f32;
+    let as_f64: f64 = symbol as f64;
+    let byte: u8 = 65;
+    let restored: char = byte as char;
+    let same: char = symbol as char;
+    println!("{}", as_i64);
+    println!("{}", as_f64);
+    println!("{}", restored);
+    println!("{}", same);
+}"#,
+        );
+        assert!(!main_fn(&program).body.stmts.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_char_casts() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let wide: i64 = 65;
+    let narrowed = wide as char;
+    let small: i32 = 66;
+    let also_narrowed = small as char;
+    let truth = 'a' as bool;
+    println!("{}", narrowed);
+    println!("{}", also_narrowed);
+    println!("{}", truth);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "only u8 can be cast as char"));
+        assert!(has_message(&diagnostics, "cannot cast char as bool"));
+    }
+
+    #[test]
+    fn accepts_char_constants() {
+        let program = expect_ok(
+            r#"const FIRST: char = 'a';
+const SECOND: char = 'b';
+const CODE: i64 = 'a' as i64;
+const LETTER: char = (97 as u8) as char;
+const ORDERED: bool = 'a' < 'b';
+fn main() {
+    println!("{}", FIRST == SECOND);
+    println!("{}", FIRST < SECOND);
+    println!("{}", CODE);
+    println!("{}", LETTER);
+    let symbol: char = FIRST;
+    println!("{}", symbol);
+}"#,
+        );
+        let constant = |name: &str| {
+            program
+                .consts
+                .iter()
+                .find(|constant| constant.name == name)
+                .unwrap_or_else(|| panic!("missing constant {}", name))
+        };
+        assert_eq!(program.consts.len(), 5);
+        assert_eq!(constant("FIRST").ty, Ty::Char);
+        assert_eq!(constant("FIRST").value, ConstValue::Char('a'));
+        assert_eq!(constant("SECOND").value, ConstValue::Char('b'));
+        assert_eq!(constant("CODE").ty, Ty::Int(IntTy::I64));
+        assert_eq!(constant("CODE").value, ConstValue::Int(97));
+        assert_eq!(constant("LETTER").ty, Ty::Char);
+        assert_eq!(constant("LETTER").value, ConstValue::Char('a'));
+        assert_eq!(constant("ORDERED").ty, Ty::Bool);
+        assert_eq!(constant("ORDERED").value, ConstValue::Bool(true));
+        assert_eq!(main_fn(&program).body.stmts.len(), 6);
+    }
+
+    #[test]
+    fn rejects_integer_literal_character_constants() {
+        // Numeric -> char casts are only legal from a value already known to
+        // be u8, so integer literals in char constants fail the cast rule.
+        // The old E0080 "not a valid character" folding path is consequently
+        // unreachable from source (u8 values are always valid scalar values);
+        // it is kept in the constant folder as a defensive check.
+        let diagnostics = expect_errors(
+            r#"const BROKEN: char = 1114112 as char;
+const SURROGATE: char = 55296 as char;
+const LETTER: char = 97 as char;
+fn main() {
+    println!("{}{}{}", BROKEN, SURROGATE, LETTER);
+}"#,
+        );
+        let cast_errors = messages(&diagnostics)
+            .into_iter()
+            .filter(|message| message.contains("only u8 can be cast as char"))
+            .count();
+        assert_eq!(cast_errors, 3, "{:?}", messages(&diagnostics));
+        // The constant folder still evaluates the rejected cast expression and
+        // reports the invalid scalar as a secondary E0080 diagnostic for the
+        // two out-of-range literals; source-level programs without constants
+        // only see the E0308 cast error.
+        let value_errors = messages(&diagnostics)
+            .into_iter()
+            .filter(|message| message.contains("not a valid character"))
+            .count();
+        assert_eq!(value_errors, 2, "{:?}", messages(&diagnostics));
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_code(&diagnostics, "E0080"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_unsuffixed_integer_literals_cast_as_char() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let thousand = 1000 as char;
+    let letter = 65 as char;
+    let three_hundred = 300 as char;
+    println!("{}{}{}", thousand, letter, three_hundred);
+}"#,
+        );
+        let cast_errors = messages(&diagnostics)
+            .into_iter()
+            .filter(|message| message.contains("only u8 can be cast as char"))
+            .count();
+        assert_eq!(cast_errors, 3, "{:?}", messages(&diagnostics));
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_float_casts_as_char() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let literal = 1.5 as char;
+    let typed: f64 = 2.5;
+    let narrowed = typed as char;
+    println!("{}{}", literal, narrowed);
+}"#,
+        );
+        let cast_errors = messages(&diagnostics)
+            .into_iter()
+            .filter(|message| message.contains("non-primitive cast"))
+            .count();
+        assert_eq!(cast_errors, 2, "{:?}", messages(&diagnostics));
+        assert!(
+            has_code(&diagnostics, "E0605"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn accepts_u8_to_char_casts_and_folds_them() {
+        let program = expect_ok(
+            r#"const LETTER: char = (97 as u8) as char;
+fn main() {
+    let byte: u8 = 65;
+    let restored: char = byte as char;
+    let literal: char = (66 as u8) as char;
+    println!("{}{}{}", LETTER, restored, literal);
+}"#,
+        );
+        let letter = program
+            .consts
+            .iter()
+            .find(|constant| constant.name == "LETTER")
+            .unwrap_or_else(|| panic!("missing constant LETTER"));
+        assert_eq!(letter.ty, crate::types::Ty::Char);
+        assert_eq!(letter.value, ConstValue::Char('a'));
+    }
+
+    #[test]
+    fn rejects_non_exhaustive_char_matches() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let symbol = 'a';
+    match symbol {
+        'a' => println!("a"),
+        'b' => println!("b"),
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0004"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "not covered"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn accepts_char_matches_with_catch_all_or_alternatives() {
+        expect_ok(
+            r#"fn describe(symbol: char) -> i64 {
+    let mut result = 0;
+    match symbol {
+        'a' | 'b' => result = 1,
+        _ => result = 2,
+    }
+    return result;
+}
+fn main() {
+    println!("{}", describe('a'));
+}"#,
+        );
+    }
+
+    #[test]
+    fn accepts_string_character_methods() {
+        let program = expect_ok(
+            r#"fn main() {
+    let mut text: String = String::from("hello");
+    let count = text.char_count();
+    let chars: Vec<char> = text.chars();
+    let second = text.char_at(1);
+    let boundary = text.is_char_boundary(1);
+    text.push('!');
+    let last = text.pop();
+    println!("{}", count);
+    println!("{}", chars.len());
+    println!("{}", second.is_some());
+    println!("{}", boundary);
+    println!("{}", last.is_some());
+}"#,
+        );
+        let expected = [
+            (1usize, HBuiltinMethod::StrCharCount, Ty::Int(IntTy::I64)),
+            (2, HBuiltinMethod::StrChars, Ty::Vec(Box::new(Ty::Char))),
+            (3, HBuiltinMethod::StrCharAt, Ty::Option(Box::new(Ty::Char))),
+            (4, HBuiltinMethod::StrIsCharBoundary, Ty::Bool),
+        ];
+        for (index, method, ty) in expected {
+            let init = let_init(&main_fn(&program).body, index);
+            assert_eq!(init.ty, ty, "result type of {:?}", method);
+            match &init.kind {
+                HExprKind::BuiltinMethod { method: found, .. } => {
+                    assert_eq!(*found, method, "statement {}", index)
+                }
+                other => panic!("expected a builtin method call, got {:?}", other),
+            }
+        }
+        match &main_fn(&program).body.stmts[5] {
+            HStmt::Expr(expr) => match &expr.kind {
+                HExprKind::BuiltinMethod {
+                    method: HBuiltinMethod::StrPush,
+                    args,
+                    ..
+                } => {
+                    assert_eq!(args.len(), 1);
+                    assert_eq!(args[0].ty, Ty::Char);
+                }
+                other => panic!("expected String::push, got {:?}", other),
+            },
+            other => panic!("expected an expression statement, got {:?}", other),
+        }
+        let pop_init = let_init(&main_fn(&program).body, 6);
+        assert_eq!(pop_init.ty, Ty::Option(Box::new(Ty::Char)));
+        match &pop_init.kind {
+            HExprKind::BuiltinMethod {
+                method: HBuiltinMethod::StrPop,
+                ..
+            } => {}
+            other => panic!("expected String::pop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accepts_string_from_char() {
+        let program = expect_ok(
+            r#"fn main() {
+    let text: String = String::from_char('x');
+    println!("{}", text);
+}"#,
+        );
+        let init = let_init(&main_fn(&program).body, 0);
+        assert_eq!(init.ty, Ty::String);
+        match &init.kind {
+            HExprKind::BuiltinAssoc {
+                func: HBuiltinAssoc::StringFromChar,
+                args,
+                ..
+            } => {
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0].ty, Ty::Char);
+            }
+            other => panic!("expected String::from_char, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accepts_char_format_specifiers() {
+        expect_ok(
+            r#"fn main() {
+    let symbol = 'x';
+    println!("{}", symbol);
+    println!("{:?}", symbol);
+    println!("{:>4}", symbol);
+    println!("{:<4}", symbol);
+    println!("{:^5}", symbol);
+    println!("{:*>5}", symbol);
+    println!("{:>4?}", symbol);
+    println!("{:?} {}", symbol, symbol);
+}"#,
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_char_format_flags() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let symbol = 'x';
+    println!("{:.2}", symbol);
+    println!("{:+}", symbol);
+    println!("{:05}", symbol);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0001"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "the precision of a format specifier is not supported for characters"
+        ));
+        assert!(has_message(
+            &diagnostics,
+            "the '+' flag of a format specifier is not supported for characters"
+        ));
+        assert!(has_message(
+            &diagnostics,
+            "the '0' flag of a format specifier is not supported for characters"
+        ));
+    }
+
+    #[test]
+    fn accepts_char_hash_map_keys() {
+        expect_ok(
+            r#"fn main() {
+    let mut map: HashMap<char, i64> = HashMap::new();
+    map.insert('a', 1);
+    map.insert('b', 2);
+    println!("{}", map.contains_key('a'));
+    println!("{}", map.get('b').is_some());
+    println!("{}", map.len());
+    let keys: Vec<char> = map.keys();
+    println!("{}", keys.len());
+    map.remove('a');
+}"#,
+        );
+    }
+
+    #[test]
+    fn reports_hash_map_key_message_with_char() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let mut map: HashMap<f64, i64> = HashMap::new();
+    map.insert(1.0, 2);
+    println!("{}", map.len());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "HashMap keys must be one of i64, u64, bool, char or String, found f64"
+        ));
+    }
+
+    // -----------------------------------------------------------------
+    // Reference-storage holes (v1.6 memory safety audit)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rejects_references_inside_inferred_constructor_payloads() {
+        // Some/Box::new/Rc::new/Ok used to validate their payload type before
+        // unifying it with the argument, so an inferred reference payload was
+        // accepted and dangled once the owner moved (borrower audit F1).
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let text = String::from("hello");
+    let some = Some(&text);
+    let boxed = Box::new(&text);
+    let shared = Rc::new(&text);
+    let nested = Some(Some(&text));
+    let ok = Ok(&text);
+    println!("{} {} {} {} {}", some.is_some(), boxed.get().len(), shared.strong_count(), nested.is_some(), ok.is_ok());
+}"#,
+        );
+        let detected = messages(&diagnostics)
+            .iter()
+            .filter(|message| message.contains("references cannot be stored in this type"))
+            .count();
+        assert!(
+            detected >= 4,
+            "expected one diagnostic per constructor, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_references_escaping_blocks_through_option_payloads() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let escaped = {
+        let value: i64 = 1;
+        Some(&value)
+    };
+    println!("{}", escaped.is_some());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "references cannot be stored in this type"
+        ));
+    }
+
+    #[test]
+    fn rejects_references_pushed_or_inserted_into_vectors() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let text = String::from("hi");
+    let mut values = Vec::new();
+    values.push(&text);
+    values.insert(0, &text);
+    let moved = text;
+    println!("{} {}", values.len(), moved);
+}"#,
+        );
+        let detected = messages(&diagnostics)
+            .iter()
+            .filter(|message| message.contains("references cannot be stored in this type"))
+            .count();
+        assert!(
+            detected >= 2,
+            "expected a diagnostic for push and insert, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_reference_elements_in_vec_literals_with_resolved_message() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let text = String::from("hi");
+    let values = vec![&text];
+    println!("{}", values.len());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        // The message must describe the resolved element type, not the
+        // unresolved inference variable (borrower audit F7).
+        assert!(
+            has_message(
+                &diagnostics,
+                "references cannot be stored in this type (found &String)"
+            ),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            !has_message(&diagnostics, "(found _)"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_reference_result_and_map_payloads() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let text = String::from("hi");
+    let ok = Ok(&text);
+    let mut map = HashMap::new();
+    map.insert(1, &text);
+    println!("{} {}", ok.is_ok(), map.len());
+}"#,
+        );
+        let detected = messages(&diagnostics)
+            .iter()
+            .filter(|message| message.contains("references cannot be stored in this type"))
+            .count();
+        assert!(
+            detected >= 2,
+            "expected a diagnostic for Ok and for HashMap::insert, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn accepts_owned_constructor_and_container_payloads() {
+        expect_ok(
+            r#"fn main() {
+    let boxed = Box::new(String::from("box"));
+    let shared = Rc::new(String::from("rc"));
+    let some = Some(String::from("some"));
+    let values: Vec<String> = vec![String::from("a")];
+    let mut list: Vec<String> = Vec::new();
+    list.push(String::from("b"));
+    list.insert(0, String::from("c"));
+    let result: Result<i64, String> = Err(String::from("bad"));
+    println!("{} {} {} {} {} {}", boxed.get().len(), shared.get().len(), some.is_some(), values.len(), list.len(), result.is_err());
+}"#,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Integer/float to bool casts (borrower audit F2)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rejects_numeric_casts_to_bool() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let literal = 1 as bool;
+    let folded = (1 + 1) as bool;
+    let float = 1.5 as bool;
+    let number: i64 = 1;
+    let typed = number as bool;
+    let real: f64 = 1.0;
+    let other = real as bool;
+    println!("{} {} {} {} {} {}", literal, folded, float, typed, other, true);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0605"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        let detected = messages(&diagnostics)
+            .iter()
+            .filter(|message| message.contains("non-primitive cast"))
+            .count();
+        assert_eq!(
+            detected,
+            5,
+            "every numeric to bool cast must be rejected: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn accepts_bool_to_integer_casts() {
+        expect_ok(
+            r#"fn main() {
+    let flag = true;
+    let number = flag as i64;
+    let again = (number > 0) as i64;
+    println!("{} {}", number, again);
+}"#,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Negative integer literal range folding (borrower audit F5/F8)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn accepts_i64_min_literal() {
+        expect_ok(
+            r#"fn main() {
+    let explicit: i64 = -9223372036854775808;
+    let inferred = -9223372036854775808;
+    let narrowed: i32 = -2147483648;
+    println!("{} {} {}", explicit, inferred, narrowed);
+}"#,
+        );
+    }
+
+    #[test]
+    fn rejects_positive_and_double_negated_out_of_range_literals() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let too_big: i64 = 9223372036854775808;
+    println!("{}", too_big);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0080"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let double: i64 = -(-9223372036854775808);
+    println!("{}", double);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0080"),
+            "double negation must overflow: {:?}",
+            messages(&diagnostics)
         );
     }
 

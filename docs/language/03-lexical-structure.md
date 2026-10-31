@@ -2,13 +2,13 @@
 
 This page describes the raw text of a program: how source files are encoded, the
 character set of identifiers, the keywords, comments, and the exact forms of
-integer, float, string, boolean and unit literals.
+integer, float, string, character, boolean and unit literals.
 
 ## Source files and encoding
 
 A source file has the extension `.ls` and is interpreted as UTF-8 text. There is
 no shebang line, no encoding declaration and no preprocessor, so the first two
-bytes are ordinary program text. Outside string literals and comments, only
+bytes are ordinary program text. Outside string and character literals and comments, only
 ASCII characters are meaningful: every operator, delimiter and keyword is ASCII.
 Non-ASCII characters may appear in comments and string literals freely, and
 (somewhat unusually) in identifiers too.
@@ -205,7 +205,7 @@ negation is folded, so the most negative value of a signed type cannot be writte
 as a plain negative literal: `let x: i8 = -128;` is rejected with
 `error[E0080]: literal out of range for i8: 128`. Compute it instead, for
 example `-127 - 1`, or produce it by arithmetic. This is a known simplification
-of the 1.5.0 constant checker.
+of the 1.6.0 constant checker.
 
 ## Float literals
 
@@ -268,7 +268,7 @@ The following escape sequences are recognized:
 | `\'` | Single quote. |
 | `\0` | NUL character. |
 | `\xNN` | A byte with the given two hexadecimal digits; only ASCII values (`\x00` to `\x7F`) are allowed. |
-| `\u{HEX}` | A Unicode scalar value written in hexadecimal, one or more digits: `\u{4F60}` is 你. |
+| `\u{HEX}` | A Unicode scalar value written in hexadecimal, one to six digits: `\u{4F60}` is 你. Surrogates and values above `0x10FFFF` are rejected. |
 
 An unknown escape sequence is an error, and the diagnostic names the offending
 sequence. Raw strings (`r"..."`) do not exist, so a backslash always starts an
@@ -296,13 +296,14 @@ fn main() {
 ```
 
 Output:
+
 ```text
 a
 b
 a	b
 he said "hi"
 C:\tmp
-1
+3
 ABC
 你好
 héllo 世界
@@ -310,9 +311,12 @@ héllo 世界
 
 The `\0` escape inserts a real NUL byte into the string; the string is still
 `len()` bytes long and is not truncated (above, the escaped string has length 3).
-Displaying or comparing such a string works on its bytes. Because lsaca strings
-are UTF-8 and methods use byte offsets, the `\u{...}` escape is the way to build
-non-ASCII text without writing it literally.
+Displaying or comparing such a string works on its bytes. The `\u{...}` escape is
+the way to build non-ASCII text without writing it literally. Since 1.6.0 every
+`String` is guaranteed valid UTF-8 and the library adds character-oriented
+methods such as `char_count`, `chars` and `push(char)`; the byte-oriented
+methods keep their byte semantics. See
+[Characters and Unicode](22-characters-and-unicode.md).
 
 ```ls,compile-fail
 fn main() {
@@ -357,40 +361,104 @@ true false
 ()
 ```
 
-## There is no character literal
+## Character literals
 
-lsaca has no `char` type, so single quotes are not a literal delimiter: `'a'` is
-a lexical error, and text of one character is a `String` of length 1, built with
-double quotes. Likewise there are no byte-string literals (`b"..."`) and no raw
-strings.
+A character literal is written in single quotes and contains exactly one
+Unicode scalar value: `'a'`, `'é'`, `'你'`, `'😀'`. It has the primitive type
+`char`, a `Copy` scalar that is not a string; the type and its operations are
+covered in [Characters and Unicode](22-characters-and-unicode.md).
+
+Character literals accept the same escape sequences as string literals, with
+the quoting rules adjusted: a single quote must be escaped as `\'`, while a
+double quote may appear directly, so `'"'` is the double-quote character. The
+`\xNN` escape is limited to ASCII bytes, and `\u{...}` accepts one to six
+hexadecimal digits for any Unicode scalar value; surrogate code points and
+values above `0x10FFFF` are rejected.
+
+```ls
+fn main() {
+    let plain = 'a';
+    let accent = 'é';
+    let quote = '\'';
+    let double = '"';
+    let newline = '\n';
+    let nul = '\0';
+    let unicode = '\u{4F60}';
+    println!("{} {} {} {}", plain, accent, quote, double);
+    println!("{:?} {:?} {:?} {:?}", newline, nul, unicode, '😀');
+}
+```
+
+Output:
+
+```text
+a é ' "
+'\n' '\u{0}' '你' '😀'
+```
+
+The literal must not be empty and must not contain more than one scalar value:
 
 ```ls,compile-fail
 fn main() {
-    let c = 'a';
-    println!("{}", c);
+    let empty = '';
+    println!("{:?}", empty);
 }
 ```
 
 Error:
+
 ```text
-error[E0001]: unexpected character '
-  --> example-10.ls:2:13
+error[E0007]: empty character literal
+  --> example-11.ls:2:17
    |
- 2 |     let c = 'a';
-   |             ^
+ 2 |     let empty = '';
+   |                 ^^
 
-error[E0001]: unexpected character '
-  --> example-10.ls:2:15
-   |
- 2 |     let c = 'a';
-   |               ^
-
-lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
+lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 ```
 
-To work with "characters", use one-character strings and the string methods in
-[Standard library](15-standard-library.md); remember that most of them use byte
-offsets, not character indices.
+```ls,compile-fail
+fn main() {
+    let pair = 'ab';
+    println!("{:?}", pair);
+}
+```
+
+Error:
+
+```text
+error[E0007]: character literal may only contain one codepoint
+  --> example-12.ls:2:16
+   |
+ 2 |     let pair = 'ab';
+   |                ^^^^
+
+lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+```
+
+```ls,compile-fail
+fn main() {
+    let bad = '\q';
+    println!("{:?}", bad);
+}
+```
+
+Error:
+
+```text
+error[E0005]: unknown escape sequence \q
+  --> example-13.ls:2:16
+   |
+ 2 |     let bad = '\q';
+   |                ^^
+
+lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
+```
+
+There are still no byte-string literals (`b"..."`) and no raw strings.
+
+Character literals are also valid patterns: the match arms in
+[Pattern matching](13-pattern-matching.md) can use them directly.
 
 ## Whitespace and semicolons
 

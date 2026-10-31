@@ -1,7 +1,7 @@
 //! Typing rules for the builtin HashMap<K, V> type (version 1.5).
 //!
-//! The key type is restricted to the four key types the runtime knows how to
-//! hash and compare (i64, u64, bool and String). Values may be any storable
+//! The key type is restricted to the key types the runtime knows how to hash
+//! and compare (i64, u64, bool, char and String). Values may be any storable
 //! value type. The methods follow the standard library reference in
 //! docs/language/15-standard-library.md: insert, get, get_with, contains_key,
 //! remove, len, is_empty, clear, keys and values.
@@ -34,6 +34,7 @@ impl<'a> Checker<'a> {
             ITy::Int(crate::types::IntTy::I64)
                 | ITy::Int(crate::types::IntTy::U64)
                 | ITy::Bool
+                | ITy::Char
                 | ITy::String
         )
     }
@@ -54,7 +55,7 @@ impl<'a> Checker<'a> {
             if self.reported_hash_map_key_errors.insert(described.clone()) {
                 self.error_code_note(
                     format!(
-                        "HashMap keys must be one of i64, u64, bool or String, found {}",
+                        "HashMap keys must be one of i64, u64, bool, char or String, found {}",
                         described
                     ),
                     span,

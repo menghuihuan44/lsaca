@@ -15,35 +15,56 @@ This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
-The current release is **1.5.0**. It adds a real **generic and trait
-system**, **lazy iterators** and a builtin **`HashMap<K, V>`**:
+The current release is **1.6.0**. It adds a real **`char` type**, **UTF-8-aware
+strings**, a **Swiss-Table-style `HashMap`** and generated-C translation-unit
+splitting for very large programs:
 
-- Generic `struct`, `enum`, `fn` and `impl` blocks with parameters and bounds
-  (including the newly supported `Iterator<T>` and `Fn(A) -> B` bounds,
-  turbofish arguments and `Self` in associated items). Instantiations are
-  checked lazily, per concrete type, so a generic function is only required to
-  type check for the argument types it is actually used with.
-- Traits with declaration-only methods and `impl Trait<Args> for Type` blocks,
-  inherent-method-first dispatch and the usual conflicts (`E0046`, `E0407`,
-  `E0053`, `E0119`, `E0034`). Trait objects and default bodies are not
-  supported.
-- Lazy iterator adapters - `iter`, `map`, `filter`, `take`, `skip`,
-  `enumerate`, `collect`, `fold`, `count`, `sum`, `any`, `all` and `find` -
-  implemented in a prelude written in lsaca itself, plus `for` loops over user
-  types that implement `Iterator<T>`.
-- A builtin `HashMap<K, V>` with `insert`, `get`, `get_with`,
-  `contains_key`, `remove`, `len`, `is_empty`, `clear`, `keys` and `values`,
-  deterministic hashing, content equality and the same ORC ownership rules as
-  the other heap types.
+- `char` is a Copy 32-bit Unicode scalar value with single-quote literals,
+  escapes, ordering/equality, patterns and formatting. New String APIs
+  `char_count`, `chars`, `char_at`, `is_char_boundary`, `push(char)`,
+  `pop` and `String::from_char` walk strings by character, while `len`,
+  `find` and `substring` stay byte-oriented with character-boundary checks.
+- Every `String` is guaranteed valid UTF-8: `read_line` and program arguments
+  panic on invalid bytes (`stream did not contain valid UTF-8` /
+  `arguments contain invalid UTF-8`), `read_file` returns `Err`,
+  `to_uppercase`/`to_lowercase` use full Unicode data (so
+  `"ß".to_uppercase()` is `"SS"`), `trim` removes Unicode whitespace
+  (including U+00A0 and U+3000), and `{:?}` follows Rust's `escape_debug`
+  rules.
+- `HashMap` uses a Swiss-Table-style layout (control bytes + 16-slot group
+  probing), accepts `char` keys, keeps deterministic fixed-seed hashing and
+  content equality, and documents iteration order as unspecified.
+- Programs with more than 256 KiB of generated user-function code are emitted
+  as `main.c` plus up to eight deterministic `lsaca_unit_N.c` units; small
+  programs still emit a single `main.c`.
+- The 1.6 audit also fixed memory-safety and correctness defects: references can
+  no longer be stored inside aggregates (`Some(&x)`, `Box::new(&x)`,
+  `Rc::new(&x)`, `vec![&x]`, `push`/`insert`, struct fields and nested
+  aggregates now all report `E0498`, naming the offending type); every
+  integer/float to `bool` cast is rejected with `E0605`; `impl Copy` and
+  `impl Clone` are rejected with `E0119`; most-negative integer literals and
+  unary-minus folding work; the ORC cycle collector and the destructor cascade
+  are iterative, so 100,000-deep object graphs no longer overflow the stack;
+  debug builds detect stale/double release through a handle registry; string
+  literals may contain NUL bytes and are interned once per distinct literal;
+  match arms can steal owned bindings; reads are buffered, `println!` no
+  longer flushes per call, and shortest-float formatting is a Rust-parity
+  Dragon4 (roughly 3.5x faster).
+- The robustness audit rejects pathological input cleanly: syntax nested deeper
+  than 128 levels is reported once as `E0001` "this code is nested too deeply"
+  (the parser, type checker and code generator run on dedicated large-stack
+  threads, so every accepted program compiles instead of crashing the
+  compiler), and diagnostics clip very long source lines to a readable window
+  around the error instead of echoing megabytes per diagnostic.
 
-Version 1.5.0 is **source compatible** with 1.4.0: existing programs keep
-working; the release fixes a long list of defects found by the new feature
-tests (nested tuples, `Option<scalar>` struct fields, function values stored in
-aggregates, aggregate equality, `Self::new`, `for`-loop return slots, HashMap
-helper dependencies and trait dispatch between impls) and improves the
-performance of iterator, HashMap and generic workloads (see
-[benchmarks](#benchmarks)). See the [release notes](#release-history) and the
-[roadmap](docs/language/16-roadmap.md).
+Version 1.6.0 is **not fully source compatible** with 1.5.0: Unicode case
+mapping, Unicode trimming and String/char Debug output can change program
+output; `substring` now panics when a boundary falls inside a character;
+invalid UTF-8 input is rejected instead of accepted; casts to `bool` are
+rejected (`E0605`); and the emitted C/HashMap ABI changed, so emitted projects
+must be regenerated. Programs that stick to the byte-oriented String API and do
+not cast numbers to bool keep working. See the [release notes](#release-history)
+and the [roadmap](docs/language/16-roadmap.md).
 
 ## Highlights
 
@@ -65,8 +86,18 @@ performance of iterator, HashMap and generic workloads (see
   [docs/language/19-iterators.md](docs/language/19-iterators.md).
 - **Builtin `HashMap<K, V>`**: `insert`, `get`, `get_with`, `contains_key`,
   `remove`, `len`, `is_empty`, `clear`, `keys` and `values`, with
-  deterministic hashing, content equality and ORC ownership rules. See
-  [docs/language/20-hashmap.md](docs/language/20-hashmap.md).
+  deterministic hashing, content equality and ORC ownership rules. The 1.6 map
+  uses a Swiss-Table-style open-addressed layout and also accepts `char` keys;
+  iteration order (`keys()`, `values()` and the printed form) is unspecified.
+  See [docs/language/20-hashmap.md](docs/language/20-hashmap.md).
+- **Characters and UTF-8 strings**: a Copy `char` scalar type with character
+  literals and escapes, comparisons, patterns and formatting; strings
+  guaranteed valid UTF-8 with character APIs (`chars`, `char_count`,
+  `char_at`, `is_char_boundary`, `push(char)`, `pop`,
+  `String::from_char`) next to byte-based `len`/`find`/`substring`,
+  Unicode case mapping and whitespace trimming, and Rust-style `{:?}`
+  escaping. See
+  [docs/language/22-characters-and-unicode.md](docs/language/22-characters-and-unicode.md).
 - **Ownership and moves**: automatically derived `Copy` and `Clone`, move-only
   heap types, deterministic `Drop` hooks, move checking (use after move, moves
   out of projections, moves while borrowed) and the general `clone()` escape
@@ -100,20 +131,22 @@ performance of iterator, HashMap and generic workloads (see
   project (the program plus a vendored runtime) and compiles and links it with
   the system C compiler. `lsaca emit-c` writes the whole project, including a
   complete `CMakeLists.txt`, so it can be inspected or embedded in another
-  build; `--cmake` makes `run`/`build` use that CMake project instead.
+  build; `--cmake` makes `run`/`build` use that CMake project instead. Very
+  large programs are split across several generated translation units
+  (`main.c` plus `lsaca_unit_N.c`).
 - **Fast, cached builds**: builds are cached by content hash, and the direct C
   backend skips CMake, so a memoised rebuild of an unchanged program takes tens
   of milliseconds instead of a second. Runtime objects are compiled once per
   profile and shared by every program.
 - **Pure Rust compiler, no third-party crates**: the compiler uses only the Rust
   standard library and forbids unsafe code. The runtime is plain C17.
-- **Documented and measured**: a detailed 21-chapter language manual under
+- **Documented and measured**: a detailed 22-chapter language manual under
   [docs/](docs/README.md), published as a static documentation site, plus
   cross-language benchmarks (compile time, runtime and peak memory) against C,
   Rust, Python and Node.js with the raw data checked in.
-- **Tested end to end**: 509 compiler unit tests, 9 end-to-end test functions
-  that compile and run 99 real programs, 17 CLI tests, a 10,200-check C runtime
-  suite and a 100-check runtime smoke script; CI runs the test matrix on Linux,
+- **Tested end to end**: 570 compiler unit tests, 12 end-to-end test functions
+  that compile and run 108 real programs, 17 CLI tests, a 10,357-check C runtime
+  suite and a 103-check runtime smoke script; CI runs the test matrix on Linux,
   macOS and Windows, plus AddressSanitizer and UndefinedBehaviorSanitizer jobs.
 
 ## Requirements
@@ -181,9 +214,9 @@ error, `101` a panic inside the compiled program.
     |                   constant evaluation, ? desugaring
     |  move checker     Copy/Clone classification, move and drop analysis
     |  borrow checker   NLL borrow checking and reference safety
-    |  C code generator main.c
+    |  C code generator main.c (+ lsaca_unit_N.c)
     v
- C17 project  +  runtime (5 C files, 2 headers, embedded in the compiler)
+ C17 project  +  runtime (6 C files, 3 headers, embedded in the compiler)
     |
     +--> system C compiler (default, no CMake) ----> native executable
     |
@@ -194,13 +227,16 @@ The generated project is self contained:
 
 ```text
 main.c               the user program plus generated clone/drop/format helpers
+lsaca_unit_N.c       additional generated translation units for very large programs
 lsaca_rt.h           public runtime ABI
 lsaca_rt_internal.h  internal runtime declarations shared by the C files
+lsaca_rt_unicode.h   generated Unicode table declarations
 lsaca_rt.c           reference counting, cycle collection, panics, checked math
-lsaca_rt_string.c    String implementation and formatting support
+lsaca_rt_string.c    String implementation, UTF-8 helpers, formatting support
 lsaca_rt_vec.c       Vec implementation
 lsaca_rt_fmt.c       format-string machinery
-lsaca_rt_map.c       HashMap table (open addressing, deterministic)
+lsaca_rt_map.c       Swiss-Table-style HashMap (control bytes, group probing)
+lsaca_rt_unicode.c   Unicode tables, char/string case mapping
 CMakeLists.txt       portable build description (Debug: -g -O0 -DLSACA_DEBUG,
                      Release: -O2 -DNDEBUG)
 ```
@@ -209,7 +245,8 @@ Builds are cached by content hash (source, generated C, runtime sources,
 compiler version and path, build mode and leak-tracking mode), so repeated runs
 of unchanged programs are fast. The compiler object files for the runtime are
 compiled once per profile and cached under `_runtime/<hash>/` in the cache root;
-only `main.c` is recompiled for each program. The cache location is chosen
+only the program's generated unit(s) (`main.c` and any `lsaca_unit_N.c`) are
+recompiled for each program. The cache location is chosen
 defensively:
 
 1. `LSACA_CACHE_DIR`, when set;
@@ -228,7 +265,7 @@ contain any characters.
 ## Ownership and memory management (ORC)
 
 Every value belongs to its binding. Values whose type is `Copy` - integers,
-floats, `bool`, `(...)` (unit), tuples of `Copy` values, `Option`/`Result`
+floats, `bool`, `char`, `(...)` (unit), tuples of `Copy` values, `Option`/`Result`
 of `Copy` values, references, and user structs/enums with only `Copy` fields
 and no `Drop` - are copied on use, so the source binding stays usable. All
 other values (`String`, `Vec<T>`, `Rc<T>`, `Box<T>`, function values, and
@@ -482,6 +519,28 @@ fn main() {
 
 The full iterator examples are in [examples/iterators.ls](examples/iterators.ls).
 
+Release 1.6 added `char` and UTF-8 strings:
+
+```rust
+fn main() {
+    let text = String::from("Héllo, 世界");
+    println!("{} bytes, {} characters", text.len(), text.char_count());
+    println!("upper = {}", text.to_uppercase());
+    println!("first = {:?}", text.char_at(0));
+    println!("substring = {}", text.substring(1, 2));
+
+    let mut greeting = String::from("hi");
+    greeting.push('!');
+    greeting.push('😀');
+    println!("{} {:?}", greeting, 'é');
+    println!("{}", String::from("straße").to_uppercase());
+}
+```
+
+The output is `14 bytes, 9 characters`, `upper = HÉLLO, 世界`,
+`first = Some('H')`, `substring = é`, `hi!😀 'é'` and `STRASSE`.
+The full program is [examples/unicode.ls](examples/unicode.ls).
+
 ## Documentation
 
 The manual is split into one detailed page per topic under [docs/](docs/):
@@ -496,7 +555,7 @@ The manual is split into one detailed page per topic under [docs/](docs/):
   structs/enums/`impl`, ownership and moves, references and borrowing, pattern
   matching, closures, the standard library (including `?` and the combinators),
   the roadmap with the deviations from Rust, generics, traits, iterators,
-  `HashMap`, and the benchmarks.
+  `HashMap`, the benchmarks, and characters and Unicode.
 - [docs/language/17-generics.md](docs/language/17-generics.md) and
   [docs/language/18-traits.md](docs/language/18-traits.md) - user-defined
   generics, trait bounds, trait declarations and implementations, dispatch
@@ -515,6 +574,10 @@ The manual is split into one detailed page per topic under [docs/](docs/):
   deviations from Rust and the verified limitations of the current release.
 - [docs/language/21-benchmarks.md](docs/language/21-benchmarks.md) - benchmark
   methodology, per-workload analysis and the measured numbers.
+- [docs/language/22-characters-and-unicode.md](docs/language/22-characters-and-unicode.md)
+  - the `char` type, character literals and escapes, UTF-8 string invariants,
+  byte- versus character-oriented APIs, Unicode case mapping and whitespace,
+  substring boundary panics and invalid-input handling.
 
 The same pages are published as a static site with GitHub Pages at
 <https://menghuihuan44.github.io/lsaca/> (built by
@@ -523,55 +586,68 @@ sources with [scripts/docsite.py](scripts/docsite.py)).
 
 ## Benchmarks
 
-`python scripts/bench.py` runs fifteen runtime workloads and one compile-only
+`python scripts/bench.py` runs eighteen runtime workloads and one compile-only
 scaling workload in lsaca and in C, Rust, Python and Node.js, verifies each
 output checksum, and records compile time, runtime median and peak working set.
 lsaca programs are built through the normal cached `lsaca build -r` pipeline
 (the direct C backend); where the C toolchain is unavailable the harness can
 fall back to a labelled direct-compile mode.
 
-The latest measured results for the 1.5.0 compiler are in
+The latest measured results for the 1.6.0 compiler are in
 [benchmarks/results/latest.md](benchmarks/results/latest.md): compile-time,
-runtime and peak-memory tables for fifteen runtime workloads plus a compile-only
+runtime and peak-memory tables for eighteen runtime workloads plus a compile-only
 scaling workload, compared with C, Rust, Python and Node. The same tables,
 per-workload analysis, methodology and caveats are in
 [docs/language/21-benchmarks.md](docs/language/21-benchmarks.md); raw JSON data
 is in [benchmarks/results/](benchmarks/results/).
 
-Headline numbers of the 1.5.0 run (Windows 11, Core i7-1260P, gcc 15.2.0, rustc
-1.99, median of 7 runtime runs and 3 compile runs):
+Headline numbers of the 1.6.0 run on an otherwise idle machine (Windows 11,
+Core i7-1260P, gcc 15.2.0, rustc 1.99, median of 7 runtime runs and 3 compile
+runs):
 
-| workload | lsaca 1.5.0 | C (gcc -O2) | Rust (rustc -O) |
+| workload | lsaca 1.6.0 | C (gcc -O2) | Rust (rustc -O) |
 | --- | ---: | ---: | ---: |
-| `fib` (runtime) | 20.4 ms | 21.5 ms | 10.2 ms |
-| `loop_sum` | 8.1 ms | 9.2 ms | 10.0 ms |
-| `string_build` | 27.0 ms | 10.0 ms | 56.2 ms |
-| `vec_memory` (runtime / peak) | 18.6 ms / 18.8 MiB | 15.9 ms / 18.8 MiB | 14.5 ms / 18.9 MiB |
-| `sort_i64` | 28.0 ms | 29.8 ms | 24.7 ms |
-| `sieve` | 24.0 ms | 22.9 ms | 23.9 ms |
-| `mandelbrot` | 26.4 ms | 27.6 ms | 26.9 ms |
-| `iterator_pipeline` | 27.8 ms | 12.0 ms | 14.5 ms |
-| `hashmap_wordcount` | 46.4 ms | 24.3 ms | 43.4 ms |
-| `generic_stack` | 14.2 ms | 17.4 ms | 16.1 ms |
-| `fn_pipeline` | 9.9 ms | 11.0 ms | 9.0 ms |
-| `binary_trees` (runtime / peak) | 534.4 ms / 101.2 MiB | 17.7 ms / 7.7 MiB | 19.4 ms / 7.7 MiB |
-| `binary_trees_refs` (runtime / peak) | 34.1 ms / 19.9 MiB | 15.1 ms / 7.7 MiB | 17.7 ms / 7.7 MiB |
-| cold build, typical workload | 0.74-1.05 s | 0.19-0.30 s | 0.20-0.39 s |
-| cached build, typical workload | 13-20 ms | - | - |
-| `compile_large` (4,511 lines), cold / cached | 3.14 s / 227 ms | - | - |
+| `fib` (runtime) | 25.3 ms | 24.5 ms | 12.9 ms |
+| `loop_sum` | 9.6 ms | 8.9 ms | 9.3 ms |
+| `string_build` | 28.6 ms | 11.0 ms | 56.4 ms |
+| `vec_memory` (runtime / peak) | 12.7 ms / 18.8 MiB | 12.3 ms / 18.8 MiB | 13.8 ms / 18.9 MiB |
+| `sort_i64` | 37.0 ms | 33.8 ms | 31.7 ms |
+| `matrix_multiply` | 12.4 ms | 12.6 ms | 12.1 ms |
+| `sieve` | 32.6 ms | 28.0 ms | 26.5 ms |
+| `mandelbrot` | 24.9 ms | 24.3 ms | 24.1 ms |
+| `iterator_pipeline` | 25.4 ms | 12.8 ms | 15.3 ms |
+| `hashmap_wordcount` | 46.8 ms | 23.4 ms | 43.2 ms |
+| `generic_stack` | 12.8 ms | 12.8 ms | 14.5 ms |
+| `fn_pipeline` | 7.6 ms | 7.2 ms | 8.1 ms |
+| `string_split` | 16.0 ms | 10.5 ms | 10.7 ms |
+| `string_unicode` | 27.9 ms | 10.0 ms | 11.7 ms |
+| `hashmap_i64` | 211.3 ms | 133.0 ms | 172.1 ms |
+| `hashmap_string` | 241.7 ms | 165.8 ms | 246.8 ms |
+| `binary_trees` (runtime / peak) | 322.4 ms / 52.3 MiB | 16.0 ms / 7.7 MiB | 17.6 ms / 7.7 MiB |
+| `binary_trees_refs` (runtime / peak) | 26.8 ms / 15.8 MiB | 16.1 ms / 7.7 MiB | 17.3 ms / 7.7 MiB |
+| cold build, typical workload | 0.91-1.22 s | 0.21-0.29 s | 0.21-0.56 s |
+| cached build, typical workload | 14-21 ms | - | - |
+| `compile_large` (4,511 lines), cold / cached | 1.83 s / 244 ms | - | - |
 
-The direct C backend keeps compile times within a factor of about three to four
-of plain gcc: the lsaca front end and code generator contribute a few hundred
-milliseconds, and the rest is the system C compiler compiling `main.c`. At run
-time most workloads are at parity with C - and some are faster, because the
-generated C uses the same algorithms without runtime bounds checks in the
-optimised build. The remaining gaps are explained per workload in the
-benchmarks page: `string_build` beats Rust thanks to an amortised growable
-buffer with append fast paths; `iterator_pipeline` and `hashmap_wordcount` pay
-for lazy adapter calls and generic-key hashing; and by-value `binary_trees`
-still copies the whole tree when it is summed, which is why the
-`binary_trees_refs` variant - traversing through borrowed references - is 15.7x
-faster and uses five times less memory.
+The direct C backend keeps cold builds around 0.9-1.2 s, roughly three to five
+times a bare `gcc -O2` invocation: the lsaca front end and C emission are fast,
+and most of the time is the system C compiler compiling the generated
+translation units (only the program's own units are recompiled; the runtime
+objects are cached). At run time most workloads are at parity with C - despite
+the fact that generated indexing is bounds-checked on every access - and a few
+are slightly faster; the remaining gaps are explained per workload in the
+benchmarks
+page: `string_build` still beats Rust thanks to an amortised growable buffer
+with append fast paths; `iterator_pipeline` and `hashmap_wordcount` pay for
+lazy adapter calls and generic-key hashing; `string_unicode` is dominated by
+`char_at` walking UTF-8 from the start of the string (a documented O(n) API);
+the Swiss-table HashMap trades a slightly slower present lookup for faster
+absent lookups, deletion and iteration, so `hashmap_i64`/`hashmap_string` sit
+between C and Rust; and by-value `binary_trees` still deep-copies the tree when
+it is summed, which is why the `binary_trees_refs` variant - traversing through
+borrowed references - is 12x faster and uses 3.3x less memory. Version 1.6 made
+the by-value tree 40% faster (534 ms in 1.5.0) with 48% less peak memory, and
+the split generated C cut `compile_large` cold time from 3.14 s to 1.83 s.
 
 ## Environment variables
 
@@ -604,7 +680,7 @@ faster and uses five times less memory.
 ## Testing
 
 ```sh
-cargo test --workspace          # 509 unit + 9 end-to-end (99 programs) + 17 CLI tests
+cargo test --workspace          # 570 unit + 12 end-to-end (108 programs) + 17 CLI tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -612,15 +688,20 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 The end-to-end tests in `crates/lsaca/tests/` compile and run the programs under
 `crates/lsaca/tests/programs/` and `examples/`, and are skipped when no C
-compiler is available. The C runtime has its own 10,200-check suite
-(`runtime/test/main.c`, including ORC stress and HashMap tests) plus a 100-check
+compiler is available. The C runtime has its own 10,357-check suite
+(`runtime/test/main.c`, including ORC stress and HashMap tests) plus a 103-check
 Windows smoke script (`runtime/test/run_smoke.ps1`). Every generated project is
 compiled without warnings under `-Wall -Wextra -Wpedantic -Werror` in both
 profiles by [scripts/check_generated_c.py](scripts/check_generated_c.py), which
 also verifies byte-identical output across runs and runs every program; CI also
 runs the C runtime in release, debug and leak-tracking modes, and checks the
-documentation site with `scripts/docsite.py --check`. The complete CI definition
-is in [.github/workflows/ci.yml](.github/workflows/ci.yml).
+documentation site with `scripts/docsite.py --check`. The documentation examples
+are executed against the real compiler by `scripts/docs_verify.py` (every
+`ls`, `ls,compile-fail` and `ls,panic` fence), and
+`scripts/check_bench21.py`, `scripts/linkcheck.py` and
+`scripts/prose_check.py` validate the benchmark page, every relative link and
+anchor, and the prose claims. The complete CI definition is in
+[.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 CI also builds emitted projects through CMake. In a confined environment where
 child processes cannot spawn CMake/Ninja, set `LSACA_SKIP_CMAKE_TESTS=1` to skip
@@ -628,6 +709,26 @@ only that CLI test; the dedicated CI job still covers the CMake backend.
 
 ## Release history
 
+- **1.6.0** - real `char` type (Copy 32-bit Unicode scalar values, character
+  literals and escapes, comparisons, patterns, casts and formatting); UTF-8
+  String invariant with character APIs (`chars`, `char_count`, `char_at`,
+  `is_char_boundary`, `push(char)`, `pop`, `String::from_char`),
+  Unicode-aware case mapping and whitespace trimming, Rust-style `escape_debug`
+  Debug output and validation of `read_line`/`read_file`/arguments; Swiss-Table
+  style `HashMap` (control bytes, 16-slot group probing) with `char` keys,
+  deterministic fixed-seed hashing and unspecified iteration order; generated C
+  split into `main.c` plus up to eight `lsaca_unit_N.c` translation units for
+  very large programs; audit fixes: `E0498` for references stored in
+  aggregates, `E0605` for integer/float to `bool` casts, `E0119` for
+  `impl Copy`/`impl Clone`, most-negative integer literal folding, iterative
+  ORC cycle collector and destructor cascade (no stack overflow on 100,000-deep
+  graphs), debug stale/double-release detection, 40-byte ORC headers, buffered
+  reads and stdout, Unicode tables, Rust-parity Dragon4 shortest floats,
+  NUL-safe interned string literals and match-arm ownership stealing; three new
+  benchmark workloads (`string_unicode`, `hashmap_i64`, `hashmap_string`).
+  Not fully source compatible with 1.5.0 (Unicode case/trim/Debug output,
+  substring boundary panics, invalid UTF-8 rejection, `E0605` casts, changed
+  emitted C/HashMap ABI).
 - **1.5.0** - user-defined generics and traits: generic `struct`/`enum`/`fn`/
   `impl` blocks with type parameters and trait bounds, multiple
   `impl Trait for Type` blocks, inherent-method-first dispatch, `Self` in
@@ -678,13 +779,19 @@ crates/lsaca/tests/      end-to-end tests and test programs
 crates/lsaca-cli/        the lsaca command line tool
 runtime/                 the C17 ORC runtime embedded into generated projects
                          (lsaca_rt.c, lsaca_rt_string.c, lsaca_rt_vec.c,
-                         lsaca_rt_fmt.c, lsaca_rt_map.c, lsaca_rt.h,
-                         lsaca_rt_internal.h)
-runtime/test/            C runtime tests (10,200-check suite and Windows smoke script)
+                         lsaca_rt_fmt.c, lsaca_rt_map.c, lsaca_rt_unicode.c,
+                         lsaca_rt.h, lsaca_rt_internal.h, lsaca_rt_unicode.h);
+                         the map is a Swiss-Table-style open-addressed table
+runtime/test/            C runtime tests (10,357-check suite, ORC stress and
+                         Windows smoke script)
 examples/                example programs
 benchmarks/              benchmark programs in five languages, harness and recorded results
 scripts/                 benchmark harness (bench.py), generated-C checker
-                         (check_generated_c.py) and documentation site generator
+                         (check_generated_c.py), documentation example verifier
+                         (docs_verify.py), benchmark-page checker
+                         (check_bench21.py), link checker (linkcheck.py), prose
+                         checker (prose_check.py), documentation site generator
+                         (docsite.py) and Unicode table generator
 docs/                    the multi-page language manual (docs/README.md is the hub)
 .github/workflows/       CI, benchmark smoke and GitHub Pages workflows
 ```

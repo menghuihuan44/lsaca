@@ -5,6 +5,13 @@
  * process/IO helpers and math helpers. The public ABI lives in lsaca_rt.h; the
  * private cross-unit contract lives in lsaca_rt_internal.h.
  *
+ * Both graph traversals of the collector and the final-reference destruction
+ * cascade are iterative: they use heap worklists instead of the C stack, so a
+ * 100k-node chain or ring is collected/destroyed with O(1) call depth. Debug
+ * builds additionally maintain the intrusive live-object list, the per-object
+ * sizes, a live-handle hash set (stale-release diagnostics) and the shutdown
+ * leak report; release builds compile all of that out.
+ *
  * Portable C17, no compiler extensions, no VLAs.
  */
 
@@ -13,14 +20,21 @@
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#else
+#include <unistd.h>
 #endif
 
 /* Rust programs write stdout/stderr as raw byte streams. The Windows C runtime
  * would translate '\n' into "\r\n" when a stream is in text mode, which would
- * make print/println output and panic reports platform dependent. Switch both
- * output streams to binary mode once so generated programs produce identical
- * bytes everywhere; stdin stays in text mode because lines are read with
- * fgets() and ls_read_line strips a trailing CR. */
+ * make print/println output, panic reports and line reads platform dependent.
+ * Switch all three standard streams to binary mode once: ls_read_line() does
+ * its own CRLF normalization and must preserve embedded NUL bytes and lone CR.
+ *
+ * stdout is line buffered (Rust's Stdout is a line writer: complete lines are
+ * flushed immediately, output without a newline stays buffered) and stderr is
+ * unbuffered so diagnostics are never lost. The print helpers in
+ * lsaca_rt_fmt.c do not flush per call; ls_print_flush(), the panic reporter,
+ * ls_exit() and ls_runtime_shutdown() are the explicit flush points. */
 static int ls_rt_stdio_configured = 0;
 
 void ls_rt_configure_stdio(void) {
@@ -29,9 +43,12 @@ void ls_rt_configure_stdio(void) {
     }
     ls_rt_stdio_configured = 1;
 #ifdef _WIN32
+    (void)_setmode(_fileno(stdin), _O_BINARY);
     (void)_setmode(_fileno(stdout), _O_BINARY);
     (void)_setmode(_fileno(stderr), _O_BINARY);
 #endif
+    (void)setvbuf(stdout, NULL, _IOLBF, 0);
+    (void)setvbuf(stderr, NULL, _IONBF, 0);
 }
 
 /* ====================================================================== */
@@ -41,18 +58,40 @@ void ls_rt_configure_stdio(void) {
 /* Cycle collector configuration (single threaded, see lsaca_rt.h). */
 #define LS_RT_CANDIDATE_THRESHOLD ((size_t)512)
 #define LS_RT_MAX_COLLECT_PASSES ((size_t)8)
-#define LS_RT_COLOR_BLACK 0u
-#define LS_RT_COLOR_GRAY 1u
-#define LS_RT_COLOR_WHITE 2u
-#define LS_RT_FLAG_QUEUED 0x01u       /* present in the candidate buffer */
-#define LS_RT_FLAG_WHITE_LISTED 0x02u /* on the collector's white list */
-/* All live reference counted allocations, most recently allocated first. */
-static LsRtHeader* ls_rt_all_head = NULL;
+
+/* Collector colors and object flags are packed into one byte in
+ * LsRtHeader.state so that the release-mode header stays small. */
+#define LS_RT_COLOR_MASK 0x03u
+#define LS_RT_COLOR_BLACK 0x00u
+#define LS_RT_COLOR_GRAY 0x01u
+#define LS_RT_COLOR_WHITE 0x02u
+/* LS_RT_FLAG_QUEUED / WHITE_LISTED / IMMORTAL are part of the private header
+ * contract (see lsaca_rt_internal.h), because LsRtHeader.state is shared with
+ * the string unit that allocates interned literals. */
+
+/* Always maintained: the ls_rt_test_live_allocations() hook reports the same
+ * numbers in every build configuration (one increment and one decrement per
+ * allocation/free; the intrusive list itself is debug only). */
 static size_t ls_rt_live_count = 0;
 
-#ifdef LS_RT_LEAK_TRACKING
+#if defined(LS_RT_LEAK_TRACKING)
+/* All live reference counted allocations, most recently allocated first. The
+ * intrusive list is maintained only in debug builds for the leak report. */
+static LsRtHeader* ls_rt_all_head = NULL;
+
 /* Set once a shutdown has reported leaks; a second shutdown must stay silent. */
 static int ls_rt_leak_reported = 0;
+
+/* Debug-only live-handle registry: an open-addressing hash set keyed by payload
+ * pointer. It lets ls_release() reject stale (already released) handles even
+ * when the allocator already reused the memory for a different live object,
+ * instead of corrupting that object. Linear probing, power-of-two capacity,
+ * tombstone deletion. */
+#define LS_RT_REG_TOMBSTONE ((void*)(uintptr_t)1)
+static void** ls_rt_registry = NULL;
+static size_t ls_rt_registry_capacity = 0;
+static size_t ls_rt_registry_count = 0;
+static size_t ls_rt_registry_tombstones = 0;
 #endif
 
 /* Objects whose managed reference count dropped but stayed above zero. The
@@ -73,14 +112,65 @@ static int ls_rt_collecting = 0;
 static int ls_rt_free_depth = 0;
 static int ls_rt_collect_pending = 0;
 
+/* Iterative worklists: collector graph walks and the drop cascade never use the
+ * C stack, so graph depth is bounded only by heap memory. */
+typedef struct LsRtStack {
+    LsRtHeader** items;
+    size_t count;
+    size_t capacity;
+} LsRtStack;
+
+static LsRtStack ls_rt_work_stack = {NULL, 0, 0};  /* mark/scan/white walk */
+static LsRtStack ls_rt_black_stack = {NULL, 0, 0}; /* scan-black restore walk */
+static LsRtStack ls_rt_free_stack = {NULL, 0, 0};  /* final-reference droppers */
+
 static void ls_rt_live_unlink(LsRtHeader* header);
 static void ls_rt_candidate_push(LsRtHeader* header);
 static void ls_rt_candidate_remove(LsRtHeader* header);
-static void ls_rt_mark_gray(LsRtHeader* header);
-static void ls_rt_scan(LsRtHeader* header);
-static void ls_rt_scan_black(LsRtHeader* header);
-static void ls_rt_collect_white(LsRtHeader* header);
+static void ls_rt_poison_header(LsRtHeader* header);
+static void ls_rt_free_header(LsRtHeader* header);
+static void ls_rt_destroy(LsRtHeader* header);
+static void ls_rt_drain_free_stack(void);
+static void ls_rt_maybe_collect(void);
+static void ls_rt_free_whites(void);
+static void ls_rt_mark_gray(LsRtHeader* root);
+static void ls_rt_scan(LsRtHeader* root);
+static void ls_rt_scan_black(LsRtHeader* root);
+static void ls_rt_collect_white(LsRtHeader* root);
 
+static unsigned ls_rt_color(const LsRtHeader* header) {
+    return (unsigned)(header->state & LS_RT_COLOR_MASK);
+}
+
+static void ls_rt_set_color(LsRtHeader* header, unsigned color) {
+    header->state = (unsigned char)((header->state & (unsigned char)~LS_RT_COLOR_MASK) |
+                                    (unsigned char)(color & LS_RT_COLOR_MASK));
+}
+
+/* Every allocation failure is fatal; there is no recoverable OOM in the
+ * language. Print a diagnostic and exit with the panic exit code. */
+LS_NORETURN void ls_rt_alloc_failure(size_t bytes) {
+    ls_rt_configure_stdio();
+    fflush(stdout);
+    fprintf(stderr, "lsaca: memory allocation of %zu byte(s) failed\n", bytes);
+    fflush(stderr);
+    exit(101);
+}
+
+/* Grow or allocate an array; every runtime allocation failure is fatal. */
+static void* ls_rt_realloc_array(void* data, size_t count, size_t item_size) {
+    void* next;
+    if (item_size != 0 && count > SIZE_MAX / item_size) {
+        ls_rt_alloc_failure(count);
+    }
+    next = realloc(data, count * item_size);
+    if (next == NULL && count != 0) {
+        ls_rt_alloc_failure(count * item_size);
+    }
+    return next;
+}
+
+#if defined(LS_RT_LEAK_TRACKING)
 static void ls_rt_live_unlink(LsRtHeader* header) {
     if (header->all_prev != NULL) {
         header->all_prev->all_next = header->all_next;
@@ -94,18 +184,143 @@ static void ls_rt_live_unlink(LsRtHeader* header) {
     header->all_next = NULL;
 }
 
-/* Every allocation failure is fatal; there is no recoverable OOM in the
- * language. Print a diagnostic and exit with the panic exit code. */
-LS_NORETURN void ls_rt_alloc_failure(size_t bytes) {
-    ls_rt_configure_stdio();
-    fflush(stdout);
-    fprintf(stderr, "lsaca: memory allocation of %zu byte(s) failed\n", bytes);
-    fflush(stderr);
-    exit(101);
+static size_t ls_rt_hash_pointer(const void* pointer) {
+    uint64_t value = (uint64_t)(uintptr_t)pointer;
+    value += (uint64_t)0x9E3779B97F4A7C15ULL;
+    value = (value ^ (value >> 30)) * (uint64_t)0xBF58476D1CE4E5B9ULL;
+    value = (value ^ (value >> 27)) * (uint64_t)0x94D049BB133111EBULL;
+    value ^= value >> 31;
+    return (size_t)value;
 }
 
-void* ls_rt_alloc_payload(size_t size, LsDropFn drop,
-                                    LsTraceFn trace) {
+static void ls_rt_registry_rebuild(size_t new_capacity) {
+    void** old_entries = ls_rt_registry;
+    size_t old_capacity = ls_rt_registry_capacity;
+    size_t index;
+    void** next = (void**)calloc(new_capacity, sizeof(void*));
+
+    if (next == NULL) {
+        ls_rt_alloc_failure(new_capacity * sizeof(void*));
+    }
+    ls_rt_registry = next;
+    ls_rt_registry_capacity = new_capacity;
+    ls_rt_registry_count = 0;
+    ls_rt_registry_tombstones = 0;
+    for (index = 0; index < old_capacity; index += 1) {
+        void* entry = old_entries[index];
+        size_t slot;
+        size_t mask;
+        if (entry == NULL || entry == LS_RT_REG_TOMBSTONE) {
+            continue;
+        }
+        mask = new_capacity - 1;
+        slot = ls_rt_hash_pointer(entry) & mask;
+        while (ls_rt_registry[slot] != NULL) {
+            slot = (slot + 1) & mask;
+        }
+        ls_rt_registry[slot] = entry;
+        ls_rt_registry_count += 1;
+    }
+    free(old_entries);
+}
+
+static void ls_rt_registry_insert(void* payload) {
+    size_t mask;
+    size_t slot;
+
+    if (ls_rt_registry_capacity == 0) {
+        ls_rt_registry_rebuild(256);
+    } else if ((ls_rt_registry_count + ls_rt_registry_tombstones + 1) * 10 >=
+               ls_rt_registry_capacity * 7) {
+        /* Grow only when most entries are live; when the table is mostly
+         * tombstones, rehash at the same capacity (keeps long churn loops from
+         * growing memory without bound). */
+        size_t new_capacity = ls_rt_registry_capacity;
+        if ((ls_rt_registry_count + 1) * 10 >= ls_rt_registry_capacity * 5) {
+            new_capacity *= 2;
+        }
+        ls_rt_registry_rebuild(new_capacity);
+    }
+    mask = ls_rt_registry_capacity - 1;
+    slot = ls_rt_hash_pointer(payload) & mask;
+    while (ls_rt_registry[slot] != NULL &&
+           ls_rt_registry[slot] != LS_RT_REG_TOMBSTONE) {
+        slot = (slot + 1) & mask;
+    }
+    if (ls_rt_registry[slot] == LS_RT_REG_TOMBSTONE) {
+        ls_rt_registry_tombstones -= 1;
+    }
+    ls_rt_registry[slot] = payload;
+    ls_rt_registry_count += 1;
+}
+
+static int ls_rt_registry_contains(const void* payload) {
+    size_t mask;
+    size_t slot;
+
+    if (ls_rt_registry_capacity == 0) {
+        return 0;
+    }
+    mask = ls_rt_registry_capacity - 1;
+    slot = ls_rt_hash_pointer(payload) & mask;
+    for (;;) {
+        void* entry = ls_rt_registry[slot];
+        if (entry == NULL) {
+            return 0;
+        }
+        if (entry == payload) {
+            return 1;
+        }
+        slot = (slot + 1) & mask;
+    }
+}
+
+static void ls_rt_registry_remove(const void* payload) {
+    size_t mask;
+    size_t slot;
+
+    if (ls_rt_registry_capacity == 0) {
+        return;
+    }
+    mask = ls_rt_registry_capacity - 1;
+    slot = ls_rt_hash_pointer(payload) & mask;
+    for (;;) {
+        void* entry = ls_rt_registry[slot];
+        if (entry == NULL) {
+            return;
+        }
+        if (entry == payload) {
+            ls_rt_registry[slot] = LS_RT_REG_TOMBSTONE;
+            ls_rt_registry_count -= 1;
+            ls_rt_registry_tombstones += 1;
+            return;
+        }
+        slot = (slot + 1) & mask;
+    }
+}
+#else
+static void ls_rt_live_unlink(LsRtHeader* header) {
+    (void)header;
+}
+#endif
+
+static void ls_rt_stack_push(LsRtStack* stack, LsRtHeader* header) {
+    if (stack->count == stack->capacity) {
+        size_t new_capacity = stack->capacity == 0 ? 256 : stack->capacity * 2;
+        stack->items = (LsRtHeader**)ls_rt_realloc_array(
+            stack->items, new_capacity, sizeof(LsRtHeader*));
+        stack->capacity = new_capacity;
+    }
+    stack->items[stack->count] = header;
+    stack->count += 1;
+}
+
+static LsRtHeader* ls_rt_stack_pop(LsRtStack* stack) {
+    stack->count -= 1;
+    return stack->items[stack->count];
+}
+
+void* ls_rt_alloc_payload(size_t size, LsDropFn drop, LsTraceFn trace) {
     size_t total;
     LsRtHeader* header;
     void* payload;
@@ -118,22 +333,26 @@ void* ls_rt_alloc_payload(size_t size, LsDropFn drop,
     if (header == NULL) {
         ls_rt_alloc_failure(size);
     }
-    header->refcount = 1;
-    header->size = size;
     header->magic = LS_RT_LIVE_MAGIC;
     header->drop = drop;
     header->trace = trace;
-    header->color = LS_RT_COLOR_BLACK;
-    header->flags = 0;
     header->candidate_index = 0;
+    header->refcount = 1;
+    header->state = (unsigned char)LS_RT_COLOR_BLACK;
+#if defined(LS_RT_LEAK_TRACKING)
+    header->size = size;
     header->all_prev = NULL;
     header->all_next = ls_rt_all_head;
     if (ls_rt_all_head != NULL) {
         ls_rt_all_head->all_prev = header;
     }
     ls_rt_all_head = header;
+#endif
     ls_rt_live_count += 1;
     payload = ls_rt_payload_of(header);
+#if defined(LS_RT_LEAK_TRACKING)
+    ls_rt_registry_insert(payload);
+#endif
     memset(payload, 0, size);
     return payload;
 }
@@ -144,6 +363,44 @@ void* ls_alloc(size_t size) {
 
 void* ls_alloc_managed(size_t size, LsDropFn drop, LsTraceFn trace) {
     return ls_rt_alloc_payload(size, drop, trace);
+}
+
+/* Immortal payload (interned string literals): never freed, never leak-counted.
+ * It still carries the live magic word so every release path can validate the
+ * handle. The debug live-handle registry accepts it as a live payload, but the
+ * intrusive leak list and the live counter deliberately omit it. */
+void* ls_rt_alloc_immortal(size_t size) {
+    size_t total;
+    LsRtHeader* header;
+    void* payload;
+
+    if (size > SIZE_MAX - LS_RT_HEADER_SPACE) {
+        ls_rt_alloc_failure(size);
+    }
+    total = LS_RT_HEADER_SPACE + size;
+    header = (LsRtHeader*)malloc(total);
+    if (header == NULL) {
+        ls_rt_alloc_failure(size);
+    }
+    header->magic = LS_RT_LIVE_MAGIC;
+    header->drop = NULL;
+    header->trace = NULL;
+    header->candidate_index = 0;
+    header->refcount = 1;
+    header->state = (unsigned char)(LS_RT_COLOR_BLACK | LS_RT_FLAG_IMMORTAL);
+#if defined(LS_RT_LEAK_TRACKING)
+    /* Not part of the leak list: initialize the fields for determinism and only
+     * register the handle for stale-release diagnostics. */
+    header->size = size;
+    header->all_prev = NULL;
+    header->all_next = NULL;
+#endif
+    payload = ls_rt_payload_of(header);
+#if defined(LS_RT_LEAK_TRACKING)
+    ls_rt_registry_insert(payload);
+#endif
+    memset(payload, 0, size);
+    return payload;
 }
 
 void* ls_retain(void* obj) {
@@ -164,10 +421,21 @@ static void ls_rt_poison_header(LsRtHeader* header) {
     ((volatile LsRtHeader*)header)->magic = 0;
 }
 
-/* Diagnose an invalid or already released handle. This check is not a debug
- * feature: it catches use-after-free in every build configuration. */
+#if defined(LS_RT_LEAK_TRACKING)
+/* Defined next to ls_rt_free_header(), after the release paths that report
+ * invalid handles and free quarantine memory. */
+static void ls_rt_quarantine_release_all(void);
+#endif
+
+/* Diagnose an invalid or already released handle. In debug builds the
+ * live-handle registry catches stale handles reliably (even when the memory was
+ * already reused); release builds fall back to the magic word, which is best
+ * effort by nature. */
 LS_NORETURN static void ls_rt_release_invalid(void) {
     ls_rt_configure_stdio();
+#if defined(LS_RT_LEAK_TRACKING)
+    ls_rt_quarantine_release_all();
+#endif
     fflush(stdout);
     fprintf(stderr,
             "lsaca: runtime error: release of an invalid or already "
@@ -176,12 +444,124 @@ LS_NORETURN static void ls_rt_release_invalid(void) {
     exit(101);
 }
 
+#if defined(LS_RT_LEAK_TRACKING)
+/* Stale-handle quarantine.
+ *
+ * Debug builds do not hand freed payload blocks back to the allocator right
+ * away. If they did, a fresh allocation could reuse the address of a released
+ * handle and a later release of the stale handle would alias the new object:
+ * the live-handle registry would accept the address and the release would
+ * corrupt a live allocation. Keeping the block reserved (with a poisoned magic
+ * word) until shutdown makes every recent stale handle detectable: the registry
+ * no longer contains the address and the header memory is still readable. The
+ * window is bounded so a long churn loop cannot grow without limit; blocks
+ * evicted from the window (oldest first) fall back to the best-effort release
+ * build behaviour. */
+#define LS_RT_QUARANTINE_MAX ((size_t)262144)
+static LsRtHeader* ls_rt_quarantine_head = NULL;
+static LsRtHeader* ls_rt_quarantine_tail = NULL;
+static size_t ls_rt_quarantine_count = 0;
+
+/* Reuses the all_prev/all_next fields after ls_rt_live_unlink(): the block is
+ * no longer part of the live list, so the links are free for the quarantine
+ * list. */
+static void ls_rt_quarantine_push(LsRtHeader* header) {
+    header->all_prev = NULL;
+    header->all_next = ls_rt_quarantine_head;
+    if (ls_rt_quarantine_head != NULL) {
+        ls_rt_quarantine_head->all_prev = header;
+    }
+    ls_rt_quarantine_head = header;
+    if (ls_rt_quarantine_tail == NULL) {
+        ls_rt_quarantine_tail = header;
+    }
+    ls_rt_quarantine_count += 1;
+    if (ls_rt_quarantine_count > LS_RT_QUARANTINE_MAX) {
+        LsRtHeader* oldest = ls_rt_quarantine_tail;
+        ls_rt_quarantine_tail = oldest->all_prev;
+        if (ls_rt_quarantine_tail != NULL) {
+            ls_rt_quarantine_tail->all_next = NULL;
+        } else {
+            ls_rt_quarantine_head = NULL;
+        }
+        ls_rt_quarantine_count -= 1;
+        free(oldest);
+    }
+}
+
+/* Give the reserved blocks back once no user code can run any more. */
+static void ls_rt_quarantine_release_all(void) {
+    while (ls_rt_quarantine_head != NULL) {
+        LsRtHeader* next = ls_rt_quarantine_head->all_next;
+        free(ls_rt_quarantine_head);
+        ls_rt_quarantine_head = next;
+    }
+    ls_rt_quarantine_tail = NULL;
+    ls_rt_quarantine_count = 0;
+}
+#endif
+
+static void ls_rt_free_header(LsRtHeader* header) {
+    ls_rt_live_unlink(header);
+    ls_rt_live_count -= 1;
+#if defined(LS_RT_LEAK_TRACKING)
+    ls_rt_registry_remove(ls_rt_payload_of(header));
+#endif
+    ls_rt_poison_header(header);
+    header->state = 0;
+#if defined(LS_RT_LEAK_TRACKING)
+    /* Reserve the block for stale-handle diagnostics instead of freeing it. */
+    ls_rt_quarantine_push(header);
+#else
+    free(header);
+#endif
+}
+
+/* Run the pending drop cascade: one payload at a time, on the heap worklist. */
+static void ls_rt_drain_free_stack(void) {
+    while (ls_rt_free_stack.count != 0) {
+        LsRtHeader* header = ls_rt_stack_pop(&ls_rt_free_stack);
+        if (header->drop != NULL) {
+            header->drop(ls_rt_payload_of(header));
+        }
+        ls_rt_free_header(header);
+    }
+}
+
+/* Final reference released: enqueue the payload for destruction. Only the
+ * outermost release context drains the queue, so drop functions that release
+ * further final references extend the heap worklist instead of the C stack. */
+static void ls_rt_destroy(LsRtHeader* header) {
+    ls_rt_stack_push(&ls_rt_free_stack, header);
+    if (ls_rt_free_depth > 0) {
+        return;
+    }
+    ls_rt_free_depth += 1;
+    ls_rt_drain_free_stack();
+    ls_rt_free_depth -= 1;
+    ls_rt_maybe_collect();
+}
+
+static void ls_rt_maybe_collect(void) {
+    if (!ls_rt_collecting && ls_rt_free_depth == 0 &&
+        (ls_rt_collect_pending ||
+         ls_rt_candidate_count > ls_rt_candidate_threshold)) {
+        ls_rt_collect_pending = 0;
+        ls_collect_cycles();
+    }
+}
+
 void ls_release(void* obj) {
     LsRtHeader* header;
 
     if (obj == NULL) {
         return;
     }
+#if defined(LS_RT_LEAK_TRACKING)
+    if (!ls_rt_registry_contains(obj)) {
+        ls_rt_release_invalid();
+    }
+#endif
     header = ls_rt_header_of(obj);
     /* A released object has its magic cleared before free(), so a magic
      * mismatch detects both invalid and already released handles. */
@@ -198,6 +578,16 @@ void ls_release(void* obj) {
     if (ls_rt_collecting && ls_rt_free_depth > 0 && header->trace != NULL) {
         return;
     }
+    /* Immortal payloads (interned literals) are never destroyed: releasing one
+     * only drops a counted reference, and the final "static" reference is left
+     * in place. This works in release builds too, where the immortal flag is
+     * the only marker available. */
+    if ((header->state & LS_RT_FLAG_IMMORTAL) != 0) {
+        if (header->refcount > 1) {
+            header->refcount -= 1;
+        }
+        return;
+    }
     if (header->refcount == 0) {
         ls_rt_release_invalid();
     }
@@ -211,70 +601,30 @@ void ls_release(void* obj) {
         if (header->trace == NULL) {
             return;
         }
-        if ((header->flags & LS_RT_FLAG_QUEUED) == 0) {
+        if ((header->state & LS_RT_FLAG_QUEUED) == 0) {
             ls_rt_candidate_push(header);
         }
-        /* Trigger a collection once enough candidates have accumulated. Never
-         * collect from inside a collection or a drop function: the next
-         * release or shutdown does it instead. */
-        if (!ls_rt_collecting && ls_rt_free_depth == 0 &&
-            (ls_rt_collect_pending ||
-             ls_rt_candidate_count > ls_rt_candidate_threshold)) {
-            ls_rt_collect_pending = 0;
-            ls_collect_cycles();
-        }
+        ls_rt_maybe_collect();
         return;
     }
-    /* Final reference: free the payload normally. */
+    /* Final reference: free the payload iteratively. */
     header->refcount = 0;
-    if ((header->flags & LS_RT_FLAG_QUEUED) != 0) {
+    if ((header->state & LS_RT_FLAG_QUEUED) != 0) {
         ls_rt_candidate_remove(header);
     }
-    if (header->drop != NULL) {
-        /* The payload is still intact, so its drop function can release the
-         * handles it owns. free_depth suppresses a nested collection. */
-        ls_rt_free_depth += 1;
-        header->drop(ls_rt_payload_of(header));
-        ls_rt_free_depth -= 1;
-    }
-    ls_rt_live_unlink(header);
-    ls_rt_live_count -= 1;
-    ls_rt_poison_header(header);
-    free(header);
-    if (!ls_rt_collecting && ls_rt_free_depth == 0 &&
-        (ls_rt_collect_pending ||
-         ls_rt_candidate_count > ls_rt_candidate_threshold)) {
-        ls_rt_collect_pending = 0;
-        ls_collect_cycles();
-    }
+    ls_rt_destroy(header);
 }
 
 size_t ls_refcount(const void* obj) {
     if (obj == NULL) {
         return 0;
     }
-    return ls_rt_header_of(obj)->refcount;
+    return (size_t)ls_rt_header_of(obj)->refcount;
 }
-
 
 /* ====================================================================== */
 /* Cycle collector (trial deletion)                                       */
 /* ====================================================================== */
-
-/* Grow or allocate a pointer array; every runtime allocation failure is
- * fatal. */
-static void* ls_rt_realloc_array(void* data, size_t count,
-                                 size_t item_size) {
-    void* next;
-    if (count > SIZE_MAX / item_size) {
-        ls_rt_alloc_failure(count);
-    }
-    next = realloc(data, count * item_size);
-    if (next == NULL) {
-        ls_rt_alloc_failure(count * item_size);
-    }
-    return next;
-}
 
 static void ls_rt_candidate_push(LsRtHeader* header) {
     if (ls_rt_candidate_count == ls_rt_candidate_capacity) {
@@ -287,7 +637,7 @@ static void ls_rt_candidate_push(LsRtHeader* header) {
     header->candidate_index = ls_rt_candidate_count;
     ls_rt_candidates[ls_rt_candidate_count] = header;
     ls_rt_candidate_count += 1;
-    header->flags |= LS_RT_FLAG_QUEUED;
+    header->state |= (unsigned char)LS_RT_FLAG_QUEUED;
 }
 
 static void ls_rt_candidate_remove(LsRtHeader* header) {
@@ -297,7 +647,7 @@ static void ls_rt_candidate_remove(LsRtHeader* header) {
         ls_rt_candidates[index] != header) {
         /* Defensive: reaching this point would indicate corrupted bookkeeping;
          * keep going without corrupting the buffer further. */
-        header->flags &= ~LS_RT_FLAG_QUEUED;
+        header->state &= (unsigned char)~LS_RT_FLAG_QUEUED;
         return;
     }
     ls_rt_candidate_count -= 1;
@@ -306,7 +656,7 @@ static void ls_rt_candidate_remove(LsRtHeader* header) {
         ls_rt_candidates[index] = moved;
         moved->candidate_index = index;
     }
-    header->flags &= ~LS_RT_FLAG_QUEUED;
+    header->state &= (unsigned char)~LS_RT_FLAG_QUEUED;
 }
 
 static void ls_rt_white_push(LsRtHeader* header) {
@@ -323,8 +673,8 @@ static void ls_rt_white_push(LsRtHeader* header) {
 
 /* Trial deletion phase 1: gray every object reachable from the roots through
  * managed handles and subtract every internal edge from the reference counts.
- * visit_mark is called once per edge; the decrement happens even when the
- * child was already gray, so each edge is subtracted exactly once. */
+ * The edge visitor is called once per edge; the decrement happens even when
+ * the child was already gray, so each edge is subtracted exactly once. */
 static void ls_rt_visit_mark(void* child) {
     LsRtHeader* header = ls_rt_header_of(child);
     if (header->trace == NULL) {
@@ -332,61 +682,85 @@ static void ls_rt_visit_mark(void* child) {
         return;
     }
     header->refcount -= 1;
-    ls_rt_mark_gray(header);
+    if (ls_rt_color(header) != LS_RT_COLOR_GRAY) {
+        ls_rt_set_color(header, LS_RT_COLOR_GRAY);
+        ls_rt_stack_push(&ls_rt_work_stack, header);
+    }
 }
 
-static void ls_rt_mark_gray(LsRtHeader* header) {
-    if (header->color == LS_RT_COLOR_GRAY) {
+static void ls_rt_mark_gray(LsRtHeader* root) {
+    if (ls_rt_color(root) == LS_RT_COLOR_GRAY) {
         return;
     }
-    header->color = LS_RT_COLOR_GRAY;
-    if (header->trace != NULL) {
-        header->trace(ls_rt_payload_of(header), ls_rt_visit_mark);
+    ls_rt_set_color(root, LS_RT_COLOR_GRAY);
+    ls_rt_stack_push(&ls_rt_work_stack, root);
+    while (ls_rt_work_stack.count != 0) {
+        LsRtHeader* header = ls_rt_stack_pop(&ls_rt_work_stack);
+        if (header->trace != NULL) {
+            header->trace(ls_rt_payload_of(header), ls_rt_visit_mark);
+        }
     }
 }
 
 /* Trial deletion phase 2: a gray object whose remaining (external) reference
  * count is positive is reachable from outside the trial set; paint it black
  * again and restore the counts of everything it reaches. Otherwise it is
- * garbage. */
-static void ls_rt_visit_scan(void* child) {
-    LsRtHeader* header = ls_rt_header_of(child);
-    if (header->trace == NULL) {
-        return;
-    }
-    ls_rt_scan(header);
-}
-
-static void ls_rt_scan(LsRtHeader* header) {
-    if (header->color != LS_RT_COLOR_GRAY) {
-        return;
-    }
-    if (header->refcount > 0) {
-        ls_rt_scan_black(header);
-    } else {
-        header->color = LS_RT_COLOR_WHITE;
-    }
-    if (header->trace != NULL) {
-        header->trace(ls_rt_payload_of(header), ls_rt_visit_scan);
-    }
-}
-
+ * garbage. Iterative version of the classic recursive scan. */
 static void ls_rt_visit_scan_black(void* child) {
     LsRtHeader* header = ls_rt_header_of(child);
     if (header->trace == NULL) {
         return;
     }
     header->refcount += 1;
-    ls_rt_scan_black(header);
+    if (ls_rt_color(header) != LS_RT_COLOR_BLACK) {
+        ls_rt_set_color(header, LS_RT_COLOR_BLACK);
+        ls_rt_stack_push(&ls_rt_black_stack, header);
+    }
 }
 
-static void ls_rt_scan_black(LsRtHeader* header) {
-    if (header->color == LS_RT_COLOR_BLACK) {
+static void ls_rt_scan_black(LsRtHeader* root) {
+    if (ls_rt_color(root) == LS_RT_COLOR_BLACK) {
         return;
     }
-    header->color = LS_RT_COLOR_BLACK;
-    if (header->trace != NULL) {
-        header->trace(ls_rt_payload_of(header), ls_rt_visit_scan_black);
+    ls_rt_set_color(root, LS_RT_COLOR_BLACK);
+    ls_rt_stack_push(&ls_rt_black_stack, root);
+    while (ls_rt_black_stack.count != 0) {
+        LsRtHeader* header = ls_rt_stack_pop(&ls_rt_black_stack);
+        if (header->trace != NULL) {
+            header->trace(ls_rt_payload_of(header), ls_rt_visit_scan_black);
+        }
+    }
+}
+
+static void ls_rt_visit_scan(void* child) {
+    LsRtHeader* header = ls_rt_header_of(child);
+    if (header->trace == NULL) {
+        return;
+    }
+    if (ls_rt_color(header) != LS_RT_COLOR_GRAY) {
+        return;
+    }
+    ls_rt_stack_push(&ls_rt_work_stack, header);
+}
+
+static void ls_rt_scan(LsRtHeader* root) {
+    if (ls_rt_color(root) != LS_RT_COLOR_GRAY) {
+        return;
+    }
+    ls_rt_stack_push(&ls_rt_work_stack, root);
+    while (ls_rt_work_stack.count != 0) {
+        LsRtHeader* header = ls_rt_stack_pop(&ls_rt_work_stack);
+        if (ls_rt_color(header) != LS_RT_COLOR_GRAY) {
+            continue;
+        }
+        if (header->refcount > 0) {
+            ls_rt_scan_black(header);
+        } else {
+            ls_rt_set_color(header, LS_RT_COLOR_WHITE);
+        }
+        if (header->trace != NULL) {
+            header->trace(ls_rt_payload_of(header), ls_rt_visit_scan);
+        }
     }
 }
 
@@ -396,40 +770,45 @@ static void ls_rt_visit_collect_white(void* child) {
     if (header->trace == NULL) {
         return;
     }
-    ls_rt_collect_white(header);
+    if (ls_rt_color(header) == LS_RT_COLOR_WHITE &&
+        (header->state & LS_RT_FLAG_WHITE_LISTED) == 0) {
+        header->state |= (unsigned char)LS_RT_FLAG_WHITE_LISTED;
+        ls_rt_stack_push(&ls_rt_work_stack, header);
+    }
 }
 
-static void ls_rt_collect_white(LsRtHeader* header) {
-    if (header->color != LS_RT_COLOR_WHITE ||
-        (header->flags & LS_RT_FLAG_WHITE_LISTED) != 0) {
+static void ls_rt_collect_white(LsRtHeader* root) {
+    if (ls_rt_color(root) != LS_RT_COLOR_WHITE ||
+        (root->state & LS_RT_FLAG_WHITE_LISTED) != 0) {
         return;
     }
-    header->flags |= LS_RT_FLAG_WHITE_LISTED;
-    if (header->trace != NULL) {
-        header->trace(ls_rt_payload_of(header), ls_rt_visit_collect_white);
+    root->state |= (unsigned char)LS_RT_FLAG_WHITE_LISTED;
+    ls_rt_stack_push(&ls_rt_work_stack, root);
+    while (ls_rt_work_stack.count != 0) {
+        LsRtHeader* header = ls_rt_stack_pop(&ls_rt_work_stack);
+        if (header->trace != NULL) {
+            header->trace(ls_rt_payload_of(header), ls_rt_visit_collect_white);
+        }
+        ls_rt_white_push(header);
     }
-    ls_rt_white_push(header);
 }
 
 /* Free the collected white set. All drop functions run before any allocation
  * is freed, so a drop function always sees intact payloads of the other white
- * objects. */
+ * objects. Unmanaged children released by those drops are destroyed through the
+ * heap free worklist. */
 static void ls_rt_free_whites(void) {
-    size_t i;
+    size_t index;
     ls_rt_free_depth += 1;
-    for (i = 0; i < ls_rt_white_count; i += 1) {
-        LsRtHeader* header = ls_rt_white_list[i];
+    for (index = 0; index < ls_rt_white_count; index += 1) {
+        LsRtHeader* header = ls_rt_white_list[index];
         if (header->drop != NULL) {
             header->drop(ls_rt_payload_of(header));
         }
     }
-    for (i = 0; i < ls_rt_white_count; i += 1) {
-        LsRtHeader* header = ls_rt_white_list[i];
-        ls_rt_live_unlink(header);
-        ls_rt_live_count -= 1;
-        ls_rt_poison_header(header);
-        header->flags = 0;
-        free(header);
+    ls_rt_drain_free_stack();
+    for (index = 0; index < ls_rt_white_count; index += 1) {
+        ls_rt_free_header(ls_rt_white_list[index]);
     }
     ls_rt_white_count = 0;
     ls_rt_free_depth -= 1;
@@ -437,7 +816,7 @@ static void ls_rt_free_whites(void) {
 
 void ls_collect_cycles(void) {
     size_t root_count;
-    size_t i;
+    size_t index;
     LsRtHeader** roots;
 
     if (ls_rt_collecting || ls_rt_free_depth > 0) {
@@ -455,20 +834,20 @@ void ls_collect_cycles(void) {
      * (for example by a drop function while the whites are freed) is queued
      * again for the next collection. */
     ls_rt_candidate_count = 0;
-    for (i = 0; i < root_count; i += 1) {
-        roots[i]->flags &= ~LS_RT_FLAG_QUEUED;
-        roots[i]->candidate_index = 0;
+    for (index = 0; index < root_count; index += 1) {
+        roots[index]->state &= (unsigned char)~LS_RT_FLAG_QUEUED;
+        roots[index]->candidate_index = 0;
     }
     ls_rt_collecting = 1;
-    for (i = 0; i < root_count; i += 1) {
-        ls_rt_mark_gray(roots[i]);
+    for (index = 0; index < root_count; index += 1) {
+        ls_rt_mark_gray(roots[index]);
     }
-    for (i = 0; i < root_count; i += 1) {
-        ls_rt_scan(roots[i]);
+    for (index = 0; index < root_count; index += 1) {
+        ls_rt_scan(roots[index]);
     }
     ls_rt_white_count = 0;
-    for (i = 0; i < root_count; i += 1) {
-        ls_rt_collect_white(roots[i]);
+    for (index = 0; index < root_count; index += 1) {
+        ls_rt_collect_white(roots[index]);
     }
     if (ls_rt_white_count != 0) {
         ls_rt_free_whites();
@@ -530,7 +909,7 @@ void ls_runtime_shutdown(void) {
         ls_collect_cycles();
     }
     ls_rt_collect_pending = 0;
-#ifdef LS_RT_LEAK_TRACKING
+#if defined(LS_RT_LEAK_TRACKING)
     if (!ls_rt_leak_reported) {
         size_t count = ls_rt_live_count;
         size_t shown = 0;
@@ -550,10 +929,13 @@ void ls_runtime_shutdown(void) {
         /* A second shutdown call must not report the same objects twice. */
         ls_rt_leak_reported = 1;
     }
+    /* The debug stale-handle quarantine reserved released blocks; give that
+     * memory back once user code cannot run any more. */
+    ls_rt_quarantine_release_all();
 #endif
+    fflush(stdout);
     fflush(stderr);
 }
-
 /* ====================================================================== */
 /* Panics                                                                 */
 /* ====================================================================== */
@@ -564,6 +946,9 @@ LS_NORETURN static void ls_rt_panic_report(const char* file, int32_t line,
                                            size_t msg_len) {
     const char* where = (file != NULL && file[0] != '\0') ? file : "<unknown>";
     ls_rt_configure_stdio();
+#if defined(LS_RT_LEAK_TRACKING)
+    ls_rt_quarantine_release_all();
+#endif
     fflush(stdout);
     fprintf(stderr, "thread 'main' panicked at %s:%" PRId32 ":%" PRId32 ":\n",
             where, line, col);
@@ -647,6 +1032,9 @@ void ls_panic_overflow(const char* file, int32_t line, int32_t col,
 
 void ls_exit(int32_t code) {
     ls_rt_configure_stdio();
+#if defined(LS_RT_LEAK_TRACKING)
+    ls_rt_quarantine_release_all();
+#endif
     fflush(stdout);
     fflush(stderr);
     exit(code);
@@ -1000,67 +1388,179 @@ LS_RT_DEF_CHECKED_UNSIGNED_SMALL(u32, uint32_t, uint64_t, UINT32_MAX)
 #undef LS_RT_DEF_CHECKED_UNSIGNED_SMALL
 #undef LS_RT_BITS
 
+
 /* ====================================================================== */
 /* Process arguments and IO                                               */
 /* ====================================================================== */
 
-LsVec_String ls_args(void) {
+/* Program arguments (excluding argv[0]) materialized as owned Strings. */
+static LsVec_String ls_rt_args_located(const char* file, int32_t line,
+                                       int32_t col) {
     LsVec_String out = ls_vec_string_new();
-    int i;
+    int index;
 
     if (ls_rt_argv == NULL) {
         return out;
     }
-    /* argv[0] is the executable; the language exposes only user arguments. */
-    for (i = 1; i < ls_rt_argc; i += 1) {
-        if (ls_rt_argv[i] == NULL) {
+    for (index = 1; index < ls_rt_argc; index += 1) {
+        const char* argument = ls_rt_argv[index];
+        size_t length;
+        if (argument == NULL) {
             break;
         }
-        ls_vec_string_push_owned(&out, ls_str_cstr(ls_rt_argv[i]));
+        length = strlen(argument);
+        if (!ls_rt_utf8_validate(argument, length)) {
+            ls_panic_cstr(file, line, col, "arguments contain invalid UTF-8");
+        }
+        ls_vec_string_push_owned(&out, ls_str_alloc_from(argument, length));
     }
     return out;
 }
 
-LsOpt_String ls_read_line(void) {
-    size_t capacity = 128;
-    size_t length = 0;
-    char* buffer = (char*)malloc(capacity);
-    int c = EOF;
-    LsString* line;
+LsVec_String ls_args(void) {
+    return ls_rt_args_located(NULL, 0, 0);
+}
 
-    if (buffer == NULL) {
-        ls_rt_alloc_failure(capacity);
+LsVec_String ls_args_at(const char* file, int32_t line, int32_t col) {
+    return ls_rt_args_located(file, line, col);
+}
+
+/* Buffered stdin reader: 8 KiB fread() blocks scanned with memchr(). This keeps
+ * long lines O(n) and stdin reads one syscall per block instead of one per
+ * byte. The unconsumed tail of the block survives between calls. */
+#define LS_RT_STDIN_BUFFER_SIZE ((size_t)8192)
+
+static char ls_rt_stdin_buffer[LS_RT_STDIN_BUFFER_SIZE];
+static size_t ls_rt_stdin_position = 0;
+static size_t ls_rt_stdin_length = 0;
+static int ls_rt_stdin_eof = 0;
+
+/* Test-only hook: lets a regression program retarget stdin with freopen()
+ * between cases without leaking buffered bytes from the previous file. */
+void ls_rt_test_reset_stdin_buffer(void) {
+    ls_rt_stdin_position = 0;
+    ls_rt_stdin_length = 0;
+    ls_rt_stdin_eof = 0;
+}
+
+static int ls_rt_stdin_fill(void) {
+    size_t count;
+    if (ls_rt_stdin_eof) {
+        return 0;
     }
-    while ((c = fgetc(stdin)) != EOF) {
-        if (length + 1 > capacity) {
-            size_t new_capacity = capacity * 2;
-            char* replacement = (char*)realloc(buffer, new_capacity);
-            if (replacement == NULL) {
-                free(buffer);
-                ls_rt_alloc_failure(new_capacity);
+    count = fread(ls_rt_stdin_buffer, 1, LS_RT_STDIN_BUFFER_SIZE, stdin);
+    if (count == 0) {
+        ls_rt_stdin_eof = 1;
+        return 0;
+    }
+    ls_rt_stdin_position = 0;
+    ls_rt_stdin_length = count;
+    return 1;
+}
+
+static void ls_rt_line_append(char** buffer, size_t* length, size_t* capacity,
+                              const char* bytes, size_t count) {
+    if (count > SIZE_MAX - *length) {
+        ls_rt_alloc_failure(count);
+    }
+    if (*capacity - *length < count) {
+        size_t new_capacity = *capacity == 0 ? 128 : *capacity;
+        char* replacement;
+        while (new_capacity - *length < count) {
+            if (new_capacity > SIZE_MAX / 2) {
+                new_capacity = *length + count;
+                break;
             }
-            buffer = replacement;
-            capacity = new_capacity;
+            new_capacity *= 2;
         }
-        buffer[length] = (char)c;
-        length += 1;
-        if (c == '\n') {
+        replacement = (char*)realloc(*buffer, new_capacity);
+        if (replacement == NULL) {
+            ls_rt_alloc_failure(new_capacity);
+        }
+        *buffer = replacement;
+        *capacity = new_capacity;
+    }
+    memcpy(*buffer + *length, bytes, count);
+    *length += count;
+}
+
+/* Read one line into a malloc'd buffer. The trailing newline is dropped; a CR
+ * is dropped only when it is the CR of a CRLF pair (Rust read_line semantics:
+ * a final line ending in a lone CR keeps that CR). Embedded NUL bytes are
+ * preserved. Returns false on EOF with no bytes. */
+static bool ls_rt_read_stdin_line(char** out_bytes, size_t* out_length) {
+    char* buffer = NULL;
+    size_t length = 0;
+    size_t capacity = 0;
+    bool complete = false;
+
+    for (;;) {
+        size_t available;
+        const char* newline;
+        size_t take;
+        if (ls_rt_stdin_position == ls_rt_stdin_length) {
+            if (!ls_rt_stdin_fill()) {
+                break;
+            }
+        }
+        available = ls_rt_stdin_length - ls_rt_stdin_position;
+        newline = (const char*)memchr(
+            ls_rt_stdin_buffer + ls_rt_stdin_position, '\n', available);
+        take = newline != NULL
+                   ? (size_t)(newline -
+                              (ls_rt_stdin_buffer + ls_rt_stdin_position)) + 1
+                   : available;
+        ls_rt_line_append(&buffer, &length, &capacity,
+                          ls_rt_stdin_buffer + ls_rt_stdin_position, take);
+        ls_rt_stdin_position += take;
+        if (newline != NULL) {
+            complete = true;
             break;
         }
     }
-    if (length == 0 && c == EOF) {
+    if (!complete && length == 0) {
         free(buffer);
+        return false;
+    }
+    if (complete) {
+        if (length > 0) {
+            length -= 1; /* trailing '\n' */
+        }
+        if (length > 0 && buffer[length - 1] == '\r') {
+            length -= 1; /* CR of a CRLF pair */
+        }
+    }
+    *out_bytes = buffer;
+    *out_length = length;
+    return true;
+}
+
+static LsOpt_String ls_rt_read_line_located(const char* file, int32_t line,
+                                            int32_t col) {
+    char* bytes = NULL;
+    size_t length = 0;
+    const char* data;
+    LsString* value;
+
+    if (!ls_rt_read_stdin_line(&bytes, &length)) {
         return ls_opt_string_none();
     }
-    if (length > 0 && buffer[length - 1] == '\n') {
-        length -= 1;
+    data = bytes != NULL ? bytes : "";
+    if (!ls_rt_utf8_validate(data, length)) {
+        free(bytes);
+        ls_panic_cstr(file, line, col, "stream did not contain valid UTF-8");
     }
-    if (length > 0 && buffer[length - 1] == '\r') {
-        length -= 1;
-    }
-    line = ls_str_alloc_from(buffer, length);
-    free(buffer);
-    return ls_opt_string_some(line);
+    value = ls_str_alloc_from(data, length);
+    free(bytes);
+    return ls_opt_string_some(value);
+}
+
+LsOpt_String ls_read_line(void) {
+    return ls_rt_read_line_located(NULL, 0, 0);
+}
+
+LsOpt_String ls_read_line_at(const char* file, int32_t line, int32_t col) {
+    return ls_rt_read_line_located(file, line, col);
 }
 
 static bool ls_rt_path_has_nul(const LsString* path) {
@@ -1131,8 +1631,13 @@ LsRes_String_String ls_read_file(const LsString* path) {
         free(buffer);
         return ls_res_string_err(ls_rt_os_error_message(error_number));
     }
+    if (!ls_rt_utf8_validate(length == 0 ? "" : buffer, length)) {
+        free(buffer);
+        return ls_res_string_err(
+            ls_str_cstr("stream did not contain valid UTF-8"));
+    }
     {
-        LsString* contents = ls_str_alloc_from(buffer, length);
+        LsString* contents = ls_str_alloc_from(length == 0 ? "" : buffer, length);
         free(buffer);
         return ls_res_string_ok(contents);
     }

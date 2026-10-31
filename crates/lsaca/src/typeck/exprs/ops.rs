@@ -6,6 +6,7 @@ use crate::span::Span;
 use crate::typeck::check::Checker;
 use crate::typeck::itype::{ITy, VarKind};
 use crate::typeck::tree::{TBlock, TExpr, TExprKind, TLit};
+use crate::types::IntTy;
 
 impl<'a> Checker<'a> {
     pub fn check_unary(
@@ -35,9 +36,20 @@ impl<'a> Checker<'a> {
                         );
                         return self.never_expr(span);
                     }
+                    // Fold the sign into a literal range check so that
+                    // `-9223372036854775808` (i64::MIN) is accepted.
+                    self.fold_literal_sign(&value);
                     TExpr::new(ty.clone(), unary(value), span)
                 }
                 ITy::Float(_) => TExpr::new(ty.clone(), unary(value), span),
+                ITy::Char => {
+                    self.error_code(
+                        "cannot apply arithmetic to values of type char".to_string(),
+                        span,
+                        "E0308",
+                    );
+                    self.never_expr(span)
+                }
                 ITy::Never => TExpr::new(ITy::never(), unary(value), span),
                 ITy::Var(id) => match self.infer.var_kind(*id) {
                     VarKind::General => {
@@ -48,7 +60,14 @@ impl<'a> Checker<'a> {
                         );
                         self.never_expr(span)
                     }
-                    _ => TExpr::new(ty.clone(), unary(value), span),
+                    _ => {
+                        // The operand may still be an unconstrained integer
+                        // literal (e.g. `-9223372036854775808` with no
+                        // annotation, defaulted to i64 later): fold the sign
+                        // into its deferred range check.
+                        self.fold_literal_sign(&value);
+                        TExpr::new(ty.clone(), unary(value), span)
+                    }
                 },
                 _ => {
                     self.error_code(
@@ -65,6 +84,14 @@ impl<'a> Checker<'a> {
             AstUnaryOp::Not => match &ty {
                 ITy::Bool => TExpr::new(ty.clone(), unary(value), span),
                 ITy::Int(_) => TExpr::new(ty.clone(), unary(value), span),
+                ITy::Char => {
+                    self.error_code(
+                        "cannot apply a bitwise operation to values of type char".to_string(),
+                        span,
+                        "E0308",
+                    );
+                    self.never_expr(span)
+                }
                 ITy::Never => TExpr::new(ITy::never(), unary(value), span),
                 ITy::Var(id) => match self.infer.var_kind(*id) {
                     VarKind::General => {
@@ -245,6 +272,10 @@ impl<'a> Checker<'a> {
             AstBinaryOp::Add => match &unified {
                 ITy::String => (hop, ITy::string()),
                 ITy::Int(_) | ITy::Float(_) => (hop, unified.clone()),
+                ITy::Char => {
+                    self.report_char_arithmetic(span);
+                    (hop, ITy::unit())
+                }
                 ITy::Never => (hop, ITy::never()),
                 _ if self.is_int_literal_var(&unified) => (hop, unified.clone()),
                 _ if self.is_float_literal_var(&unified) => (hop, unified.clone()),
@@ -260,6 +291,10 @@ impl<'a> Checker<'a> {
             AstBinaryOp::Sub | AstBinaryOp::Mul | AstBinaryOp::Div | AstBinaryOp::Rem => {
                 match &unified {
                     ITy::Int(_) | ITy::Float(_) => (hop, unified.clone()),
+                    ITy::Char => {
+                        self.report_char_arithmetic(span);
+                        (hop, ITy::unit())
+                    }
                     ITy::Never => (hop, ITy::never()),
                     _ if self.is_int_literal_var(&unified) => (hop, unified.clone()),
                     _ if self.is_float_literal_var(&unified) => (hop, unified.clone()),
@@ -287,7 +322,9 @@ impl<'a> Checker<'a> {
             }
             AstBinaryOp::Lt | AstBinaryOp::Le | AstBinaryOp::Gt | AstBinaryOp::Ge => match &unified
             {
-                ITy::Int(_) | ITy::Float(_) | ITy::String | ITy::Never => (hop, ITy::bool_()),
+                ITy::Int(_) | ITy::Float(_) | ITy::String | ITy::Char | ITy::Never => {
+                    (hop, ITy::bool_())
+                }
                 _ if self.is_int_literal_var(&unified) => (hop, ITy::bool_()),
                 _ if self.is_float_literal_var(&unified) => (hop, ITy::bool_()),
                 _ => {
@@ -305,6 +342,14 @@ impl<'a> Checker<'a> {
             | AstBinaryOp::Shl
             | AstBinaryOp::Shr => match &unified {
                 ITy::Int(_) => (hop, unified.clone()),
+                ITy::Char => {
+                    self.error_code(
+                        "cannot apply a bitwise operation to values of type char".to_string(),
+                        span,
+                        "E0308",
+                    );
+                    (hop, ITy::unit())
+                }
                 ITy::Never => (hop, ITy::never()),
                 _ if self.is_int_literal_var(&unified) => (hop, unified.clone()),
                 _ => {
@@ -318,6 +363,14 @@ impl<'a> Checker<'a> {
             },
             AstBinaryOp::And | AstBinaryOp::Or => (hop, ITy::bool_()),
         }
+    }
+
+    fn report_char_arithmetic(&mut self, span: Span) {
+        self.error_code(
+            "cannot apply arithmetic to values of type char".to_string(),
+            span,
+            "E0308",
+        );
     }
 
     pub fn report_operator_error(&mut self, op: AstBinaryOp, left: &ITy, right: &ITy, span: Span) {
@@ -415,7 +468,38 @@ impl<'a> Checker<'a> {
         };
         let value = self.check_expr(inner, None);
         let from = self.infer.resolve(&value.ty);
-        if !self.cast_allowed(&from, &target) {
+        // Version 1.6 char casts: char converts to every integer and float
+        // type, but only a value whose type is already known to be u8 can be
+        // cast to char, and char cannot become bool. Unsuffixed integer
+        // literals are still integer variables at this point ("1000 as char"
+        // included), so integer-like sources are rejected here instead of
+        // falling through to [cast_allowed], which accepts literal variables.
+        let integer_source = matches!(from, ITy::Int(_))
+            || matches!(
+                from,
+                ITy::Var(id) if !matches!(self.infer.var_kind(id), VarKind::FloatLiteral)
+            );
+        let float_source = matches!(from, ITy::Float(_)) || self.is_float_literal_var(&from);
+        if matches!(target, ITy::Char)
+            && !matches!(from, ITy::Char | ITy::Int(IntTy::U8))
+            && !from.is_never()
+        {
+            if integer_source {
+                self.error_code("only u8 can be cast as char".to_string(), span, "E0308");
+            } else if float_source || !self.cast_allowed(&from, &target) {
+                self.error_code(
+                    format!(
+                        "non-primitive cast: {} as {}",
+                        self.describe_resolved(&from),
+                        self.describe(&target)
+                    ),
+                    span,
+                    "E0605",
+                );
+            }
+        } else if matches!(from, ITy::Char) && matches!(target, ITy::Bool) {
+            self.error_code("cannot cast char as bool".to_string(), span, "E0308");
+        } else if !self.cast_allowed(&from, &target) {
             self.error_code(
                 format!(
                     "non-primitive cast: {} as {}",
@@ -435,9 +519,35 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// Fold the pending unary minus into the deferred integer range check of
+    /// the literal at the bottom of [value] (if [value] is a literal or a
+    /// chain of unary negations over one).
+    fn fold_literal_sign(&mut self, value: &TExpr) {
+        let mut current = value;
+        while let TExprKind::Unary {
+            op: HUnaryOp::Neg,
+            expr,
+        } = &current.kind
+        {
+            current = expr;
+        }
+        if matches!(&current.kind, TExprKind::Lit(TLit::Int(_))) {
+            self.infer.negate_int_check(current.span);
+        }
+    }
+
     fn cast_allowed(&self, from: &ITy, target: &ITy) -> bool {
         if from.is_never() || target.is_never() {
             return true;
+        }
+        // Version 1.6: integers and floats never cast to bool (Rust-like, no
+        // implicit truthiness). This check must come before the literal
+        // variable fallbacks below, which would otherwise accept `1 as bool`.
+        let numeric_from = matches!(from, ITy::Int(_) | ITy::Float(_))
+            || self.is_int_literal_var(from)
+            || self.is_float_literal_var(from);
+        if matches!(target, ITy::Bool) && numeric_from {
+            return false;
         }
         if self.is_general_var(from) || self.is_general_var(target) {
             return true;
@@ -455,6 +565,9 @@ impl<'a> Checker<'a> {
             (ITy::Float(_), ITy::Float(_)) => true,
             (ITy::Bool, ITy::Int(_)) => true,
             (ITy::Bool, ITy::Bool) => true,
+            (ITy::Char, ITy::Int(_)) => true,
+            (ITy::Char, ITy::Float(_)) => true,
+            (ITy::Int(IntTy::U8), ITy::Char) => true,
             (left, right) => left == right,
         }
     }

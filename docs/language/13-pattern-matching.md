@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-150), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-160), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 1.5.0 are:
+The pattern forms available in 1.6.0 are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -40,6 +40,7 @@ The pattern forms available in 1.5.0 are:
 | Binding | `n`, `mut n` | anything, binds the value |
 | Integer literal | `0`, `-1`, `42` | that exact integer |
 | Boolean literal | `true`, `false` | that boolean |
+| Character literal | `'a'`, `'a' \| 'e'` | that exact Unicode scalar value |
 | String literal | `"lsaca"`, `"a" \| "b"` | that exact string content, compared byte for byte |
 | Unit | `()` | the unit value |
 | Tuple | `(a, b)`, `()` | a tuple of that length; tuple patterns may nest |
@@ -48,8 +49,9 @@ The pattern forms available in 1.5.0 are:
 | Or-pattern | `0 \| 1`, `E::A(x) \| E::B(x)` | at least one alternative matches; every alternative binds the same names |
 
 Patterns nest: a variant pattern can contain a struct pattern, a struct pattern
-can contain tuple patterns, and so on. String literals are supported as
-patterns and match the exact string content; or-patterns (`p | q`) and match
+can contain tuple patterns, and so on. String and character literals are
+supported as patterns and match the exact string content or Unicode scalar;
+or-patterns (`p | q`) and match
 guards (`pattern if condition`) are fully supported. There are no range, slice,
 `@`-binding or `ref` patterns, and a reference scrutinee is matched with
 *match ergonomics* rather than a `&`-pattern — see
@@ -765,7 +767,7 @@ Output:
 7
 ```
 
-Bindings from a `&mut` *aggregate* pattern are writable in version 1.5.0: a struct
+Bindings from a `&mut` *aggregate* pattern are writable in version 1.6.0: a struct
 pattern with several bindings behaves like a single binding, and assignments such as
 `match &mut maybe { Some(value) => { *value = 9; } ... }` compile and update the
 referent (see [References and
@@ -906,10 +908,10 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 1.5.0
+## Known limitations in 1.6.0
 
 Or-patterns, match guards and string-literal patterns are fully supported. The
-pattern restrictions that remain in 1.5.0 are:
+pattern restrictions that remain in 1.6.0 are:
 
 * **Guards only in `match`** — `if let` and `while let` take a pattern but no
   guard; nest an `if` inside the body instead.

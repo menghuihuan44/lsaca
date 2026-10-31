@@ -375,7 +375,7 @@ vector shown.
 
 ## What is not provided
 
-The 1.5.0 iterator pipeline is deliberately small. It has no:
+The 1.6.0 iterator pipeline is deliberately small. It has no:
 
 * `rev`/`reverse`, `zip`, `chain`, `flat_map`, `for_each`, `size_hint` or
   slices;
@@ -387,10 +387,10 @@ The 1.5.0 iterator pipeline is deliberately small. It has no:
   structs implement the trait, while ranges keep their own `for` lowering;
 * `collect` into anything except `Vec<T>`.
 
-## Known limitations in 1.5.0
+## Known limitations in 1.6.0
 
 * `.iter()` consumes the `Vec`; there is no way to iterate a vector by
-  reference in 1.5.0.
+  reference in 1.6.0.
 * `collect` needs a known result type; a bare `collect()` without an
   annotation or turbofish is `E0282`.
 * `sum` supports `i64` and `f64` items only; other item types are `E0277`.

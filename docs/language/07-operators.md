@@ -169,7 +169,7 @@ Output:
 ```
 
 The behavior is chosen when the runtime is compiled, not by the program: the
-same `main.c` compiled with `-DLSACA_DEBUG` panics and compiled with `-DNDEBUG`
+same generated C compiled with `-DLSACA_DEBUG` panics and compiled with `-DNDEBUG`
 wraps. See [Getting started](01-getting-started.md) for the build profiles.
 
 ## Arithmetic on floats
@@ -346,6 +346,8 @@ type:
 * floats compare by IEEE-754 rules (NaN compares false with everything);
 * `String` compares byte-wise as described above;
 * `bool` compares with `==`/`!=` only; ordering is not available;
+* `char` compares by Unicode scalar value with `==`, `!=` and the ordering
+  operators;
 * `Rc<T>` compares by **identity** — two handles are equal when they point at the
   same cell;
 * `Box<T>` compares by payload, structurally;
@@ -499,6 +501,14 @@ Output:
 65
 200
 ```
+
+A `char` is a scalar too, so it participates in `as` conversions: a character
+converts to any integer or float type as its Unicode scalar value, and `u8`
+converts to `char`. Other integer types cannot be cast to `char`, characters
+cannot be cast to `bool`, and no numeric value can be cast to `bool` at all
+(`E0605`); conditions never convert numbers. See
+[Types](04-types.md#casts) and [Characters and
+Unicode](22-characters-and-unicode.md).
 
 ## What next
 

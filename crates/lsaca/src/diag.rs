@@ -226,7 +226,6 @@ pub fn render_diagnostic(out: &mut String, file: &SourceFile, diagnostic: &Diagn
         width = gutter_width + 1
     );
     let _ = writeln!(out, "{:width$} |", "", width = gutter_width + 1);
-    let _ = writeln!(out, " {} | {}", line, line_text);
 
     // Caret underline for the primary span, clipped to the displayed line.
     let line_span = file.line_span(line);
@@ -242,12 +241,43 @@ pub fn render_diagnostic(out: &mut String, file: &SourceFile, diagnostic: &Diagn
         .get(span_start as usize..span_end as usize)
         .map(|s| s.chars().count().max(1))
         .unwrap_or(1);
+
+    // Machine-generated sources can have megabyte-long lines, and a broken
+    // program can produce thousands of diagnostics; each one quoting the full
+    // line would multiply the output by the file length. Only a window around
+    // the primary span is displayed, with "..." marking the omitted text.
+    const MAX_RENDERED_LINE_CHARS: usize = 160;
+    let line_chars: Vec<char> = line_text.chars().collect();
+    let (shown_text, shown_prefix, shown_caret) = if line_chars.len() <= MAX_RENDERED_LINE_CHARS {
+        let shown_caret = caret_count.min(line_chars.len().saturating_sub(prefix_chars));
+        (line_text.to_string(), prefix_chars, shown_caret.max(1))
+    } else {
+        let window_len = MAX_RENDERED_LINE_CHARS;
+        let mut start = prefix_chars.saturating_sub(window_len / 3);
+        if start + window_len > line_chars.len() {
+            start = line_chars.len() - window_len;
+        }
+        let end = start + window_len;
+        let lead = if start > 0 { "..." } else { "" };
+        let tail = if end < line_chars.len() { "..." } else { "" };
+        let window: String = line_chars[start..end].iter().collect();
+        let relative_prefix = prefix_chars.saturating_sub(start);
+        let shown_caret = caret_count
+            .min(window_len.saturating_sub(relative_prefix))
+            .max(1);
+        (
+            format!("{lead}{window}{tail}"),
+            lead.len() + relative_prefix,
+            shown_caret,
+        )
+    };
+    let _ = writeln!(out, " {} | {}", line, shown_text);
     let _ = writeln!(
         out,
         "{:width$} | {}{}",
         "",
-        " ".repeat(prefix_chars),
-        "^".repeat(caret_count),
+        " ".repeat(shown_prefix),
+        "^".repeat(shown_caret),
         width = gutter_width + 1
     );
 
@@ -300,6 +330,30 @@ mod tests {
         assert!(text.contains("error[E0001]: unexpected token"));
         assert!(text.contains("--> t.ls:1:5"));
         assert!(text.contains("    ^"));
+    }
+
+    #[test]
+    fn clips_very_long_source_lines() {
+        let mut source = String::new();
+        source.push_str(&"a".repeat(500));
+        source.push_str("bad");
+        source.push_str(&"b".repeat(500));
+        source.push('\n');
+        let file = SourceFile::new("t.ls", &source);
+        let mut diagnostics = Diagnostics::new();
+        diagnostics
+            .push(Diagnostic::error("unexpected token", Span::new(500, 503)).with_code("E0001"));
+        let rendered = diagnostics.render(&file);
+        assert!(rendered.contains("..."));
+        assert!(rendered.contains("error[E0001]"));
+        assert!(rendered.contains('^'));
+        for line in rendered.lines() {
+            assert!(
+                line.chars().count() <= 200,
+                "rendered line was too long: {} chars",
+                line.chars().count()
+            );
+        }
     }
 
     #[test]

@@ -13,9 +13,10 @@ type, and describes inference and conversions.
 | `i8` `i16` `i32` `i64` | Signed integers. | Two's complement; `i64` is the default integer type and the type of all lengths and indices. |
 | `u8` `u16` `u32` `u64` | Unsigned integers. | Values are kept in the corresponding C unsigned type. |
 | `f32` `f64` | IEEE-754 binary floating point. | `f64` is the default float type. |
+| `char` | Unicode scalar value. | Added in 1.6.0; written with single quotes; a `Copy` scalar stored as a 32-bit value; see [Characters and Unicode](22-characters-and-unicode.md). |
 | `String` | Owned UTF-8 string. | Move-only refcounted buffer; `.clone()` produces an independent copy; `len()` is a byte count. |
 | `Vec<T>` | Growable array. | Builtin generic, move-only; `.clone()` deep-copies. |
-| `HashMap<K, V>` | Hash table. | Added in 1.5.0; builtin generic, move-only; keys are `i64`, `u64`, `bool` or `String`; `==` compares contents. |
+| `HashMap<K, V>` | Hash table. | Added in 1.5.0; builtin generic, move-only; keys are `i64`, `u64`, `bool`, `String` or `char`; `==` compares contents. |
 | `Option<T>` | `Some(T)` or `None`. | Builtin generic. |
 | `Result<T, E>` | `Ok(T)` or `Err(E)`. | Builtin generic. |
 | `Rc<T>` | Shared, mutable heap cell. | Move-only handle; `.clone()` shares one payload; `get()`/`set()`. |
@@ -26,8 +27,8 @@ type, and describes inference and conversions.
 | `Name` | User struct or enum. | Declared with `struct`/`enum`; generic types are written `Name<T, ...>` since 1.5. `Copy` when every kind of field is `Copy` and there is no `Drop` impl; otherwise move-only. `.clone()` is derived automatically unless the type implements `Drop`; `impl Drop for Name` adds a destructor hook. |
 | `Alias` | Type alias. | `type Alias = T;` introduces no new type. |
 
-There is no `usize`, `isize`, `char`, raw pointer type, array type or slice
-type. Generic user types are written with type arguments, `Name<T, ...>` (see
+There is no `usize`, `isize`, raw pointer type, array type or slice type.
+Generic user types are written with type arguments, `Name<T, ...>` (see
 [Generics](17-generics.md)); a trait name is not a type, and using one as a type
 is `E0412` because there are no trait objects (see [Traits](18-traits.md)).
 References are written `&T` (shared) and `&mut T` (mutable); they are
@@ -125,8 +126,11 @@ is occasionally useful in generic-looking code.
 are **move-only**: assigning or passing one by value moves it, so clone first
 when both sides must stay usable. `.clone()` produces an independent copy (the
 runtime may share storage internally until one side is modified, but you cannot
-observe that). Both are indexed by `i64`, and `String` methods
-use **byte** offsets. They are described in
+observe that). They are addressed with `i64` indices and lengths. Since 1.6.0
+every `String` is guaranteed valid UTF-8: the byte-oriented methods keep byte
+semantics (`len`, `find`, `substring`), while `char_count`, `chars`, `char_at`,
+`push(char)`, `pop` and `is_char_boundary` work with Unicode scalar values (see
+[Characters and Unicode](22-characters-and-unicode.md)). They are described in
 [Memory model](05-memory-model.md) and their full API is in
 [Standard library](15-standard-library.md).
 
@@ -252,9 +256,8 @@ and the compiler's lightweight borrow checker enforces that (see
 [References and borrowing](12-references-and-borrowing.md)).
 
 Field access, method calls and indexing automatically dereference a reference,
-so `r.field` and `r.method()` work without an explicit `*`; writes through a
-reference need either `*r = value` for a whole place or `(*r).field = value`
-for a field. References cannot be stored in structs, enums, tuples, `Vec`,
+so `r.field`, `r.method()` and `r.field = value` all work without an explicit
+`*`; `(*r).field = value` is an equivalent spelling. References cannot be stored in structs, enums, tuples, `Vec`,
 `Option`, `Result`, `Box` or closures and cannot be converted with `as`; since
 1.5.0 `==` compares the pointed-to values.
 
@@ -493,30 +496,74 @@ The conversion rules follow Rust:
 * Integer to float: exact value if it fits, otherwise rounded.
 * Float to integer: truncate toward zero, saturating at the target type's
   bounds; NaN becomes `0`.
+* `char` to an integer or float: the scalar value, truncated by the target
+  integer width (`'A' as i64` is `65`, `'é' as u8` is `233`).
+* `u8` to `char`: the byte value as a scalar; other integer types are rejected
+  with `E0308` (only `u8` can be cast as `char`), and `char` can never be cast
+  to or from `bool`.
 * Boolean to integer: `true` becomes `1`, `false` becomes `0`.
-* Integer to boolean is accepted by the `as` operator (`0 as bool` is `false` and
-  any non-zero value is `true`) even though it is not part of the intended
-  language; do not rely on it. This is a property of the cast only: conditions
-  never convert numbers, so `if 1` is `E0308` — see [Statements and control
+* Casting to `bool`: an integer or a float cannot be cast to `bool` (`E0605`);
+  only `bool` values are booleans. Conditions never convert numbers, so `if 1`
+  is `E0308` — see [Statements and control
   flow](08-statements-and-control-flow.md#conditions).
+
+Characters convert explicitly too:
+
+```ls
+fn main() {
+    println!("{} {}", 'A' as i64, 'é' as u8);
+    println!("{:?} {}", 65 as u8 as char, '😀' as u32);
+}
+```
+
+Output:
+
+```text
+65 233
+'A' 128512
+```
 
 ```ls
 fn main() {
     println!("{} {}", 300 as u8, -1 as u8);
     println!("{} {}", 3.99 as i64, -3.99 as i64);
     println!("{} {}", 1e20 as i64, (0.0 / 0.0) as i64);
-    println!("{} {} {}", 65 as f64, true as i64, (2 as bool));
-    println!("{}", 16777217 as f32);
+    println!("{} {}", 65 as f64, true as i64);
+    println!("{} {}", 16777216 as f32, 16777217 as f32);
+    println!("{}", 123456789 as f32);
 }
 ```
 
 Output:
+
 ```text
 44 255
 3 -3
 9223372036854775807 0
-65 1 true
-16777216
+65 1
+16777216 16777216
+123456790
+```
+
+A cast to `bool` is rejected:
+
+```ls,compile-fail
+fn main() {
+    let flag = 1 as bool;
+    println!("{}", flag);
+}
+```
+
+Error:
+
+```text
+error[E0605]: non-primitive cast: {integer} as bool
+  --> example-15.ls:2:16
+   |
+ 2 |     let flag = 1 as bool;
+   |                ^^^^^^^^^
+
+lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
 ```
 
 There are no implicit conversions, so the following is rejected:
@@ -530,15 +577,16 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0308]: mismatched types
-  --> example-14.ls:3:18
+  --> example-16.ls:3:18
    |
  3 |     let y: f64 = x;
    |                  ^
    = note: expected f64, found i64
 
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 ```
 
 A type that does not exist gives a name-resolution error rather than a cast
@@ -552,14 +600,15 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0412]: cannot find type 'usize' in this scope
-  --> example-15.ls:2:12
+  --> example-17.ls:2:12
    |
  2 |     let x: usize = 0;
    |            ^^^^^
 
-lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
+lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
 ```
 
 Finally, an unknown type name in any position is reported as `E0412`:
@@ -572,20 +621,21 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0412]: cannot find type 'Widget' in this scope
-  --> example-16.ls:2:17
+  --> example-18.ls:2:17
    |
  2 |     let widget: Widget = Widget { value: 1 };
    |                 ^^^^^^
 
 error[E0412]: cannot find struct Widget in this scope
-  --> example-16.ls:2:26
+  --> example-18.ls:2:26
    |
  2 |     let widget: Widget = Widget { value: 1 };
    |                          ^^^^^^
 
-lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
+lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
 ```
 
 ## What next
@@ -594,4 +644,6 @@ lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 * Operators on each type: [Operators](07-operators.md).
 * Borrow values without giving up ownership: [References and
   borrowing](12-references-and-borrowing.md).
+* Characters and Unicode text: [Characters and
+  Unicode](22-characters-and-unicode.md).
 * The full built-in API: [Standard library](15-standard-library.md).

@@ -1,6 +1,6 @@
 //! End-to-end tests: every case is a complete program that is compiled to C,
-//! built with CMake and a native C compiler, then executed and compared against
-//! the expected output and exit code.
+//! built with a native C compiler, then executed and compared against the
+//! expected output and exit code.
 //!
 //! The tests are skipped when no C compiler is available, so cargo test works on
 //! machines without a C toolchain (the compiler unit tests still run).
@@ -927,6 +927,65 @@ fn cases() -> Vec<Case> {
             exit: 0,
             stderr_contains: &[],
         },
+        Case {
+            name: "char_basics",
+            source: include_str!("programs/char_basics.ls"),
+            args: &[],
+            stdout: "a true 你\n'\\n'\n97\ntrue\nletter a\nsmall digit\nspace\nother\n2 你\nsome z\n你 1\n你\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "string_unicode",
+            source: include_str!("programs/string_unicode.ls"),
+            args: &[],
+            stdout: "13\n8\ntrue false\nSome('h')\nSome('é')\nSome(' ')\n你好\nhéll !\nSTRASSE\nhéllo\n[x]\n0 true\n3\n3\nx \"x\"\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "unicode_debug",
+            source: include_str!("programs/unicode_debug.ls"),
+            args: &[],
+            stdout: "'x'\n'\\n'\n'\\''\n'\\\\'\n'\\u{7}'\n'你'\n\"a\\u{0}b\"\n\"tab\\there\"\n\"\"\n[😀]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "hashmap_char",
+            source: include_str!("programs/hashmap_char.ls"),
+            args: &[],
+            stdout: "4 5\nSome(2) 3\n0 true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "hashmap_swiss",
+            source: include_str!("programs/hashmap_swiss.ls"),
+            args: &[],
+            stdout: "2000 5997000\n1000 1000\n1000\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "panic_substring",
+            source: include_str!("programs/panic_substring.ls"),
+            args: &[],
+            stdout: "",
+            exit: 101,
+            stderr_contains: &[
+                "byte index 2 is not a char boundary",
+                "it is inside 'é' (bytes 1..3) of `héllo`",
+            ],
+        },
+        Case {
+            name: "deep_expression",
+            source: include_str!("programs/deep_expression.ls"),
+            args: &[],
+            stdout: "100\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
     ]
 }
 
@@ -1031,6 +1090,10 @@ fn frontend_rejects_invalid_programs() {
             include_str!("programs/bad_ambiguous_ref_return.ls"),
         ),
         ("bad_mut_borrow", include_str!("programs/bad_mut_borrow.ls")),
+        (
+            "bad_deep_nesting",
+            include_str!("programs/bad_deep_nesting.ls"),
+        ),
     ];
     let mut problems: Vec<String> = Vec::new();
     for (name, source) in programs {
@@ -1123,6 +1186,30 @@ fn non_bool_conditions_are_rejected() {
     }
 }
 
+/// Pathologically deep expressions are rejected with one diagnostic instead of
+/// overflowing the parser or type-checker stack; ordinary deep chains compile.
+#[test]
+fn deeply_nested_expressions_are_rejected() {
+    let source = include_str!("programs/bad_deep_nesting.ls");
+    let frontend = Frontend::new("bad_deep_nesting.ls", source);
+    let diagnostics = match frontend.check() {
+        Ok(_) => panic!("expected a nesting error, but the program was accepted"),
+        Err(diagnostics) => diagnostics,
+    };
+    let rendered = diagnostics.render(frontend.file());
+    assert!(
+        rendered.contains("this code is nested too deeply"),
+        "rendered diagnostics do not mention deep nesting:\n{}",
+        rendered
+    );
+    assert_eq!(
+        rendered.matches("this code is nested too deeply").count(),
+        1,
+        "expected exactly one nesting diagnostic:\n{}",
+        rendered
+    );
+}
+
 /// Format specifications are checked against the argument type at compile time;
 /// each invalid combination has to name the offending construct.
 #[test]
@@ -1141,6 +1228,20 @@ fn format_specifier_errors_are_reported() {
             "bad_format_unsigned",
             include_str!("programs/bad_format_unsigned.ls"),
             &["the '+' sign flag is not supported for unsigned integers"],
+        ),
+        (
+            "bad_char_operators",
+            include_str!("programs/bad_char_operators.ls"),
+            &[
+                "error[E0308]",
+                "cannot cast char as bool",
+                "expected char, found {integer}",
+            ],
+        ),
+        (
+            "bad_char_format",
+            include_str!("programs/bad_char_format.ls"),
+            &["the '+' flag of a format specifier is not supported for characters"],
         ),
     ];
     let mut problems: Vec<String> = Vec::new();
@@ -1287,6 +1388,11 @@ fn borrow_errors_are_reported() {
                 "cannot move out of maybe because it is borrowed",
             ],
         ),
+        (
+            "bad_char_cast",
+            include_str!("programs/bad_char_cast.ls"),
+            &["error[E0308]", "only u8 can be cast as char"],
+        ),
     ];
     let mut problems: Vec<String> = Vec::new();
     for (name, source, expected) in programs {
@@ -1429,7 +1535,7 @@ fn v15_feature_errors_are_reported() {
             include_str!("programs/bad_hashmap_key.ls"),
             &[
                 "error[E0277]",
-                "HashMap keys must be one of i64, u64, bool or String, found f64",
+                "HashMap keys must be one of i64, u64, bool, char or String, found f64",
             ],
         ),
         (
@@ -1447,7 +1553,7 @@ fn v15_feature_errors_are_reported() {
             include_str!("programs/bad_store_hash_map_key_ref.ls"),
             &[
                 "error[E0277]",
-                "HashMap keys must be one of i64, u64, bool or String",
+                "HashMap keys must be one of i64, u64, bool, char or String",
             ],
         ),
         (
@@ -1537,4 +1643,141 @@ fn v15_feature_errors_are_reported() {
     if !problems.is_empty() {
         panic!("{}", problems.join("\n\n"));
     }
+}
+
+/// Build and run a program with the given bytes on standard input.
+fn run_program_with_stdin(
+    name: &str,
+    source: &str,
+    stdin: &[u8],
+) -> Result<(String, String, i32), String> {
+    use std::io::Write;
+    use std::process::{Command as StdCommand, Stdio};
+    let executable = build_program(name, source, false)?;
+    let mut child = StdCommand::new(&executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run {}: {}", name, error))?;
+    {
+        let mut pipe = child.stdin.take().expect("piped stdin");
+        pipe.write_all(stdin)
+            .map_err(|error| format!("could not write stdin of {}: {}", name, error))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("could not wait for {}: {}", name, error))?;
+    Ok((
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        normalize(&String::from_utf8_lossy(&output.stderr)),
+        output.status.code().unwrap_or(-1),
+    ))
+}
+
+const READ_LINE_PROGRAM: &str = r###"
+fn main() {
+    let line = read_line().unwrap();
+    println!("{}", line);
+    let rest = read_line();
+    match rest {
+        Some(value) => println!("{}", value),
+        None => println!("<eof>"),
+    }
+}
+"###;
+
+/// `read_line` must accept valid UTF-8 from standard input and report end of
+/// file as `None`; invalid UTF-8 must panic with Rust's message instead of
+/// injecting an invalid `String` into the program.
+#[test]
+fn read_line_validates_stdin_utf8() {
+    match run_program_with_stdin("stdin_ok", READ_LINE_PROGRAM, b"hello\nworld\n") {
+        Ok((stdout, stderr, exit)) => {
+            assert_eq!(stdout, "hello\nworld\n");
+            assert_eq!(exit, 0);
+            assert!(!stderr.contains("reference-counted allocation"));
+        }
+        Err(error) => panic!("{}", error),
+    }
+    match run_program_with_stdin("stdin_bad", READ_LINE_PROGRAM, b"ok\n\xff\xfe\n") {
+        Ok((stdout, stderr, exit)) => {
+            assert_eq!(stdout, "ok\n", "output before the panic");
+            assert_eq!(exit, 101, "a runtime panic exits with 101");
+            assert!(
+                stderr.contains("stream did not contain valid UTF-8"),
+                "stderr should explain the invalid UTF-8: {}",
+                stderr
+            );
+        }
+        Err(error) => panic!("{}", error),
+    }
+}
+
+/// Programs whose emitted user functions exceed the split threshold must be
+/// generated as `main.c` plus deterministic extra translation units, and the
+/// build driver must write, compile and link every unit.
+#[test]
+fn large_programs_are_split_into_translation_units() {
+    let source = include_str!("../../../benchmarks/programs/compile_large.ls");
+    let frontend = Frontend::new("compile_large.ls", source);
+    let program = match frontend.check() {
+        Ok(program) => program,
+        Err(diagnostics) => panic!(
+            "compile_large was rejected:\n{}",
+            diagnostics.render(frontend.file())
+        ),
+    };
+    let options = CodegenOptions {
+        program_name: "compile_large_split".to_string(),
+        debug_checks: false,
+        emit_location_info: true,
+        source: Some(frontend.file().clone()),
+        ..CodegenOptions::default()
+    };
+    let generated = driver::generate_c(&program, &options);
+    assert!(
+        !generated.units.is_empty(),
+        "compile_large should be split into translation units"
+    );
+    let names: Vec<String> = generated
+        .units
+        .iter()
+        .map(|unit| unit.file_name.clone())
+        .collect();
+    let expected: Vec<String> = (1..=names.len())
+        .map(|index| format!("lsaca_unit_{}.c", index))
+        .collect();
+    assert_eq!(
+        names, expected,
+        "unit file names must be contiguous and deterministic"
+    );
+    assert!(
+        generated.main_c.contains("int main("),
+        "main.c keeps the C entry point"
+    );
+    let build = BuildOptions::new("compile_large_split".to_string());
+    let built = match driver::build_with_cache(&generated, &build, &test_cache_root()) {
+        Ok(built) => built,
+        Err(error) => panic!("building the split project failed:\n{}", error),
+    };
+    let project_dir = built
+        .build_dir
+        .parent()
+        .expect("the build directory is inside the project directory");
+    for name in &names {
+        assert!(
+            project_dir.join(name).is_file(),
+            "the split build tree should contain {}",
+            name
+        );
+    }
+    let output = Command::new(&built.executable)
+        .output()
+        .unwrap_or_else(|error| panic!("could not run the split program: {}", error));
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+    assert_eq!(stdout, "checksum=14655037\n");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!stderr.contains("reference-counted allocation"));
 }

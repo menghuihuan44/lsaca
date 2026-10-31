@@ -187,7 +187,7 @@ impl<'a> Checker<'a> {
         }
         let resolved = self.infer.resolve(ty);
         match resolved {
-            ITy::Unit | ITy::Bool | ITy::Int(_) | ITy::Float(_) | ITy::Var(_) => true,
+            ITy::Unit | ITy::Bool | ITy::Char | ITy::Int(_) | ITy::Float(_) | ITy::Var(_) => true,
             ITy::Option(inner) => self.is_plain_value_type_at(&inner, depth + 1),
             ITy::Tuple(elems) => elems
                 .iter()
@@ -222,10 +222,16 @@ impl<'a> Checker<'a> {
     }
 
     /// Reject a type that stores references (struct fields, enum payloads,
-    /// collection elements, tuple elements and closure captures).
+    /// collection elements, tuple elements, constructor payloads and closure
+    /// captures). This is the single central guard for owned-storage
+    /// positions: every payload that is inferred (rather than annotated) must
+    /// be validated *after* unification, so callers run this on the resolved
+    /// type. The type is resolved here as well so diagnostics never describe
+    /// an unresolved variable as `_`.
     pub fn validate_storage_type(&mut self, ty: &ITy, span: Span) -> bool {
-        if self.type_contains_ref(ty) {
-            let described = self.describe_resolved(ty);
+        let resolved = self.infer.resolve(ty);
+        if self.type_contains_ref(&resolved) {
+            let described = self.describe_resolved(&resolved);
             self.error_code(
                 format!(
                     "references cannot be stored in this type (found {})",

@@ -21,7 +21,11 @@ pub fn target_name(program_name: &str, fallback: &str) -> String {
 }
 
 /// Render the CMakeLists.txt for a generated project.
-pub fn render(program_name: &str, fallback: &str) -> String {
+///
+/// `translation_units` lists the extra generated C files next to main.c (the
+/// split build used for large programs). It is empty for the usual
+/// single-translation-unit project, where the output is unchanged.
+pub fn render(program_name: &str, fallback: &str, translation_units: &[String]) -> String {
     let name = target_name(program_name, fallback);
     // Every runtime translation unit becomes part of the executable. The list
     // is derived from runtime::sources() so adding a runtime file only requires
@@ -44,6 +48,12 @@ pub fn render(program_name: &str, fallback: &str) -> String {
     out.push_str("option(LSACA_DEBUG_RC \"Track reference-counted allocations in every configuration\" OFF)\n");
     out.push('\n');
     out.push_str(&format!("add_executable({} main.c", name));
+    // Extra generated translation units of a split build, in the deterministic
+    // order of the unit files.
+    for unit in translation_units {
+        out.push(' ');
+        out.push_str(unit);
+    }
     for source in &runtime_translation_units {
         out.push(' ');
         out.push_str(source);
@@ -91,7 +101,7 @@ mod tests {
 
     #[test]
     fn renders_a_deterministic_project() {
-        let text = render("hello", "program");
+        let text = render("hello", "program", &[]);
         assert!(text.contains("project(hello C)"));
         let runtime_translation_units: Vec<&str> = crate::runtime::sources()
             .iter()
@@ -111,7 +121,29 @@ mod tests {
         assert!(text.contains("target_compile_definitions(hello PRIVATE LSACA_DEBUG_RC)"));
         assert!(text.contains("if(UNIX AND NOT APPLE)"));
         assert!(text.contains("target_link_libraries(hello PRIVATE m)"));
-        assert_eq!(text, render("hello", "program"));
+        assert_eq!(text, render("hello", "program", &[]));
+    }
+
+    #[test]
+    fn lists_split_translation_units_before_the_runtime() {
+        let units = vec![
+            String::from("lsaca_unit_1.c"),
+            String::from("lsaca_unit_2.c"),
+        ];
+        let text = render("hello", "program", &units);
+        let runtime_translation_units: Vec<&str> = crate::runtime::sources()
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| name.ends_with(".c"))
+            .collect();
+        let expected_sources = format!(
+            "add_executable(hello main.c lsaca_unit_1.c lsaca_unit_2.c {})",
+            runtime_translation_units.join(" ")
+        );
+        assert!(text.contains(&expected_sources));
+        // Rendering is deterministic and the runtime files stay after the
+        // generated units.
+        assert_eq!(text, render("hello", "program", &units));
     }
 
     #[test]

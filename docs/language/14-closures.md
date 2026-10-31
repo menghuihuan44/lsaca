@@ -324,7 +324,7 @@ Function values and closures do not support `==` (`E0369`), and a closure cannot
 call itself — there is no way to name it from inside its own body. To write a
 recursive function value, use a named `fn`.
 
-## Known limitations in 1.5.0
+## Known limitations in 1.6.0
 
 * closures and function values are move-only and cannot be compared with `==`
   (`E0369`);

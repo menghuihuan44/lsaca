@@ -209,6 +209,7 @@ pub enum TLit {
     Int(i128),
     Float(f64),
     Bool(bool),
+    Char(char),
     Str(String),
     Unit,
 }

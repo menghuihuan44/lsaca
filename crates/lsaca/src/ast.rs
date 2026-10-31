@@ -551,6 +551,9 @@ pub enum Lit {
         raw: String,
     },
     Bool(bool),
+    /// A character literal such as 'a' or '\n'. The value is a Unicode
+    /// scalar value.
+    Char(char),
     Str(String),
 }
 
@@ -560,6 +563,7 @@ impl Lit {
             Lit::Int { raw, .. } => raw.clone(),
             Lit::Float { raw, .. } => raw.clone(),
             Lit::Bool(value) => value.to_string(),
+            Lit::Char(value) => format!("{:?}", value),
             Lit::Str(_) => "string".to_string(),
         }
     }

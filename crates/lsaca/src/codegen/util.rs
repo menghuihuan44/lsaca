@@ -116,6 +116,15 @@ pub fn float_literal(value: f64, ty: FloatTy) -> String {
     format!("(({}){:?})", c_ty, value)
 }
 
+/// Render a character literal as a C `uint32_t` scalar expression.
+///
+/// The scalar value is emitted in hexadecimal so that source encoding and C
+/// escape-sequence portability never matter; the generator only produces the
+/// value, never a C character literal.
+pub fn char_literal(ch: char) -> String {
+    format!("((uint32_t)0x{:X})", ch as u32)
+}
+
 /// The escaped C file name plus resolved line/column for panic call sites.
 pub fn source_location(
     source: Option<&SourceFile>,
@@ -170,6 +179,15 @@ mod tests {
             float_literal(f64::INFINITY, FloatTy::F64),
             "((double)INFINITY)"
         );
+    }
+
+    #[test]
+    fn formats_char_literals() {
+        assert_eq!(char_literal('a'), "((uint32_t)0x61)");
+        assert_eq!(char_literal('\n'), "((uint32_t)0xA)");
+        assert_eq!(char_literal('\''), "((uint32_t)0x27)");
+        assert_eq!(char_literal('\u{00e9}'), "((uint32_t)0xE9)");
+        assert_eq!(char_literal('\u{1F600}'), "((uint32_t)0x1F600)");
     }
 
     #[test]

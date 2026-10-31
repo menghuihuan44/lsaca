@@ -3,14 +3,14 @@ resolver = "2"
 members = ["crates/lsaca", "crates/lsaca-cli"]
 
 [workspace.package]
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
 authors = ["The lsaca language authors"]
 
 [workspace.dependencies]
-lsaca = { path = "crates/lsaca", version = "1.5.0" }
+lsaca = { path = "crates/lsaca", version = "1.6.0" }
 
 [profile.release]
 lto = "thin"

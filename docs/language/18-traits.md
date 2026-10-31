@@ -3,7 +3,7 @@
 Version 1.5.0 adds user-defined traits. A trait declares a set of method
 signatures that a type can implement; traits are used as bounds on generic
 parameters (see [Generics](17-generics.md)) and are resolved entirely at
-compile time. There are no trait objects and no dynamic dispatch in 1.5.0.
+compile time. There are no trait objects and no dynamic dispatch in 1.6.0.
 
 ## Declaring a trait
 
@@ -402,7 +402,7 @@ lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
 ## No trait objects
 
 A trait is not a type. It cannot be used as a value type, as a parameter type,
-or with `dyn`; there is no dynamic dispatch in 1.5.0. Generic bounds are the
+or with `dyn`; there is no dynamic dispatch in 1.6.0. Generic bounds are the
 only way to write code over "any type that implements a trait":
 
 ```ls,compile-fail

@@ -91,7 +91,7 @@ pub fn eq_expr(names: &TypeNames, ty: &Ty, a: &str, b: &str) -> String {
         String::from("true")
     } else if ty.is_string() {
         format!("ls_str_eq(({}), ({}))", a, b)
-    } else if ty.is_bool() || ty.is_integer() || ty.is_float() || ty.is_rc() {
+    } else if ty.is_bool() || ty.is_char() || ty.is_integer() || ty.is_float() || ty.is_rc() {
         // Scalars compare directly; Rc handles compare by identity (their C
         // representation is the cell pointer).
         format!("(({}) == ({}))", a, b)
@@ -147,6 +147,7 @@ pub fn debug_scalar_kind(ty: &Ty) -> Option<DebugScalar> {
             }
         }
         Ty::String => Some(DebugScalar::String),
+        Ty::Char => Some(DebugScalar::Char),
         _ => None,
     }
 }
@@ -160,6 +161,7 @@ pub enum DebugScalar {
     F32,
     F64,
     String,
+    Char,
 }
 
 /// A statement appending the debug representation of a scalar (or the macro
@@ -216,6 +218,10 @@ pub fn debug_append_statement(
         )),
         Some(DebugScalar::String) => Some(format!(
             "{} = ls_fmt_debug_string({}, ({}));",
+            acc, acc, value
+        )),
+        Some(DebugScalar::Char) => Some(format!(
+            "{} = ls_fmt_char_debug({}, (uint32_t)({}));",
             acc, acc, value
         )),
         Some(DebugScalar::Unit) => None,

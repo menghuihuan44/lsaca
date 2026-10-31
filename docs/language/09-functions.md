@@ -189,7 +189,7 @@ Output:
 8 13
 ```
 
-One limitation remains in 1.5.0: function values do **not** support `==`, so
+One limitation remains in 1.6.0: function values do **not** support `==`, so
 comparing two of them is an error (`E0369`):
 
 ```ls,compile-fail

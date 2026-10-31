@@ -158,6 +158,35 @@ PROGRAMS = {
         "workload": {"rules": 3, "iterations": 1000, "clone_iterations": 500,
                      "fn_field": "fn(i64) -> i64", "non_copy_field": "String"},
     },
+    "string_unicode": {
+        "expected": "checksum=3357,6921,368454760",
+        "description": "build a 120,000-scalar mixed ASCII/Unicode string one char at a time, "
+                       "fold every scalar from iteration and from 1,000 random char_at "
+                       "accesses, apply full-Unicode to_uppercase, slice on character "
+                       "boundaries, push/pop and extend; checksum is char count, byte length "
+                       "and the folded scalar checksum",
+        "workload": {"chars": 120000, "alphabet": 24, "uppercase": "full Unicode"},
+    },
+    "hashmap_i64": {
+        "expected": "checksum=821060469,900000,1000000",
+        "description": "1,000,000 integer-key inserts, 1,000,000 present lookups, "
+                       "1,000,000 absent lookups and 100,000 deletions in a hash map; "
+                       "checksum is the folded value sum, the final length and the number "
+                       "of successful lookups",
+        "workload": {"inserts": 1000000, "present_lookups": 1000000,
+                     "absent_lookups": 1000000, "deletes": 100000,
+                     "key_type": "i64", "value_type": "i64"},
+    },
+    "hashmap_string": {
+        "expected": "checksum=794025725,180000,200000",
+        "description": "200,000 distinct generated String keys inserted into a hash map, then "
+                       "200,000 present lookups, 200,000 absent lookups (folding the bytes of "
+                       "each absent key) and 20,000 deletions; checksum is the folded value "
+                       "sum, the final length and the number of successful lookups",
+        "workload": {"tokens": 200000, "present_lookups": 200000,
+                     "absent_lookups": 200000, "deletes": 20000,
+                     "key_type": "String", "value_type": "i64"},
+    },
     "compile_large": {
         "expected": "checksum=14655037",
         "description": "generated 4,511-line lsaca source (450 functions) used to measure "

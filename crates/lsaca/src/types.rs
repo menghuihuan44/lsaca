@@ -179,6 +179,9 @@ pub enum Ty {
     /// The unit type, written ().
     Unit,
     Bool,
+    /// A Unicode scalar value, written char. Stored as a C uint32_t; a Copy
+    /// scalar that never takes part in reference counting.
+    Char,
     Int(IntTy),
     Float(FloatTy),
     /// Owned, reference counted UTF-8 string.
@@ -228,6 +231,11 @@ impl Ty {
 
     pub fn bool_() -> Ty {
         Ty::Bool
+    }
+
+    /// The char type: one Unicode scalar value.
+    pub fn char_() -> Ty {
+        Ty::Char
     }
 
     pub fn i8() -> Ty {
@@ -334,6 +342,10 @@ impl Ty {
         matches!(self, Ty::Bool)
     }
 
+    pub fn is_char(&self) -> bool {
+        matches!(self, Ty::Char)
+    }
+
     pub fn is_string(&self) -> bool {
         matches!(self, Ty::String)
     }
@@ -410,7 +422,7 @@ impl Ty {
     /// types can be copied with a plain C assignment and need no cleanup.
     pub fn is_bitwise_copy(&self) -> bool {
         match self {
-            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) => true,
+            Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) => true,
             Ty::Ref { .. } => true,
             Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) | Ty::HashMap(_, _) => {
                 false
@@ -429,7 +441,13 @@ impl Ty {
     pub fn is_scalar(&self) -> bool {
         matches!(
             self,
-            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::Fn(_, _) | Ty::Ref { .. }
+            Ty::Unit
+                | Ty::Bool
+                | Ty::Char
+                | Ty::Int(_)
+                | Ty::Float(_)
+                | Ty::Fn(_, _)
+                | Ty::Ref { .. }
         )
     }
 
@@ -451,6 +469,7 @@ impl fmt::Display for Ty {
         match self {
             Ty::Unit => write!(f, "()"),
             Ty::Bool => write!(f, "bool"),
+            Ty::Char => write!(f, "char"),
             Ty::Int(int) => write!(f, "{}", int.name()),
             Ty::Float(float) => write!(f, "{}", float.name()),
             Ty::String => write!(f, "String"),

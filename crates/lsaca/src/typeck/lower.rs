@@ -226,6 +226,7 @@ impl<'a> Checker<'a> {
             ConstVal::Int(raw) => ConstValue::Int(*raw),
             ConstVal::Float(raw) => ConstValue::Float(*raw),
             ConstVal::Bool(raw) => ConstValue::Bool(*raw),
+            ConstVal::Char(raw) => ConstValue::Char(*raw),
             ConstVal::Str(raw) => ConstValue::Str(raw.clone()),
             ConstVal::Unit => ConstValue::Unit,
         }
@@ -559,6 +560,7 @@ impl<'a> Checker<'a> {
                 }
             }
             TLit::Bool(value) => HLit::Bool(*value),
+            TLit::Char(value) => HLit::Char(*value),
             TLit::Str(value) => HLit::Str(value.clone()),
             TLit::Unit => HLit::Unit,
         }

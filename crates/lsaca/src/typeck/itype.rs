@@ -14,6 +14,8 @@ use crate::types::{FloatTy, IntTy, Ty};
 pub enum ITy {
     Unit,
     Bool,
+    /// A Unicode scalar value (`char`).
+    Char,
     Int(IntTy),
     Float(FloatTy),
     String,
@@ -45,6 +47,10 @@ impl ITy {
 
     pub fn bool_() -> ITy {
         ITy::Bool
+    }
+
+    pub fn char_() -> ITy {
+        ITy::Char
     }
 
     pub fn string() -> ITy {
@@ -108,6 +114,7 @@ impl ITy {
         match ty {
             Ty::Unit => ITy::Unit,
             Ty::Bool => ITy::Bool,
+            Ty::Char => ITy::Char,
             Ty::Int(int_ty) => ITy::Int(*int_ty),
             Ty::Float(float_ty) => ITy::Float(*float_ty),
             Ty::String => ITy::String,
@@ -212,6 +219,30 @@ impl Infer {
         ty
     }
 
+    /// Fold a unary minus into a deferred integer literal range check.
+    ///
+    /// The parser represents a negative literal as unary minus over the
+    /// positive literal, so the range check would otherwise reject
+    /// `i64::MIN` (the positive magnitude does not fit in an `i64`). Every
+    /// enclosing unary minus flips the value again, so a double negation such
+    /// as `--9223372036854775808` still reports the positive magnitude as out
+    /// of range.
+    pub fn negate_int_check(&mut self, span: Span) {
+        if let Some(check) = self
+            .int_checks
+            .iter_mut()
+            .rev()
+            .find(|check| check.span == span)
+        {
+            check.value = -check.value;
+            if let Some(stripped) = check.raw.strip_prefix('-') {
+                check.raw = stripped.to_string();
+            } else {
+                check.raw.insert(0, '-');
+            }
+        }
+    }
+
     pub fn var_kind(&self, id: u32) -> VarKind {
         self.vars
             .get(id as usize)
@@ -292,7 +323,10 @@ impl Infer {
             }
             (ITy::Var(id), other) => self.bind_var(id, other),
             (other, ITy::Var(id)) => self.bind_var(id, other),
-            (ITy::Unit, ITy::Unit) | (ITy::Bool, ITy::Bool) | (ITy::String, ITy::String) => Ok(()),
+            (ITy::Unit, ITy::Unit)
+            | (ITy::Bool, ITy::Bool)
+            | (ITy::Char, ITy::Char)
+            | (ITy::String, ITy::String) => Ok(()),
             (ITy::Int(a), ITy::Int(b)) if a == b => Ok(()),
             (ITy::Float(a), ITy::Float(b)) if a == b => Ok(()),
             (
@@ -437,6 +471,7 @@ impl Infer {
         match ty {
             ITy::Unit => Ok(Ty::Unit),
             ITy::Bool => Ok(Ty::Bool),
+            ITy::Char => Ok(Ty::Char),
             ITy::Int(int_ty) => Ok(Ty::Int(*int_ty)),
             ITy::Float(float_ty) => Ok(Ty::Float(*float_ty)),
             ITy::String => Ok(Ty::String),

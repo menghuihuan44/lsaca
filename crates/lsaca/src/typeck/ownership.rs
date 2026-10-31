@@ -81,6 +81,7 @@ impl<'a> Checker<'a> {
                 .any(|elem| self.has_drop_glue_inner(elem, visiting)),
             ITy::Unit
             | ITy::Bool
+            | ITy::Char
             | ITy::Int(_)
             | ITy::Float(_)
             | ITy::String

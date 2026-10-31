@@ -6,7 +6,7 @@
 //! with include_str! and written out next to the generated main.c when a
 //! project is emitted.
 //!
-//! The runtime is split into five translation units so that the build back end
+//! The runtime is split into six translation units so that the build back end
 //! can compile them in parallel:
 //!
 //! * `lsaca_rt.c` — allocations/ORC collector, lifetime, panics, checked
@@ -16,6 +16,8 @@
 //! * `lsaca_rt_fmt.c` — format builder, float formatting, output/printing.
 //! * `lsaca_rt_map.c` — the builtin HashMap table, hashing and equality
 //!   primitives.
+//! * `lsaca_rt_unicode.c` — generated Unicode tables (case mapping, White_Space
+//!   and Debug printability) shared by the String, Vec and formatting units.
 //!
 //! lsaca_rt_internal.h is the private contract shared by those translation
 //! units; generated code only ever includes the public lsaca_rt.h.
@@ -45,19 +47,27 @@ pub const RUNTIME_FMT_C: &str = include_str!("../../../runtime/lsaca_rt_fmt.c");
 /// The contents of runtime/lsaca_rt_map.c.
 pub const RUNTIME_MAP_C: &str = include_str!("../../../runtime/lsaca_rt_map.c");
 
+/// The contents of runtime/lsaca_rt_unicode.h (Unicode helper contract).
+pub const RUNTIME_UNICODE_H: &str = include_str!("../../../runtime/lsaca_rt_unicode.h");
+
+/// The contents of runtime/lsaca_rt_unicode.c (generated Unicode tables).
+pub const RUNTIME_UNICODE_C: &str = include_str!("../../../runtime/lsaca_rt_unicode.c");
+
 /// Every runtime file name, in the order the compiler must write them out.
 ///
 /// Headers come first, then the translation units. Every file ending in ".c"
 /// is compiled as its own translation unit and linked with the generated
 /// program; the two headers are included by those translation units.
-pub const RUNTIME_FILES: [&str; 7] = [
+pub const RUNTIME_FILES: [&str; 9] = [
     "lsaca_rt.h",
     "lsaca_rt_internal.h",
+    "lsaca_rt_unicode.h",
     "lsaca_rt.c",
     "lsaca_rt_string.c",
     "lsaca_rt_vec.c",
     "lsaca_rt_fmt.c",
     "lsaca_rt_map.c",
+    "lsaca_rt_unicode.c",
 ];
 
 /// The runtime source files, as (file name, contents) pairs.
@@ -69,11 +79,13 @@ pub fn sources() -> &'static [(&'static str, &'static str)] {
     &[
         ("lsaca_rt.h", RUNTIME_H),
         ("lsaca_rt_internal.h", RUNTIME_INTERNAL_H),
+        ("lsaca_rt_unicode.h", RUNTIME_UNICODE_H),
         ("lsaca_rt.c", RUNTIME_C),
         ("lsaca_rt_string.c", RUNTIME_STRING_C),
         ("lsaca_rt_vec.c", RUNTIME_VEC_C),
         ("lsaca_rt_fmt.c", RUNTIME_FMT_C),
         ("lsaca_rt_map.c", RUNTIME_MAP_C),
+        ("lsaca_rt_unicode.c", RUNTIME_UNICODE_C),
     ]
 }
 

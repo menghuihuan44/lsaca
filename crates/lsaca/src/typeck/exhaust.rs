@@ -10,6 +10,7 @@ use crate::span::Span;
 pub enum LitKey {
     Int(i128),
     Float(u64),
+    Char(char),
     Str(String),
 }
 
@@ -397,6 +398,7 @@ impl<'a> Checker<'a> {
             EPat::Lit(key) => match key {
                 LitKey::Int(value) => value.to_string(),
                 LitKey::Float(bits) => f64::from_bits(*bits).to_string(),
+                LitKey::Char(value) => format!("{:?}", value),
                 LitKey::Str(text) => format!("{:?}", text),
             },
             EPat::Ctor(ctor, args) => match &ty {
@@ -482,6 +484,7 @@ fn bool_or_lit_epat(lit: &TLit) -> EPat {
         TLit::Int(value) => EPat::Lit(LitKey::Int(*value)),
         TLit::Float(value) => EPat::Lit(LitKey::Float(value.to_bits())),
         TLit::Bool(value) => EPat::Ctor(if *value { 1 } else { 0 }, Vec::new()),
+        TLit::Char(value) => EPat::Lit(LitKey::Char(*value)),
         TLit::Str(text) => EPat::Lit(LitKey::Str(text.clone())),
         TLit::Unit => EPat::Ctor(0, Vec::new()),
     }
@@ -507,6 +510,21 @@ fn fresh_lit(ty: &ITy, used: &[LitKey]) -> LitKey {
                     return candidate;
                 }
                 value += 1.0;
+            }
+        }
+        ITy::Char => {
+            let mut value: u32 = 0x61;
+            loop {
+                if let Some(character) = char::from_u32(value) {
+                    let candidate = LitKey::Char(character);
+                    if !used.contains(&candidate) {
+                        return candidate;
+                    }
+                }
+                value = match value.checked_add(1) {
+                    Some(next) if next <= 0x10FFFF => next,
+                    _ => return LitKey::Char('a'),
+                };
             }
         }
         ITy::String => {

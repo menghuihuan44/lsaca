@@ -4,7 +4,7 @@ lsaca has no imports and no module system: everything in this page is a builtin
 that is always in scope. Builtin generic types are `Vec<T>`, `HashMap<K, V>`,
 `Option<T>`, `Result<T, E>`, `Rc<T>` and `Box<T>`; `String` and the scalar types
 are non-generic. The `fn main()` program can use all of them without
-declarations. This page describes the library of version 1.5.0.
+declarations. This page describes the library of version 1.6.0.
 
 The page is organised by builtin: formatting first, because every example in the
 documentation uses it, then `String`, `Vec`, iterators, `HashMap`, `Option`
@@ -73,6 +73,12 @@ A replacement field is:
 Defaults: strings and booleans align left, numbers align right; padding uses
 spaces; floats print with the shortest representation that round-trips, and
 precision rounds like C's `printf` (round-half-even on exact ties).
+
+A `char` accepts fill, alignment and width like a string (one column per
+character); precision, the `+` sign and the `0` flag are rejected for it with
+`E0001`. `{:?}` prints a quoted character literal, and `{}` writes the
+character's UTF-8 encoding (see [Characters and
+Unicode](22-characters-and-unicode.md)).
 
 ```ls
 fn main() {
@@ -181,7 +187,11 @@ Output:
 
 `{:?}` prints strings with quotes and escapes, and is identical to `Display` for
 scalars. For composites it prints the same structural form as `Display`, but
-strings nested inside composites are always quoted:
+strings nested inside composites are always quoted. Since 1.6.0 string and
+character `Debug` output follows Rust's `escape_debug`: control characters,
+format characters and other non-printable code points are written as
+`\u{...}`, while printable non-ASCII text is kept as UTF-8. A `char` prints as
+a quoted character literal:
 
 ```ls
 fn main() {
@@ -200,6 +210,24 @@ Some("x")
 ("q", 1)
 ```
 
+```ls
+fn main() {
+    println!("{:?}", "café");
+    println!("{:?}", "a\tb\u{1}");
+    println!("{:?}", 'é');
+    println!("{:?}", '\n');
+}
+```
+
+Output:
+
+```text
+"café"
+"a\tb\u{1}"
+'é'
+'\n'
+```
+
 Width applies before the value is quoted, so the padding surrounds the whole
 quoted string. Precision and the `?` flag cannot be combined.
 
@@ -216,14 +244,15 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0001]: unsupported format specifier '{:q}' in format string
-  --> example-07.ls:2:14
+  --> example-08.ls:2:14
    |
  2 |     println!("{:q}", 1);
    |              ^^^^^^
 
-lsaca: example-07.ls: could not compile example-07.ls due to previous error(s)
+lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -233,14 +262,15 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0001]: 2 format argument(s) required, but 1 were supplied
-  --> example-08.ls:2:5
+  --> example-09.ls:2:5
    |
  2 |     println!("{} {}", 1);
    |     ^^^^^^^^^^^^^^^^^^^^
 
-lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
+lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -250,14 +280,15 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0001]: precision is only supported for floats and strings
-  --> example-09.ls:2:23
+  --> example-10.ls:2:23
    |
  2 |     println!("{:.2}", 5);
    |                       ^
 
-lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
+lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -267,14 +298,15 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0001]: the '0' flag is only supported for numeric values
-  --> example-10.ls:2:23
+  --> example-11.ls:2:23
    |
  2 |     println!("{:04}", "ab");
    |                       ^^^^
 
-lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
+lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 ```
 
 Named arguments (`{name}`) and positional indices (`{0}`) are not supported:
@@ -286,7 +318,8 @@ an integer in another base — write a helper function if you need one.
 
 | Builtin | Created with | Treated by ORC as |
 | --- | --- | --- |
-| `String` | literal, `String::from` | move-only refcounted buffer; `.clone()` copies the text |
+| `String` | literal, `String::from` | move-only refcounted buffer; `.clone()` copies the text; always valid UTF-8 (1.6.0) |
+| `char` | character literal, `as` cast | `Copy` scalar; no ORC participation |
 | `Vec<T>` | `vec![…]`, `Vec::new()` | move-only refcounted buffer; `.clone()` copies the elements |
 | `Option<T>` | `Some(v)`, `None` | handle if `T` is a handle |
 | `Result<T, E>` | `Ok(v)`, `Err(e)` | handle if payload is a handle |
@@ -299,6 +332,10 @@ an integer in another base — write a helper function if you need one.
 A `String` is an owned UTF-8 string. Literals have type `String` already, and
 `String::from` accepts a string literal (or another `String`). String
 concatenation uses `+` and `+=`; see [Operators](07-operators.md#strings-concatenation-and-comparison).
+Since 1.6.0 every `String` value is guaranteed valid UTF-8. The methods below
+split into the byte-oriented API (`len`, `find`, `substring` and the other
+byte-indexed operations) and the character-oriented API (`char_count`, `chars`,
+`char_at`, `is_char_boundary`, `push(char)`, `pop`, `String::from_char`).
 
 | Method | Signature (informal) | Description |
 | --- | --- | --- |
@@ -311,23 +348,31 @@ concatenation uses `+` and `+=`; see [Operators](07-operators.md#strings-concate
 | `ends_with` | `(suffix) → bool` | suffix test |
 | `find` | `(needle) → Option<i64>` | byte index of the first occurrence |
 | `replace` | `(from, to) → String` | replaces every occurrence, returns a new string |
-| `to_uppercase` | `→ String` | ASCII uppercasing only |
-| `to_lowercase` | `→ String` | ASCII lowercasing only |
-| `trim` | `→ String` | strips leading/trailing ASCII whitespace |
+| `to_uppercase` | `→ String` | Unicode default uppercasing (can change the character count) |
+| `to_lowercase` | `→ String` | Unicode default lowercasing |
+| `trim` | `→ String` | strips leading/trailing Unicode whitespace |
 | `split` | `(separator) → Vec<String>` | splits on every occurrence |
-| `substring` | `(start, len) → String` | byte-based slice; panics when out of range |
+| `substring` | `(start, len) → String` | byte-based slice; panics unless both boundaries are character boundaries |
 | `repeat` | `(n) → String` | concatenates `n` copies |
 | `parse_i64` | `→ Result<i64, String>` | decimal parse |
 | `parse_f64` | `→ Result<f64, String>` | decimal float parse |
+| `char_count` | `→ i64` | number of Unicode scalar values |
+| `chars` | `→ Vec<char>` | every scalar value, in order (eager) |
+| `char_at` | `(i) → Option<char>` | the `i`-th scalar value; `None` when out of range |
+| `is_char_boundary` | `(i) → bool` | whether byte index `i` starts a character |
+| `push` | `(c)` | appends one character, mutating in place |
+| `pop` | `→ Option<char>` | removes and returns the last character |
+| `String::from_char` | `(c) → String` | a new one-character string |
 
-Because all lengths and offsets are byte-based, `len` of a non-ASCII string is
-larger than its character count, and `find` returns a byte offset. Keep this in
-mind when slicing:
+Because the byte-oriented methods use byte offsets, `len` of a non-ASCII string
+is larger than its character count and `find` returns a byte offset; the
+character-oriented methods count scalar values instead. Keep this in mind when
+slicing:
 
 ```ls
 fn main() {
     let text = String::from("héllo");
-    println!("{} {}", text.len(), "hello".len());
+    println!("{} {} {}", text.len(), "hello".len(), text.char_count());
     println!("{}", text.substring(1, 3));
     println!("{}", text.to_uppercase());
 }
@@ -335,9 +380,44 @@ fn main() {
 
 Output:
 ```text
-6 5
+6 5 5
 él
-HéLLO
+HÉLLO
+```
+
+`to_uppercase` and `to_lowercase` implement the Unicode default case mappings,
+so they can change the number of characters (`"ß".to_uppercase()` is `"SS"`).
+`trim` removes Unicode whitespace, including U+00A0 and U+3000. `substring`
+keeps its byte offsets and byte length but panics when a boundary falls inside
+a character; the exact messages are in the panic table below. See
+[Characters and Unicode](22-characters-and-unicode.md) for a full treatment.
+
+### Character-oriented methods
+
+The character-oriented methods return or consume `char` values and never split
+a character. `chars()` is eager and returns a fresh `Vec<char>`:
+
+```ls
+fn main() {
+    let mut text = String::from("héllo");
+    println!("{} {}", text.len(), text.char_count());
+    println!("{:?}", text.chars());
+    println!("{:?} {:?}", text.char_at(1), text.char_at(9));
+    text.push('!');
+    println!("{} {:?}", text, text.pop());
+    let single: String = String::from_char('ñ');
+    println!("{} {}", single, single.len());
+}
+```
+
+Output:
+
+```text
+6 5
+['h', 'é', 'l', 'l', 'o']
+Some('é') None
+héllo! Some('!')
+ñ 2
 ```
 
 A tour of the remaining methods:
@@ -517,8 +597,9 @@ fn main() {
 ```
 
 Panic:
+
 ```text
-thread 'main' panicked at example-16.ls:3:20:
+thread 'main' panicked at example-18.ls:3:20:
 index out of bounds: the len is 3 but the index is 5
 ```
 
@@ -566,9 +647,13 @@ Full details, user-defined iterators and the exact rules are on
 ## HashMap<K, V>
 
 A `HashMap` is a builtin map from keys to values added in 1.5. Keys are limited
-to `i64`, `u64`, `bool` and `String`; values may be any value type. A map is
-move-only and owns its keys and values; `.clone()` produces an independent copy
-when the key and value types are cloneable.
+to `i64`, `u64`, `bool`, `String` and `char` (character keys since 1.6.0);
+values may be any value type. A map is move-only and owns its keys and values;
+`.clone()` produces an independent copy when the key and value types are
+cloneable. Since 1.6.0 the implementation is a Swiss-Table-style open-addressed
+table with a deterministic, non-cryptographic 64-bit hash. The printed order is
+the internal slot order, which is not insertion order and is not a language
+guarantee; content equality ignores order.
 
 ```ls
 fn main() {
@@ -929,15 +1014,16 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0277]: the ? operator can only be used in a function that returns Option, but this function returns ()
-  --> example-27.ls:3:17
+  --> example-29.ls:3:17
    |
  3 |     let inner = value?;
    |                 ^^^^^^
    = note: propagate the value with an explicit match, or change the function to return Option
 
-lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
+lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -951,15 +1037,16 @@ fn main() {}
 ```
 
 Error:
+
 ```text
 error[E0277]: the ? operator can only be applied to Option or Result values, but found i64
-  --> example-28.ls:3:17
+  --> example-30.ls:3:17
    |
  3 |     let inner = value?;
    |                 ^^^^^^
    = note: the ? operator propagates None or Err out of the enclosing function
 
-lsaca: example-28.ls: could not compile example-28.ls due to previous error(s)
+lsaca: example-30.ls: could not compile example-30.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -973,15 +1060,16 @@ fn main() {}
 ```
 
 Error:
+
 ```text
 error[E0308]: the ? operator cannot convert error types: expected String, found i64
-  --> example-29.ls:3:17
+  --> example-31.ls:3:17
    |
  3 |     let value = other?;
    |                 ^^^^^^
    = note: the ? operator requires the error types to match exactly; use map_err or an explicit match to convert
 
-lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
+lsaca: example-31.ls: could not compile example-31.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -995,15 +1083,16 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0277]: the ? operator requires the enclosing closure to declare an Option return type
-  --> example-30.ls:3:21
+  --> example-32.ls:3:21
    |
  3 |         let inner = value?;
    |                     ^^^^^^
    = note: add an explicit return type such as -> Option<i64> to this closure
 
-lsaca: example-30.ls: could not compile example-30.ls due to previous error(s)
+lsaca: example-32.ls: could not compile example-32.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -1015,20 +1104,21 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0015]: the ? operator is not allowed in a constant initializer
-  --> example-31.ls:1:20
+  --> example-33.ls:1:20
    |
  1 | const VALUE: i64 = 1?;
    |                    ^^
 
 error[E0015]: constant initializer must be a constant expression
-  --> example-31.ls:1:20
+  --> example-33.ls:1:20
    |
  1 | const VALUE: i64 = 1?;
    |                    ^^
 
-lsaca: example-31.ls: could not compile example-31.ls due to previous error(s)
+lsaca: example-33.ls: could not compile example-33.ls due to previous error(s)
 ```
 
 A closure can use `?` when its return type is known, for example through a
@@ -1168,7 +1258,7 @@ These functions are always in scope.
 | `read_line()` | `→ Option<String>` | one line from stdin, newline stripped; `None` at EOF |
 | `args()` | `→ Vec<String>` | command-line arguments after the program name |
 | `exit(code)` | `(i32)` | terminates immediately with the exit code |
-| `read_file(path)` | `→ Result<String, String>` | reads a UTF-8 text file |
+| `read_file(path)` | `→ Result<String, String>` | reads a file as UTF-8; invalid bytes become `Err` |
 | `write_file(path, contents)` | `→ Result<(), String>` | writes a text file |
 
 `read_line` returns lines without the trailing newline and `None` once the input
@@ -1232,8 +1322,15 @@ Output:
 before
 ```
 
+`read_line` validates input: bytes that are not valid UTF-8 make it panic with
+`stream did not contain valid UTF-8` (exit code 101), and there is no lossy
+variant. `args` likewise panics with `arguments contain invalid UTF-8` when an
+argument is not valid UTF-8.
+
 File I/O reports failures through `Result` instead of panicking. `read_file`
-reads a UTF-8 file into a `String`; `write_file` returns `Ok(())` on success:
+reads a file as UTF-8 into a `String`; a file whose bytes are not valid UTF-8
+gives `Err("stream did not contain valid UTF-8")`. `write_file` returns `Ok(())`
+on success:
 
 ```ls
 fn main() {
@@ -1307,22 +1404,23 @@ fn main() {
 ```
 
 Error:
+
 ```text
 error[E0308]: mismatched types
-  --> example-41.ls:2:24
+  --> example-43.ls:2:24
    |
  2 |     println!("{}", pow(2, 10));
    |                        ^
    = note: expected f64, found {integer}
 
 error[E0308]: mismatched types
-  --> example-41.ls:2:27
+  --> example-43.ls:2:27
    |
  2 |     println!("{}", pow(2, 10));
    |                           ^^
    = note: expected f64, found {integer}
 
-lsaca: example-41.ls: could not compile example-41.ls due to previous error(s)
+lsaca: example-43.ls: could not compile example-43.ls due to previous error(s)
 ```
 
 ## assert and vec macros
@@ -1376,8 +1474,9 @@ fn main() {
 ```
 
 Panic:
+
 ```text
-thread 'main' panicked at example-43.ls:3:20:
+thread 'main' panicked at example-45.ls:3:20:
 called `Option::unwrap()` on a `None` value
 ```
 
@@ -1388,8 +1487,9 @@ fn main() {
 ```
 
 Panic:
+
 ```text
-thread 'main' panicked at example-44.ls:2:5:
+thread 'main' panicked at example-46.ls:2:5:
 explicit panic
 ```
 
@@ -1404,7 +1504,11 @@ The panic conditions in the builtin library are:
 | integer division by zero | `attempt to divide by zero` |
 | integer remainder by zero | `attempt to calculate the remainder with a divisor of zero` |
 | index out of bounds | `index out of bounds: the len is N but the index is M` |
-| `substring` out of range | `index out of bounds` with start + len as the index |
+| `substring` end past the string | `byte index N is out of bounds of <string>` with N = start + len |
+| `substring` start inside a character | `byte index N is not a char boundary; it is inside C (bytes A..B) of <string>` |
+| `substring` end inside a character | the same non-boundary message with N = start + len |
+| `read_line` on invalid UTF-8 | `stream did not contain valid UTF-8` |
+| `args` on invalid UTF-8 | `arguments contain invalid UTF-8` |
 | checked integer overflow (Debug) | `attempt to add with overflow` (also subtract/multiply) |
 | shift overflow (Debug) | `attempt to shift left with overflow` |
 | `assert!(false)` | `assertion failed` |

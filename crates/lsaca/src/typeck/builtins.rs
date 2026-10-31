@@ -75,6 +75,14 @@ fn string_method(name: &str) -> Option<BuiltinMethodInfo> {
         "repeat" => method(StrRepeat, vec![i64()], ITy::string()),
         "parse_i64" => method(StrParseI64, vec![], ITy::result(i64(), ITy::string())),
         "parse_f64" => method(StrParseF64, vec![], ITy::result(ITy::f64(), ITy::string())),
+        // Version 1.6 UTF-8 aware String API: character indices are scalar
+        // positions, byte-indexed methods use `is_char_boundary`.
+        "char_count" => method(StrCharCount, vec![], i64()),
+        "chars" => method(StrChars, vec![], ITy::vec(ITy::char_())),
+        "char_at" => method(StrCharAt, vec![i64()], ITy::option(ITy::char_())),
+        "push" => mutating(StrPush, vec![ITy::char_()], ITy::Unit),
+        "pop" => mutating(StrPop, vec![], ITy::option(ITy::char_())),
+        "is_char_boundary" => method(StrIsCharBoundary, vec![i64()], ITy::bool_()),
         _ => return None,
     };
     Some(info)
@@ -210,6 +218,7 @@ pub fn builtin_assoc(type_name: &str, name: &str) -> Option<HBuiltinAssoc> {
     match (type_name, name) {
         ("String", "new") => Some(StringNew),
         ("String", "from") => Some(StringFrom),
+        ("String", "from_char") => Some(StringFromChar),
         ("Vec", "new") => Some(VecNew),
         ("Vec", "with_capacity") => Some(VecWithCapacity),
         ("Rc", "new") => Some(RcNew),
@@ -341,6 +350,9 @@ fn parse_format_spec(raw: &str) -> Result<FormatSpec, String> {
 pub enum FormatValueKind {
     String,
     Bool,
+    /// A `char` value: width, alignment, fill and debug are allowed; the
+    /// precision, '+' and '0' flags are not.
+    Char,
     SignedInt,
     UnsignedInt,
     Float,
@@ -354,6 +366,26 @@ pub enum FormatValueKind {
 /// Returns a diagnostic message when the specification cannot be applied to
 /// the value; `None` when the combination is valid.
 pub fn format_spec_error(spec: &FormatSpec, kind: FormatValueKind) -> Option<String> {
+    if kind == FormatValueKind::Char {
+        // A character occupies exactly one output position, so precision,
+        // sign and zero padding have no meaning for it.
+        if spec.precision.is_some() {
+            return Some(
+                "the precision of a format specifier is not supported for characters".to_string(),
+            );
+        }
+        if spec.sign_plus {
+            return Some(
+                "the '+' flag of a format specifier is not supported for characters".to_string(),
+            );
+        }
+        if spec.zero_pad {
+            return Some(
+                "the '0' flag of a format specifier is not supported for characters".to_string(),
+            );
+        }
+        return None;
+    }
     let is_string = kind == FormatValueKind::String;
     let is_float = kind == FormatValueKind::Float;
     let is_signed_int = kind == FormatValueKind::SignedInt;

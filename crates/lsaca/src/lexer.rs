@@ -23,6 +23,7 @@ pub enum TokenKind {
     Int(u128),
     Float(f64),
     Str(String),
+    Char(char),
     // Keywords
     KwFn,
     KwLet,
@@ -122,6 +123,7 @@ impl TokenKind {
             TokenKind::Int(value) => format!("integer literal {}", value),
             TokenKind::Float(value) => format!("float literal {}", value),
             TokenKind::Str(_) => "string literal".to_string(),
+            TokenKind::Char(_) => "character literal".to_string(),
             TokenKind::Eof => "end of file".to_string(),
             other => format!("{}", other),
         }
@@ -135,6 +137,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Int(value) => write!(f, "{}", value),
             TokenKind::Float(value) => write!(f, "{}", value),
             TokenKind::Str(_) => write!(f, "string literal"),
+            TokenKind::Char(_) => write!(f, "character literal"),
             TokenKind::KwFn => write!(f, "fn"),
             TokenKind::KwLet => write!(f, "let"),
             TokenKind::KwMut => write!(f, "mut"),
@@ -218,9 +221,10 @@ impl std::fmt::Display for TokenKind {
 const E_UNEXPECTED_CHAR: &str = "E0001";
 const E_INT_LITERAL: &str = "E0002";
 const E_FLOAT_LITERAL: &str = "E0003";
-const E_UNTERMINATED_STRING: &str = "E0004";
+const E_UNTERMINATED_LITERAL: &str = "E0004";
 const E_ESCAPE: &str = "E0005";
 const E_UNTERMINATED_COMMENT: &str = "E0006";
+const E_CHAR_LITERAL: &str = "E0007";
 
 /// Tokenize a whole source file.
 ///
@@ -274,6 +278,8 @@ impl<'a> Lexer<'a> {
                 self.lex_number(start);
             } else if ch == '"' {
                 self.lex_string(start);
+            } else if ch == '\'' {
+                self.lex_char(start);
             } else {
                 self.lex_punctuation(start);
             }
@@ -726,7 +732,7 @@ impl<'a> Lexer<'a> {
         let end = self.pos;
         if !terminated {
             self.report_error(
-                E_UNTERMINATED_STRING,
+                E_UNTERMINATED_LITERAL,
                 "unterminated string literal",
                 start,
                 end,
@@ -737,8 +743,78 @@ impl<'a> Lexer<'a> {
         self.push(TokenKind::Str(value), start, end);
     }
 
+    // -----------------------------------------------------------------------
+    // Character literals
+    // -----------------------------------------------------------------------
+
+    /// Lex a character literal such as `'a'` or `'\u{1F600}'`.
+    ///
+    /// A character literal is a single Unicode scalar value, so it reuses the
+    /// escape machinery of string literals: every escape is decoded into a
+    /// scratch string and the literal must end up holding exactly one
+    /// codepoint. Malformed literals are reported and recovered with a
+    /// replacement character literal so that the parser can keep going.
+    fn lex_char(&mut self, start: usize) {
+        self.bump(); // opening quote
+        let mut decoded = String::new();
+        let mut codepoints: usize = 0;
+        let mut terminated = false;
+        let mut escape_failed = false;
+        while let Some(ch) = self.peek_char() {
+            match ch {
+                '\'' => {
+                    self.bump();
+                    terminated = true;
+                    break;
+                }
+                // A literal cannot span lines; leave the newline for the next
+                // token so that the unterminated literal is recovered once.
+                '\n' | '\r' => break,
+                '\\' => {
+                    self.bump();
+                    let before = self.diagnostics.error_count();
+                    self.lex_escape(&mut decoded);
+                    escape_failed |= self.diagnostics.error_count() != before;
+                    codepoints += 1;
+                }
+                _ => {
+                    decoded.push(ch);
+                    codepoints += 1;
+                    self.bump();
+                }
+            }
+        }
+        let end = self.pos;
+        if !terminated {
+            self.report_error(
+                E_UNTERMINATED_LITERAL,
+                "unterminated character literal",
+                start,
+                end,
+            );
+        } else if codepoints > 1 {
+            self.report_error(
+                E_CHAR_LITERAL,
+                "character literal may only contain one codepoint",
+                start,
+                end,
+            );
+        } else if codepoints == 0 && !escape_failed {
+            self.report_error(E_CHAR_LITERAL, "empty character literal", start, end);
+        }
+        // Recover with a real character token so that the parser keeps going;
+        // the diagnostic above carries the actual problem.
+        let value = if codepoints == 0 {
+            '\0'
+        } else {
+            decoded.chars().next().unwrap_or('\0')
+        };
+        self.push(TokenKind::Char(value), start, end);
+    }
+
     /// Consume one escape sequence. The leading backslash has already been
     /// consumed; out receives the decoded character when the escape is valid.
+    /// Shared by string and character literals.
     fn lex_escape(&mut self, out: &mut String) {
         let esc_start = self.pos.saturating_sub(1);
         let ch = match self.bump() {
@@ -1098,6 +1174,17 @@ mod tests {
             .collect()
     }
 
+    fn chars(source: &str) -> Vec<char> {
+        tokenize(source)
+            .0
+            .into_iter()
+            .filter_map(|token| match token.kind {
+                TokenKind::Char(value) => Some(value),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn empty_source_yields_eof() {
         let (tokens, diagnostics) = tokenize("");
@@ -1401,6 +1488,103 @@ mod tests {
     }
 
     #[test]
+    fn char_literals_and_escapes() {
+        assert_eq!(chars("'a'"), vec!['a']);
+        assert_eq!(chars("' '"), vec![' ']);
+        assert_eq!(chars("'\u{4F60}'"), vec!['\u{4F60}']);
+        // Non-ASCII text passes through unchanged.
+        assert_eq!(chars("'\u{1F600}'"), vec!['\u{1F600}']);
+        assert_eq!(
+            chars(r#"'\n' '\t' '\r' '\\' '\'' '\"' '\0' '\x41' '\u{4F60}' '\u{1F600}'"#),
+            vec![
+                '\n',
+                '\t',
+                '\r',
+                '\\',
+                '\'',
+                '"',
+                '\0',
+                'A',
+                '\u{4F60}',
+                '\u{1F600}'
+            ]
+        );
+        assert!(
+            errors(r#"'\n' '\t' '\r' '\\' '\'' '\"' '\0' '\x41' '\u{4F60}' '\u{1F600}'"#)
+                .is_empty()
+        );
+        // A character literal is a single token and does not swallow neighbours.
+        use TokenKind::*;
+        assert_eq!(kinds("'a' + 'b'"), vec![Char('a'), Plus, Char('b'), Eof]);
+        assert_eq!(kinds("x'y'"), vec![Ident("x".to_string()), Char('y'), Eof]);
+        // The token description mirrors string literals.
+        assert_eq!(TokenKind::Char('x').describe(), "character literal");
+        assert_eq!(format!("{}", TokenKind::Char('x')), "character literal");
+    }
+
+    #[test]
+    fn char_literal_errors() {
+        assert_eq!(
+            error_messages("''"),
+            vec!["empty character literal".to_string()]
+        );
+        assert!(error_messages("'ab'")[0].contains("one codepoint"));
+        assert!(error_messages("'a b'")[0].contains("one codepoint"));
+        assert!(error_messages(r#"'\u{D800}'"#)[0].contains("unicode scalar"));
+        assert!(error_messages(r#"'\u{DFFF}'"#)[0].contains("unicode scalar"));
+        assert!(error_messages(r#"'\u{110000}'"#)[0].contains("unicode scalar"));
+        assert!(error_messages(r#"'\q'"#)[0].contains("unknown escape"));
+        assert!(error_messages(r#"'\x80'"#)[0].contains("ASCII"));
+        assert!(error_messages(r#"'\x4'"#)[0].contains("hexadecimal"));
+        assert!(error_messages(r#"'\u{}'"#)[0].contains("hexadecimal"));
+        assert!(error_messages("'a")[0].contains("unterminated"));
+        // A newline terminates the literal (and is not consumed): one diagnostic.
+        let (tokens, diagnostics) = tokenize("let c = 'a\nlet d = 1;");
+        assert!(diagnostics.has_errors());
+        assert_eq!(diagnostics.error_count(), 1);
+        assert!(
+            diagnostics
+                .iter()
+                .next()
+                .unwrap()
+                .message
+                .contains("unterminated")
+        );
+        assert_eq!(
+            tokens.last().map(|token| token.kind.clone()),
+            Some(TokenKind::Eof)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Char('a'))
+        );
+    }
+
+    #[test]
+    fn malformed_char_literals_are_recovered() {
+        let (tokens, diagnostics) = tokenize("let c = '';");
+        assert!(diagnostics.has_errors());
+        assert_eq!(diagnostics.error_count(), 1);
+        assert!(
+            diagnostics
+                .iter()
+                .next()
+                .map(|diagnostic| diagnostic.code == Some("E0007"))
+                .unwrap_or(false)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Char('\0'))
+        );
+        assert_eq!(
+            tokens.last().map(|token| token.kind.clone()),
+            Some(TokenKind::Eof)
+        );
+    }
+
+    #[test]
     fn unterminated_block_comment_is_recovered() {
         let (tokens, diagnostics) = tokenize("let x = 1; /* not closed");
         assert!(diagnostics.has_errors());
@@ -1620,6 +1804,18 @@ mod tests {
             .filter_map(|diagnostic| diagnostic.code)
             .collect();
         assert_eq!(codes, vec!["E0006"]);
+        let diagnostics = tokenize("''").1;
+        let codes: Vec<&str> = diagnostics
+            .iter()
+            .filter_map(|diagnostic| diagnostic.code)
+            .collect();
+        assert_eq!(codes, vec!["E0007"]);
+        let diagnostics = tokenize("'a").1;
+        let codes: Vec<&str> = diagnostics
+            .iter()
+            .filter_map(|diagnostic| diagnostic.code)
+            .collect();
+        assert_eq!(codes, vec!["E0004"]);
     }
 
     #[test]
@@ -1643,7 +1839,7 @@ mod tests {
         let alphabet: Vec<char> = vec![
             'a', 'b', 'X', 'Y', '_', '0', '1', '2', '9', ' ', '/', '*', '+', '-', '=', '!', '&',
             '|', '^', '~', '#', '{', '}', '[', ']', '(', ')', '.', ',', ';', ':', '<', '>', '%',
-            '"', '?', '@',
+            '"', '?', '@', '\'',
         ];
         let mut state: u64 = 0x2545_F491_4F6C_DD1D;
         for _ in 0..300 {

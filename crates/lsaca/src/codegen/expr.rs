@@ -359,6 +359,7 @@ impl<'a> Gen<'a> {
             (Ty::Bool, Ty::Float(float_ty)) => {
                 format!("({})(({}) ? 1 : 0)", float_ty.c_type(), value)
             }
+            (Ty::Int(_), Ty::Char) => format!("(uint32_t)({})", value),
             (Ty::Int(_), Ty::Bool) => format!("(({}) != 0)", value),
             (Ty::Float(_), Ty::Bool) => format!("(({}) != 0)", value),
             (_, Ty::Int(int_ty)) => format!("({})({})", int_ty.c_type(), value),

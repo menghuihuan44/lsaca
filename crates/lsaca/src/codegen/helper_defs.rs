@@ -810,7 +810,7 @@ fn traceable(ty: &Ty) -> bool {
         // A reference borrows a place owned by someone else: it never owns an
         // allocation of its own, so the cycle collector must not follow it.
         Ty::Ref { .. } => false,
-        Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::String => false,
+        Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::String => false,
         _ => true,
     }
 }
@@ -835,7 +835,7 @@ pub(crate) fn emit_trace_slot(w: &mut CWriter, names: &TypeNames, ty: &Ty, slot:
         }
         // Borrowed references do not participate in cycle tracing.
         Ty::Ref { .. } => {}
-        Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::String => {}
+        Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::String => {}
         _ => {
             w.line(format!(
                 "lsaca_trace_{}(&{}, visit);",
@@ -1180,6 +1180,7 @@ fn emit_map_key_callbacks(w: &mut CWriter, names: &TypeNames, key: &Ty, suffix: 
         Ty::Int(int) if int.is_signed() => w.line("return ls_hash_i64(slot);"),
         Ty::Int(_) => w.line("return ls_hash_u64(slot);"),
         Ty::Bool => w.line("return ls_hash_bool(slot);"),
+        Ty::Char => w.line("return ls_hash_char(slot);"),
         Ty::String => w.line("return ls_hash_string_slot(slot);"),
         _ => w.line(format!("return ls_hash_bytes(slot, sizeof({}));", key_ty)),
     }
@@ -1196,6 +1197,7 @@ fn emit_map_key_callbacks(w: &mut CWriter, names: &TypeNames, key: &Ty, suffix: 
         Ty::Int(int) if int.is_signed() => w.line("return ls_eq_i64(a, b);"),
         Ty::Int(_) => w.line("return ls_eq_u64(a, b);"),
         Ty::Bool => w.line("return ls_eq_bool(a, b);"),
+        Ty::Char => w.line("return ls_eq_char(a, b);"),
         Ty::String => w.line("return ls_eq_string_slot(a, b);"),
         _ => {
             let equal = ops::eq_expr(
@@ -1301,7 +1303,7 @@ fn emit_map_helpers(w: &mut CWriter, names: &TypeNames, ty: &Ty, key: &Ty, value
     w.line("ls_map_clear(&self->table);");
     w.line("free(self->table.keys);");
     w.line("free(self->table.values);");
-    w.line("free(self->table.states);");
+    w.line("free(self->table.ctrl);");
     w.dedent();
     w.line("}");
     w.blank();

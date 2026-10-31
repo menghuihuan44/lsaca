@@ -17,7 +17,7 @@ enum FoldOutcome {
 fn const_type_supported(ty: &Ty) -> bool {
     matches!(
         ty,
-        Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::String
+        Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::String
     )
 }
 
@@ -122,6 +122,7 @@ impl<'a> Checker<'a> {
                 TLit::Int(value) => folded(ConstVal::Int(*value)),
                 TLit::Float(value) => folded(ConstVal::Float(*value)),
                 TLit::Bool(value) => folded(ConstVal::Bool(*value)),
+                TLit::Char(value) => folded(ConstVal::Char(*value)),
                 TLit::Str(value) => folded(ConstVal::Str(value.clone())),
                 TLit::Unit => folded(ConstVal::Unit),
             },
@@ -373,6 +374,15 @@ impl<'a> Checker<'a> {
                 Ne => folded(ConstVal::Bool(lhs_value != rhs_value)),
                 _ => FoldOutcome::NotConst,
             },
+            (ConstVal::Char(lhs_value), ConstVal::Char(rhs_value)) => match op {
+                Eq => folded(ConstVal::Bool(lhs_value == rhs_value)),
+                Ne => folded(ConstVal::Bool(lhs_value != rhs_value)),
+                Lt => folded(ConstVal::Bool(lhs_value < rhs_value)),
+                Le => folded(ConstVal::Bool(lhs_value <= rhs_value)),
+                Gt => folded(ConstVal::Bool(lhs_value > rhs_value)),
+                Ge => folded(ConstVal::Bool(lhs_value >= rhs_value)),
+                _ => FoldOutcome::NotConst,
+            },
             (ConstVal::Str(lhs_value), ConstVal::Str(rhs_value)) => match op {
                 Add => folded(ConstVal::Str(format!("{}{}", lhs_value, rhs_value))),
                 Eq => folded(ConstVal::Bool(lhs_value == rhs_value)),
@@ -411,6 +421,30 @@ impl<'a> Checker<'a> {
                 let raw = if *raw { 1 } else { 0 };
                 self.finish_int(*int_ty, raw, expr.span)
             }
+            (ConstVal::Char(raw), ITy::Int(int_ty)) => {
+                self.finish_int(*int_ty, wrap_int(*raw as u32 as i128, *int_ty), expr.span)
+            }
+            (ConstVal::Char(raw), ITy::Float(float_ty)) => {
+                folded(ConstVal::Float(round_float(*float_ty, *raw as u32 as f64)))
+            }
+            // Only u8 -> char casts pass the type checker. Constant folding
+            // still runs over cast expressions that the checker already
+            // rejected, so this arm can additionally report an invalid scalar
+            // (e.g. "1114112 as char") as a secondary E0080 diagnostic; valid
+            // u8 values always fit in 0..=255.
+            (ConstVal::Int(raw), ITy::Char) => match char::from_u32(*raw as u32) {
+                Some(character) if *raw >= 0 && *raw <= 0x10FFFF => {
+                    folded(ConstVal::Char(character))
+                }
+                _ => {
+                    self.error_code(
+                        "constant evaluation failed: value is not a valid character".to_string(),
+                        expr.span,
+                        "E0080",
+                    );
+                    FoldOutcome::NotConst
+                }
+            },
             _ => FoldOutcome::NotConst,
         }
     }
@@ -493,6 +527,13 @@ fn format_const(value: &ConstVal, debug: bool) -> Option<String> {
         ConstVal::Int(raw) => Some(raw.to_string()),
         ConstVal::Float(raw) => Some(format!("{}", raw)),
         ConstVal::Bool(raw) => Some(if *raw { "true" } else { "false" }.to_string()),
+        ConstVal::Char(raw) => {
+            if debug {
+                Some(format!("{:?}", raw))
+            } else {
+                Some(raw.to_string())
+            }
+        }
         ConstVal::Str(raw) => {
             if debug {
                 Some(format!("{:?}", raw))

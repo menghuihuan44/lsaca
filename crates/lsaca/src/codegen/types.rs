@@ -50,6 +50,7 @@ impl TypeNames {
             Ty::Int(int_ty) => int_ty.name().to_string(),
             Ty::Float(float_ty) => float_ty.name().to_string(),
             Ty::String => String::from("String"),
+            Ty::Char => String::from("char"),
             Ty::Vec(elem) => format!("Vec_{}", self.mangle(elem)),
             Ty::Rc(elem) => format!("Rc_{}", self.mangle(elem)),
             Ty::Box(elem) => format!("Box_{}", self.mangle(elem)),
@@ -111,6 +112,7 @@ impl TypeNames {
             Ty::Int(int_ty) => int_ty.c_type().to_string(),
             Ty::Float(float_ty) => float_ty.c_type().to_string(),
             Ty::String => String::from("LsString*"),
+            Ty::Char => String::from("uint32_t"),
             // Rc, Box and HashMap values are pointers to managed cells.
             Ty::Rc(_) | Ty::Box(_) | Ty::HashMap(_, _) => format!("Ls{}*", self.mangle(ty)),
             // References are non-owning pointers to the referent value.
@@ -214,8 +216,8 @@ impl TypeRegistry {
     }
 
     /// True for the instantiations whose struct layout comes from the runtime
-    /// header (LsVec_String, LsOpt_String, LsRes_String_String) and for
-    /// LsString itself.
+    /// header (LsVec_String, LsOpt_String, LsRes_String_String, LsVec_char,
+    /// LsOpt_char) and for LsString itself.
     pub fn is_frozen(&self, ty: &Ty) -> bool {
         matches!(
             ty,
@@ -227,8 +229,8 @@ impl TypeRegistry {
         // Unwrap the generic shape before testing, so that the check works even
         // for types that were not registered.
         match ty {
-            Ty::Vec(elem) => **elem == Ty::String,
-            Ty::Option(elem) => **elem == Ty::String,
+            Ty::Vec(elem) => **elem == Ty::String || (**elem).is_char(),
+            Ty::Option(elem) => **elem == Ty::String || (**elem).is_char(),
             Ty::Result(ok, err) => **ok == Ty::String && **err == Ty::String,
             _ => false,
         }
@@ -338,6 +340,7 @@ fn push_if_compound(deps: &mut Vec<Ty>, ty: &Ty) {
     // when stored inside another type, so they must stay in the graph.
     if ty.is_unit()
         || ty.is_bool()
+        || ty.is_char()
         || ty.is_integer()
         || ty.is_float()
         || ty.is_rc()
@@ -657,7 +660,7 @@ impl TypeRegistry {
             return false;
         }
         let def = match ty {
-            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) => TypeDef::Scalar,
+            Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) => TypeDef::Scalar,
             Ty::String => TypeDef::Frozen,
             Ty::Struct(index) => TypeDef::Struct(*index),
             Ty::Enum(index) => TypeDef::Enum(*index),
@@ -718,6 +721,7 @@ impl TypeNames {
             Ty::Bool => String::from("false"),
             Ty::Int(int_ty) => crate::codegen::util::int_literal(0, *int_ty),
             Ty::Float(float_ty) => crate::codegen::util::float_literal(0.0, *float_ty),
+            Ty::Char => String::from("((uint32_t)0)"),
             Ty::String => String::from("ls_str_new()"),
             Ty::Vec(_) => format!("(({}){{0, 0, NULL}})", self.ctype(ty)),
             Ty::Rc(_) | Ty::Box(_) | Ty::HashMap(_, _) | Ty::Ref { .. } => {

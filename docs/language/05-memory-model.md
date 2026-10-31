@@ -14,7 +14,10 @@ observable: a value runs its `Drop` implementation when it is released. Version
 aliasing (it never owns or frees anything — see [References and
 borrowing](12-references-and-borrowing.md)). Version 1.5 adds user-defined
 generics and traits, lazy iterators, the builtin `HashMap<K, V>`, and extends
-`==` to aggregates, references and maps.
+`==` to aggregates, references and maps. Version 1.6 adds the `char` scalar
+type and makes every `String` a guaranteed-valid UTF-8 string with
+character-aware methods; see [Characters and
+Unicode](22-characters-and-unicode.md).
 
 This page is the authoritative description of ownership, moves, `.clone()`,
 `Drop`, copy-on-write mutation, `Rc<T>`, `Box<T>`, iterator ownership,
@@ -26,7 +29,8 @@ in expressions are also collected in [Ownership and moves](11-ownership-and-move
 Every lsaca value is represented in one of three ways:
 
 1. **Copy values** are stored directly and copied bit by bit: the scalar types
-   `bool`, all integer and float types, `()`, and references (`&T`, `&mut T`).
+   `bool`, `char`, all integer and float types, `()`, and references
+   (`&T`, `&mut T`).
    Copying a value of these types is always allowed and never invalidates the
    original.
 2. **Move-only values** are owned values with a heap payload or drop glue:
@@ -47,7 +51,7 @@ in the next sections.
 
 | Category | Types | What use-by-value does |
 | --- | --- | --- |
-| Copy | `bool`, integers, floats, `()`, `&T`, `&mut T`; tuples, `Option` and `Result` all of whose parts are Copy; user structs and enums whose fields are all Copy and that do not implement `Drop` | Copies the value; the original stays usable |
+| Copy | `bool`, `char`, integers, floats, `()`, `&T`, `&mut T`; tuples, `Option` and `Result` all of whose parts are Copy; user structs and enums whose fields are all Copy and that do not implement `Drop` | Copies the value; the original stays usable |
 | Move-only | `String`, `Vec<T>`, `HashMap<K, V>`, `Rc<T>`, `Box<T>`, function values and closures; any type containing one of them; every type that implements `Drop` | Moves ownership to the new place; using the old binding is an error |
 
 ```ls
@@ -157,7 +161,7 @@ moves](11-ownership-and-moves.md).
 `Copy` is derived automatically; there is no `impl Copy` syntax. A type is Copy
 when every part of it is Copy and it does not implement `Drop`:
 
-* `bool`, all integer and float types, `()`;
+* `bool`, `char`, all integer and float types, `()`;
 * shared and mutable references, `&T` and `&mut T`;
 * tuples, `Option<T>` and `Result<T, E>` when all their parts are Copy;
 * user structs and enums whose fields or payloads are all Copy, when the type
@@ -387,6 +391,14 @@ mutating a clone never changes the original, and mutating the original after a
 clone never changes the clone. Moving a value transfers the buffer without any
 copy at all, which is why moves are preferred to clones.
 
+Since 1.6.0 a `String` is additionally guaranteed to hold valid UTF-8. That
+invariant is part of the value's representation: every constructor, mutation
+and substring operation either preserves it or rejects the input, so a `String`
+never contains invalid bytes. Lengths and offsets stay byte-based (`len`,
+`find`, `substring`), and the character-oriented methods (`char_count`,
+`chars`, `char_at`) count Unicode scalar values; see
+[Characters and Unicode](22-characters-and-unicode.md).
+
 Acyclic refcounted values are freed deterministically, one allocation at a time,
 as their reference counts drop to zero.
 
@@ -488,6 +500,8 @@ subgraph, running the `Drop` hooks of the collected values. Its guarantees are:
 * The collector is not a tracing GC: it never moves objects, and it runs only
   over candidate subgraphs, in bounded increments at allocation and release
   points.
+* The order in which the hooks of collected values run is not specified; the
+  program cannot observe which member of a cycle is released first.
 
 ```ls
 struct Node {
@@ -522,8 +536,8 @@ drop node 1
 drop node 2
 drop node 1
 2 2
-drop node 2
 drop node 1
+drop node 2
 ```
 
 ## `Box<T>`: owned indirection

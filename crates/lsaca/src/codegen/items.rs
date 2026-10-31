@@ -12,11 +12,21 @@
 //! 7. environment support and per closure environment drop and trace functions;
 //! 8. function value thunks, closure bodies, user function bodies;
 //! 9. the C main wrapper that drives the runtime lifecycle.
+//!
+//! Large programs are split into main.c plus extra translation units so a C
+//! compiler can compile them in parallel. In that case main.c keeps items 1, 2,
+//! 4, 5, 6, the interned literal table, thunks and closures, the user entry
+//! point and the C wrapper; the remaining user functions are distributed over
+//! deterministic unit files. Every unit repeats the includes, the unit type,
+//! the type definitions, the environment structs and the declarations, and
+//! additionally declares the cast helpers, interned literal handles and thunks
+//! that main.c defines.
 
-use crate::hir::{HBlock, HParam, Program};
+use crate::hir::{HBlock, HFn, HParam, Program};
 use crate::types::{IntTy, SelfKind, Ty};
 
 use super::CodegenOptions;
+use super::GeneratedUnit;
 use super::c_writer::CWriter;
 use super::emit::{BoundVar, EnvInfo, Gen};
 use super::helper_defs;
@@ -27,23 +37,55 @@ use super::types::{
     RESULT_OK_MEMBER, TAG_FIELD, TypeDef, TypeRegistry, UNION_FIELD, field_cname, positional_field,
     variant_member,
 };
+use super::util;
 
-/// Generate the complete main.c for one checked program.
-pub(crate) fn generate_main_c(
+/// Above this many bytes of generated user function bodies a program is split
+/// into several C translation units so that a C compiler can compile them in
+/// parallel. Smaller programs stay in a single main.c, byte for byte as before.
+pub(crate) const SPLIT_THRESHOLD_BYTES: usize = 256 * 1024;
+
+/// Maximum number of extra translation units in a split project.
+pub(crate) const MAX_SPLIT_UNITS: usize = 8;
+
+/// Generate the C translation units for one checked program.
+///
+/// The first element of the result is always main.c. The second element lists
+/// the extra translation units of a split build; it is empty for the usual
+/// single-translation-unit project.
+pub(crate) fn generate_project(
     program: &Program,
     registry: &TypeRegistry,
     options: &CodegenOptions,
-) -> String {
+) -> (String, Vec<GeneratedUnit>) {
     let mut generator = Gen::new(program, registry, options, CWriter::new());
-    generator.emit_program();
-    generator.w.finish()
+    generator.emit_program()
+}
+
+/// Concatenate writer sections into one C file without copying their text.
+fn stitch(prefix: CWriter, sections: impl IntoIterator<Item = CWriter>) -> String {
+    let mut writer = prefix;
+    for section in sections {
+        writer.append(section);
+    }
+    writer.finish()
 }
 
 impl<'a> Gen<'a> {
-    fn emit_program(&mut self) {
+    /// Emit the whole project and return main.c plus the extra translation
+    /// units of a split build.
+    ///
+    /// The file layout is described in the module documentation. Sections are
+    /// generated in the same order as the single-translation-unit layout but
+    /// captured into separate writers, so the unsplit output stays byte
+    /// identical while a split build can distribute the function bodies.
+    fn emit_program(&mut self) -> (String, Vec<GeneratedUnit>) {
         self.emit_prelude();
         self.emit_unit_type();
+        let includes = self.take_w();
+
         self.emit_cast_helpers();
+        let cast_definitions = self.take_w();
+
         let ordered = self.registry.topological_order(self.program);
         self.emit_forward_typedefs(&ordered);
         self.emit_type_definitions(&ordered);
@@ -51,14 +93,118 @@ impl<'a> Gen<'a> {
         self.emit_env_structs();
         helpers::emit_helper_prototypes(&mut self.w, self.program, self.registry);
         self.emit_function_prototypes();
+        let declarations = self.take_w();
+
         helpers::emit_helper_definitions(&mut self.w, self.program, self.registry);
         helpers::emit_env_support(&mut self.w);
         self.emit_env_drops();
         self.emit_env_traces();
+        let helper_definitions = self.take_w();
+
         self.emit_thunks();
         self.emit_closure_fns();
-        self.emit_user_fns();
+        let closure_support = self.take_w();
+
+        let function_texts = self.emit_user_fns();
         self.emit_main_wrapper();
+        let wrapper = self.take_w();
+
+        // The interned string literal table must be declared before every
+        // function body that uses it, but the set of literals is only known
+        // after all bodies have been generated. The table is therefore
+        // emitted last and stitched in front of the bodies, which keeps the
+        // unsplit output byte identical.
+        let function_bytes: usize = function_texts.iter().map(String::len).sum();
+        let split = function_bytes >= SPLIT_THRESHOLD_BYTES;
+        self.emit_interned_literals(split);
+        let literals = self.take_w();
+
+        if !split {
+            let mut out = stitch(
+                includes,
+                [
+                    cast_definitions,
+                    declarations,
+                    helper_definitions,
+                    literals,
+                    closure_support,
+                ],
+            );
+            out.push_str(&function_texts.concat());
+            out.push_str(&wrapper.finish());
+            return (out, Vec::new());
+        }
+
+        // Split build: main.c keeps the shared declarations, the helper
+        // definitions, the literal table, thunks and closures, the user entry
+        // point and the C wrapper. The remaining user functions are spread
+        // byte balanced over a bounded number of deterministic units, in the
+        // existing emission order.
+        let main_fn_index = self.program.main_fn;
+        let mut main_fn_text = String::new();
+        let mut distributable: Vec<String> = Vec::with_capacity(function_texts.len());
+        for (index, text) in function_texts.into_iter().enumerate() {
+            if index == main_fn_index {
+                main_fn_text = text;
+            } else {
+                distributable.push(text);
+            }
+        }
+        let distributable_bytes: usize = distributable.iter().map(String::len).sum();
+        let unit_count = distributable_bytes
+            .div_ceil(SPLIT_THRESHOLD_BYTES)
+            .clamp(1, MAX_SPLIT_UNITS);
+        let mut groups: Vec<Vec<String>> = vec![Vec::new(); unit_count];
+        let mut group_bytes = vec![0usize; unit_count];
+        for text in distributable {
+            let mut target = 0;
+            for index in 1..unit_count {
+                if group_bytes[index] < group_bytes[target] {
+                    target = index;
+                }
+            }
+            group_bytes[target] += text.len();
+            groups[target].push(text);
+        }
+
+        // Every unit repeats the shared declarations and additionally needs
+        // declarations of everything defined in main.c that it may reference:
+        // the saturating cast helpers, the interned literal handles and the
+        // function value thunks. The helper, closure and closure environment
+        // prototypes are already part of the shared declarations.
+        let mut unit_prefix = includes.clone();
+        Self::emit_cast_helper_prototypes(&mut unit_prefix);
+        unit_prefix.append(declarations.clone());
+        self.emit_interned_literal_externs(&mut unit_prefix);
+        self.emit_thunk_prototypes(&mut unit_prefix);
+        let unit_prefix = unit_prefix.finish();
+        let units: Vec<GeneratedUnit> = groups
+            .into_iter()
+            .enumerate()
+            .map(|(index, texts)| GeneratedUnit {
+                file_name: format!("lsaca_unit_{}.c", index + 1),
+                contents: format!("{}{}", unit_prefix, texts.concat()),
+            })
+            .collect();
+
+        let mut main_c = stitch(
+            includes,
+            [
+                cast_definitions,
+                declarations,
+                helper_definitions,
+                literals,
+                closure_support,
+            ],
+        );
+        main_c.push_str(&main_fn_text);
+        main_c.push_str(&wrapper.finish());
+        (main_c, units)
+    }
+
+    /// Finish the current writer and start an empty one.
+    fn take_w(&mut self) -> CWriter {
+        std::mem::take(&mut self.w)
     }
 
     fn emit_prelude(&mut self) {
@@ -95,7 +241,7 @@ impl<'a> Gen<'a> {
             .line("/* Saturating float to integer conversions. */");
         for int_ty in IntTy::ALL {
             let c_type = int_ty.c_type();
-            let name = format!("lsaca_cast_f2i_{}", int_ty.name());
+            let name = cast_helper_name(int_ty);
             self.w.line(format!("{} {}(double value) {{", c_type, name));
             self.w.indent();
             self.w
@@ -518,39 +664,51 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn emit_user_fns(&mut self) {
+    /// Emit every user function definition, capturing each into its own
+    /// buffer so a split build can distribute them without regenerating.
+    fn emit_user_fns(&mut self) -> Vec<String> {
         let fns = self.program.fns.clone();
+        let mut texts = Vec::with_capacity(fns.len());
         for function in &fns {
-            match function.self_kind {
-                Some(SelfKind::Value) => {
-                    self.w
-                        .line("/* Receiver is passed by value: the caller transfers one owned");
-                    self.w
-                        .line("   reference and this function releases it on every exit path. */");
-                }
-                Some(SelfKind::Ref) | Some(SelfKind::RefMut) => {
-                    self.w
-                        .line("/* Receiver is passed by pointer and stays owned by the caller. */");
-                }
-                None => {}
-            }
-            let return_type = self.registry.ctype(&function.ret);
-            let parameters = self.fn_param_declarations(&function.params, function.self_kind);
-            self.w.line(format!(
-                "{} {}({})",
-                return_type,
-                function.c_name,
-                parameters.join(", ")
-            ));
-            self.emit_function_body(
-                &function.params,
-                function.self_kind,
-                &function.ret,
-                &function.body,
-                None,
-            );
-            self.w.blank();
+            // The buffer must be empty between functions; each function body is
+            // generated into a fresh writer and captured afterwards.
+            self.w = CWriter::new();
+            self.emit_user_fn(function);
+            texts.push(self.take_w().finish());
         }
+        texts
+    }
+
+    fn emit_user_fn(&mut self, function: &HFn) {
+        match function.self_kind {
+            Some(SelfKind::Value) => {
+                self.w
+                    .line("/* Receiver is passed by value: the caller transfers one owned");
+                self.w
+                    .line("   reference and this function releases it on every exit path. */");
+            }
+            Some(SelfKind::Ref) | Some(SelfKind::RefMut) => {
+                self.w
+                    .line("/* Receiver is passed by pointer and stays owned by the caller. */");
+            }
+            None => {}
+        }
+        let return_type = self.registry.ctype(&function.ret);
+        let parameters = self.fn_param_declarations(&function.params, function.self_kind);
+        self.w.line(format!(
+            "{} {}({})",
+            return_type,
+            function.c_name,
+            parameters.join(", ")
+        ));
+        self.emit_function_body(
+            &function.params,
+            function.self_kind,
+            &function.ret,
+            &function.body,
+            None,
+        );
+        self.w.blank();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -635,10 +793,112 @@ impl<'a> Gen<'a> {
         self.w.line("}");
     }
 
+    /// Declarations and startup initialisation of the immortal interned string
+    /// literals, in first-use order.
+    ///
+    /// Each distinct literal becomes one immortal allocation created during
+    /// startup; evaluating the literal later only retains the shared handle.
+    /// The shared bytes are therefore never mutated by copy-on-write, and the
+    /// per-evaluation managed allocation disappears.
+    ///
+    /// In a split build the handles are plain (non-static) definitions in
+    /// main.c and the units refer to them through the declarations emitted by
+    /// [Gen::emit_interned_literal_externs].
+    fn emit_interned_literals(&mut self, split: bool) {
+        if self.interned.is_empty() {
+            return;
+        }
+        self.w
+            .line("/* Immortal interned string literals, in first-use order. */");
+        for (index, value) in self.interned.iter().enumerate() {
+            self.w.line(format!(
+                "static const char lsaca_lit_data_{}[] = {};",
+                index,
+                util::c_string_literal(value)
+            ));
+            if split {
+                self.w
+                    .line(format!("LsString* lsaca_lit_{} = NULL;", index));
+            } else {
+                self.w
+                    .line(format!("static LsString* lsaca_lit_{} = NULL;", index));
+            }
+        }
+        self.w.blank();
+        self.w
+            .line("static void lsaca_init_interned_literals(void) {");
+        self.w.indent();
+        for (index, value) in self.interned.iter().enumerate() {
+            self.w.line(format!(
+                "lsaca_lit_{} = ls_str_static(lsaca_lit_data_{}, (size_t){});",
+                index,
+                index,
+                value.len()
+            ));
+        }
+        self.w.dedent();
+        self.w.line("}");
+        self.w.blank();
+    }
+
+    /// Declarations of the saturating cast helpers defined in main.c.
+    ///
+    /// Split translation units call those helpers without seeing their
+    /// definitions.
+    fn emit_cast_helper_prototypes(w: &mut CWriter) {
+        w.line("/* Saturating float to integer conversions (defined in main.c). */");
+        for int_ty in IntTy::ALL {
+            w.line(format!(
+                "{} {}(double value);",
+                int_ty.c_type(),
+                cast_helper_name(int_ty)
+            ));
+        }
+        w.blank();
+    }
+
+    /// Declarations of the interned literal handles that main.c owns.
+    fn emit_interned_literal_externs(&self, w: &mut CWriter) {
+        if self.interned.is_empty() {
+            return;
+        }
+        let count = self.interned.len();
+        w.line("/* Immortal interned string literals defined in main.c. */");
+        for index in 0..count {
+            w.line(format!("extern LsString* lsaca_lit_{};", index));
+        }
+        w.blank();
+    }
+
+    /// Declarations of the function value thunks defined in main.c.
+    fn emit_thunk_prototypes(&self, w: &mut CWriter) {
+        let mut emitted = false;
+        for (fn_id, function) in self.program.fns.iter().enumerate() {
+            if function.self_kind.is_some() {
+                continue;
+            }
+            let return_type = self.registry.ctype(&function.ret);
+            let parameters = self.fn_param_declarations(&function.params, None);
+            w.line(format!(
+                "{} lsaca_thunk_{}(void* env{});",
+                return_type,
+                fn_id,
+                comma_prefixed(&parameters)
+            ));
+            emitted = true;
+        }
+        if emitted {
+            w.blank();
+        }
+    }
+
     fn emit_main_wrapper(&mut self) {
         self.w.line("int main(int argc, char** argv) {");
         self.w.indent();
         self.w.line("ls_runtime_init(argc, argv);");
+        if !self.interned.is_empty() {
+            self.w.line("lsaca_init_interned_literals();");
+        }
         let main_fn = self.program.fns.get(self.program.main_fn).cloned();
         if let Some(function) = main_fn {
             let mut arguments = Vec::with_capacity(function.params.len());
@@ -653,6 +913,12 @@ impl<'a> Gen<'a> {
         self.w.dedent();
         self.w.line("}");
     }
+}
+
+/// C name of the saturating float to integer cast helper for one integer
+/// type.
+fn cast_helper_name(int_ty: IntTy) -> String {
+    format!("lsaca_cast_f2i_{}", int_ty.name())
 }
 
 /// Build the ", a, b" suffix used after a leading parameter.

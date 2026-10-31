@@ -15,10 +15,47 @@ use crate::types::SelfKind;
 
 /// Parse a token stream into a program. The token stream should end with
 /// TokenKind::Eof (the lexer guarantees that); a missing Eof is tolerated.
+///
+/// The recursive descent parser spends roughly twenty kilobytes of debug-build
+/// stack per nesting level, and MAX_NESTING_DEPTH levels need more than the
+/// 1 MiB stack that Windows gives to the main thread. Parsing therefore runs on
+/// a dedicated thread with a generous stack, so deeply nested (but still
+/// accepted) source code cannot abort the process. Parsing itself never
+/// panics; the fallback below only guards against a failed thread spawn.
 pub fn parse(tokens: &[Token], file: &SourceFile) -> (Program, Diagnostics) {
-    let mut parser = Parser::new(tokens, file);
-    let program = parser.parse_program();
-    (program, parser.diagnostics)
+    const PARSE_STACK_SIZE: usize = 16 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        let spawned = std::thread::Builder::new()
+            .name("lsaca-parser".to_string())
+            .stack_size(PARSE_STACK_SIZE)
+            .spawn_scoped(scope, || {
+                let mut parser = Parser::new(tokens, file);
+                let mut program = parser.parse_program();
+                parser.check_ast_depth(&mut program);
+                (program, parser.diagnostics)
+            });
+        match spawned {
+            Ok(handle) => handle.join().unwrap_or_else(|_| parser_failure()),
+            // A thread could not be spawned (for example because the process
+            // hit a resource limit); parse on the current thread instead.
+            Err(_) => {
+                let mut parser = Parser::new(tokens, file);
+                let mut program = parser.parse_program();
+                parser.check_ast_depth(&mut program);
+                (program, parser.diagnostics)
+            }
+        }
+    })
+}
+
+/// Result returned when the parser thread itself failed.
+fn parser_failure() -> (Program, Diagnostics) {
+    let mut diagnostics = Diagnostics::new();
+    diagnostics.error(
+        "internal parser error: the parser thread failed",
+        Span::new(0, 0),
+    );
+    (Program { items: Vec::new() }, diagnostics)
 }
 
 /// Names that are sugar for Option and Result variants in patterns. A bare
@@ -29,13 +66,31 @@ const SUGAR_VARIANT_NAMES: [&str; 4] = ["None", "Some", "Ok", "Err"];
 /// Maximum recursion depth of the recursive descent parser. Deeper input is
 /// rejected with a diagnostic instead of risking a stack overflow, so that
 /// pathological source code cannot abort the compiler. A debug build needs
-/// roughly 1.3 MB of stack for 64 expression nesting levels, which fits on the
-/// 2 MiB stack of a test thread; no sane program comes close.
+/// roughly 1.3 MB of stack for 64 expression nesting levels; [parse] runs the
+/// parser on a dedicated 16 MiB thread so this limit fits comfortably, and no
+/// sane program comes close.
 const MAX_NESTING_DEPTH: usize = 64;
+
+/// Maximum structural depth of the finished AST, counted as the number of AST
+/// nodes on the deepest path from an item down to a leaf. The recursive descent
+/// parser folds long operator, unary and postfix chains iteratively, so
+/// MAX_NESTING_DEPTH never sees them; every later pass (type checking, HIR
+/// lowering, borrow and move checking, code generation) walks the tree
+/// recursively, one stack frame per level, so pathologically deep chains would
+/// overflow their stacks. Parser::check_ast_depth validates the finished tree
+/// with an explicit stack and rejects anything deeper than this limit with the
+/// same "this code is nested too deeply" diagnostic as the recursive descent
+/// guard (code E0001).
+///
+/// 128 levels is far below the roughly 300-800 expression levels that overflow
+/// a 1 MiB debug stack, and far above the nesting that the shipped prelude,
+/// examples and fixtures contain.
+const MAX_AST_DEPTH: usize = 128;
 
 /// Diagnostic code used for the syntax restrictions that target/v15/DESIGN.md
 /// specifies as E0001: empty generic parameter lists, generic type aliases,
-/// trait declaration shape violations and unsupported trait paths.
+/// trait declaration shape violations and unsupported trait paths, plus the
+/// post-parse check that rejects pathologically deep syntax.
 const E_SYNTAX: &str = "E0001";
 
 /// Maximum number of tokens scanned to find the top-level 'for' of an impl head.
@@ -74,6 +129,10 @@ struct Parser<'a> {
     /// Whether the "nested too deeply" diagnostic has already been reported, so
     /// that recovery does not repeat it at every truncated recursion level.
     reported_deep_nesting: bool,
+    /// Span of the first "nested too deeply" report. The post-parse depth check
+    /// uses it to emit that diagnostic when the recursive descent guard fired
+    /// even if the recovered tree turned out shallow enough to keep.
+    deep_nesting_span: Option<Span>,
 }
 
 impl<'a> Parser<'a> {
@@ -95,6 +154,7 @@ impl<'a> Parser<'a> {
             eof,
             depth: 0,
             reported_deep_nesting: false,
+            deep_nesting_span: None,
         }
     }
 
@@ -262,6 +322,7 @@ impl<'a> Parser<'a> {
             if !self.reported_deep_nesting {
                 self.reported_deep_nesting = true;
                 let span = self.span();
+                self.deep_nesting_span = Some(span);
                 self.error("this code is nested too deeply", span);
             }
             return false;
@@ -273,6 +334,72 @@ impl<'a> Parser<'a> {
     /// Leave one level of recursive descent entered with enter_nesting.
     fn leave_nesting(&mut self) {
         self.depth = self.depth.saturating_sub(1);
+    }
+
+    /// Validate the structural depth of the finished AST after parsing, and
+    /// discard trees that are too deep for the later recursive passes.
+    ///
+    /// The recursive descent parser folds long operator, unary and postfix
+    /// chains iteratively, so `enter_nesting` never sees them and the finished
+    /// tree can be arbitrarily deep even though parsing itself used little
+    /// stack. Later passes walk the tree recursively, so this method measures
+    /// the whole tree with an explicit stack of its own (it can never overflow)
+    /// and reports the "nested too deeply" diagnostic (E0001) when the deepest
+    /// path is deeper than MAX_AST_DEPTH.
+    ///
+    /// A too-deep tree is deliberately leaked before it is returned: dropping a
+    /// 20 000 level chain of `Box`ed expressions recurses through the drop glue
+    /// and would overflow the stack before the driver could even print the
+    /// diagnostic (the driver drops the AST when parsing fails). The leak is
+    /// bounded by the size of the input and only happens for input that is
+    /// already rejected, so the process is about to report errors instead of
+    /// compiling it.
+    fn check_ast_depth(&mut self, program: &mut Program) {
+        let exceeded = {
+            let mut stack: Vec<(AstNode<'_>, usize)> = Vec::new();
+            for item in &program.items {
+                stack.push((AstNode::Item(item), 1));
+            }
+            let mut exceeded = None;
+            while let Some((node, depth)) = stack.pop() {
+                if depth > MAX_AST_DEPTH {
+                    exceeded = Some(node.span());
+                    break;
+                }
+                node.push_children(&mut stack, depth + 1);
+            }
+            exceeded
+        };
+        let Some(span) = exceeded else {
+            // The recovered tree is shallow enough to keep, but the recursive
+            // descent guard may still have rejected part of the input.
+            if self.reported_deep_nesting {
+                let span = self.deep_nesting_span.unwrap_or_else(|| Span::new(0, 0));
+                self.report_depth_error_only(span);
+            }
+            return;
+        };
+        // The tree is too deep for the recursive passes and may also be far too
+        // deep to drop recursively, so replace it with an empty program and
+        // deliberately leak the rejected tree instead of dropping it.
+        let too_deep = std::mem::replace(program, Program { items: Vec::new() });
+        std::mem::forget(too_deep);
+        self.report_depth_error_only(span);
+    }
+
+    /// Replace every parser diagnostic with a single "nested too deeply" error.
+    ///
+    /// Error recovery on pathological input emits tens of thousands of
+    /// diagnostics (5 000 opening parentheses already produce nearly 15 000),
+    /// and every diagnostic renders the whole source line below it. On a huge
+    /// single-line file that means hundreds of megabytes of output and tens of
+    /// seconds of rendering for one file that is rejected anyway, so a
+    /// depth-rejected file reports only the one diagnostic that explains why it
+    /// cannot be compiled at all.
+    fn report_depth_error_only(&mut self, span: Span) {
+        self.reported_deep_nesting = true;
+        self.diagnostics = Diagnostics::new();
+        self.error_coded(E_SYNTAX, "this code is nested too deeply", span);
     }
 
     /// The placeholder expression used when a construct had to be abandoned.
@@ -371,6 +498,7 @@ impl<'a> Parser<'a> {
             TokenKind::Int(_)
                 | TokenKind::Float(_)
                 | TokenKind::Str(_)
+                | TokenKind::Char(_)
                 | TokenKind::Ident(_)
                 | TokenKind::KwTrue
                 | TokenKind::KwFalse
@@ -1444,6 +1572,13 @@ impl<'a> Parser<'a> {
                     span: start,
                 }
             }
+            TokenKind::Char(value) => {
+                self.bump();
+                Pattern {
+                    kind: PatternKind::Lit(Lit::Char(value)),
+                    span: start,
+                }
+            }
             TokenKind::Minus => {
                 self.bump();
                 self.parse_negative_literal_pattern(start)
@@ -2205,6 +2340,10 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Expr::new(ExprKind::Lit(Lit::Str(value)), start)
             }
+            TokenKind::Char(value) => {
+                self.bump();
+                Expr::new(ExprKind::Lit(Lit::Char(value)), start)
+            }
             TokenKind::KwTrue => {
                 self.bump();
                 Expr::new(ExprKind::Lit(Lit::Bool(true)), start)
@@ -2850,6 +2989,312 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// One node of the iterative AST depth validation run by
+/// [Parser::check_ast_depth] at the end of parsing. The walk is driven by an
+/// explicit stack, so validating the tree does not itself recurse and cannot
+/// overflow the stack it is meant to protect.
+enum AstNode<'a> {
+    Item(&'a Item),
+    Fn(&'a FnDecl),
+    Block(&'a Block),
+    Stmt(&'a Stmt),
+    Expr(&'a Expr),
+    Pattern(&'a Pattern),
+    Type(&'a TypeExpr),
+}
+
+impl<'a> AstNode<'a> {
+    /// Span of this node, used for the diagnostic when the limit is exceeded.
+    fn span(&self) -> Span {
+        match self {
+            AstNode::Item(item) => item.span(),
+            AstNode::Fn(decl) => decl.span,
+            AstNode::Block(block) => block.span,
+            AstNode::Stmt(stmt) => stmt.span(),
+            AstNode::Expr(expr) => expr.span,
+            AstNode::Pattern(pattern) => pattern.span,
+            AstNode::Type(ty) => ty.span(),
+        }
+    }
+
+    /// Push every direct child of this node with `depth` as the child's depth.
+    fn push_children(self, stack: &mut Vec<(AstNode<'a>, usize)>, depth: usize) {
+        match self {
+            AstNode::Item(item) => match item {
+                Item::Fn(decl) => stack.push((AstNode::Fn(decl), depth)),
+                Item::Struct(decl) => {
+                    push_generic_bounds(stack, &decl.generics, depth);
+                    for field in &decl.fields {
+                        stack.push((AstNode::Type(&field.ty), depth));
+                    }
+                }
+                Item::Enum(decl) => {
+                    push_generic_bounds(stack, &decl.generics, depth);
+                    for variant in &decl.variants {
+                        for ty in &variant.fields {
+                            stack.push((AstNode::Type(ty), depth));
+                        }
+                    }
+                }
+                Item::Impl(block) => {
+                    push_generic_bounds(stack, &block.generics, depth);
+                    stack.push((AstNode::Type(&block.ty), depth));
+                    if let Some(trait_ref) = &block.trait_name {
+                        for arg in &trait_ref.args {
+                            stack.push((AstNode::Type(arg), depth));
+                        }
+                    }
+                    for decl in &block.fns {
+                        stack.push((AstNode::Fn(decl), depth));
+                    }
+                }
+                Item::Const(decl) => {
+                    stack.push((AstNode::Type(&decl.ty), depth));
+                    stack.push((AstNode::Expr(&decl.value), depth));
+                }
+                Item::TypeAlias(decl) => {
+                    push_generic_bounds(stack, &decl.generics, depth);
+                    stack.push((AstNode::Type(&decl.ty), depth));
+                }
+                Item::Trait(decl) => {
+                    push_generic_bounds(stack, &decl.generics, depth);
+                    for method in &decl.methods {
+                        for param in &method.params {
+                            stack.push((AstNode::Type(&param.ty), depth));
+                        }
+                        if let Some(ret) = &method.ret {
+                            stack.push((AstNode::Type(ret), depth));
+                        }
+                    }
+                }
+            },
+            AstNode::Fn(decl) => {
+                push_generic_bounds(stack, &decl.generics, depth);
+                for param in &decl.params {
+                    stack.push((AstNode::Type(&param.ty), depth));
+                }
+                if let Some(ret) = &decl.ret {
+                    stack.push((AstNode::Type(ret), depth));
+                }
+                stack.push((AstNode::Block(&decl.body), depth));
+            }
+            AstNode::Block(block) => {
+                for stmt in &block.stmts {
+                    stack.push((AstNode::Stmt(stmt), depth));
+                }
+                if let Some(tail) = &block.tail {
+                    stack.push((AstNode::Expr(tail), depth));
+                }
+            }
+            AstNode::Stmt(stmt) => match stmt {
+                Stmt::Let(lets) => {
+                    stack.push((AstNode::Pattern(&lets.pat), depth));
+                    if let Some(ty) = &lets.ty {
+                        stack.push((AstNode::Type(ty), depth));
+                    }
+                    if let Some(init) = &lets.init {
+                        stack.push((AstNode::Expr(init), depth));
+                    }
+                }
+                Stmt::Expr(expr) => stack.push((AstNode::Expr(expr), depth)),
+                Stmt::Item(item) => stack.push((AstNode::Item(item), depth)),
+                Stmt::Empty(_) => {}
+            },
+            AstNode::Expr(expr) => match &expr.kind {
+                ExprKind::Lit(_) | ExprKind::Continue => {}
+                ExprKind::Path(path) => push_path_generics(stack, path, depth),
+                ExprKind::Unary { expr, .. } => stack.push((AstNode::Expr(expr), depth)),
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    stack.push((AstNode::Expr(lhs), depth));
+                    stack.push((AstNode::Expr(rhs), depth));
+                }
+                ExprKind::Assign { target, value, .. } => {
+                    stack.push((AstNode::Expr(target), depth));
+                    stack.push((AstNode::Expr(value), depth));
+                }
+                ExprKind::Cast { expr, ty } => {
+                    stack.push((AstNode::Expr(expr), depth));
+                    stack.push((AstNode::Type(ty), depth));
+                }
+                ExprKind::Call { callee, args } => {
+                    stack.push((AstNode::Expr(callee), depth));
+                    for arg in args {
+                        stack.push((AstNode::Expr(arg), depth));
+                    }
+                }
+                ExprKind::MethodCall {
+                    receiver,
+                    turbofish,
+                    args,
+                    ..
+                } => {
+                    stack.push((AstNode::Expr(receiver), depth));
+                    for ty in turbofish {
+                        stack.push((AstNode::Type(ty), depth));
+                    }
+                    for arg in args {
+                        stack.push((AstNode::Expr(arg), depth));
+                    }
+                }
+                ExprKind::Field { base, .. } => {
+                    stack.push((AstNode::Expr(base), depth));
+                }
+                ExprKind::TupleField { base, .. } => {
+                    stack.push((AstNode::Expr(base), depth));
+                }
+                ExprKind::Index { base, index } => {
+                    stack.push((AstNode::Expr(base), depth));
+                    stack.push((AstNode::Expr(index), depth));
+                }
+                ExprKind::If(if_expr) => {
+                    stack.push((AstNode::Expr(&if_expr.cond), depth));
+                    stack.push((AstNode::Block(&if_expr.then_block), depth));
+                    if let Some(else_expr) = &if_expr.else_expr {
+                        stack.push((AstNode::Expr(else_expr), depth));
+                    }
+                }
+                ExprKind::Match(match_expr) => {
+                    stack.push((AstNode::Expr(&match_expr.scrutinee), depth));
+                    for arm in &match_expr.arms {
+                        stack.push((AstNode::Pattern(&arm.pat), depth));
+                        if let Some(guard) = &arm.guard {
+                            stack.push((AstNode::Expr(guard), depth));
+                        }
+                        stack.push((AstNode::Expr(&arm.body), depth));
+                    }
+                }
+                ExprKind::Block(block) => stack.push((AstNode::Block(block), depth)),
+                ExprKind::Loop { body } => stack.push((AstNode::Block(body), depth)),
+                ExprKind::While { cond, body } => {
+                    stack.push((AstNode::Expr(cond), depth));
+                    stack.push((AstNode::Block(body), depth));
+                }
+                ExprKind::For { pat, iter, body } => {
+                    stack.push((AstNode::Pattern(pat), depth));
+                    stack.push((AstNode::Expr(iter), depth));
+                    stack.push((AstNode::Block(body), depth));
+                }
+                ExprKind::Range { start, end, .. } => {
+                    stack.push((AstNode::Expr(start), depth));
+                    stack.push((AstNode::Expr(end), depth));
+                }
+                ExprKind::Closure(closure) => {
+                    for param in &closure.params {
+                        stack.push((AstNode::Pattern(&param.pat), depth));
+                        if let Some(ty) = &param.ty {
+                            stack.push((AstNode::Type(ty), depth));
+                        }
+                    }
+                    if let Some(ret) = &closure.ret {
+                        stack.push((AstNode::Type(ret), depth));
+                    }
+                    stack.push((AstNode::Expr(&closure.body), depth));
+                }
+                ExprKind::StructLit { path, fields } => {
+                    push_path_generics(stack, path, depth);
+                    for field in fields {
+                        stack.push((AstNode::Expr(&field.value), depth));
+                    }
+                }
+                ExprKind::Tuple(elems) => {
+                    for elem in elems {
+                        stack.push((AstNode::Expr(elem), depth));
+                    }
+                }
+                ExprKind::Vec(vec_lit) => match vec_lit {
+                    VecLit::List(elems) => {
+                        for elem in elems {
+                            stack.push((AstNode::Expr(elem), depth));
+                        }
+                    }
+                    VecLit::Repeat { value, count } => {
+                        stack.push((AstNode::Expr(value), depth));
+                        stack.push((AstNode::Expr(count), depth));
+                    }
+                },
+                ExprKind::Macro(call) => {
+                    for arg in &call.args {
+                        stack.push((AstNode::Expr(arg), depth));
+                    }
+                }
+                ExprKind::Break(value) | ExprKind::Return(value) => {
+                    if let Some(value) = value {
+                        stack.push((AstNode::Expr(value), depth));
+                    }
+                }
+                ExprKind::Ref { expr, .. } => stack.push((AstNode::Expr(expr), depth)),
+                ExprKind::Deref { expr } => stack.push((AstNode::Expr(expr), depth)),
+                ExprKind::Try { expr } => stack.push((AstNode::Expr(expr), depth)),
+            },
+            AstNode::Pattern(pattern) => match &pattern.kind {
+                PatternKind::Wild | PatternKind::Binding { .. } | PatternKind::Lit(_) => {}
+                PatternKind::Tuple(pats) => {
+                    for pat in pats {
+                        stack.push((AstNode::Pattern(pat), depth));
+                    }
+                }
+                PatternKind::Path { path, args } => {
+                    push_path_generics(stack, path, depth);
+                    for pat in args {
+                        stack.push((AstNode::Pattern(pat), depth));
+                    }
+                }
+                PatternKind::Struct { path, fields, .. } => {
+                    push_path_generics(stack, path, depth);
+                    for field in fields {
+                        stack.push((AstNode::Pattern(&field.pat), depth));
+                    }
+                }
+                PatternKind::Or(pats) => {
+                    for pat in pats {
+                        stack.push((AstNode::Pattern(pat), depth));
+                    }
+                }
+            },
+            AstNode::Type(ty) => match ty {
+                TypeExpr::Path { generics, .. } => {
+                    for inner in generics {
+                        stack.push((AstNode::Type(inner), depth));
+                    }
+                }
+                TypeExpr::Tuple { elems, .. } => {
+                    for inner in elems {
+                        stack.push((AstNode::Type(inner), depth));
+                    }
+                }
+                TypeExpr::Fn { params, ret, .. } => {
+                    for param in params {
+                        stack.push((AstNode::Type(param), depth));
+                    }
+                    stack.push((AstNode::Type(ret), depth));
+                }
+                TypeExpr::Ref { inner, .. } => stack.push((AstNode::Type(inner), depth)),
+            },
+        }
+    }
+}
+
+/// Push every bound of the given generic parameters as type children.
+fn push_generic_bounds<'a>(
+    stack: &mut Vec<(AstNode<'a>, usize)>,
+    generics: &'a [GenericParam],
+    depth: usize,
+) {
+    for param in generics {
+        for bound in &param.bounds {
+            stack.push((AstNode::Type(bound), depth));
+        }
+    }
+}
+
+/// Push the generic arguments written on every segment of a path.
+fn push_path_generics<'a>(stack: &mut Vec<(AstNode<'a>, usize)>, path: &'a PathExpr, depth: usize) {
+    for segment in &path.segments {
+        for ty in &segment.generics {
+            stack.push((AstNode::Type(ty), depth));
+        }
+    }
+}
 /// The synthesized type of a trait method receiver. The type checker replaces
 /// it with the concrete impl type when it dispatches a trait method call.
 fn self_type(span: Span) -> TypeExpr {
@@ -4773,6 +5218,185 @@ impl Point {
     }
 
     #[test]
+    fn parses_char_literal_expressions() {
+        match &parse_tail("'a'").kind {
+            ExprKind::Lit(Lit::Char(value)) => assert_eq!(*value, 'a'),
+            other => panic!("expected a char literal, got {:?}", other),
+        }
+        match &parse_tail(r#"'\n'"#).kind {
+            ExprKind::Lit(Lit::Char(value)) => assert_eq!(*value, '\n'),
+            other => panic!("expected an escaped char literal, got {:?}", other),
+        }
+        match &parse_tail(r#"'\u{1F600}'"#).kind {
+            ExprKind::Lit(Lit::Char(value)) => assert_eq!(*value, '\u{1F600}'),
+            other => panic!("expected a unicode char literal, got {:?}", other),
+        }
+
+        let source = r#"fn main() {
+    let c: char = 'x';
+    let order = 'a' < 'b';
+    let code = 'a' as i64;
+}"#;
+        let program = parse_ok(source);
+        let stmts = main_stmts(&program);
+        match &let_init(&stmts[0]).kind {
+            ExprKind::Lit(Lit::Char(value)) => assert_eq!(*value, 'x'),
+            other => panic!("expected a char literal, got {:?}", other),
+        }
+        let (op, lhs, rhs) = as_binary(let_init(&stmts[1]));
+        assert_eq!(*op, BinaryOp::Lt);
+        assert!(matches!(&lhs.kind, ExprKind::Lit(Lit::Char('a'))));
+        assert!(matches!(&rhs.kind, ExprKind::Lit(Lit::Char('b'))));
+        match &let_init(&stmts[2]).kind {
+            ExprKind::Cast { expr, ty } => {
+                assert!(matches!(&expr.kind, ExprKind::Lit(Lit::Char('a'))));
+                match ty {
+                    TypeExpr::Path { name, .. } => assert_eq!(name, "i64"),
+                    other => panic!("expected an i64 cast target, got {:?}", other),
+                }
+            }
+            other => panic!("expected a cast, got {:?}", other),
+        }
+
+        // Character literals can be passed to macros and used in postfix forms.
+        let source = r#"fn main() { println!("{}", 'x'); }"#;
+        let program = parse_ok(source);
+        match &stmt_expr(&main_stmts(&program)[0]).kind {
+            ExprKind::Macro(call) => match &call.args[1].kind {
+                ExprKind::Lit(Lit::Char(value)) => assert_eq!(*value, 'x'),
+                other => panic!("expected a char macro argument, got {:?}", other),
+            },
+            other => panic!("expected a macro call, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_char_literal_patterns() {
+        let source = r#"fn main() {
+    match c {
+        'a' => 1,
+        'b' | 'c' => 2,
+        _ => 3,
+    }
+}"#;
+        let program = parse_ok(source);
+        match &main_tail(&program).kind {
+            ExprKind::Match(match_expr) => {
+                assert_eq!(match_expr.arms.len(), 3);
+                assert!(matches!(
+                    &match_expr.arms[0].pat.kind,
+                    PatternKind::Lit(Lit::Char('a'))
+                ));
+                match &match_expr.arms[1].pat.kind {
+                    PatternKind::Or(alternatives) => {
+                        assert_eq!(alternatives.len(), 2);
+                        assert!(matches!(
+                            &alternatives[0].kind,
+                            PatternKind::Lit(Lit::Char('b'))
+                        ));
+                        assert!(matches!(
+                            &alternatives[1].kind,
+                            PatternKind::Lit(Lit::Char('c'))
+                        ));
+                    }
+                    other => panic!("expected an or pattern, got {:?}", other),
+                }
+                assert!(matches!(&match_expr.arms[2].pat.kind, PatternKind::Wild));
+            }
+            other => panic!("expected a match expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_char_type_paths() {
+        let source = r#"type CharAlias = char;
+struct Tagged { ch: char, flags: Vec<char> }
+enum Maybe { None, Some(char) }
+fn identity(value: char) -> char { value }
+const LETTER: char = 'a';
+fn main() {
+    let c: char = 'z';
+    let maybe: Option<char> = None;
+    let counts: HashMap<char, i64> = HashMap::new();
+}"#;
+        let program = parse_ok(source);
+        let alias = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::TypeAlias(alias) => Some(alias),
+                _ => None,
+            })
+            .expect("expected a type alias");
+        assert_eq!(alias.name, "CharAlias");
+        match &alias.ty {
+            TypeExpr::Path { name, .. } => assert_eq!(name, "char"),
+            other => panic!("expected a char alias target, got {:?}", other),
+        }
+
+        let tagged = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected a struct");
+        match &tagged.fields[0].ty {
+            TypeExpr::Path { name, .. } => assert_eq!(name, "char"),
+            other => panic!("expected a char field, got {:?}", other),
+        }
+        match &tagged.fields[1].ty {
+            TypeExpr::Path { name, generics, .. } => {
+                assert_eq!(name, "Vec");
+                assert_eq!(generics.len(), 1);
+                match &generics[0] {
+                    TypeExpr::Path { name, .. } => assert_eq!(name, "char"),
+                    other => panic!("expected a char type argument, got {:?}", other),
+                }
+            }
+            other => panic!("expected a Vec field, got {:?}", other),
+        }
+
+        let maybe = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Enum(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected an enum");
+        match &maybe.variants[1].fields[0] {
+            TypeExpr::Path { name, .. } => assert_eq!(name, "char"),
+            other => panic!("expected a char enum payload, got {:?}", other),
+        }
+
+        let identity = fn_named(&program, "identity");
+        match &identity.params[0].ty {
+            TypeExpr::Path { name, .. } => assert_eq!(name, "char"),
+            other => panic!("expected a char parameter, got {:?}", other),
+        }
+        match identity.ret.as_ref().expect("expected a return type") {
+            TypeExpr::Path { name, .. } => assert_eq!(name, "char"),
+            other => panic!("expected a char return type, got {:?}", other),
+        }
+
+        let letter = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Const(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected a const");
+        match &letter.ty {
+            TypeExpr::Path { name, .. } => assert_eq!(name, "char"),
+            other => panic!("expected a char const type, got {:?}", other),
+        }
+        assert!(matches!(&letter.value.kind, ExprKind::Lit(Lit::Char('a'))));
+    }
+
+    #[test]
     fn parses_loops_and_for_ranges() {
         let source = r#"fn main() {
     loop { break; }
@@ -5480,8 +6104,19 @@ impl Counter {
             }
             parens.push_str(" }");
             let (program, diagnostics) = parse_source(&parens);
-            assert!(!program.items.is_empty());
+            // Error recovery from the nesting guard can still leave an AST
+            // deeper than MAX_AST_DEPTH; such a tree is discarded instead of
+            // returned, so that dropping it cannot overflow the stack.
+            assert!(program.items.is_empty());
             assert!(diagnostics.has_errors());
+            // Deeply nested input is rejected as a whole, so the recovery noise
+            // is replaced by the single diagnostic that explains the rejection.
+            assert_eq!(
+                diagnostics.len(),
+                1,
+                "a depth-rejected file reports exactly one diagnostic, got {:?}",
+                messages(&diagnostics)
+            );
             assert_eq!(
                 messages(&diagnostics)
                     .iter()
@@ -5501,8 +6136,17 @@ impl Counter {
             }
             types.push_str(" = x; }");
             let (program, diagnostics) = parse_source(&types);
-            assert!(!program.items.is_empty());
+            // Error recovery from the nesting guard can still leave an AST
+            // deeper than MAX_AST_DEPTH; such a tree is discarded instead of
+            // returned, so that dropping it cannot overflow the stack.
+            assert!(program.items.is_empty());
             assert!(diagnostics.has_errors());
+            assert_eq!(
+                diagnostics.len(),
+                1,
+                "a depth-rejected file reports exactly one diagnostic, got {:?}",
+                messages(&diagnostics)
+            );
             assert!(
                 messages(&diagnostics)
                     .iter()
@@ -5519,13 +6163,162 @@ impl Counter {
             }
             nested_items.push_str(" }");
             let (program, diagnostics) = parse_source(&nested_items);
-            assert!(!program.items.is_empty());
+            // Error recovery from the nesting guard can still leave an AST
+            // deeper than MAX_AST_DEPTH; such a tree is discarded instead of
+            // returned, so that dropping it cannot overflow the stack.
+            assert!(program.items.is_empty());
             assert!(diagnostics.has_errors());
+            assert_eq!(
+                diagnostics.len(),
+                1,
+                "a depth-rejected file reports exactly one diagnostic, got {:?}",
+                messages(&diagnostics)
+            );
             assert!(
                 messages(&diagnostics)
                     .iter()
                     .any(|message| message.contains("nested too deeply"))
             );
         });
+    }
+
+    #[test]
+    fn pathological_single_line_input_reports_one_small_diagnostic() {
+        // 30 000 nested parentheses on one line used to make recovery emit tens
+        // of thousands of diagnostics, each rendering the whole 60 KB source
+        // line. That took tens of seconds and could exhaust the output pipe, so a
+        // rejected file must report a single diagnostic whose rendered form stays
+        // proportional to one source line.
+        with_big_stack(|| {
+            let mut source = String::from("fn main() { ");
+            source.push_str(&"(".repeat(30_000));
+            source.push('1');
+            source.push_str(&")".repeat(30_000));
+            source.push_str(" }");
+            assert!(source.len() > 60_000);
+
+            let file = SourceFile::new("<test>", &source);
+            let (tokens, lexer_diagnostics) = crate::lexer::tokenize(&source);
+            assert!(
+                !lexer_diagnostics.has_errors(),
+                "{:?}",
+                messages(&lexer_diagnostics)
+            );
+            let (program, diagnostics) = parse(&tokens, &file);
+            assert!(program.items.is_empty(), "the rejected tree is discarded");
+            assert_eq!(
+                diagnostics.len(),
+                1,
+                "a depth-rejected file reports exactly one diagnostic, got {:?}",
+                messages(&diagnostics)
+            );
+            let diagnostic = &diagnostics.as_slice()[0];
+            assert!(diagnostic.message.contains("nested too deeply"));
+            assert_eq!(diagnostic.code, Some("E0001"));
+            assert_eq!(diagnostic.severity, Severity::Error);
+            let rendered = diagnostics.render(&file);
+            assert!(
+                rendered.len() < source.len() * 4,
+                "rendered diagnostics must stay proportional to one source line, \
+                 got {} bytes for a {} byte source",
+                rendered.len(),
+                source.len()
+            );
+        });
+    }
+
+    fn add_chain_source(terms: usize) -> String {
+        let mut source = String::from("fn main() -> i64 { 1");
+        for _ in 1..terms {
+            source.push_str(" + 1");
+        }
+        source.push_str(" }");
+        source
+    }
+
+    fn method_chain_source(calls: usize) -> String {
+        let mut source = String::from("fn main() { let s = 1; let t = s");
+        for _ in 0..calls {
+            source.push_str(".clone()");
+        }
+        source.push_str("; }");
+        source
+    }
+
+    fn assert_rejected_as_too_deep(source: &str) {
+        let (program, diagnostics) = parse_source(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "a depth-rejected file reports exactly one diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        let deep: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("nested too deeply"))
+            .collect();
+        assert_eq!(
+            deep.len(),
+            1,
+            "expected exactly one nesting diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        let diagnostic = deep[0];
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.code, Some("E0001"));
+        assert!(
+            diagnostic.span.start < source.len() as u32,
+            "diagnostic span start {} is outside the {} byte source",
+            diagnostic.span.start,
+            source.len()
+        );
+        assert!(
+            diagnostic.span.end <= source.len() as u32,
+            "diagnostic span end {} is outside the {} byte source",
+            diagnostic.span.end,
+            source.len()
+        );
+        assert!(diagnostic.span.start <= diagnostic.span.end);
+        // A rejected tree is discarded instead of being returned and dropped,
+        // because dropping a pathologically deep tree would overflow the stack.
+        assert!(
+            program.items.is_empty(),
+            "a too-deep AST is discarded, so no items are returned"
+        );
+    }
+
+    #[test]
+    fn accepts_moderately_long_expression_chains() {
+        // Folding long operator and method chains iteratively is legal; only the
+        // structural depth of the finished AST is limited.
+        parse_ok(&add_chain_source(100));
+        parse_ok(&method_chain_source(100));
+    }
+
+    #[test]
+    fn rejects_deep_binary_operator_chain() {
+        assert_rejected_as_too_deep(&add_chain_source(400));
+    }
+
+    #[test]
+    fn rejects_deep_method_call_chain() {
+        assert_rejected_as_too_deep(&method_chain_source(2000));
+    }
+
+    #[test]
+    fn rejects_very_deep_binary_operator_chain() {
+        // A tree this deep would overflow the stack when the driver drops it if
+        // the parser returned or dropped it normally.
+        assert_rejected_as_too_deep(&add_chain_source(8000));
+    }
+
+    #[test]
+    fn rejects_deep_unary_operator_chain() {
+        let mut source = String::from("fn main() { let b: bool = ");
+        for _ in 0..400 {
+            source.push('!');
+        }
+        source.push_str("true; }");
+        assert_rejected_as_too_deep(&source);
     }
 }

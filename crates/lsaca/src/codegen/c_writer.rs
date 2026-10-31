@@ -5,6 +5,7 @@
 //! (two spaces per nesting level, no trailing whitespace).
 
 /// Buffered C source writer with two-space indentation.
+#[derive(Clone)]
 pub struct CWriter {
     out: String,
     indent: usize,
@@ -43,6 +44,15 @@ impl CWriter {
 
     pub fn dedent(&mut self) {
         self.indent = self.indent.saturating_sub(1);
+    }
+
+    /// Append the complete contents of another writer verbatim.
+    ///
+    /// The other writer's indentation is already baked into its text, so this
+    /// is only used to stitch together sections that had to be generated in a
+    /// different order than they appear in the final file.
+    pub fn append(&mut self, other: CWriter) {
+        self.out.push_str(&other.out);
     }
 
     /// Consume the writer and return the generated text.

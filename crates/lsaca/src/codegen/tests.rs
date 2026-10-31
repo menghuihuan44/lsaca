@@ -8,7 +8,7 @@
 use super::{CodegenOptions, generate};
 use crate::driver::Frontend;
 
-fn generate_source(name: &str, source: &str, debug_checks: bool) -> (String, String) {
+fn generate_project_source(name: &str, source: &str, debug_checks: bool) -> super::Generated {
     let frontend = Frontend::new(format!("{}.ls", name), source);
     let program = match frontend.check() {
         Ok(program) => program,
@@ -23,7 +23,11 @@ fn generate_source(name: &str, source: &str, debug_checks: bool) -> (String, Str
         source: Some(frontend.file().clone()),
         ..CodegenOptions::default()
     };
-    let generated = generate(&program, &options);
+    generate(&program, &options)
+}
+
+fn generate_source(name: &str, source: &str, debug_checks: bool) -> (String, String) {
+    let generated = generate_project_source(name, source, debug_checks);
     (generated.main_c, generated.cmake)
 }
 
@@ -1149,4 +1153,614 @@ fn match_whole_value_bindings_move_from_the_scrutinee() {
         body.contains("if (t") && body.contains("lsaca_release_Loud(t"),
         "the scrutinee release is not guarded by its live flag:\n{body}"
     );
+}
+
+const INTERNED_LITERALS_PROGRAM: &str = r#"
+fn main() {
+    let first = "same";
+    let second = "same";
+    println!("{} {}", first, second);
+}
+"#;
+
+#[test]
+fn interns_string_literals_as_immortal_statics() {
+    let (main_c, _) = generate_source("interned_literals_fixture", INTERNED_LITERALS_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // One static byte array plus one handle per *distinct* literal; every
+    // occurrence shares the interned allocation.
+    assert_eq!(
+        main_c.matches("static const char lsaca_lit_data_").count(),
+        1,
+        "the repeated literal was not deduplicated:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("static const char lsaca_lit_data_0[] = \"same\";"),
+        "the literal bytes are not emitted as a static array:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("static LsString* lsaca_lit_0 = NULL;"),
+        "the literal handle is not declared:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("lsaca_lit_0 = ls_str_static(lsaca_lit_data_0, (size_t)4);"),
+        "the literal is not interned with its explicit byte length:\n{main_c}"
+    );
+    assert!(
+        body.contains("((LsString*)ls_retain((void*)(lsaca_lit_0)))"),
+        "evaluating the literal does not retain the interned handle:\n{body}"
+    );
+    // The old allocation per evaluation is gone.
+    assert!(
+        !body.contains("ls_str_cstr(") && !body.contains("ls_str_from_parts("),
+        "a string literal still allocates a fresh runtime string:\n{body}"
+    );
+
+    // The table must be declared before the first body that mentions it, and
+    // initialised in the C wrapper after the runtime starts.
+    let declaration = main_c
+        .find("static LsString* lsaca_lit_0 = NULL;")
+        .expect("literal handle declaration missing");
+    let first_use = main_c
+        .find("((LsString*)ls_retain((void*)(lsaca_lit_0)))")
+        .expect("literal use missing");
+    assert!(
+        declaration < first_use,
+        "the literal is used before it is declared"
+    );
+    let wrapper = main_c
+        .find("int main(int argc, char** argv)")
+        .expect("main wrapper missing");
+    let tail = &main_c[wrapper..];
+    let runtime_init = tail.find("ls_runtime_init(argc, argv);").unwrap();
+    let literal_init = tail.find("lsaca_init_interned_literals();").unwrap();
+    let user_main = tail.find("lsaca_fn_main();").unwrap();
+    assert!(
+        runtime_init < literal_init && literal_init < user_main,
+        "the interned literals are not initialised before user code runs:\n{tail}"
+    );
+}
+
+const EMBEDDED_NUL_PROGRAM: &str = r#"
+fn main() {
+    let text = "a\0b";
+    println!("{}", text.len());
+}
+"#;
+
+#[test]
+fn keeps_embedded_nul_bytes_in_interned_literals() {
+    let (main_c, _) = generate_source("embedded_nul_fixture", EMBEDDED_NUL_PROGRAM, true);
+
+    // Octal escapes keep the NUL byte inside the static array, and the
+    // explicit byte length keeps it inside the runtime string (a strlen based
+    // C string would truncate to "a").
+    assert!(
+        main_c.contains("static const char lsaca_lit_data_0[] = \"a\\000b\";"),
+        "the NUL byte is not preserved in the static literal array:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("lsaca_lit_0 = ls_str_static(lsaca_lit_data_0, (size_t)3);"),
+        "the literal byte length does not count embedded NULs:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("(size_t)2);") && !main_c.contains("ls_str_cstr("),
+        "the literal is still built through a strlen based builder:\n{main_c}"
+    );
+}
+
+const STRING_PATTERN_PROGRAM: &str = r#"
+fn main() {
+    let text = String::from("a\0b");
+    match text {
+        "a\0b" => {
+            println!("matched");
+        }
+        _ => {
+            println!("fallback");
+        }
+    }
+}
+"#;
+
+#[test]
+fn compares_string_literal_patterns_against_interned_literals() {
+    let (main_c, _) = generate_source("string_pattern_fixture", STRING_PATTERN_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // A literal pattern compares the borrowed scrutinee against the interned
+    // handle: no allocation, no temporary release.
+    assert!(
+        body.contains("if (!ls_str_eq((") && body.contains("(lsaca_lit_0))"),
+        "the literal pattern does not compare against the interned literal:\n{body}"
+    );
+    assert!(
+        !main_c.contains("ls_str_cstr(") && !main_c.contains("ls_str_from_parts("),
+        "the literal pattern still allocates a runtime string:\n{main_c}"
+    );
+    // The scrutinee and pattern share the same literal.
+    assert_eq!(
+        main_c.matches("static const char lsaca_lit_data_").count(),
+        1,
+        "the match pattern literal was not interned together with the value literal:\n{main_c}"
+    );
+}
+
+const NO_STRING_LITERAL_PROGRAM: &str = r#"
+fn main() {
+    let value = 6;
+    let doubled = value * 2;
+    println!("{}", doubled);
+}
+"#;
+
+#[test]
+fn emits_no_literal_table_for_programs_without_string_literals() {
+    let (main_c, _) = generate_source("no_literals_fixture", NO_STRING_LITERAL_PROGRAM, true);
+
+    // Programs without string literals keep the previous output shape: no
+    // literal table, no startup hook.
+    assert!(
+        !main_c.contains("lsaca_lit_"),
+        "a program without string literals emitted a literal table:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("lsaca_init_interned_literals"),
+        "a program without string literals emitted the startup hook:\n{main_c}"
+    );
+    let wrapper = main_c
+        .find("int main(int argc, char** argv)")
+        .expect("main wrapper missing");
+    let tail = &main_c[wrapper..];
+    assert!(
+        !tail.contains("lsaca_init"),
+        "the wrapper of a literal-free program calls the interned literal setup:\n{tail}"
+    );
+}
+
+const CHAR_LITERALS_PROGRAM: &str = r#"
+fn main() {
+    let a = 'a';
+    let b: char = '\n';
+    if a == 'a' {
+        println!("{}", a);
+    }
+    println!("{:?}", b);
+}
+"#;
+
+#[test]
+fn emits_char_literals_comparisons_and_formatting() {
+    let (main_c, _) = generate_source("char_literals_fixture", CHAR_LITERALS_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // Characters are plain uint32_t scalars: no retain/release, no live flag.
+    assert!(
+        main_c.contains("uint32_t v1 = ((uint32_t)0);"),
+        "a char local is not initialised as a uint32_t:\n{main_c}"
+    );
+    assert!(
+        !body.contains("v1_live") && !body.contains("v2_live"),
+        "a char local carries an ownership live flag:\n{body}"
+    );
+    assert!(
+        body.contains("v1 = ((uint32_t)0x61);"),
+        "a char literal is not emitted as a scalar literal:\n{body}"
+    );
+    assert!(
+        body.contains("v2 = ((uint32_t)0xA);"),
+        "an escaped char literal is not emitted as a scalar literal:\n{body}"
+    );
+    assert!(
+        body.contains("c2 = ((v1) == (t3));"),
+        "char equality is not a plain scalar comparison:\n{body}"
+    );
+    assert!(
+        body.contains("= ls_fmt_char(acc") && body.contains("= ls_fmt_char_debug(acc"),
+        "char Display and Debug formatting do not use the runtime helpers:\n{body}"
+    );
+}
+
+const CHAR_WIDTH_PROGRAM: &str = r#"
+fn main() {
+    let c = 'x';
+    println!("[{:>5}]", c);
+}
+"#;
+
+#[test]
+fn applies_width_to_char_formatting() {
+    let (main_c, _) = generate_source("char_width_fixture", CHAR_WIDTH_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    assert!(
+        body.contains("= ls_fmt_char(") && body.contains("= ls_fmt_apply_width("),
+        "char width formatting does not format the scalar before padding:\n{body}"
+    );
+}
+
+const CHAR_CASTS_PROGRAM: &str = r#"
+fn main() {
+    let c = 'A';
+    let n = c as u8;
+    let back = n as char;
+    println!("{} {} {}", c, n, back);
+}
+"#;
+
+#[test]
+fn casts_between_chars_and_integers() {
+    let (main_c, _) = generate_source("char_casts_fixture", CHAR_CASTS_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    assert!(
+        body.contains("v2 = (uint8_t)(t1);"),
+        "char to integer cast is not a plain numeric cast:\n{body}"
+    );
+    assert!(
+        body.contains("v3 = (uint32_t)(t2);"),
+        "integer to char cast is not a plain numeric cast:\n{body}"
+    );
+}
+
+const LOCATED_IO_PROGRAM: &str = r#"
+fn main() {
+    let line = read_line();
+    let all = args();
+    println!("{} {}", line.is_some(), all.len());
+}
+"#;
+
+#[test]
+fn emits_located_io_calls_with_source_locations() {
+    let (main_c, _) = generate_source("located_io_fixture", LOCATED_IO_PROGRAM, true);
+
+    assert!(
+        main_c.contains("ls_read_line_at(\"located_io_fixture.ls\", "),
+        "read_line does not pass its source location:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("ls_args_at(\"located_io_fixture.ls\", "),
+        "args does not pass its source location:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("= ls_read_line();") && !main_c.contains("= ls_args();"),
+        "the legacy unlocated IO calls are still emitted:\n{main_c}"
+    );
+}
+
+const VEC_CHAR_PROGRAM: &str = r#"
+fn main() {
+    let text = String::from("héllo");
+    let chars = text.chars();
+    let count = text.char_count();
+    let first = text.char_at(0);
+    println!("{} {} {:?}", chars.len(), count, first);
+    let mut total = 0;
+    for c in chars {
+        total += 1;
+    }
+    println!("{}", total);
+}
+"#;
+
+#[test]
+fn reuses_the_runtime_layout_for_vec_char() {
+    let (main_c, _) = generate_source("vec_char_fixture", VEC_CHAR_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // LsVec_char and LsOpt_char are provided by the runtime header: the
+    // generated program must not redefine their layout.
+    assert!(
+        !main_c.contains("struct LsVec_char {") && !main_c.contains("struct LsOpt_char {"),
+        "the generated program redefines the frozen runtime char types:\n{main_c}"
+    );
+    // The frozen layout still gets the generic copy/release/debug helpers.
+    assert!(
+        main_c.contains("LsVec_char lsaca_copy_Vec_char("),
+        "Vec<char> has no copy helper:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("void lsaca_release_Vec_char("),
+        "Vec<char> has no release helper:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("LsVec_char lsaca_vec_push_slow_Vec_char(LsVec_char v, uint32_t value);"),
+        "Vec<char> has no dynamic push helper with the scalar element type:\n{main_c}"
+    );
+    assert!(
+        body.contains("= ls_str_chars("),
+        "String::chars does not return the runtime Vec<char> directly:\n{body}"
+    );
+    assert!(
+        !main_c.contains("(LsVec_char)ls_str_chars("),
+        "the Vec<char> result is cast by value, which -Wpedantic rejects:\n{main_c}"
+    );
+    assert!(
+        body.contains("= (int64_t)ls_str_char_count("),
+        "char_count is not a scalar conversion:\n{body}"
+    );
+}
+
+const MAP_CTRL_PROGRAM: &str = r#"
+fn main() {
+    let mut map: HashMap<String, i64> = HashMap::new();
+    map.insert(String::from("a"), 1);
+    println!("{}", map.len());
+}
+"#;
+
+#[test]
+fn frees_the_hash_map_control_bytes() {
+    let (main_c, _) = generate_source("map_ctrl_fixture", MAP_CTRL_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // The Swiss-table control bytes replace the old state array; the drop
+    // helper must free them and must not touch the removed field.
+    assert!(
+        main_c.contains("free(self->table.ctrl);"),
+        "the map drop helper does not free the control bytes:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("table.states"),
+        "the generated code still references the removed map state array:\n{main_c}"
+    );
+    assert!(
+        body.contains("lsaca_map_insert_String_i64("),
+        "the map insert call is missing:\n{body}"
+    );
+}
+
+const CHAR_METHODS_PROGRAM: &str = r#"
+fn main() {
+    let mut s = String::from("aé");
+    s.push('!');
+    let c = s.char_at(0);
+    let boundary = s.is_char_boundary(1);
+    let popped = s.pop();
+    let fresh = String::from_char('z');
+    println!("{:?} {:?} {} {}", c, popped, boundary, fresh);
+}
+"#;
+
+#[test]
+fn emits_char_string_methods() {
+    let (main_c, _) = generate_source("char_methods_fixture", CHAR_METHODS_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // push/pop are copy-on-write handle replacements: the updated handle is
+    // assigned back to the receiver place, not to the unit target.
+    assert!(
+        body.contains("v1 = ls_str_push_scalar(v1, (uint32_t)(t3));"),
+        "String::push does not reassign the copy-on-write handle:\n{body}"
+    );
+    assert!(
+        body.contains("v1 = ls_str_pop_scalar(v1, &popped7, &ch8);"),
+        "String::pop does not reassign the copy-on-write handle:\n{body}"
+    );
+    assert!(
+        body.contains("if (ls_str_char_at(v1, (int64_t)(t4), &ch5)) {"),
+        "String::char_at does not use the runtime out-parameter:\n{body}"
+    );
+    assert!(
+        body.contains("if (popped7) {") && body.contains("v4 = ls_opt_char_some(ch8);"),
+        "String::pop does not build the Option<char> from the runtime result:\n{body}"
+    );
+    assert!(
+        body.contains("v3 = ls_str_is_char_boundary(v1, (int64_t)(t6));"),
+        "String::is_char_boundary is not a plain boolean query:\n{body}"
+    );
+    assert!(
+        body.contains("v5 = ls_str_from_scalar((uint32_t)(t9));"),
+        "String::from_char does not use the runtime helper:\n{body}"
+    );
+    // Struct results must not be cast to their own type: ISO C forbids a
+    // non-scalar cast and the generated project must stay -Wpedantic clean.
+    assert!(
+        !main_c.contains("(LsOpt_char)ls_opt_char_some"),
+        "Option<char> values are cast by value:\n{main_c}"
+    );
+}
+
+const MATCH_MOVE_PROGRAM: &str = r#"
+struct Tree {
+    value: i64,
+    left: Option<Box<Tree>>,
+    right: Option<Box<Tree>>,
+}
+
+fn total(node: Option<Box<Tree>>) -> i64 {
+    match node {
+        None => 0,
+        Some(boxed) => {
+            let inner = boxed.get();
+            inner.value + total(inner.left.clone()) + total(inner.right.clone())
+        }
+    }
+}
+
+fn guarded(node: Option<Box<Tree>>) -> i64 {
+    match node {
+        Some(boxed) if boxed.get().value > 5 => 1,
+        _ => 0,
+    }
+}
+
+fn main() {
+    let tree = Some(Box::new(Tree { value: 7, left: None, right: None }));
+    let other = Some(Box::new(Tree { value: 9, left: None, right: None }));
+    println!("{} {}", total(tree), guarded(other));
+}
+"#;
+
+/// Slice of `main_c` holding the top-level definition of the function whose
+/// generated signature starts with `signature`.
+fn function_definition<'a>(main_c: &'a str, signature: &str) -> &'a str {
+    let start = main_c
+        .rfind(signature)
+        .unwrap_or_else(|| panic!("missing generated function {signature}:\n{main_c}"));
+    let after = &main_c[start..];
+    let end = after.find("\n}\n").map_or(after.len(), |index| index + 1);
+    &after[..end]
+}
+
+#[test]
+fn moves_owned_match_bindings_out_of_the_scrutinee() {
+    let (main_c, _) = generate_source("match_move_fixture", MATCH_MOVE_PROGRAM, true);
+    let total = function_definition(&main_c, "int64_t lsaca_fn_total(");
+
+    // A consuming, unguarded match arm binds by move: the Option payload is
+    // stolen from the scrutinee local and the emptied slot is raw-zeroed.
+    assert!(
+        total.contains("u.some = ((LsBox_Tree*){0});"),
+        "the match binding does not clear the moved scrutinee slot:\n{total}"
+    );
+    assert!(
+        !total.contains("lsaca_copy_Box_Tree("),
+        "the match binding deep-copies the Box payload instead of moving it:\n{total}"
+    );
+    assert!(
+        total.contains("_live = true;"),
+        "the moved binding has no liveness flag:\n{total}"
+    );
+    // The scrutinee is still released exactly once; releasing the zeroed
+    // payload slot is a NULL-safe no-op.
+    assert!(
+        total.contains("lsaca_release_Opt_Box_Tree("),
+        "the consumed match scrutinee is not released:\n{total}"
+    );
+
+    // A guard reads its bindings before the arm is selected, so guarded arms
+    // keep the copying form: the value may still belong to a later arm.
+    let guarded = function_definition(&main_c, "int64_t lsaca_fn_guarded(");
+    assert!(
+        guarded.contains("lsaca_copy_Box_Tree("),
+        "a guarded match arm must not move its bindings out:\n{guarded}"
+    );
+}
+
+#[test]
+fn single_translation_unit_output_stays_byte_identical() {
+    let (main_c, _) = generate_source("hello", HELLO, true);
+    assert_eq!(
+        main_c,
+        include_str!("testdata/single_tu_hello.c"),
+        "the generated main.c for a small program must not change when translation units are introduced"
+    );
+}
+
+#[test]
+fn small_programs_emit_a_single_translation_unit() {
+    let generated = generate_project_source("hello", HELLO, false);
+    assert!(
+        generated.units.is_empty(),
+        "small program emitted extra translation units: {:?}",
+        generated
+            .units
+            .iter()
+            .map(|unit| &unit.file_name)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Build a source program whose emitted function bodies exceed the split
+/// threshold so that the generator distributes user functions over units.
+fn split_threshold_program() -> String {
+    let mut source = String::new();
+    for function in 0..120 {
+        source.push_str(&format!("fn f{function}(x: i64) -> i64 {{\n    x"));
+        for term in 0..60 {
+            source.push_str(&format!(" + {term}"));
+        }
+        source.push_str("\n}\n\n");
+    }
+    source.push_str("fn banner() -> String {\n    String::from(\"banner\")\n}\n\n");
+    source.push_str("fn main() {\n    let label = \"split\";\n    let mut total = 0;\n");
+    for function in 0..120 {
+        source.push_str(&format!("    total += f{function}({function});\n"));
+    }
+    source.push_str("    println!(\"{} {}\", label, total);\n}\n");
+    source
+}
+
+#[test]
+fn splits_large_programs_into_deterministic_translation_units() {
+    let source = split_threshold_program();
+    let generated = generate_project_source("split_fixture", &source, true);
+
+    assert!(
+        (2..=8).contains(&generated.units.len()),
+        "unexpected translation unit count: {}",
+        generated.units.len()
+    );
+    let names: Vec<&str> = generated
+        .units
+        .iter()
+        .map(|unit| unit.file_name.as_str())
+        .collect();
+    for (index, unit) in generated.units.iter().enumerate() {
+        assert_eq!(unit.file_name, format!("lsaca_unit_{}.c", index + 1));
+        assert!(!unit.contents.is_empty(), "{} is empty", unit.file_name);
+        // Every unit repeats the shared prefix so that it compiles on its own.
+        assert!(unit.contents.contains("#include \"lsaca_rt.h\""));
+        assert!(unit.contents.contains("typedef struct LsUnit"));
+        // The entry point and the C wrapper stay in main.c.
+        assert!(!unit.contents.contains("int main(int argc, char** argv)"));
+        assert!(!unit.contents.contains("LsUnit lsaca_fn_main()\n{"));
+        // Interned literal handles are defined in main.c and declared here.
+        assert!(unit.contents.contains("extern LsString* lsaca_lit_0;"));
+        assert!(!unit.contents.contains("LsString* lsaca_lit_0 = NULL;"));
+    }
+
+    // main.c keeps the literal table definitions and the entry point.
+    assert!(
+        generated
+            .main_c
+            .contains("static const char lsaca_lit_data_0[]")
+    );
+    assert!(generated.main_c.contains("LsString* lsaca_lit_0 = NULL;"));
+    assert!(
+        !generated
+            .main_c
+            .contains("static LsString* lsaca_lit_0 = NULL;")
+    );
+    assert!(generated.main_c.contains("LsUnit lsaca_fn_main()"));
+    assert!(generated.main_c.contains("int main(int argc, char** argv)"));
+
+    // Every user function is defined exactly once across all translation units.
+    let mut combined = generated.main_c.clone();
+    for unit in &generated.units {
+        combined.push_str(&unit.contents);
+    }
+    assert!(
+        combined.contains("((LsString*)ls_retain((void*)(lsaca_lit_0)))"),
+        "the split output never references an interned literal handle"
+    );
+    for function in 0..120 {
+        let definition = format!("int64_t lsaca_fn_f{function}(int64_t p0)\n{{");
+        assert_eq!(
+            combined.matches(&definition).count(),
+            1,
+            "function f{function} is not defined exactly once"
+        );
+    }
+
+    // The build lists main.c first, then the units, then the runtime sources.
+    let unit_list = names.join(" ");
+    let expected = format!("add_executable(split_fixture main.c {unit_list} ");
+    assert!(
+        generated.cmake.contains(&expected),
+        "cmake does not list the translation units after main.c:\n{}",
+        generated.cmake
+    );
+
+    // Emission is deterministic.
+    let again = generate_project_source("split_fixture", &source, true);
+    assert_eq!(again.main_c, generated.main_c);
+    assert_eq!(again.units.len(), generated.units.len());
+    for (left, right) in again.units.iter().zip(generated.units.iter()) {
+        assert_eq!(left.file_name, right.file_name);
+        assert_eq!(left.contents, right.contents);
+    }
 }

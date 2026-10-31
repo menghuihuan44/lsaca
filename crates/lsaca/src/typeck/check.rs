@@ -378,6 +378,7 @@ impl<'a> Checker<'a> {
         match ty {
             ITy::Unit => "()".to_string(),
             ITy::Bool => "bool".to_string(),
+            ITy::Char => "char".to_string(),
             ITy::Int(int_ty) => int_ty.name().to_string(),
             ITy::Float(float_ty) => float_ty.name().to_string(),
             ITy::String => "String".to_string(),

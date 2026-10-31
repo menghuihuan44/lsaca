@@ -263,6 +263,10 @@ impl<'a> Checker<'a> {
                 self.unify_or_report(expected, &ITy::bool_(), span);
                 TLit::Bool(*value)
             }
+            ast::Lit::Char(value) => {
+                self.unify_or_report(expected, &ITy::char_(), span);
+                TLit::Char(*value)
+            }
             ast::Lit::Str(value) => {
                 self.unify_or_report(expected, &ITy::string(), span);
                 TLit::Str(value.clone())

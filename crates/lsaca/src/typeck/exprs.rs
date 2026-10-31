@@ -99,6 +99,11 @@ impl<'a> Checker<'a> {
                 self.apply_hint(&ty, hint);
                 TExpr::new(ty, TExprKind::Lit(TLit::Bool(*value)), span)
             }
+            ast::Lit::Char(value) => {
+                let ty = ITy::char_();
+                self.apply_hint(&ty, hint);
+                TExpr::new(ty, TExprKind::Lit(TLit::Char(*value)), span)
+            }
             ast::Lit::Str(value) => {
                 let ty = ITy::string();
                 self.apply_hint(&ty, hint);
@@ -959,9 +964,13 @@ impl<'a> Checker<'a> {
             match index {
                 Some(index) => {
                     let expected = struct_fields[index].2.clone();
-                    self.validate_storage_type(&expected, field.value.span);
                     let value = self.check_expr(&field.value, Some(&expected));
                     let value = self.coerce_to(value, &expected, field.value.span);
+                    // Field types are normally concrete, but a generic field can
+                    // stay a variable until the value is checked; validate the
+                    // resolved type so references cannot be stored.
+                    let resolved_expected = self.infer.resolve(&expected);
+                    self.validate_storage_type(&resolved_expected, field.value.span);
                     values.push((index, value));
                 }
                 None => {

@@ -244,6 +244,86 @@ impl<'a> Gen<'a> {
                 }
             }
 
+            HBuiltinMethod::StrCharCount => {
+                // char_count() counts Unicode scalar values, not bytes.
+                let place = self.place_through_reference(receiver);
+                let ctype = self.ctype(ty);
+                self.line(format!(
+                    "{} = ({})ls_str_char_count({});",
+                    target, ctype, place
+                ));
+            }
+            HBuiltinMethod::StrChars => {
+                // The runtime decodes the string and returns the scalars in a
+                // freshly allocated array; the result is the frozen
+                // LsVec_char layout declared by the runtime header.
+                let place = self.place_through_reference(receiver);
+                // Assigning a struct value must not use a cast: ISO C forbids
+                // casting a non-scalar to the same type under -Wpedantic.
+                self.line(format!("{} = ls_str_chars({});", target, place));
+            }
+            HBuiltinMethod::StrCharAt => {
+                // char_at() is byte based at the ABI level: the runtime walks
+                // the UTF-8 bytes and reports whether the index is a scalar.
+                let place = self.place_through_reference(receiver);
+                if let Some(arg) = args.first() {
+                    let index = self.gen_owned(arg);
+                    let scalar = self.new_plain_of("uint32_t", "ch");
+                    self.line(format!(
+                        "if (ls_str_char_at({}, (int64_t)({}), &{})) {{",
+                        place, index, scalar
+                    ));
+                    self.w.indent();
+                    self.line(format!("{} = ls_opt_char_some({});", target, scalar));
+                    self.w.dedent();
+                    self.line("}");
+                }
+            }
+            HBuiltinMethod::StrPush => {
+                // push(char) is a consuming COW operation like push_str: the
+                // receiver handle is replaced by the returned handle.
+                let place = self.place_through_reference(receiver);
+                if let Some(arg) = args.first() {
+                    let value = self.gen_owned(arg);
+                    // The COW helper returns the (possibly reallocated)
+                    // handle, so the place itself is updated first; the
+                    // statement result is unit.
+                    self.line(format!(
+                        "{0} = ls_str_push_scalar({0}, (uint32_t)({1}));",
+                        place, value
+                    ));
+                    self.assign_unit(target);
+                }
+            }
+            HBuiltinMethod::StrPop => {
+                // pop() consumes and replaces the handle too; the out
+                // parameters report whether a scalar was removed.
+                let place = self.place_through_reference(receiver);
+                let popped = self.new_plain_of("bool", "popped");
+                let scalar = self.new_plain_of("uint32_t", "ch");
+                // pop() also updates the COW handle in place; the optional
+                // scalar is built from the out parameters.
+                self.line(format!(
+                    "{0} = ls_str_pop_scalar({0}, &{1}, &{2});",
+                    place, popped, scalar
+                ));
+                self.line(format!("if ({}) {{", popped));
+                self.w.indent();
+                self.line(format!("{} = ls_opt_char_some({});", target, scalar));
+                self.w.dedent();
+                self.line("}");
+            }
+            HBuiltinMethod::StrIsCharBoundary => {
+                let place = self.place_through_reference(receiver);
+                if let Some(arg) = args.first() {
+                    let index = self.gen_owned(arg);
+                    self.line(format!(
+                        "{} = ls_str_is_char_boundary({}, (int64_t)({}));",
+                        target, place, index
+                    ));
+                }
+            }
+
             // ----- Vec<T> --------------------------------------------------
             HBuiltinMethod::VecLen => {
                 let place = self.place_through_reference(receiver);
@@ -1190,6 +1270,15 @@ impl<'a> Gen<'a> {
                     self.line(format!("{} = ls_str_clone({});", target, value));
                 }
             }
+            HBuiltinAssoc::StringFromChar => {
+                if let Some(arg) = args.first() {
+                    let value = self.gen_owned(arg);
+                    self.line(format!(
+                        "{} = ls_str_from_scalar((uint32_t)({}));",
+                        target, value
+                    ));
+                }
+            }
             HBuiltinAssoc::RcNew => {
                 if let (Some(arg), Ty::Rc(inner)) = (args.first(), ty) {
                     // The new cell owns the payload: transfer ownership
@@ -1326,10 +1415,10 @@ impl<'a> Gen<'a> {
             HBuiltinFn::Min => self.gen_int_or_float_min_max(true, args, ty, target),
             HBuiltinFn::Max => self.gen_int_or_float_min_max(false, args, ty, target),
             HBuiltinFn::ReadLine => {
-                self.line(format!("{} = ls_read_line();", target));
+                self.line(format!("{} = ls_read_line_at({});", target, loc));
             }
             HBuiltinFn::Args => {
-                self.line(format!("{} = ls_args();", target));
+                self.line(format!("{} = ls_args_at({});", target, loc));
             }
             HBuiltinFn::Exit => {
                 if let Some(arg) = args.first() {
@@ -1743,6 +1832,10 @@ impl<'a> Gen<'a> {
                 "{} = ls_fmt_bool({}, {});",
                 accumulator, accumulator, value
             )),
+            Ty::Char => self.line(format!(
+                "{} = ls_fmt_char({}, (uint32_t)({}));",
+                accumulator, accumulator, value
+            )),
             Ty::Int(int_ty) => {
                 if int_ty.is_signed() {
                     self.line(format!(
@@ -1792,6 +1885,10 @@ impl<'a> Gen<'a> {
             )),
             Ty::Bool => Some(format!(
                 "{} = ls_fmt_bool({}, {});",
+                accumulator, accumulator, value
+            )),
+            Ty::Char => Some(format!(
+                "{} = ls_fmt_char({}, (uint32_t)({}));",
                 accumulator, accumulator, value
             )),
             Ty::Int(int_ty) => {

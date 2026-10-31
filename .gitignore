@@ -28,6 +28,10 @@ rules.ninja
 # Generated documentation site
 _site/
 
+# Python caches
+__pycache__/
+*.pyc
+
 # Editor / OS noise
 *.swp
 *~

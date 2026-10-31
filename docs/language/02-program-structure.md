@@ -374,7 +374,7 @@ circle 2
 
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 1.5.0 parser. Optional parts
+The grammar below is the authoritative EBNF of the 1.6.0 parser. Optional parts
 are written with `[...]`, repetitions with `*` and `+`, and alternatives with
 `|`. It is reproduced here for reference; the individual pages explain each
 construct in detail.
@@ -426,7 +426,7 @@ postfixExpr  = primary ( call | methodCall | "." IDENT | "." INT | "[" expr "]" 
 call         = "(" args? ")" ;
 methodCall   = "." IDENT ( "::" "<" typeArgs ">" )? "(" args? ")" ;
 args         = expr ( "," expr )* ","? ;
-primary      = INT | FLOAT | STRING | "true" | "false"
+primary      = INT | FLOAT | CHAR | STRING | "true" | "false"
              | "(" ")" | "(" expr ")" | tupleExpr
              | path | structLiteral | vecExpr | macroCall
              | ifExpr | matchExpr | loopExpr | whileExpr | forExpr | block
@@ -452,7 +452,7 @@ closureParam = primaryPattern ( ":" type )? ;
 pattern      = orPattern ;
 orPattern    = primaryPattern ( "|" primaryPattern )* ;
 primaryPattern = "_" | "mut"? IDENT
-             | "true" | "false" | INT | FLOAT | STRING | "-" ( INT | FLOAT )
+             | "true" | "false" | CHAR | INT | FLOAT | STRING | "-" ( INT | FLOAT )
              | "(" ")" | "(" pattern ")" | tuplePattern
              | path ( "(" patternList? ")" )?
              | path "{" ( fieldPat ( "," fieldPat )* ( "," ".." )? ","? | ".." )? "}" ;
@@ -473,7 +473,8 @@ A few productions deserve a warning because the parser is more permissive than
 the type checker: `methodCall` parses `::<...>` (turbofish) after the method
 name, but the type checker rejects generic methods (traits have no generic
 methods in 1.5.0); and `break expr` / `return expr` parse even where a value
-cannot be carried.
+cannot be carried. `CHAR` is a character literal such as `'a'` or `'\u{4F60}'`;
+it is accepted wherever a literal expression or a literal pattern is accepted.
 
 Or-patterns (`orPattern`) and match guards (the optional `if` in `matchArm`) are
 fully implemented since 1.1.0: every alternative of an or-pattern is tested, and a
@@ -498,11 +499,12 @@ Output:
 small big other
 ```
 
-## Syntax added in 1.5
+## Syntax added in 1.5 and 1.6
 
-The grammar above already contains the productions added for generics and
-traits. This section collects those forms, the turbofish, and the
-syntax restrictions that the parser and the item collector enforce.
+The grammar above already contains the productions added for generics,
+traits and character literals. This section collects those forms, the
+turbofish, and the syntax restrictions that the parser and the item collector
+enforce.
 
 ### Generic parameter lists and bounds
 
@@ -558,12 +560,22 @@ Explicit type arguments are written with the Rust-style turbofish `::<…>`:
 * a generic associated function: `Pair::<i64>::new(3, 4)` and
   `HashMap::<String, i64>::new()`;
 * a generic struct literal: `Pair::<i64> { first: 3, second: 4 }`;
-* a method call: `value.method::<i64>()` parses, but generic methods do not
-  exist in 1.5.0, so the type checker rejects the turbofish with `E0107`
+* a method call: `value.method::<i64>()` parses, but trait methods are not
+  generic in 1.6.0, so the type checker rejects the turbofish with `E0107`
   (`method get takes 0 generic arguments but 1 was supplied`).
 
 In expression position use the turbofish; in type position the arguments are
 written without `::`: `let pair: Pair<i64> = Pair::<i64>::new(1, 2);`.
+
+### Character literals and the `char` type
+
+Version 1.6.0 adds one new token, the character literal (production `CHAR`): a
+single Unicode scalar value in single quotes, with the same escape sequences as
+a string literal (`'a'`, `'\n'`, `'\u{4F60}'`, `'\''`). The type name
+`char` is an ordinary path type, and character literals are accepted in
+patterns. There is no other new syntax: `char` values use the existing
+expression, pattern and type productions. See [Characters and
+Unicode](22-characters-and-unicode.md).
 
 ### `Self` in expression position
 

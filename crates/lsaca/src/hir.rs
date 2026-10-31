@@ -187,7 +187,7 @@ impl Program {
     /// Whether values of ty are implicitly copied (no move, no drop flag).
     pub fn is_copy(&self, ty: &Ty) -> bool {
         match ty {
-            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) | Ty::Ref { .. } => true,
+            Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::Ref { .. } => true,
             Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) | Ty::HashMap(_, _) => {
                 false
             }
@@ -277,6 +277,7 @@ impl Program {
                 .any(|elem| self.has_drop_glue_guarded(elem, structs, enums)),
             Ty::Unit
             | Ty::Bool
+            | Ty::Char
             | Ty::Int(_)
             | Ty::Float(_)
             | Ty::String
@@ -374,6 +375,7 @@ pub enum ConstValue {
     Int(i128),
     Float(f64),
     Bool(bool),
+    Char(char),
     Str(String),
     Unit,
 }
@@ -613,9 +615,17 @@ pub enum HFieldRef {
 
 #[derive(Debug, Clone)]
 pub enum HLit {
-    Int { value: i128, int_ty: IntTy },
-    Float { value: f64, float_ty: FloatTy },
+    Int {
+        value: i128,
+        int_ty: IntTy,
+    },
+    Float {
+        value: f64,
+        float_ty: FloatTy,
+    },
     Bool(bool),
+    /// A character literal: one Unicode scalar value.
+    Char(char),
     Str(String),
     Unit,
 }
@@ -698,6 +708,12 @@ pub enum HBuiltinMethod {
     StrParseF64,
     StrSubstring,
     StrRepeat,
+    StrCharCount,
+    StrChars,
+    StrCharAt,
+    StrPush,
+    StrPop,
+    StrIsCharBoundary,
     // Vec
     VecLen,
     VecIsEmpty,
@@ -769,6 +785,12 @@ impl HBuiltinMethod {
             StrParseF64 => "parse_f64",
             StrSubstring => "substring",
             StrRepeat => "repeat",
+            StrCharCount => "char_count",
+            StrChars => "chars",
+            StrCharAt => "char_at",
+            StrPush => "push",
+            StrPop => "pop",
+            StrIsCharBoundary => "is_char_boundary",
             VecLen => "len",
             VecIsEmpty => "is_empty",
             VecPush => "push",
@@ -820,6 +842,8 @@ pub enum HBuiltinAssoc {
     StringNew,
     /// String::from(&str) - the argument is a String, so this is a clone.
     StringFrom,
+    /// String::from_char(c) - a one character string.
+    StringFromChar,
     /// `Vec::<T>::new()`
     VecNew,
     /// `Vec::<T>::with_capacity(n)`

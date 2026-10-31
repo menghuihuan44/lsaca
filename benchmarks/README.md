@@ -17,7 +17,8 @@ compile-only workload measures how the lsaca build scales with source size.
                            sort_i64, matrix_multiply, binary_trees,
                            binary_trees_refs, string_split, sieve, mandelbrot,
                            iterator_pipeline, hashmap_wordcount, generic_stack,
-                           fn_pipeline
+                           fn_pipeline, string_unicode, hashmap_i64,
+                           hashmap_string
         compile_large.ls   generated 4,511-line lsaca source (compile-only workload)
         gen_compile_large.py  stdlib-only generator for compile_large.ls
       results/
@@ -38,9 +39,9 @@ Then run the suite from the repository root:
 
     python scripts/bench.py
 
-That takes several minutes on a modern laptop (the published 1.4 run took 3m47s for
-twelve programs; the suite now has sixteen programs, fifteen of them executed with 7
-runs each, plus the peak-memory runs) and writes:
+That takes a few minutes on a modern laptop (the published 1.6 run took about three and
+a half minutes for nineteen programs, eighteen of them executed with 7 runs each, plus the
+peak-memory runs) and writes:
 
 - benchmarks/results/latest.json  (raw data)
 - benchmarks/results/latest.md    (tables)
@@ -79,6 +80,9 @@ fails; fallback results are labelled in the JSON and in the markdown tables.
 | hashmap_wordcount | hash map counting with String keys | 200,000 deterministic words from a 4,096-word alphabet counted in a map; checksum is the sum of squared frequencies, the number of distinct keys and the highest frequency | checksum=9766208,4096,49 |
 | generic_stack | generic type instantiation | one generic Stack<T> instantiated for i64 (1,000,000 push/pop) and String (1,000 strings), same code both times | checksum=499999500000,5900 |
 | fn_pipeline | function values in struct fields, mixed ownership | three Rule{label: String, apply: fn(i64)->i64} records applied 1,000x each plus a clone of the first, 500x; checksum is result sum and label bytes | checksum=53637,22 |
+| string_unicode | UTF-8 string handling | build a 120,000-scalar mixed ASCII/Unicode string one char at a time, fold every scalar from iteration and 1,000 random char_at accesses, apply full-Unicode to_uppercase, slice on character boundaries, push/pop and extend; checksum is char count, byte length and the folded scalar checksum | checksum=3357,6921,368454760 |
+| hashmap_i64 | hash map with integer keys | 1,000,000 inserts, 1,000,000 present lookups, 1,000,000 absent lookups and 100,000 deletions; checksum is the folded value sum, final length and hit count | checksum=821060469,900000,1000000 |
+| hashmap_string | hash map with String keys | 200,000 distinct generated String keys, 200,000 present lookups, 200,000 absent lookups (folding the absent key bytes) and 20,000 deletions; checksum is the folded value sum, final length and hit count | checksum=794025725,180000,200000 |
 | compile_large | lsaca build-time scaling (compile-only) | generated 4,511-line lsaca source with 450 functions; built but not executed | checksum=14655037 (not run by the harness) |
 
 Each executed program prints exactly one line (checksum=...) and exits with code 0. The
@@ -158,7 +162,10 @@ The newer workloads add these language-specific choices, all described on the do
   Python a __slots__ class and Node.js plain objects. The lsaca traversal takes the subtree
   by value, and since 1.4 that means it consumes it: sum_tree clones the two child subtrees
   with .clone() at every level, so the row pays for the boxed nodes being copied - that is
-  the measured cost of the by-value traversal, not a compiler bug. binary_trees_refs starts
+  the measured cost of the by-value traversal, not a compiler bug. (Since 1.6 the
+  Some(boxed) match binding moves the box out of the Option instead of copying it, so the
+  remaining copies are the explicit child .clone() calls plus boxed.get(), which reads the
+  payload by value.) binary_trees_refs starts
   from the same tree but sums it through a borrowed `&Option<Box<Node>>` parameter, the
   shape a Rust user would write; the difference between the two lsaca rows is what
   references buy (the ownership difference is explicit since 1.4).
@@ -180,7 +187,10 @@ The newer workloads add these language-specific choices, all described on the do
   number of distinct keys and the highest frequency. lsaca uses the builtin
   HashMap<String, i64>; Rust uses std::collections::HashMap, Python a dict, Node.js a Map,
   and C a hand-written open-addressing table with FNV-1a hashing and strcmp because C has
-  no map in its standard library.
+  no map in its standard library. Since 1.6 the builtin map is a Swiss-table layout with a
+  7/8 load factor: absent lookups, removal and iteration are faster than the 1.5 linear
+  probing layout, while present lookups pay for a dependent control-byte-to-key load; on
+  this mixed workload the two effects roughly cancel.
 - generic_stack: the lsaca stack is a generic struct Stack<T> instantiated for i64 and String
   from the same source, and the compiler monomorphises both; Rust does the same with a generic
   struct, Python and Node.js rely on dynamic typing, and C spells the two instantiations out
@@ -191,6 +201,23 @@ The newer workloads add these language-specific choices, all described on the do
   one does not allocate). Rust stores a fn pointer in the struct, C stores a function pointer,
   and Python/Node.js store closures in the record. This exercises fn values inside aggregates,
   which 1.5 made valid C for the first time.
+- string_unicode: the lsaca version drives the 1.6 UTF-8 String API directly (push(char),
+  chars(), char_at(), is_char_boundary(), substring(), to_uppercase(), pop(), push_str(),
+  char_count()). C has hand-written UTF-8 encode/decode helpers and a small uppercase table
+  covering the 24-scalar alphabet, Rust uses char, Vec<char> and String::to_uppercase,
+  Python 3 strings, and Node.js iterates code points with String.fromCodePoint/toUpperCase.
+  The 1,000 char_at probes sample character indices spread across the first 7,000 characters:
+  Python and Rust index a code-point array in O(1), C folds the sampled scalars during one
+  linear scan, and lsaca calls char_at(probe * 7), which decodes UTF-8 from the start of the
+  string up to the requested character.
+- hashmap_i64: lsaca uses the builtin HashMap<i64, i64> (a Swiss-table layout since 1.6),
+  Rust std::collections::HashMap, Python a dict, Node.js a Map, and C a hand-written
+  open-addressing table with splitmix64 hashing, tombstone reuse and 0.5 load-factor growth
+  (C has no map in its standard library). All versions do the same four phases.
+- hashmap_string: the same shapes with 200,000 generated String keys. The lsaca version
+  inserts owned strings into the builtin HashMap<String, i64>, C strdup's its keys and frees
+  them, and the other languages use their native string-keyed maps; the absent-lookup phase
+  folds the UTF-8 bytes of each absent key in every language.
 
 A contiguous array of values (C, Rust, lsaca) and a per-element object (Python, Node.js)
 are both the natural representation in their language; the compiler/VM overhead that
@@ -211,7 +238,9 @@ The harness supports three ways to build an lsaca program:
   compiles it together with the cached runtime translation units using gcc, and links -
   no CMake. The older CMake + Ninja pipeline is still available as
   lsaca build -r --cmake, but the harness does not measure it. This mode needs a working C
-  compiler on PATH (gcc in the usual MSYS2 location is found automatically).
+  compiler on PATH (gcc in the usual MSYS2 location is found automatically). Since 1.6 a
+  large program is split into main.c plus extra translation units so gcc can compile them
+  in parallel; compile_large exercises that path.
 - fallback: lsaca emit-c -r followed by a direct gcc -O2 -DNDEBUG of the generated C and
   the runtime sources. This is not the normal path, but it is enough to compare
   generated-C performance, and it works in environments where the compiler's child gcc
@@ -255,7 +284,9 @@ measured on the reference machine; those tables are generated from
 benchmarks/results/latest.md, and the page explains how to reproduce them. The recorded
 run used the `official` build mode (the normal `lsaca build -r` path, not the fallback);
 its JSON also contains every individual run, the compiler SHA-256 prefix and the
-repository commit, so a saved result is self-describing. The top-level `warnings` list
+repository commit, so a saved result is self-describing. The published v1.6 run was
+recorded on 2026-10-31T23:24:44+08:00 with lsaca 1.6.0 (compiler SHA-256 prefix
+b1489a3dec37e163, repository commit 59d56c7). The top-level `warnings` list
 records anything that affects interpretation, for example a single sample that had to be
 re-measured because of unrelated background load on the machine. If you rerun the suite,
 do not compare fallback numbers with the numbers on the docs page - the two measure

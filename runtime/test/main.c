@@ -2,8 +2,8 @@
  *
  * Build (from an ASCII directory, because the repo path has non-ASCII bytes):
  *     gcc -std=c17 -Wall -Wextra -Wpedantic -O1 main.c lsaca_rt.c \
- *         lsaca_rt_string.c lsaca_rt_vec.c lsaca_rt_fmt.c lsaca_rt_map.c -lm \
- *         -o smoke
+ *         lsaca_rt_string.c lsaca_rt_vec.c lsaca_rt_fmt.c lsaca_rt_map.c \
+ *         lsaca_rt_unicode.c -lm -o smoke
  *     smoke                 -- in-process checks (no file IO)
  *     smoke --io <file>     -- in-process checks including file IO
  *     smoke --args a b      -- prints the language-level argument vector
@@ -19,6 +19,7 @@
  */
 
 #include "lsaca_rt.h"
+#include "lsaca_rt_unicode.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1732,32 +1733,77 @@ static void map_init_bool_i64(LsMapTable* table) {
                 map_drop_value_i64);
 }
 
+/* Control-byte values and constants of the Swiss-table layout (see
+ * lsaca_rt_map.c and the LsMapTable documentation in lsaca_rt.h). The table
+ * struct is public, so the adversarial tests below forge control bytes with
+ * these values. */
+#define MAP_CTRL_EMPTY_BYTE ((unsigned char)0x80)
+#define MAP_CTRL_DELETED_BYTE ((unsigned char)0xFE)
+#define MAP_CTRL_H2_LIMIT ((unsigned char)0x7F)
+#define MAP_CTRL_GROUP_WIDTH ((size_t)16)
+#define MAP_CTRL_LOAD_DENOMINATOR ((size_t)8)
+
 /* Frees the three slot arrays; the table must be empty (cleared) first. */
 static void map_free_arrays(LsMapTable* table) {
     free(table->keys);
     free(table->values);
-    free(table->states);
+    free(table->ctrl);
     table->keys = NULL;
     table->values = NULL;
-    table->states = NULL;
+    table->ctrl = NULL;
     table->cap = 0;
     table->len = 0;
+    table->growth_left = 0;
 }
 
+/* Checks the Swiss-table invariants the runtime documents for LsMapTable:
+ * capacity is a power of two >= 16 (or 0 before the first insert), the three
+ * arrays exist together, the load factor stays at most 7/8, every control byte
+ * is EMPTY (0x80), DELETED (0xFE) or an occupied H2 (0x00..0x7F), the occupied
+ * byte count equals len, the EMPTY count equals cap/8 + growth_left, and the
+ * 16-byte mirror after the table repeats the first control group. */
 static bool map_capacity_ok(const LsMapTable* table) {
     size_t cap = table->cap;
+    size_t occupied = 0;
+    size_t empty = 0;
+    size_t index;
+
     if (cap == 0) {
         return table->len == 0 && table->keys == NULL &&
-               table->values == NULL && table->states == NULL;
+               table->values == NULL && table->ctrl == NULL;
     }
-    if ((cap & (cap - 1)) != 0 || cap < 8) {
+    if ((cap & (cap - 1)) != 0 || cap < MAP_CTRL_GROUP_WIDTH) {
         return false;
     }
     if (table->keys == NULL || table->values == NULL ||
-        table->states == NULL) {
+        table->ctrl == NULL) {
         return false;
     }
-    return table->len <= (cap / 4) * 3;
+    if (table->len * 8 > cap * 7) {
+        return false;
+    }
+    if (table->growth_left > cap - cap / MAP_CTRL_LOAD_DENOMINATOR) {
+        return false;
+    }
+    for (index = 0; index < cap; index += 1) {
+        unsigned char byte = table->ctrl[index];
+        if (byte == MAP_CTRL_EMPTY_BYTE) {
+            empty += 1;
+        } else if (byte == MAP_CTRL_DELETED_BYTE) {
+            /* Tombstones are not occupied entries. */
+        } else if (byte <= MAP_CTRL_H2_LIMIT) {
+            occupied += 1;
+        } else {
+            return false;
+        }
+    }
+    if (occupied != table->len) {
+        return false;
+    }
+    if (empty != cap / MAP_CTRL_LOAD_DENOMINATOR + table->growth_left) {
+        return false;
+    }
+    return memcmp(table->ctrl + cap, table->ctrl, MAP_CTRL_GROUP_WIDTH) == 0;
 }
 
 static bool map_sequences_equal(const LsMapTable* a, const LsMapTable* b) {
@@ -1806,37 +1852,40 @@ static void test_map_hash_primitives(void) {
     LsString* third = ls_str_cstr("hello world");
 
     CHECK(first != NULL && second != NULL && third != NULL);
-    /* FNV-1a 64 followed by splitmix64: frozen constants. */
-    CHECK(ls_hash_bytes("", 0) == 0xF52A15E9A9B5E89BULL);
-    CHECK(ls_hash_bytes(NULL, 0) == 0xF52A15E9A9B5E89BULL);
-    CHECK(ls_hash_bytes("abc", 3) == 0x0DD490490804B508ULL);
-    CHECK(ls_hash_bytes("hello world", 11) == 0x05CB585112BE1151ULL);
+    /* wyhash-style 64-bit hash with fixed secrets: frozen constants (see
+     * lsaca_rt_map.c). Scalar helpers hash the little-endian byte pattern and
+     * agree bit for bit with ls_hash_bytes over the same bytes, so a zero
+     * scalar still hashes non-zero. */
+    CHECK(ls_hash_bytes("", 0) == 0x09EC1EB68F0BB84AULL);
+    CHECK(ls_hash_bytes(NULL, 0) == 0x09EC1EB68F0BB84AULL);
+    CHECK(ls_hash_bytes("abc", 3) == 0xC290F8A784C43C92ULL);
+    CHECK(ls_hash_bytes("hello world", 11) == 0x279192601F8FDC93ULL);
     CHECK(ls_hash_bytes("abc", 3) != ls_hash_bytes("abd", 3));
-    CHECK(ls_hash_i64(&zero) == 0);
-    CHECK(ls_hash_i64(&one) == 0x5692161D100B05E5ULL);
-    CHECK(ls_hash_i64(&forty_two) == 0xA759EA27D4727622ULL);
-    CHECK(ls_hash_i64(&minus_one) == 0xB4D055FCF2CBBD7BULL);
+    CHECK(ls_hash_i64(&zero) == 0xE57D83D407CABA2FULL);
+    CHECK(ls_hash_i64(&one) == 0x2E07CAD7E5281828ULL);
+    CHECK(ls_hash_i64(&forty_two) == 0xAC8C9D001F291713ULL);
+    CHECK(ls_hash_i64(&minus_one) == 0xBB0FCCAA641DF4B6ULL);
     CHECK(ls_hash_i64(&forty_two) == ls_hash_i64(&same));
     CHECK(ls_eq_i64(&forty_two, &same));
     CHECK(!ls_eq_i64(&forty_two, &different));
-    CHECK(ls_hash_u64(&uzero) == 0);
-    CHECK(ls_hash_u64(&uone) == 0x5692161D100B05E5ULL);
+    CHECK(ls_hash_u64(&uzero) == 0xE57D83D407CABA2FULL);
+    CHECK(ls_hash_u64(&uone) == 0x2E07CAD7E5281828ULL);
     CHECK(ls_eq_u64(&uone, &usame));
     CHECK(!ls_eq_u64(&uone, &udifferent));
-    CHECK(ls_hash_bool(&bfalse) == 0);
-    CHECK(ls_hash_bool(&btrue) == 0x5692161D100B05E5ULL);
+    CHECK(ls_hash_bool(&bfalse) == 0xF41EDC109ABBA57FULL);
+    CHECK(ls_hash_bool(&btrue) == 0x05BD9307C048752EULL);
     CHECK(ls_eq_bool(&btrue, &btrue));
     CHECK(ls_eq_bool(&bfalse, &bfalse));
     CHECK(!ls_eq_bool(&btrue, &bfalse));
-    CHECK(ls_hash_string_slot(&null_handle) == 0);
+    CHECK(ls_hash_string_slot(&null_handle) == 0x09EC1EB68F0BB84AULL);
     CHECK(ls_eq_string_slot(&null_handle, &null_handle));
-    CHECK(ls_hash_string_slot(&first) == 0x0DD490490804B508ULL);
+    CHECK(ls_hash_string_slot(&first) == 0xC290F8A784C43C92ULL);
     CHECK(ls_hash_string_slot(&first) == ls_hash_string_slot(&second));
     CHECK(ls_eq_string_slot(&first, &second));
     CHECK(!ls_eq_string_slot(&first, &third));
     CHECK(!ls_eq_string_slot(&first, &null_handle));
     CHECK(!ls_eq_string_slot(&null_handle, &first));
-    CHECK(ls_hash_string_slot(&third) == 0x05CB585112BE1151ULL);
+    CHECK(ls_hash_string_slot(&third) == 0x279192601F8FDC93ULL);
     ls_release(first);
     ls_release(second);
     ls_release(third);
@@ -1855,7 +1904,7 @@ static void test_map_int_basics(void) {
     CHECK(table.len == 0);
     CHECK(table.key_size == sizeof(int64_t));
     CHECK(table.value_size == sizeof(int64_t));
-    CHECK(table.keys == NULL && table.values == NULL && table.states == NULL);
+    CHECK(table.keys == NULL && table.values == NULL && table.ctrl == NULL);
     CHECK(map_capacity_ok(&table));
     CHECK(ls_map_len(&table) == 0);
     CHECK(ls_map_is_empty(&table));
@@ -1868,7 +1917,7 @@ static void test_map_int_basics(void) {
     value = 70;
     CHECK(!ls_map_insert(&table, &key, &value, &out_old));
     CHECK(table.len == 1);
-    CHECK(table.cap == 8);
+    CHECK(table.cap == 16);
     CHECK(map_capacity_ok(&table));
     CHECK(!ls_map_is_empty(&table));
     CHECK(ls_map_get_ptr(&table, &key, &slot));
@@ -1913,7 +1962,8 @@ static void test_map_int_basics(void) {
         CHECK(!ls_map_insert(&table, &key, &value, NULL));
     }
     CHECK(table.len == 10);
-    /* 10 entries need (10 + 1) > 8 * 0.75, so the table grows to 16. */
+    /* A fresh table starts at capacity 16; the 7/8 load factor holds 14
+     * entries, so ten entries fit without a grow. */
     CHECK(table.cap == 16);
     CHECK(map_capacity_ok(&table));
     for (i = 0; i < 10; i += 1) {
@@ -1943,8 +1993,10 @@ static void test_map_int_basics(void) {
 }
 
 static void test_map_iteration_order(void) {
-    /* Frozen slot order for i64 keys 1..5 in a capacity-8 table. */
-    static const int64_t expected[5] = {3, 2, 4, 1, 5};
+    /* Frozen iteration order for i64 keys 1..5 in a capacity-16 table: the
+     * table has a single 16-slot group, so entries come back in insertion
+     * order. */
+    static const int64_t expected[5] = {1, 2, 3, 4, 5};
     LsMapTable table;
     LsMapIter iter;
     int64_t keys[5];
@@ -1958,7 +2010,7 @@ static void test_map_iteration_order(void) {
         value = keys[i] * 100;
         CHECK(!ls_map_insert(&table, &keys[i], &value, NULL));
     }
-    CHECK(table.cap == 8);
+    CHECK(table.cap == 16);
     ls_map_iter_init(&iter, &table);
     for (;;) {
         const void* key_ptr = NULL;
@@ -2432,11 +2484,8 @@ static void test_map_callback_balance(void) {
 /* Hash map stress and adversarial-state tests                            */
 /* ---------------------------------------------------------------------- */
 
-/* Frozen slot state bytes (see lsaca_rt_map.c): the adversarial tests build
- * table states directly, so they spell the values out. */
-#define MAP_TEST_EMPTY ((unsigned char)0)
-#define MAP_TEST_OCCUPIED ((unsigned char)1)
-#define MAP_TEST_TOMBSTONE ((unsigned char)2)
+/* The control-byte constants the map tests use (MAP_CTRL_*) are declared
+ * next to the map test helpers, above map_capacity_ok(). */
 
 /* Stress sizes: compile-time constants keep the aggregate check count small;
  * each test reports a few summary CHECKs instead of one per operation. */
@@ -2908,120 +2957,464 @@ static void test_map_stress_string_keys(void) {
     CHECK(ls_rt_test_live_allocations() == base);
 }
 
-/* Adversarial table states. The struct is public, so the tests can construct
- * the two defensive probe outcomes that the load-factor invariant otherwise
- * makes unreachable:
- *   1. every slot occupied, no empty slot and no tombstone: a probe runs for
- *      exactly cap steps and returns SIZE_MAX, which forces a grow;
- *   2. every slot used by occupied entries and tombstones but no empty slot,
- *      while len + 1 is still within the load limit: the probe returns the
- *      first tombstone and the insert fills it without growing.
+/* Adversarial table states. The struct is public, so the tests can forge the
+ * two defensive probe outcomes that the load-factor invariant otherwise makes
+ * unreachable:
+ *   1. a full table with no EMPTY slot (growth_left forced to zero): the probe
+ *      finds no slot at all, so insert has to rehash before inserting;
+ *   2. a table whose first control group is all tombstones while a later group
+ *      still has EMPTY slots: the probe wraps around, returns the earliest
+ *      tombstone and the insert reuses it without consuming growth_left.
  * Both paths must stay in bounds and keep every existing entry addressable. */
 static void test_map_adversarial_states(void) {
     LsMapTable table;
     size_t i;
     size_t slot;
-    size_t dummy;
+    size_t forged;
     int64_t key;
     int64_t value;
     void* value_ptr = NULL;
 
-    /* (1) Full table without tombstones: insert falls back to a grow. */
+    /* (1) Full table without EMPTY slots: insert rehashes and grows. */
     map_init_i64_i64(&table);
-    for (i = 0; i < 6; i += 1) {
+    for (i = 0; i < 12; i += 1) {
         key = (int64_t)i;
         value = (int64_t)i * 10;
         CHECK(!ls_map_insert(&table, &key, &value, NULL));
     }
-    CHECK(table.cap == 8);
-    CHECK(table.len == 6);
+    CHECK(table.cap == 16);
+    CHECK(table.len == 12);
+    CHECK(table.growth_left == 2);
+    CHECK(map_capacity_ok(&table));
     slot = 0;
-    dummy = 0;
-    while (dummy < 2) {
-        if (table.states[slot] == MAP_TEST_EMPTY) {
-            key = 1000 + (int64_t)dummy;
-            value = 9000 + (int64_t)dummy;
+    forged = 0;
+    while (forged < 2) {
+        if (table.ctrl[slot] == MAP_CTRL_EMPTY_BYTE) {
+            key = 1000 + (int64_t)forged;
+            value = 9000 + (int64_t)forged;
             memcpy(table.keys + slot * sizeof(int64_t), &key, sizeof key);
             memcpy(table.values + slot * sizeof(int64_t), &value, sizeof value);
-            table.states[slot] = MAP_TEST_OCCUPIED;
+            table.ctrl[slot] =
+                (unsigned char)(ls_hash_i64(&key) & MAP_CTRL_H2_LIMIT);
+            table.ctrl[table.cap + slot] = table.ctrl[slot];
             table.len += 1;
-            dummy += 1;
+            table.growth_left -= 1;
+            forged += 1;
         }
         slot += 1;
     }
-    CHECK(table.len == 8);
+    CHECK(table.len == 14);
+    CHECK(table.growth_left == 0);
+    CHECK(map_capacity_ok(&table));
     key = 500;
     value = 5000;
     CHECK(!ls_map_insert(&table, &key, &value, NULL));
-    CHECK(table.cap == 16);
-    CHECK(table.len == 9);
+    CHECK(table.cap == 32);
+    CHECK(table.len == 15);
+    CHECK(map_capacity_ok(&table));
     value_ptr = NULL;
     CHECK(ls_map_get_ptr(&table, &key, &value_ptr));
     CHECK(value_ptr != NULL && *(const int64_t*)value_ptr == 5000);
-    dummy = 0;
-    for (i = 0; i < 6; i += 1) {
+    forged = 0;
+    for (i = 0; i < 12; i += 1) {
         int64_t existing = (int64_t)i;
         value_ptr = NULL;
         if (ls_map_get_ptr(&table, &existing, &value_ptr) &&
-            value_ptr != NULL && *(const int64_t*)value_ptr == (int64_t)i * 10) {
-            dummy += 1;
+            value_ptr != NULL &&
+            *(const int64_t*)value_ptr == (int64_t)i * 10) {
+            forged += 1;
         }
     }
-    CHECK(dummy == 6);
+    CHECK(forged == 12);
+    for (i = 0; i < 2; i += 1) {
+        int64_t existing = 1000 + (int64_t)i;
+        value_ptr = NULL;
+        CHECK(ls_map_get_ptr(&table, &existing, &value_ptr));
+        CHECK(value_ptr != NULL &&
+              *(const int64_t*)value_ptr == 9000 + (int64_t)i);
+    }
     ls_map_clear(&table);
     CHECK(table.len == 0);
     map_free_arrays(&table);
 
-    /* (2) No empty slot, five tombstones, len + 1 == 3/4 load limit. */
+    /* (2) First control group all tombstones: probe wraps to the next group and
+     * reuses the earliest tombstone instead of growing. */
     map_init_i64_i64(&table);
-    for (i = 0; i < 11; i += 1) {
+    for (i = 0; i < 15; i += 1) {
         key = (int64_t)i;
         value = (int64_t)i * 10;
         CHECK(!ls_map_insert(&table, &key, &value, NULL));
     }
-    CHECK(table.cap == 16);
-    CHECK(table.len == 11);
-    for (i = 0; i < 5; i += 1) {
-        key = (int64_t)i;
-        CHECK(ls_map_remove(&table, &key, NULL));
+    CHECK(table.cap == 32);
+    ls_map_clear(&table);
+    CHECK(table.len == 0);
+    CHECK(table.cap == 32);
+    for (i = 0; i < MAP_CTRL_GROUP_WIDTH; i += 1) {
+        table.ctrl[i] = MAP_CTRL_DELETED_BYTE;
+        table.ctrl[table.cap + i] = MAP_CTRL_DELETED_BYTE;
     }
-    CHECK(table.len == 6);
-    slot = 0;
-    dummy = 0;
-    while (dummy < 5) {
-        if (table.states[slot] == MAP_TEST_EMPTY) {
-            key = 2000 + (int64_t)dummy;
-            value = 9500 + (int64_t)dummy;
-            memcpy(table.keys + slot * sizeof(int64_t), &key, sizeof key);
-            memcpy(table.values + slot * sizeof(int64_t), &value, sizeof value);
-            table.states[slot] = MAP_TEST_OCCUPIED;
-            dummy += 1;
+    {
+        size_t empty = 0;
+        for (i = MAP_CTRL_GROUP_WIDTH; i < table.cap; i += 1) {
+            if (table.ctrl[i] == MAP_CTRL_EMPTY_BYTE) {
+                empty += 1;
+            }
         }
-        slot += 1;
+        CHECK(empty == table.cap - MAP_CTRL_GROUP_WIDTH);
+        table.growth_left = empty - table.cap / MAP_CTRL_LOAD_DENOMINATOR;
     }
-    table.len = 11;
-    CHECK(table.cap == 16);
-    key = 777;
-    value = 7770;
+    CHECK(table.growth_left == 12);
+    CHECK(map_capacity_ok(&table));
+    forged = 0;
+    for (key = 0; key < 1000; key += 1) {
+        if (((ls_hash_i64(&key) >> 7) & 1u) == 0u) {
+            forged = 1;
+            break;
+        }
+    }
+    CHECK(forged == 1);
+    CHECK(key < 1000);
+    value = 5000;
     CHECK(!ls_map_insert(&table, &key, &value, NULL));
-    CHECK(table.cap == 16); /* 11 + 1 == 3/4 load: no grow needed */
-    CHECK(table.len == 12);
+    CHECK(table.cap == 32);
+    CHECK(table.len == 1);
+    CHECK(table.growth_left == 12);
+    CHECK(table.ctrl[0] <= MAP_CTRL_H2_LIMIT);
+    CHECK(map_capacity_ok(&table));
     value_ptr = NULL;
     CHECK(ls_map_get_ptr(&table, &key, &value_ptr));
-    CHECK(value_ptr != NULL && *(const int64_t*)value_ptr == 7770);
-    dummy = 0;
-    for (i = 5; i < 11; i += 1) {
-        int64_t existing = (int64_t)i;
-        value_ptr = NULL;
-        if (ls_map_get_ptr(&table, &existing, &value_ptr) &&
-            value_ptr != NULL) {
-            dummy += 1;
-        }
-    }
-    CHECK(dummy == 6);
+    CHECK(value_ptr != NULL && *(const int64_t*)value_ptr == 5000);
     ls_map_clear(&table);
     CHECK(table.len == 0);
     map_free_arrays(&table);
+}
+
+/* ====================================================================== */
+/* v1.6 Unicode, char and shortest-float regressions                      */
+/* ====================================================================== */
+
+static void test_utf8_validation(void) {
+    static const unsigned char latin1[] = {'h', 0xC3, 0xA9, 'l', 'l', 'o'};
+    static const unsigned char euro[] = {0xE2, 0x82, 0xAC};
+    static const unsigned char emoji[] = {0xF0, 0x9F, 0x98, 0x80};
+    static const unsigned char max_scalar[] = {0xF4, 0x8F, 0xBF, 0xBF};
+    static const unsigned char embedded_nul[] = {'a', 0x00, 'b'};
+    static const unsigned char stray_continuation[] = {0x80};
+    static const unsigned char overlong_two[] = {0xC0, 0xAF};
+    static const unsigned char overlong_three[] = {0xE0, 0x9F, 0xBF};
+    static const unsigned char surrogate[] = {0xED, 0xA0, 0x80};
+    static const unsigned char above_max[] = {0xF4, 0x90, 0x80, 0x80};
+    static const unsigned char five_byte[] = {0xF5, 0x80, 0x80, 0x80};
+    static const unsigned char truncated[] = {0xE2, 0x82};
+    static const unsigned char bad_continuation[] = {0xC3, 0x28};
+    LsString* scalar;
+
+    CHECK(ls_rt_utf8_validate(NULL, 0));
+    CHECK(ls_rt_utf8_validate("", 0));
+    CHECK(ls_rt_utf8_validate("ascii text", 10));
+    CHECK(ls_rt_utf8_validate((const char*)latin1, sizeof latin1));
+    CHECK(ls_rt_utf8_validate((const char*)euro, sizeof euro));
+    CHECK(ls_rt_utf8_validate((const char*)emoji, sizeof emoji));
+    CHECK(ls_rt_utf8_validate((const char*)max_scalar, sizeof max_scalar));
+    CHECK(ls_rt_utf8_validate((const char*)embedded_nul, sizeof embedded_nul));
+    CHECK(!ls_rt_utf8_validate((const char*)stray_continuation,
+                               sizeof stray_continuation));
+    CHECK(!ls_rt_utf8_validate((const char*)overlong_two,
+                               sizeof overlong_two));
+    CHECK(!ls_rt_utf8_validate((const char*)overlong_three,
+                               sizeof overlong_three));
+    CHECK(!ls_rt_utf8_validate((const char*)surrogate, sizeof surrogate));
+    CHECK(!ls_rt_utf8_validate((const char*)above_max, sizeof above_max));
+    CHECK(!ls_rt_utf8_validate((const char*)five_byte, sizeof five_byte));
+    CHECK(!ls_rt_utf8_validate((const char*)truncated, sizeof truncated));
+    CHECK(!ls_rt_utf8_validate((const char*)bad_continuation,
+                               sizeof bad_continuation));
+    CHECK(ls_rt_utf8_validate("abc", 2)); /* len 2 of an ASCII string: still valid */
+
+    /* Strings built by the runtime are always valid UTF-8. */
+    scalar = ls_str_from_scalar(0x1F600u);
+    CHECK(ls_rt_utf8_validate(ls_str_data(scalar), ls_str_len(scalar)));
+    ls_release(scalar);
+    scalar = ls_str_from_parts((const char*)latin1, sizeof latin1);
+    CHECK(ls_rt_utf8_validate(ls_str_data(scalar), ls_str_len(scalar)));
+    ls_release(scalar);
+}
+
+static LsString* hello_from_parts(void) {
+    /* "hello" with U+00E9 (two UTF-8 bytes) in place of the first e:
+     * 6 bytes, 5 Unicode scalars. */
+    static const unsigned char bytes[] = {'h', 0xC3, 0xA9, 'l', 'l', 'o'};
+    return ls_str_from_parts((const char*)bytes, sizeof bytes);
+}
+
+static void test_char_api(void) {
+    LsString* text = hello_from_parts();
+    LsString* scalar;
+    LsVec_char chars;
+    uint32_t value = 0;
+    int64_t index;
+
+    CHECK(ls_str_len(text) == 6);
+    CHECK(ls_str_char_count(text) == 5);
+    CHECK(ls_str_is_char_boundary(text, 0));
+    CHECK(!ls_str_is_char_boundary(text, 2)); /* inside the two-byte scalar */
+    CHECK(ls_str_is_char_boundary(text, 3));
+    CHECK(ls_str_is_char_boundary(text, 6));
+    CHECK(!ls_str_is_char_boundary(text, -1));
+    CHECK(!ls_str_is_char_boundary(text, 7));
+    CHECK(ls_str_char_at(text, 0, &value) && value == 'h');
+    CHECK(ls_str_char_at(text, 1, &value) && value == 0xE9u);
+    CHECK(ls_str_char_at(text, 4, &value) && value == 'o');
+    CHECK(!ls_str_char_at(text, 5, &value));
+    CHECK(!ls_str_char_at(text, -1, &value));
+
+    chars = ls_str_chars(text);
+    CHECK(chars.len == 5);
+    CHECK(chars.data != NULL);
+    if (chars.data != NULL) {
+        CHECK(chars.data[0] == 'h');
+        CHECK(chars.data[1] == 0xE9u);
+        CHECK(chars.data[4] == 'o');
+    }
+    ls_vec_free_bytes(chars.data);
+
+    scalar = ls_str_from_scalar(0x20ACu); /* euro sign */
+    CHECK(ls_str_len(scalar) == 3);
+    CHECK_STR(scalar, "\xE2\x82\xAC");
+    ls_release(scalar);
+
+    /* push/pop operate on scalars and detach shared buffers (COW). */
+    scalar = ls_str_cstr("a");
+    {
+        LsString* shared = (LsString*)ls_retain(scalar);
+        bool popped = false;
+        uint32_t removed = 0;
+
+        scalar = ls_str_push_scalar(scalar, 0x1F600u);
+        CHECK_STR(scalar, "a\xF0\x9F\x98\x80");
+        CHECK_STR(shared, "a");
+        ls_release(shared);
+
+        scalar = ls_str_pop_scalar(scalar, &popped, &removed);
+        CHECK(popped);
+        CHECK(removed == 0x1F600u);
+        CHECK_STR(scalar, "a");
+
+        scalar = ls_str_pop_scalar(scalar, &popped, &removed);
+        CHECK(popped);
+        CHECK(removed == 'a');
+        CHECK_STR(scalar, "");
+
+        scalar = ls_str_pop_scalar(scalar, &popped, &removed);
+        CHECK(!popped);
+        CHECK_STR(scalar, "");
+    }
+    ls_release(scalar);
+
+    /* Every prefix boundary reported by is_char_boundary must be a valid
+     * split point. */
+    for (index = 0; index <= (int64_t)ls_str_len(text); index += 1) {
+        if (ls_str_is_char_boundary(text, index)) {
+            LsString* head = ls_str_substring(text, 0, (size_t)index,
+                                              TEST_FILE, 0, 0);
+            CHECK(head != NULL);
+            CHECK(ls_rt_utf8_validate(ls_str_data(head), ls_str_len(head)));
+            ls_release(head);
+        }
+    }
+    ls_release(text);
+}
+
+static LsString* from_bytes(const unsigned char* bytes, size_t len) {
+    return ls_str_from_parts((const char*)bytes, len);
+}
+
+static void test_string_unicode(void) {
+    /* Full default case mappings. */
+    {
+        static const unsigned char sharp_s[] = {'a', 0xC3, 0x9F, 'e', 'x'};
+        LsString* text = from_bytes(sharp_s, sizeof sharp_s);
+        LsString* upper = ls_str_to_uppercase(text);
+        CHECK_STR(upper, "ASSEX"); /* U+00DF expands to "SS" */
+        ls_release(upper);
+        ls_release(text);
+    }
+    {
+        static const unsigned char dotted_i[] = {0xC4, 0xB0}; /* U+0130 */
+        LsString* text = from_bytes(dotted_i, sizeof dotted_i);
+        LsString* lower = ls_str_to_lowercase(text);
+        CHECK_STR(lower, "i\xCC\x87"); /* i + COMBINING DOT ABOVE */
+        ls_release(lower);
+        ls_release(text);
+    }
+    {
+        static const unsigned char j_caron[] = {0xC7, 0xB0}; /* U+01F0 */
+        LsString* text = from_bytes(j_caron, sizeof j_caron);
+        LsString* upper = ls_str_to_uppercase(text);
+        CHECK_STR(upper, "J\xCC\x8C"); /* J + COMBINING CARON */
+        ls_release(upper);
+        ls_release(text);
+    }
+
+    /* Unicode White_Space trimming. */
+    {
+        static const unsigned char spaced[] = {0x20, 0xC2, 0xA0, 'x',
+                                               0x20, 0xE2, 0x80, 0x83};
+        LsString* text = from_bytes(spaced, sizeof spaced);
+        LsString* trimmed = ls_str_trim(text);
+        CHECK_STR(trimmed, "x"); /* space, NBSP and EM SPACE removed */
+        ls_release(trimmed);
+        ls_release(text);
+    }
+    {
+        static const unsigned char zero_width[] = {0xE2, 0x80, 0x8B, 'x'};
+        LsString* text = from_bytes(zero_width, sizeof zero_width);
+        LsString* trimmed = ls_str_trim(text);
+        CHECK(trimmed != NULL && ls_str_len(trimmed) == 4);
+        CHECK_STR(trimmed, "\xE2\x80\x8Bx"); /* U+200B is not White_Space */
+        ls_release(trimmed);
+        ls_release(text);
+    }
+
+    /* An empty pattern in replace() must iterate scalars, not bytes. */
+    {
+        LsString* replaced = replace_cstr("h\xC3\xA9llo", "", "-");
+        CHECK_STR(replaced, "-h-\xC3\xA9-l-l-o-");
+        ls_release(replaced);
+    }
+
+    /* An empty separator in split() must also iterate scalars. */
+    {
+        LsString* text = hello_from_parts();
+        LsString* separator = ls_str_cstr("");
+        LsVec_String pieces = ls_str_split(text, separator);
+        size_t i;
+
+        CHECK(pieces.len == 7);
+        if (pieces.len == 7) {
+            CHECK_STR(pieces.data[0], "");
+            CHECK_STR(pieces.data[1], "h");
+            CHECK_STR(pieces.data[2], "\xC3\xA9");
+            CHECK_STR(pieces.data[3], "l");
+            CHECK_STR(pieces.data[4], "l");
+            CHECK_STR(pieces.data[5], "o");
+            CHECK_STR(pieces.data[6], "");
+        }
+        for (i = 0; i < pieces.len; i += 1) {
+            CHECK(ls_rt_utf8_validate(ls_str_data(pieces.data[i]),
+                                      ls_str_len(pieces.data[i])));
+        }
+        ls_vec_string_free(&pieces);
+        ls_release(separator);
+        ls_release(text);
+    }
+
+    /* String Debug escaping: printable scalars stay raw, marks are escaped. */
+    {
+        static const unsigned char mixed[] = {
+            'a', 0xC3, 0xA9,             /* a + U+00E9 */
+            0xCC, 0x81,                  /* U+0301 COMBINING ACUTE */
+            '\t', '"', '\\'};
+        LsString* text = from_bytes(mixed, sizeof mixed);
+        LsString* rendered = ls_fmt_debug_string(ls_format_begin(0), text);
+        CHECK_STR(rendered,
+                  "\"a\xC3\xA9" "\\u{301}" "\\t" "\\\"" "\\\\" "\"");
+        ls_release(rendered);
+        ls_release(text);
+    }
+    {
+        static const unsigned char with_nul[] = {'a', 0x00, 'b'};
+        LsString* text = from_bytes(with_nul, sizeof with_nul);
+        LsString* rendered = ls_fmt_debug_string(ls_format_begin(0), text);
+        CHECK_STR(rendered, "\"a\\u{0}b\"");
+        ls_release(rendered);
+        ls_release(text);
+    }
+}
+
+static LsString* render_char(uint32_t v) {
+    return ls_fmt_char(ls_format_begin(0), v);
+}
+
+static LsString* render_char_debug(uint32_t v) {
+    return ls_fmt_char_debug(ls_format_begin(0), v);
+}
+
+static void test_char_formatting(void) {
+    CHECK_RENDER(render_char('a'), "a");
+    CHECK_RENDER(render_char(0xE9u), "\xC3\xA9");
+    CHECK_RENDER(render_char_debug('a'), "'a'");
+    CHECK_RENDER(render_char_debug(0x27u), "'\\''");
+    CHECK_RENDER(render_char_debug('\n'), "'\\n'");
+    CHECK_RENDER(render_char_debug('\\'), "'\\\\'");
+    CHECK_RENDER(render_char_debug(0x0301u), "'\\u{301}'");
+    CHECK_RENDER(render_char_debug(0xE9u), "'\xC3\xA9'");
+    CHECK_RENDER(render_char_debug(0x00u), "'\\u{0}'");
+}
+
+static void test_format_float_shortest(void) {
+    /* Golden values: the shortest representation must match Rust's Display
+     * and Debug output. */
+    CHECK_RENDER(render_f64(0.0), "0");
+    CHECK_RENDER(render_f64_debug(0.0), "0.0");
+    CHECK_RENDER(render_f64(1.0), "1");
+    CHECK_RENDER(render_f64_debug(1.0), "1.0");
+    CHECK_RENDER(render_f64(0.1), "0.1");
+    CHECK_RENDER(render_f64_debug(0.1), "0.1");
+    CHECK_RENDER(render_f64(1.0 / 3.0), "0.3333333333333333");
+    CHECK_RENDER(render_f64_debug(1.0 / 3.0), "0.3333333333333333");
+    CHECK_RENDER(render_f64(1e16), "10000000000000000");
+    CHECK_RENDER(render_f64_debug(1e16), "1e16");
+    CHECK_RENDER(render_f64(1e-5), "0.00001");
+    CHECK_RENDER(render_f64_debug(1e-5), "1e-5");
+    CHECK_RENDER(render_f64_debug(1e-4), "0.0001");
+    CHECK_RENDER(render_f64(-0.0), "-0");
+    CHECK_RENDER(render_f64_debug(-0.0), "-0.0");
+    CHECK_RENDER(render_f64(INFINITY), "inf");
+    CHECK_RENDER(render_f64_debug(INFINITY), "inf");
+    CHECK_RENDER(render_f64(-INFINITY), "-inf");
+    CHECK_RENDER(render_f64(NAN), "NaN");
+    CHECK_RENDER(render_f64_debug(NAN), "NaN");
+    CHECK_RENDER(render_f64_debug(5e-324), "5e-324");
+    CHECK_RENDER(render_f64_debug(1.7976931348623157e308),
+                 "1.7976931348623157e308");
+    CHECK_RENDER(render_f64_debug(2.2250738585072014e-308),
+                 "2.2250738585072014e-308");
+    CHECK_RENDER(render_f64_debug(9007199254740992.0), "9007199254740992.0");
+    CHECK_RENDER(render_f64_debug(0.30000000000000004),
+                 "0.30000000000000004");
+    CHECK_RENDER(render_f32(0.0f), "0");
+    CHECK_RENDER(render_f32_debug(0.0f), "0.0");
+    CHECK_RENDER(render_f32(1.0f / 3.0f), "0.33333334");
+    CHECK_RENDER(render_f32_debug(1.0f / 3.0f), "0.33333334");
+    CHECK_RENDER(render_f32_debug(3.4028235e38f), "3.4028235e38");
+    CHECK_RENDER(render_f32(INFINITY), "inf");
+    CHECK_RENDER(render_f32(NAN), "NaN");
+    /* Shortest-round-trip identity on the single-precision boundary: these
+     * catch a stale runtime snapshot being embedded in the compiler. */
+    CHECK_RENDER(render_f64(16777217.0), "16777217");
+    CHECK_RENDER(render_f32(16777216.0f), "16777216");
+    CHECK_RENDER(render_f32(16777217.0f), "16777216");
+    CHECK_RENDER(render_f32(123456789.0f), "123456790");
+}
+
+static void test_str_static(void) {
+    static const char literal[] = {'l', 'i', 't', 0x00, 'x'}; /* embedded NUL */
+    size_t live_before = ls_rt_test_live_allocations();
+    LsString* interned = ls_str_static(literal, sizeof literal);
+
+    CHECK(interned != NULL);
+    CHECK(ls_str_len(interned) == sizeof literal);
+    CHECK(ls_str_data(interned) != NULL &&
+          memcmp(ls_str_data(interned), literal, sizeof literal) == 0);
+    /* Immortal allocations are excluded from the live-object accounting. */
+    CHECK(ls_rt_test_live_allocations() == live_before);
+    ls_release(interned);
+    /* Release drops the handle but must never destroy interned bytes. */
+    CHECK(ls_str_len(interned) == sizeof literal);
+    CHECK(ls_str_data(interned) != NULL &&
+          memcmp(ls_str_data(interned), literal, sizeof literal) == 0);
+    CHECK(ls_rt_test_live_allocations() == live_before);
 }
 
 /* ====================================================================== */
@@ -3057,6 +3450,12 @@ static void run_all(const char* io_path) {
     test_map_stress_i64();
     test_map_stress_string_keys();
     test_map_adversarial_states();
+    test_utf8_validation();
+    test_char_api();
+    test_string_unicode();
+    test_char_formatting();
+    test_format_float_shortest();
+    test_str_static();
     test_formatting();
     test_format_specs();
     test_option_result();
@@ -3143,6 +3542,12 @@ static int run_panic_mode(const char* mode) {
     } else if (strcmp(mode, "--panic-bounds") == 0) {
         LsString* s = ls_str_cstr("abc");
         (void)ls_str_substring(s, 99, 0, TEST_FILE, 11, 8);
+        ls_release(s);
+    } else if (strcmp(mode, "--panic-bounds-boundary") == 0) {
+        static const char hello[] = {'h', (char)0xC3, (char)0xA9, 'l', 'l',
+                                     'o'};
+        LsString* s = ls_str_from_parts(hello, sizeof hello);
+        (void)ls_str_substring(s, 2, 1, TEST_FILE, 13, 4);
         ls_release(s);
     } else if (strcmp(mode, "--panic-explicit") == 0) {
         ls_panic_cstr(TEST_FILE, 12, 9, "explicit panic");

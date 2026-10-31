@@ -20,9 +20,12 @@
  *     structs (frozen layouts, see below). Copied by the codegen-emitted
  *     copy/release helpers, never by the runtime.
  *   - All runtime symbols use the "ls_" prefix; generated code uses "lsaca_".
- *   - Strings, vectors and Options are byte/ownership containers; the runtime
- *     never validates UTF-8. Case conversion and trim are ASCII only, other
- *     bytes are copied through unchanged.
+ *   - LsString payloads are always valid UTF-8, and the runtime preserves
+ *     that invariant: the character/String methods reject or split only at
+ *     scalar boundaries, case conversion and trim use the full Unicode
+ *     tables in lsaca_rt_unicode.c, and the IO entry points (read_line,
+ *     ls_args, ls_read_file) validate whatever the process provides. Vectors
+ *     and Options are plain byte/ownership containers for their element type.
  *   - The runtime is not thread safe (the language has no threads).
  *   - Define LSACA_DEBUG (any value) when compiling the runtime and generated
  *     code in a debug configuration to enable leak checking. The generated
@@ -146,11 +149,27 @@ typedef struct LsString {
 LsString* ls_str_new(void);                            /* empty */
 LsString* ls_str_cstr(const char* cstr);               /* copies a C string */
 LsString* ls_str_from_parts(const char* bytes, size_t len); /* copies len bytes */
+/* Immortal interned string: copies `len` bytes (embedded NULs included) into a
+ * fresh LsString whose allocation is immortal. ls_release() only drops the
+ * reference count and never destroys the object; the allocation is not counted
+ * or reported by the debug leak report. The returned handle is owned by the
+ * caller. Generated code builds each distinct literal once at startup and
+ * retains the cached handle per use. */
+LsString* ls_str_static(const char* data, size_t len);
 LsString* ls_str_with_capacity(size_t capacity);       /* empty string with room */
+LsString* ls_str_from_scalar(uint32_t scalar);         /* one Unicode scalar */
 
 /* Observe a String (borrowed; the handle stays owned by the caller). */
 size_t ls_str_len(const LsString* s);
 bool ls_str_is_empty(const LsString* s);
+/* Number of Unicode scalar values in the string (not bytes). The buffer is
+ * always valid UTF-8, so this never fails. */
+int64_t ls_str_char_count(const LsString* s);
+/* Copy the scalar with the given character index (0 based, counting Unicode
+ * scalar values) into *out. Returns false when the index is out of range. */
+bool ls_str_char_at(const LsString* s, int64_t char_index, uint32_t* out);
+/* True when the byte offset is 0, s->len, or the start of a UTF-8 sequence. */
+bool ls_str_is_char_boundary(const LsString* s, int64_t byte_index);
 const char* ls_str_data(const LsString* s); /* NUL terminated byte view */
 bool ls_str_eq(const LsString* a, const LsString* b);
 int32_t ls_str_cmp(const LsString* a, const LsString* b); /* byte order */
@@ -182,6 +201,13 @@ LsString* ls_str_concat(const LsString* a, const LsString* b);
 LsString* ls_str_push_str(LsString* s, const LsString* suffix);
 LsString* ls_str_push_cstr(LsString* s, const char* suffix);
 LsString* ls_str_push_char(LsString* s, char c); /* appends one byte */
+/* Append one Unicode scalar value, encoded as UTF-8 (String::push(char)).
+ * Same copy-on-write ownership contract as the other mutators. */
+LsString* ls_str_push_scalar(LsString* s, uint32_t scalar);
+/* Remove the last Unicode scalar value (String::pop). The handle is consumed
+ * and returned like every other copy-on-write mutator. *out_some reports
+ * whether the string was non-empty; *out_scalar receives the removed scalar. */
+LsString* ls_str_pop_scalar(LsString* s, bool* out_some, uint32_t* out_scalar);
 LsString* ls_str_clear(LsString* s);             /* len = 0, keeps capacity */
 LsString* ls_str_reserve(LsString* s, size_t additional);
 
@@ -195,12 +221,17 @@ int64_t ls_str_find(const LsString* haystack, const LsString* needle);
 /* Transformations: return a new owned string, the input is borrowed. */
 LsString* ls_str_replace(const LsString* s, const LsString* from,
                          const LsString* to);
+/* Full Unicode default case mapping: one scalar may expand to several
+ * (for example sharp s upper-cases to "SS"); the buffer stays valid UTF-8. */
 LsString* ls_str_to_uppercase(const LsString* s);
 LsString* ls_str_to_lowercase(const LsString* s);
-LsString* ls_str_trim(const LsString* s); /* ASCII whitespace */
+/* Trim leading and trailing Unicode White_Space scalars. */
+LsString* ls_str_trim(const LsString* s);
 
 /* Bounds-checked; panic with the given source location when out of range.
- * substring(s, start, len): start + len must be <= s.len. */
+ * substring(s, start, len): start + len must be <= s.len and both start and
+ * start + len must fall on a UTF-8 scalar boundary; the panic messages match
+ * Rust's str slicing (out of bounds / not a char boundary). */
 LsString* ls_str_substring(const LsString* s, size_t start, size_t len,
                            const char* file, int32_t line, int32_t col);
 LsString* ls_str_repeat(const LsString* s, size_t count, const char* file,
@@ -318,6 +349,37 @@ typedef struct LsRes_String_String {
     } u;
 } LsRes_String_String;
 
+/* Vec<char>: data is a malloc'd array of uint32_t scalars (frozen layout). */
+typedef struct LsVec_char {
+    size_t len;
+    size_t cap;
+    uint32_t* data;
+} LsVec_char;
+
+/* Option<char>: tag 0 = None, tag 1 = Some. */
+typedef struct LsOpt_char {
+    int32_t tag;
+    union {
+        uint32_t some;
+    } u;
+} LsOpt_char;
+
+/* Collect every Unicode scalar value into a fresh Vec<char> (owned). */
+LsVec_char ls_str_chars(const LsString* s);
+
+static inline LsOpt_char ls_opt_char_none(void) {
+    LsOpt_char o;
+    o.tag = 0;
+    o.u.some = 0;
+    return o;
+}
+static inline LsOpt_char ls_opt_char_some(uint32_t some) {
+    LsOpt_char o;
+    o.tag = 1;
+    o.u.some = some;
+    return o;
+}
+
 /* LsVec_String operations. The vector owns one reference per element. */
 LsVec_String ls_vec_string_new(void);
 /* Split on a separator (declared here because it returns LsVec_String). Rust
@@ -378,17 +440,23 @@ static inline LsRes_String_String ls_res_string_err(LsString* err) {
  * (typedef struct LsMap_K_V { LsMapTable table; }) and never touches the table
  * internals directly; the runtime owns only the three slot arrays.
  *
- * Algorithm (frozen contract, see DESIGN 5.5):
- *   - Open addressing with linear probing, power-of-two capacity, load factor
- *     3/4 and tombstones. The capacity starts at 8 with the first insert and
- *     doubles when an insert would exceed the load factor.
- *   - Hash: FNV-1a 64 over the bytes (offset basis 0xcbf29ce484222325, prime
- *     0x100000001b3) followed by the splitmix64 finalizer
- *     (x ^= x >> 30; x *= 0xbf58476d1ce4e5b9; x ^= x >> 27;
- *      x *= 0x94d049bb133111eb; x ^= x >> 31 over uint64_t). i64/u64/bool hash
- *     their 64-bit value (bool as 0/1) through the same finalizer; strings hash
- *     their bytes. There is no randomized seed: hashes are deterministic for a
- *     given runtime version.
+ * Algorithm (frozen contract): a SwissTable style hash map with 16 slot
+ * groups.
+ *   - Control bytes: one uint8_t per slot followed by 16 mirror bytes, so a
+ *     16 slot group can always be loaded as two adjacent uint64_t words. The
+ *     value is 0x00..0x7F for an occupied slot (the low 7 bits of the key
+ *     hash, called H2), 0x80 for empty and 0xFE for a deleted (tombstone)
+ *     slot. The byte masks are computed with portable SWAR arithmetic on two
+ *     64-bit loads (no SSE, no unaligned or strict-aliasing tricks, no
+ *     platform intrinsics).
+ *   - Probing: the group index is (hash >> 7) & (cap / 16 - 1), so a group is
+ *     16 consecutive slots; groups are probed forward (wrapping) until an
+ *     empty control byte stops the search. Within a group every matching H2
+ *     candidate is compared with eq_key().
+ *   - Capacity is a power of two, at least 16, and 0 before the first insert.
+ *     The load factor is 7/8: the table grows when growth_left reaches zero;
+ *     growth doubles the capacity when len * 8 >= cap * 7 and otherwise
+ *     rehashes at the same capacity (dropping tombstones).
  *   - Iteration walks slot indices in order. That order is deterministic for a
  *     given sequence of operations but is an implementation detail, not part of
  *     the language contract.
@@ -409,7 +477,7 @@ static inline LsRes_String_String ls_res_string_err(LsString* err) {
  *     generation uses copy_key() for the keys() snapshot and copy_value() for
  *     get() and old-value outputs.
  * The generated wrapper's drop helper must call ls_map_clear() and then free()
- * keys, values and states; all three pointers are NULL before the first insert.
+ * keys, values and ctrl; all three pointers are NULL before the first insert.
  *
  * Preconditions: the ls_map_init() callbacks are all non-NULL and key_size /
  * value_size are the non-zero C sizeof of the language key/value types. The
@@ -420,9 +488,12 @@ static inline LsRes_String_String ls_res_string_err(LsString* err) {
 typedef struct LsMapTable {
     unsigned char* keys;      /* slot array, cap * key_size bytes   */
     unsigned char* values;    /* slot array, cap * value_size bytes */
-    unsigned char* states;    /* 0 empty, 1 occupied, 2 tombstone   */
+    /* cap + 16 control bytes; the last 16 mirror the first 16. Empty slots
+     * are 0x80, deleted slots 0xFE, occupied slots store H2 (0x00..0x7F). */
+    unsigned char* ctrl;
     size_t len;
-    size_t cap;               /* power of two, 0 before first insert */
+    size_t cap;               /* power of two (>= 16), 0 before first insert */
+    size_t growth_left;       /* inserts before the next resize */
     size_t key_size;
     size_t value_size;
     uint64_t (*hash_key)(const void* key_bytes);
@@ -468,8 +539,11 @@ bool ls_map_iter_next(LsMapIter* iter, const void** key_ptr,
                       const void** value_ptr);
 
 /* Deterministic hashing/equality callbacks for the frozen key types of the
- * builtin HashMap. The hash functions take a pointer to the stored key bytes
- * and return the frozen hash described above. ls_hash_string_slot() interprets
+ * builtin HashMap (i64, u64, bool, String, char). The hash functions take a
+ * pointer to the stored key bytes and return the full 64-bit hash; the map
+ * itself derives the group index and H2 from it. ls_hash_bytes() is the
+ * wyhash style byte hash with fixed seeds (no randomized state), so hashes are
+ * deterministic for a given runtime version. ls_hash_string_slot() interprets
  * the slot as an LsString* handle (NULL hashes as 0) and hashes the string
  * bytes. The eq functions take two key byte pointers and compare the language
  * values; strings compare content (NULL only equals NULL). */
@@ -478,10 +552,12 @@ uint64_t ls_hash_i64(const void* slot);
 uint64_t ls_hash_u64(const void* slot);
 uint64_t ls_hash_bool(const void* slot);
 uint64_t ls_hash_string_slot(const void* slot);
+uint64_t ls_hash_char(const void* slot);
 bool ls_eq_i64(const void* a, const void* b);
 bool ls_eq_u64(const void* a, const void* b);
 bool ls_eq_bool(const void* a, const void* b);
 bool ls_eq_string_slot(const void* a, const void* b);
+bool ls_eq_char(const void* a, const void* b);
 
 /* ====================================================================== */
 /* Formatting                                                             */
@@ -505,6 +581,10 @@ LsString* ls_format_push_cstr(LsString* acc, const char* cstr);
 LsString* ls_fmt_i64(LsString* acc, int64_t v);
 LsString* ls_fmt_u64(LsString* acc, uint64_t v);
 LsString* ls_fmt_bool(LsString* acc, bool v);
+/* A char: Display appends the raw UTF-8 encoding, Debug appends a quoted Rust
+ * style character literal (for example 'a', '\n', '\u{1F600}'). */
+LsString* ls_fmt_char(LsString* acc, uint32_t v);
+LsString* ls_fmt_char_debug(LsString* acc, uint32_t v);
 /* Shortest decimal representation that round-trips to the same bits.
  * f64 and f32 are formatted independently (0.1f32 prints as "0.1"). */
 LsString* ls_fmt_f64(LsString* acc, double v);
@@ -667,15 +747,23 @@ LS_RT_DECL_CHECKED_UNSIGNED(u64, uint64_t)
  * every call. The caller owns the returned vector (release with
  * ls_vec_string_free). */
 LsVec_String ls_args(void);
+/* Located variants used by generated code: validate that every argument is
+ * valid UTF-8 and panic at the given location otherwise (the panic message is
+ * "arguments contain invalid UTF-8"). */
+LsVec_String ls_args_at(const char* file, int32_t line, int32_t col);
 
 /* Read one line from stdin without the trailing newline ("\r\n" is
  * normalized). Returns tag 0 (None) on EOF, tag 1 (Some) with an owned string
  * otherwise. */
 LsOpt_String ls_read_line(void);
+/* Located variant used by generated code: panics with "stream did not contain
+ * valid UTF-8" when stdin is not valid UTF-8. */
+LsOpt_String ls_read_line_at(const char* file, int32_t line, int32_t col);
 
-/* Read a whole file (binary safe, no UTF-8 validation). On error the result
- * has tag 1 (Err) and an owned OS error message such as
- * "No such file or directory (os error 2)". */
+/* Read a whole file. The contents must be valid UTF-8: an invalid file yields
+ * tag 1 (Err) with the message "stream did not contain valid UTF-8" instead of
+ * panicking. On other errors the result has tag 1 (Err) and an owned OS error
+ * message such as "No such file or directory (os error 2)". */
 LsRes_String_String ls_read_file(const LsString* path);
 
 /* Write a whole file (truncates it first). On success tag 0 (Ok) with an empty

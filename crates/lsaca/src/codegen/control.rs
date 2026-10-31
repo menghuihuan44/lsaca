@@ -158,7 +158,7 @@ impl<'a> Gen<'a> {
     /// Copy the values selected by a pattern out of `source` into the
     /// predeclared variables.
     fn bind_pattern(&mut self, pat: &HPat, source: &str) {
-        self.bind_pattern_mode(pat, source, false);
+        self.bind_pattern_mode(pat, source, false, false);
     }
 
     /// Bind the variables of a `let` pattern whose initialiser may be a
@@ -177,7 +177,7 @@ impl<'a> Gen<'a> {
             scrutinee_ty = *inner;
             ref_mode = true;
         }
-        self.bind_pattern_mode(pat, &source, ref_mode);
+        self.bind_pattern_mode(pat, &source, ref_mode, false);
     }
 
     /// Bind the variables of a pattern.
@@ -187,7 +187,15 @@ impl<'a> Gen<'a> {
     /// instead of copying its value: the binding itself has reference type.
     /// Test paths and binding paths read through the same dereferenced source,
     /// so nested structural patterns work unchanged.
-    fn bind_pattern_mode(&mut self, pat: &HPat, source: &str, ref_mode: bool) {
+    ///
+    /// With `move_bindings` set the pattern belongs to a consuming, unguarded
+    /// match arm: a by-value binding steals the selected value out of the
+    /// scrutinee instead of copying it (Rust pattern bindings move). The
+    /// selected place is raw-zeroed and the binding becomes its owner; see
+    /// [`Gen::zero_release_is_inert`] for when that is sound. Guarded arms
+    /// keep the copying form because the bindings are created before the guard
+    /// is evaluated and a rejecting guard would have to move the values back.
+    fn bind_pattern_mode(&mut self, pat: &HPat, source: &str, ref_mode: bool, move_bindings: bool) {
         match &pat.kind {
             HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => {}
             HPatKind::Bind { c_name, .. } => {
@@ -202,6 +210,21 @@ impl<'a> Gen<'a> {
                         self.ctype(&pat.ty),
                         source
                     ));
+                } else if move_bindings
+                    && !self.is_trivial_copy(&pat.ty)
+                    && self.zero_release_is_inert(&pat.ty)
+                {
+                    // A by-value binding in a consuming, unguarded match arm
+                    // moves the value out of the scrutinee: Rust pattern
+                    // bindings move, they do not clone. Stealing the value is
+                    // sound because releasing the raw-zeroed place it leaves
+                    // behind is a no-op, and the scrutinee owner is released
+                    // exactly once at the end of the match.
+                    self.emit_release_guarded(&pat.ty, c_name, self.live_flag(c_name).as_deref());
+                    self.w.line(format!("{} = {};", c_name, source));
+                    self.w
+                        .line(format!("{} = {};", source, self.raw_zero_expr(&pat.ty)));
+                    self.set_live(c_name, true);
                 } else {
                     // Pattern bindings read their value out of the scrutinee
                     // temporary: copy Copy values and retain managed ones.
@@ -215,7 +238,7 @@ impl<'a> Gen<'a> {
             HPatKind::Tuple(parts) => {
                 for (index, part) in parts.iter().enumerate() {
                     let sub = format!("({}).{}", source, types::positional_field(index));
-                    self.bind_pattern_mode(part, &sub, ref_mode);
+                    self.bind_pattern_mode(part, &sub, ref_mode, move_bindings);
                 }
             }
             HPatKind::Struct {
@@ -230,7 +253,7 @@ impl<'a> Gen<'a> {
                         .map(|field| field.name.clone())
                         .unwrap_or_else(|| format!("field{}", index));
                     let sub = format!("({}).{}", source, types::field_cname(&name));
-                    self.bind_pattern_mode(part, &sub, ref_mode);
+                    self.bind_pattern_mode(part, &sub, ref_mode, move_bindings);
                 }
             }
             HPatKind::Enum {
@@ -253,7 +276,7 @@ impl<'a> Gen<'a> {
                         types::variant_member(&name),
                         types::positional_field(index)
                     );
-                    self.bind_pattern_mode(part, &sub, ref_mode);
+                    self.bind_pattern_mode(part, &sub, ref_mode, move_bindings);
                 }
             }
             HPatKind::OptionSome(inner) => {
@@ -263,7 +286,7 @@ impl<'a> Gen<'a> {
                     types::UNION_FIELD,
                     types::OPTION_SOME_MEMBER
                 );
-                self.bind_pattern_mode(inner, &sub, ref_mode);
+                self.bind_pattern_mode(inner, &sub, ref_mode, move_bindings);
             }
             HPatKind::ResultOk(inner) => {
                 let sub = format!(
@@ -272,7 +295,7 @@ impl<'a> Gen<'a> {
                     types::UNION_FIELD,
                     types::RESULT_OK_MEMBER
                 );
-                self.bind_pattern_mode(inner, &sub, ref_mode);
+                self.bind_pattern_mode(inner, &sub, ref_mode, move_bindings);
             }
             HPatKind::ResultErr(inner) => {
                 let sub = format!(
@@ -281,7 +304,7 @@ impl<'a> Gen<'a> {
                     types::UNION_FIELD,
                     types::RESULT_ERR_MEMBER
                 );
-                self.bind_pattern_mode(inner, &sub, ref_mode);
+                self.bind_pattern_mode(inner, &sub, ref_mode, move_bindings);
             }
             HPatKind::Or(alternatives) => {
                 // Bind the variables from whichever alternative matched.
@@ -294,7 +317,7 @@ impl<'a> Gen<'a> {
                     self.gen_match_tests(alternative, source, &matched);
                     self.w.line(format!("if ({}) {{", matched));
                     self.w.indent();
-                    self.bind_pattern_mode(alternative, source, ref_mode);
+                    self.bind_pattern_mode(alternative, source, ref_mode, move_bindings);
                     self.w.dedent();
                     self.w.line("}");
                 }
@@ -488,7 +511,16 @@ impl<'a> Gen<'a> {
                 _ => None,
             };
             if moved_whole.is_none() {
-                self.bind_pattern_mode(&arm.pat, &source, ref_mode);
+                // A consuming arm without a guard binds by move: Rust pattern
+                // bindings take ownership of the matched values instead of
+                // cloning them. Guarded arms keep the copying form because
+                // their bindings exist before the guard result is known.
+                self.bind_pattern_mode(
+                    &arm.pat,
+                    &source,
+                    ref_mode,
+                    !ref_mode && arm.guard.is_none(),
+                );
             }
             let guard_frame = self.frames.len();
             self.push_frame();
@@ -684,17 +716,14 @@ impl<'a> Gen<'a> {
     fn gen_literal_test(&mut self, lit: &HLit, source: &str, matched: &str) {
         match lit {
             HLit::Str(text) => {
-                let literal = self.new_plain(&Ty::String, "pl");
-                self.w.line(format!(
-                    "{} = ls_str_cstr({});",
-                    literal,
-                    util::c_string_literal(text)
-                ));
+                // A string literal pattern compares against the immortal
+                // interned copy: no allocation, no release, and embedded NUL
+                // bytes compare exactly like the occurrence of the literal.
+                let literal = self.interned_address(text);
                 self.w.line(format!(
                     "if (!ls_str_eq(({}), ({}))) {{ {} = false; }}",
                     source, literal, matched
                 ));
-                self.w.line(format!("ls_release({});", literal));
             }
             HLit::Int { value, int_ty } => {
                 let literal = util::int_literal(*value, *int_ty);
@@ -714,6 +743,13 @@ impl<'a> Gen<'a> {
                 let literal = if *value { "true" } else { "false" };
                 self.w.line(format!(
                     "if (({}) != {}) {{ {} = false; }}",
+                    source, literal, matched
+                ));
+            }
+            HLit::Char(value) => {
+                let literal = util::char_literal(*value);
+                self.w.line(format!(
+                    "if (({}) != ({})) {{ {} = false; }}",
                     source, literal, matched
                 ));
             }

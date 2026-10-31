@@ -66,12 +66,32 @@ impl Default for CodegenOptions {
 pub struct Generated {
     pub main_c: String,
     pub cmake: String,
+    /// Extra C translation units next to main.c. Empty for the usual
+    /// single-translation-unit project; large programs are split into main.c
+    /// plus up to 8 units so the C compiler can compile them in parallel.
+    /// main.c is always [Generated::main_c] and never repeated here.
+    pub units: Vec<GeneratedUnit>,
+}
+
+/// One extra C translation unit of a split project.
+///
+/// The file name is relative to the generated project directory, for example
+/// lsaca_unit_1.c.
+#[derive(Debug, Clone)]
+pub struct GeneratedUnit {
+    pub file_name: String,
+    pub contents: String,
 }
 
 /// Generate the C project for a checked program.
 pub fn generate(program: &hir::Program, options: &CodegenOptions) -> Generated {
     let registry = types::TypeRegistry::collect(program);
-    let main_c = items::generate_main_c(program, &registry, options);
-    let cmake = cmake::render(&options.program_name, &program.name);
-    Generated { main_c, cmake }
+    let (main_c, units) = items::generate_project(program, &registry, options);
+    let unit_file_names: Vec<String> = units.iter().map(|unit| unit.file_name.clone()).collect();
+    let cmake = cmake::render(&options.program_name, &program.name, &unit_file_names);
+    Generated {
+        main_c,
+        cmake,
+        units,
+    }
 }

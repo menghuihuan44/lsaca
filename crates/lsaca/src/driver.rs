@@ -32,8 +32,55 @@ use crate::hir;
 use crate::lexer;
 use crate::parser;
 use crate::runtime;
-use crate::span::SourceFile;
+use crate::span::{SourceFile, Span};
 use crate::typeck;
+
+/// Stack size of the worker thread that runs the recursive compiler passes.
+///
+/// The parser rejects syntax nested deeper than 128 AST levels, and every later
+/// pass walks the tree recursively. The type checker needs roughly 10 KiB of
+/// stack per level in a debug build, so on the default 1 MiB main thread a legal
+/// program with about 99 nested expressions used to abort with a stack overflow
+/// (exit code 0xC00000FD) instead of compiling. A 64 MiB thread keeps every
+/// accepted program safe (128 levels need well under 2 MiB); the main thread
+/// stack is left untouched for the rest of the process.
+const COMPILER_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+/// Run one recursive compiler pass on a worker thread with a large stack.
+///
+/// Returns the panic payload when the thread could not be spawned or when the
+/// pass panicked. Both are internal compiler errors: the type checker reports
+/// them as a diagnostic, while the code generator re-raises the panic.
+fn run_on_compiler_stack<T, F>(work: F) -> Result<T, Box<dyn std::any::Any + Send>>
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .name("lsaca-compiler".to_string())
+            .stack_size(COMPILER_STACK_SIZE)
+            .spawn_scoped(scope, work)
+        {
+            Ok(handle) => handle.join(),
+            Err(error) => Err(
+                Box::new(format!("could not start the compiler thread: {error}"))
+                    as Box<dyn std::any::Any + Send>,
+            ),
+        }
+    })
+}
+
+/// Describe a panic payload passed through run_on_compiler_stack.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_string();
+    }
+    "internal compiler error".to_string()
+}
 
 /// Front-end pipeline: lex, parse and type check one source file.
 pub struct Frontend {
@@ -81,8 +128,26 @@ impl Frontend {
                 return Err(diagnostics);
             }
         };
-        let (result, type_diagnostics) =
-            typeck::check_reporting_with_prelude(&ast, prelude, &self.file);
+        // Type checking and HIR lowering recurse once per AST level, so they
+        // run on the large-stack worker thread: the parser already guarantees
+        // that accepted syntax is at most 128 levels deep, which overflows the
+        // default main-thread stack in debug builds.
+        let checked = run_on_compiler_stack(|| {
+            typeck::check_reporting_with_prelude(&ast, prelude, &self.file)
+        });
+        let (result, type_diagnostics) = match checked {
+            Ok(checked) => checked,
+            Err(payload) => {
+                diagnostics.error(
+                    format!(
+                        "the compiler crashed while checking this program ({})",
+                        panic_message(&*payload)
+                    ),
+                    Span::default(),
+                );
+                return Err(diagnostics);
+            }
+        };
         match result {
             Ok(program) => {
                 diagnostics.extend(type_diagnostics);
@@ -98,16 +163,26 @@ impl Frontend {
 }
 
 /// Generate the C project for a checked program.
+///
+/// Code generation walks the HIR recursively, so it runs on the large-stack
+/// worker thread as well. A failure here is an internal compiler bug (the input
+/// has already been type checked), so the panic is propagated unchanged.
 pub fn generate_c(program: &hir::Program, options: &CodegenOptions) -> Generated {
-    codegen::generate(program, options)
+    match run_on_compiler_stack(|| codegen::generate(program, options)) {
+        Ok(generated) => generated,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
-/// Write the generated C project (main.c, every runtime source published by
-/// [`runtime::sources`] and CMakeLists.txt) into a directory, creating it if
-/// needed.
+/// Write the generated C project (main.c, the extra translation units of a
+/// split program, every runtime source published by [`runtime::sources`] and
+/// CMakeLists.txt) into a directory, creating it if needed.
 pub fn write_project(dir: &Path, generated: &Generated) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     write_atomic(&dir.join("main.c"), &generated.main_c)?;
+    for unit in &generated.units {
+        write_atomic(&dir.join(&unit.file_name), &unit.contents)?;
+    }
     write_runtime_sources(dir)?;
     write_atomic(&dir.join("CMakeLists.txt"), &generated.cmake)?;
     Ok(())
@@ -387,33 +462,44 @@ fn build_project_direct(
             missing.push(((*source).to_string(), object));
         }
     }
-    let main_object = temporary_path(&build_dir, "main.o");
-    let (runtime_result, main_result) = std::thread::scope(|scope| {
+    // The generated sources to compile: main.c plus the extra translation
+    // units of a split project (discovered on disk, because [write_project]
+    // wrote them into the project directory).
+    let generated_sources = generated_source_files(project_dir);
+    let generated_objects: Vec<PathBuf> = generated_sources
+        .iter()
+        .map(|name| build_dir.join(object_name_for_source(name)))
+        .collect();
+
+    let (runtime_result, generated_result) = std::thread::scope(|scope| {
         let runtime_handle = scope.spawn(|| {
             compile_runtime_objects(&compiler, project_dir, &tmp_dir, &flags, options, &missing)
         });
-        let main_handle = scope.spawn(|| {
-            compile_main_object(
+        let generated_handle = scope.spawn(|| {
+            compile_generated_objects(
                 &compiler,
                 project_dir,
                 &tmp_dir,
                 &flags,
-                &main_object,
-                options.verbose,
+                options,
+                &generated_sources,
+                &generated_objects,
             )
         });
         (
             join_compilation(runtime_handle),
-            join_compilation(main_handle),
+            join_compilation(generated_handle),
         )
     });
     runtime_result?;
-    main_result?;
+    generated_result?;
 
     let executable = build_dir.join(executable_name(&options.program_name));
     let temp_executable = temporary_path(&build_dir, &executable_name(&options.program_name));
     let mut link = Command::new(&compiler);
-    link.arg(&main_object);
+    for object in &generated_objects {
+        link.arg(object);
+    }
     for source in &runtime_sources {
         link.arg(object_dir.join(runtime_object_name(source)));
     }
@@ -425,13 +511,16 @@ fn build_project_direct(
     prepare_child(&mut link, compiler.parent(), &tmp_dir);
     run_tool(&mut link, "link executable", options.verbose)?;
     install_built_file(&temp_executable, &executable, "executable")?;
-    let _ = fs::remove_file(&main_object);
+    for object in &generated_objects {
+        let _ = fs::remove_file(object);
+    }
 
     if options.verbose {
         eprintln!(
-            "lsaca: build: direct compiler backend, {} runtime object(s) reused, {} compiled, {:.3}s total",
+            "lsaca: build: direct compiler backend, {} runtime object(s) reused, {} compiled, {} generated translation unit(s), {:.3}s total",
             reused,
             missing.len(),
+            generated_sources.len(),
             started.elapsed().as_secs_f64()
         );
     }
@@ -452,27 +541,101 @@ fn build_project_direct(
     })
 }
 
-/// Compile the generated main.c translation unit.
-fn compile_main_object(
+/// The generated translation units of a project: main.c followed by the extra
+/// units of a split program, in deterministic lexical order.
+fn generated_source_files(project_dir: &Path) -> Vec<String> {
+    let mut sources = vec![String::from("main.c")];
+    let Ok(entries) = fs::read_dir(project_dir) else {
+        return sources;
+    };
+    let mut units: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("lsaca_unit_") && name.ends_with(".c") {
+            units.push(name);
+        }
+    }
+    units.sort();
+    sources.extend(units);
+    sources
+}
+
+/// Object file name for one generated C source (`main.c` -> `main.o`).
+fn object_name_for_source(source: &str) -> String {
+    let stem = source.strip_suffix(".c").unwrap_or(source);
+    format!("{}.o", stem)
+}
+
+/// Compile every generated translation unit, using up to one thread per job.
+fn compile_generated_objects(
     compiler: &Path,
     project_dir: &Path,
     tmp_dir: &Path,
     flags: &[String],
-    main_object: &Path,
+    options: &BuildOptions,
+    sources: &[String],
+    objects: &[PathBuf],
+) -> io::Result<()> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let threads = build_parallelism().min(sources.len()).max(1);
+    let verbose = options.verbose;
+    let mut results: Vec<io::Result<()>> = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for worker in 0..threads {
+            handles.push(scope.spawn(move || -> io::Result<()> {
+                for index in (worker..sources.len()).step_by(threads) {
+                    compile_generated_object(
+                        compiler,
+                        project_dir,
+                        tmp_dir,
+                        flags,
+                        &sources[index],
+                        &objects[index],
+                        verbose,
+                    )?;
+                }
+                Ok(())
+            }));
+        }
+        for handle in handles {
+            results.push(
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err(io::Error::other("a compilation thread panicked"))),
+            );
+        }
+    });
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
+/// Compile one generated translation unit into an object file.
+fn compile_generated_object(
+    compiler: &Path,
+    project_dir: &Path,
+    tmp_dir: &Path,
+    flags: &[String],
+    source: &str,
+    object: &Path,
     verbose: bool,
 ) -> io::Result<()> {
     let mut command = Command::new(compiler);
     command
         .arg("-c")
-        .arg(project_dir.join("main.c"))
+        .arg(project_dir.join(source))
         .args(flags)
         .arg("-I")
         .arg(project_dir)
         .arg("-o")
-        .arg(main_object);
+        .arg(object);
     command.current_dir(project_dir);
     prepare_child(&mut command, compiler.parent(), tmp_dir);
-    run_tool(&mut command, "compile main.c", verbose)
+    run_tool(&mut command, &format!("compile {}", source), verbose)
 }
 
 /// Wait for one compilation thread and turn a thread panic into an IO error.
@@ -679,6 +842,12 @@ pub fn cache_key(generated: &Generated, options: &BuildOptions, compiler: &Path)
     ] {
         hash = fnv1a(hash, bytes);
         hash = fnv1a(hash, &[0xff]);
+    }
+    for unit in &generated.units {
+        for bytes in [unit.file_name.as_bytes(), unit.contents.as_bytes()] {
+            hash = fnv1a(hash, bytes);
+            hash = fnv1a(hash, &[0xff]);
+        }
     }
     for (name, contents) in runtime::sources() {
         for bytes in [name.as_bytes(), contents.as_bytes()] {
@@ -1044,6 +1213,7 @@ pub fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::GeneratedUnit;
 
     /// Scratch directory under the workspace target directory.
     ///
@@ -1081,6 +1251,69 @@ mod tests {
         let candidates = cache_root_candidates();
         let cwd = env::current_dir().expect("the current directory should be available");
         assert_eq!(candidates.last(), Some(&cwd.join(".lsaca-build-cache")));
+    }
+
+    fn sample_generated() -> Generated {
+        Generated {
+            main_c: String::from("int main(void) { return 0; }\n"),
+            cmake: String::from("project(sample)\n"),
+            units: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn discovers_split_translation_units_in_order() {
+        let dir = scratch_dir("units");
+        for name in ["main.c", "lsaca_unit_2.c", "lsaca_unit_1.c", "notes.txt"] {
+            fs::write(dir.join(name), b"/* generated */\n").expect("could not write a source file");
+        }
+        let sources = generated_source_files(&dir);
+        assert_eq!(
+            sources,
+            vec![
+                String::from("main.c"),
+                String::from("lsaca_unit_1.c"),
+                String::from("lsaca_unit_2.c"),
+            ]
+        );
+        assert_eq!(object_name_for_source("main.c"), "main.o");
+        assert_eq!(object_name_for_source("lsaca_unit_1.c"), "lsaca_unit_1.o");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_key_covers_split_translation_units() {
+        let compiler = PathBuf::from("cc");
+        let options = BuildOptions::new("sample");
+        let single = sample_generated();
+        let plain_key = cache_key(&single, &options, &compiler);
+        let mut split = single.clone();
+        split.units.push(GeneratedUnit {
+            file_name: String::from("lsaca_unit_1.c"),
+            contents: String::from("void lsaca_fn_extra(void) {}\n"),
+        });
+        let split_key = cache_key(&split, &options, &compiler);
+        assert_ne!(plain_key, split_key);
+        split.units[0].contents.push_str("/* changed */\n");
+        assert_ne!(split_key, cache_key(&split, &options, &compiler));
+    }
+
+    #[test]
+    fn write_project_writes_every_translation_unit() {
+        let dir = scratch_dir("project");
+        let mut generated = sample_generated();
+        generated.units.push(GeneratedUnit {
+            file_name: String::from("lsaca_unit_1.c"),
+            contents: String::from("void lsaca_fn_extra(void) {}\n"),
+        });
+        write_project(&dir, &generated).expect("the project should be written");
+        assert!(dir.join("main.c").is_file());
+        assert!(dir.join("lsaca_unit_1.c").is_file());
+        assert_eq!(
+            fs::read_to_string(dir.join("lsaca_unit_1.c")).expect("unit should be readable"),
+            "void lsaca_fn_extra(void) {}\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

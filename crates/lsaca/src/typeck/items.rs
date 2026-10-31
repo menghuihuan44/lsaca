@@ -82,6 +82,7 @@ pub enum ConstVal {
     Int(i128),
     Float(f64),
     Bool(bool),
+    Char(char),
     Str(String),
     Unit,
 }
@@ -93,6 +94,7 @@ impl ConstVal {
             ConstVal::Int(value) => TLit::Int(*value),
             ConstVal::Float(value) => TLit::Float(*value),
             ConstVal::Bool(value) => TLit::Bool(*value),
+            ConstVal::Char(value) => TLit::Char(*value),
             ConstVal::Str(value) => TLit::Str(value.clone()),
             ConstVal::Unit => TLit::Unit,
         }
@@ -618,12 +620,13 @@ impl<'a> Checker<'a> {
                         self.register_generic_drop_impl(block, trait_ref);
                     }
                 }
-                "Copy" | "Clone" => self.error_at(
+                "Copy" | "Clone" => self.error_code(
                     format!(
                         "the trait '{}' is derived automatically; remove this impl block",
                         trait_ref.name
                     ),
                     trait_ref.span,
+                    "E0119",
                 ),
                 _ => self.register_trait_impl_block(block, trait_ref),
             }
@@ -1076,6 +1079,7 @@ impl<'a> Checker<'a> {
                 }
             }
             "bool" => self.simple_type(span, generics, ITy::bool_()),
+            "char" => self.simple_type(span, generics, ITy::char_()),
             "String" => self.simple_type(span, generics, ITy::string()),
             "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => {
                 match crate::types::IntTy::from_name(name) {

@@ -27,6 +27,8 @@
 //! * pattern bindings move out of the scrutinee temporary (copying a Copy
 //!   value) so that the temporary never releases the transferred value.
 
+use std::collections::HashMap;
+
 use crate::hir::{self, HExpr, HExprKind, HLit};
 use crate::span::Span;
 use crate::types::Ty;
@@ -100,6 +102,12 @@ pub(crate) struct Gen<'a> {
     pub block_terminated: bool,
     pub fn_terminated: bool,
     pub debug_checks: bool,
+    /// Distinct string literals in first-use order. Their immortal handles are
+    /// declared in the generated file before the function bodies (the bodies
+    /// are generated into a side buffer, see `emit_program`).
+    pub interned: Vec<String>,
+    /// Index of each interned literal inside `interned`.
+    interned_lookup: HashMap<String, usize>,
 }
 
 impl<'a> Gen<'a> {
@@ -124,7 +132,34 @@ impl<'a> Gen<'a> {
             block_terminated: false,
             fn_terminated: false,
             debug_checks: options.debug_checks,
+            interned: Vec::new(),
+            interned_lookup: HashMap::new(),
         }
+    }
+
+    /// C name of the immortal interned handle for the string literal `value`.
+    ///
+    /// Literals are interned in first-use order, so the generated table is
+    /// deterministic. The handles are declared before every function body that
+    /// mentions them; see `emit_interned_literals`.
+    pub(crate) fn interned_address(&mut self, value: &str) -> String {
+        if let Some(index) = self.interned_lookup.get(value) {
+            return format!("lsaca_lit_{}", index);
+        }
+        let index = self.interned.len();
+        self.interned.push(value.to_string());
+        self.interned_lookup.insert(value.to_string(), index);
+        format!("lsaca_lit_{}", index)
+    }
+
+    /// Owned reference to an interned string literal.
+    ///
+    /// The generated allocation is immortal; retaining it keeps reference
+    /// counting uniform (the caller releases it like any other owned String)
+    /// and guarantees that copy-on-write never mutates the shared bytes.
+    pub(crate) fn interned_owned(&mut self, value: &str) -> String {
+        let handle = self.interned_address(value);
+        format!("((LsString*)ls_retain((void*)({})))", handle)
     }
 
     // ----- names and helpers ------------------------------------------------
@@ -143,7 +178,7 @@ impl<'a> Gen<'a> {
     /// release.
     pub(crate) fn raw_zero_expr(&self, ty: &Ty) -> String {
         match ty {
-            Ty::Unit | Ty::Bool | Ty::Int(_) | Ty::Float(_) => self.zero_expr(ty),
+            Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) => self.zero_expr(ty),
             Ty::String => String::from("NULL"),
             _ => format!("(({}){{0}})", self.ctype(ty)),
         }
@@ -358,6 +393,117 @@ impl<'a> Gen<'a> {
         self.program.is_copy(ty)
     }
 
+    /// True when releasing a zero-initialised value of `ty` is a no-op.
+    ///
+    /// Pattern bindings that move a value out of a consumed match scrutinee
+    /// leave the selected place raw-zeroed (see `control::bind_pattern_mode`).
+    /// The owner of the scrutinee is still released afterwards and may walk
+    /// that zeroed place, so stealing is only sound when releasing the zero
+    /// value neither frees an owned payload nor runs a user Drop hook. The
+    /// interesting cases:
+    ///
+    /// * pointers and containers (`String`, `Rc`, `Box`, `Vec`, map, `fn`)
+    ///   are NULL/empty after zeroing, and their release helpers are
+    ///   NULL-safe;
+    /// * `Option` has tag 0 after zeroing, so its release never touches the
+    ///   payload;
+    /// * `Result` releases the Ok payload of tag 0, so only that type matters;
+    /// * aggregates recurse into the fields/variants their release helper
+    ///   walks, and any user Drop hook makes the zero value observable.
+    pub(crate) fn zero_release_is_inert(&self, ty: &Ty) -> bool {
+        if self.is_trivial_copy(ty) {
+            return true;
+        }
+        self.zero_release_inert_guarded(
+            ty,
+            &mut vec![false; self.program.structs.len()],
+            &mut vec![false; self.program.enums.len()],
+        )
+    }
+
+    fn zero_release_inert_guarded(
+        &self,
+        ty: &Ty,
+        structs: &mut [bool],
+        enums: &mut [bool],
+    ) -> bool {
+        match ty {
+            // Releasing a zeroed copy/fixed-layout container is NULL-safe:
+            // pointers are NULL and vectors are empty.
+            Ty::Unit
+            | Ty::Bool
+            | Ty::Char
+            | Ty::Int(_)
+            | Ty::Float(_)
+            | Ty::String
+            | Ty::Vec(_)
+            | Ty::Rc(_)
+            | Ty::Box(_)
+            | Ty::HashMap(_, _)
+            | Ty::Fn(_, _)
+            | Ty::Ref { .. } => true,
+            // Tag 0 means None: the release helper never reads the payload.
+            Ty::Option(_) => true,
+            // Tag 0 means Ok: only the Ok payload is released.
+            Ty::Result(ok, err) => {
+                let _ = err;
+                self.zero_release_inert_guarded(ok, structs, enums)
+            }
+            Ty::Tuple(elems) => elems
+                .iter()
+                .all(|elem| self.zero_release_inert_guarded(elem, structs, enums)),
+            Ty::Struct(id) => {
+                if self.program.drop_hook(ty).is_some() {
+                    // A Drop hook would observe the zero value: not inert.
+                    return false;
+                }
+                if structs.get(*id).copied().unwrap_or(true) {
+                    // A by-value cycle is rejected by the type checker; fail
+                    // conservatively (copy path) instead of recursing forever.
+                    return false;
+                }
+                structs[*id] = true;
+                let inert = self
+                    .program
+                    .structs
+                    .get(*id)
+                    .map(|item| {
+                        item.fields
+                            .iter()
+                            .all(|field| self.zero_release_inert_guarded(&field.ty, structs, enums))
+                    })
+                    .unwrap_or(false);
+                structs[*id] = false;
+                inert
+            }
+            Ty::Enum(id) => {
+                if self.program.drop_hook(ty).is_some() {
+                    // The release helper runs the hook before the tag switch,
+                    // so a zeroed enum would run it a second time.
+                    return false;
+                }
+                if enums.get(*id).copied().unwrap_or(true) {
+                    return false;
+                }
+                enums[*id] = true;
+                let inert =
+                    self.program
+                        .enums
+                        .get(*id)
+                        .map(|item| {
+                            item.variants.iter().all(|variant| {
+                                variant.fields.iter().all(|field| {
+                                    self.zero_release_inert_guarded(field, structs, enums)
+                                })
+                            })
+                        })
+                        .unwrap_or(false);
+                enums[*id] = false;
+                inert
+            }
+        }
+    }
+
     /// Materialise `expr` into a fresh owned temporary and return its name.
     ///
     /// This is the copying/materialising form: a place expression is copied
@@ -566,7 +712,7 @@ impl<'a> Gen<'a> {
         lvalue
     }
 
-    pub(crate) fn literal(&self, lit: &HLit) -> String {
+    pub(crate) fn literal(&mut self, lit: &HLit) -> String {
         match lit {
             HLit::Int { value, int_ty } => util::int_literal(*value, *int_ty),
             HLit::Float { value, float_ty } => util::float_literal(*value, *float_ty),
@@ -577,12 +723,13 @@ impl<'a> Gen<'a> {
                     "false".to_string()
                 }
             }
-            HLit::Str(value) => format!("ls_str_cstr({})", util::c_string_literal(value)),
+            HLit::Str(value) => self.interned_owned(value),
+            HLit::Char(value) => util::char_literal(*value),
             HLit::Unit => "((LsUnit){0})".to_string(),
         }
     }
 
-    pub(crate) fn const_expr(&self, c_name: &str, ty: &Ty) -> Option<String> {
+    pub(crate) fn const_expr(&mut self, c_name: &str, ty: &Ty) -> Option<String> {
         for c in &self.program.consts {
             if c.c_name == c_name {
                 return Some(match &c.value {
@@ -595,9 +742,8 @@ impl<'a> Gen<'a> {
                             "false".to_string()
                         }
                     }
-                    hir::ConstValue::Str(value) => {
-                        format!("ls_str_cstr({})", util::c_string_literal(value))
-                    }
+                    hir::ConstValue::Str(value) => self.interned_owned(value),
+                    hir::ConstValue::Char(value) => util::char_literal(*value),
                     hir::ConstValue::Unit => "((LsUnit){0})".to_string(),
                 });
             }
