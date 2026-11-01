@@ -11,10 +11,11 @@ use super::generics::{
     ImplMethod, StructInstance,
 };
 use super::itype::ITy;
+use super::modules::{Binding, DefRef, ModuleId};
 use super::tree::TBlock;
 use crate::ast::{
     self, Block, EnumDecl, Expr, ExprKind, FieldDef, FnDecl, ImplBlock, Item, LetStmt, Program,
-    Stmt, StructDecl, TraitRef, TypeAliasDecl, TypeExpr, VariantDef, VecLit,
+    Stmt, StructDecl, TraitRef, TypeAliasDecl, TypeExpr, VariantDef, VecLit, Visibility,
 };
 use crate::diag::Diagnostic;
 use crate::span::Span;
@@ -37,6 +38,8 @@ pub struct StructField {
 #[derive(Clone, Debug)]
 pub struct StructInfo {
     pub name: String,
+    /// Module that declares the struct (name resolution and privacy).
+    pub module: ModuleId,
     /// Unique C identifier for this type (generic instances get a mangled name).
     pub c_name: String,
     /// Set for monomorphized generic instances.
@@ -57,6 +60,8 @@ pub struct VariantInfo {
 #[derive(Clone, Debug)]
 pub struct EnumInfo {
     pub name: String,
+    /// Module that declares the enum (name resolution and privacy).
+    pub module: ModuleId,
     /// Unique C identifier for this type (generic instances get a mangled name).
     pub c_name: String,
     /// Set for monomorphized generic instances.
@@ -70,6 +75,7 @@ pub struct EnumInfo {
 #[derive(Clone, Debug)]
 pub struct AliasInfo {
     pub name: String,
+    pub module: ModuleId,
     pub span: Span,
     pub target: TypeExpr,
     pub resolved: Option<ITy>,
@@ -112,6 +118,8 @@ pub enum ConstState {
 pub struct ConstItem {
     pub decl: ast::ConstDecl,
     pub c_name: String,
+    /// Module that declares the constant.
+    pub module: ModuleId,
     pub state: ConstState,
 }
 
@@ -129,6 +137,9 @@ pub struct FnInfo {
     pub name: String,
     pub display: String,
     pub c_name: String,
+    /// Module that declares the function and its visibility.
+    pub module: ModuleId,
+    pub vis: Visibility,
     pub decl: FnDecl,
     /// Which program declared this function (user code or the std prelude).
     pub origin: DefOrigin,
@@ -193,14 +204,6 @@ pub fn sanitize_c_ident(name: &str) -> String {
 // ---------------------------------------------------------------------------
 // AST walking: gather every item, including ones nested inside blocks.
 // ---------------------------------------------------------------------------
-
-pub fn gather_items(program: &Program) -> Vec<&Item> {
-    let mut out = Vec::new();
-    for item in &program.items {
-        gather_item(item, &mut out);
-    }
-    out
-}
 
 fn gather_item<'a>(item: &'a Item, out: &mut Vec<&'a Item>) {
     out.push(item);
@@ -343,28 +346,92 @@ fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
 // ---------------------------------------------------------------------------
 
 impl<'a> Checker<'a> {
-    /// Register every item of one program. Call [Checker::resolve_all_types]
-    /// once after all programs (user and prelude) have been collected.
+    /// Build the module tree of one program and record the items of every
+    /// module. Call [Checker::register_collected_items] once all crates (user
+    /// program, dependencies and the prelude) have been collected.
+    ///
+    /// Used by the type-checker tests; kept next to the collection API.
+    #[allow(dead_code)]
     pub fn collect_items_only(&mut self, program: &Program, origin: DefOrigin) {
-        self.collecting_origin = origin;
-        let items = gather_items(program);
-        for item in &items {
+        let module = self.current_crate_root();
+        self.modules[module].origin = origin;
+        self.collect_program_items(module, &program.items);
+    }
+
+    /// Collect the module tree rooted at `module`.
+    pub fn collect_program_items(&mut self, module: ModuleId, items: &[Item]) {
+        self.collect_module_tree(module, items);
+    }
+
+    fn collect_module_tree(&mut self, module: ModuleId, items: &[Item]) {
+        let mut own: Vec<Item> = Vec::new();
+        for item in items {
             match item {
-                Item::Struct(decl) => self.register_struct(decl),
-                Item::Enum(decl) => self.register_enum(decl),
-                Item::TypeAlias(decl) => self.register_alias(decl),
-                Item::Trait(decl) => self.register_trait_decl(decl),
+                Item::Mod(decl) => {
+                    let child =
+                        self.child_module(module, &decl.name, decl.name_span, decl.vis, decl.span);
+                    self.collect_module_tree(child, &decl.items);
+                }
+                other => own.push(other.clone()),
+            }
+        }
+        // Items nested inside blocks and const initializers are hoisted into
+        // the surrounding module, as in version 1.6.
+        let mut nested: Vec<&Item> = Vec::new();
+        for item in &own {
+            match item {
+                Item::Fn(decl) => scan_block(&decl.body, &mut nested),
+                Item::Impl(block) => {
+                    for func in &block.fns {
+                        scan_block(&func.body, &mut nested);
+                    }
+                }
+                Item::Const(decl) => scan_expr(&decl.value, &mut nested),
                 _ => {}
             }
         }
-        for item in &items {
-            match item {
-                Item::Fn(decl) => self.register_free_fn(decl),
-                Item::Impl(block) => self.pending_impls.push((block.clone(), origin)),
-                Item::Const(decl) => self.register_const(decl),
-                _ => {}
+        let nested_items: Vec<Item> = nested.into_iter().cloned().collect();
+        self.module_items[module].extend(own);
+        self.module_items[module].extend(nested_items);
+    }
+
+    /// Register every collected module scope: type names first, then values,
+    /// then `use` declarations, so imports can see the items of their module.
+    pub fn register_collected_items(&mut self) {
+        let module_count = self.modules.len();
+        for module in 0..module_count {
+            self.current_module = module;
+            self.collecting_origin = self.modules[module].origin;
+            self.force_public_items = self.modules[module].origin.is_prelude();
+            let items = self.module_items[module].clone();
+            for item in &items {
+                match item {
+                    Item::Struct(decl) => self.register_struct(decl),
+                    Item::Enum(decl) => self.register_enum(decl),
+                    Item::TypeAlias(decl) => self.register_alias(decl),
+                    Item::Trait(decl) => self.register_trait_decl(decl),
+                    _ => {}
+                }
+            }
+            for item in &items {
+                match item {
+                    Item::Fn(decl) => self.register_free_fn(decl),
+                    Item::Impl(block) => {
+                        self.pending_impls
+                            .push((block.clone(), self.collecting_origin, module))
+                    }
+                    Item::Const(decl) => self.register_const(decl),
+                    _ => {}
+                }
+            }
+            for item in &items {
+                if let Item::Use(decl) = item {
+                    self.collect_use_decl(module, decl);
+                }
             }
         }
+        self.force_public_items = false;
+        self.current_module = self.crate_roots[self.root_crate];
         self.collecting_origin = DefOrigin::User;
     }
 
@@ -373,70 +440,87 @@ impl<'a> Checker<'a> {
     /// of them.
     pub fn register_pending_impls(&mut self) {
         let pending = std::mem::take(&mut self.pending_impls);
-        for (block, origin) in pending {
+        for (block, origin, module) in pending {
             self.collecting_origin = origin;
+            self.current_module = module;
             self.register_impl(&block);
         }
         self.collecting_origin = DefOrigin::User;
+        self.current_module = self.crate_roots[self.root_crate];
     }
 
-    pub fn type_name_conflict(&self, name: &str) -> Option<Span> {
-        if let Some(id) = self.struct_by_name.get(name) {
-            return self.structs.get(*id).map(|info| info.span);
+    /// Visibility written on an item, forced public inside the standard
+    /// library so user code can see prelude items.
+    pub(super) fn item_visibility(&self, vis: Visibility) -> Visibility {
+        if self.force_public_items {
+            Visibility::Public
+        } else {
+            vis
         }
-        if let Some(id) = self.enum_by_name.get(name) {
-            return self.enums.get(*id).map(|info| info.span);
-        }
-        if let Some(id) = self.alias_by_name.get(name) {
-            return self.aliases.get(*id).map(|info| info.span);
-        }
-        if let Some(id) = self.generic_struct_by_name.get(name) {
-            return self.generic_structs.get(*id).map(|info| info.span);
-        }
-        if let Some(id) = self.generic_enum_by_name.get(name) {
-            return self.generic_enums.get(*id).map(|info| info.span);
-        }
-        if let Some(id) = self.trait_by_name.get(name) {
-            return self.traits.get(*id).map(|info| info.span);
-        }
-        None
     }
 
-    fn report_duplicate_type(&mut self, name: &str, span: Span) {
+    /// Whether the inherent method or associated function `fn_id` is visible
+    /// from the current module.
+    ///
+    /// The visibility written on the method decides on its own: a `pub` method
+    /// of a type declared in a private module is callable wherever the type can
+    /// be named, exactly like Rust.
+    pub fn method_visible(&self, fn_id: usize) -> bool {
+        let info = &self.fns[fn_id];
+        self.visibility_allows(info.vis, info.module, self.privacy_module())
+    }
+
+    fn module_prefix(&self, module: ModuleId) -> String {
+        self.modules[module].prefix.clone()
+    }
+
+    pub(super) fn report_duplicate_type(&mut self, name: &str, span: Span, previous: Span) {
         let mut diag = Diagnostic::error(
             format!("the name '{}' is defined multiple times", name),
             span,
         )
         .with_code("E0428");
-        if let Some(previous) = self.type_name_conflict(name) {
-            diag = diag.with_label(previous, format!("previous definition of '{}' here", name));
-        }
+        diag = diag.with_label(previous, format!("previous definition of '{}' here", name));
         self.diagnostics.push(diag);
     }
 
     fn register_struct(&mut self, decl: &StructDecl) {
-        if self.type_name_conflict(&decl.name).is_some() {
-            self.report_duplicate_type(&decl.name, decl.name_span);
+        let module = self.current_module;
+        let vis = self.item_visibility(decl.vis);
+        if let Some(previous) = self
+            .lookup_type_in(module, &decl.name)
+            .map(|binding| binding.span)
+        {
+            self.report_duplicate_type(&decl.name, decl.name_span, previous);
             return;
         }
+        let prefix = self.module_prefix(module);
+        let base = format!("{}{}", prefix, sanitize_c_ident(&decl.name));
         if !decl.generics.is_empty() {
             self.validate_generic_params(&decl.generics);
             let def_id = self.generic_structs.len();
             self.generic_structs.push(GStructDef {
                 name: decl.name.clone(),
-                span: decl.span,
                 generics: decl.generics.clone(),
                 decl: decl.clone(),
                 instances: HashMap::new(),
+                module,
+                c_name_base: base,
             });
-            self.generic_struct_by_name
-                .insert(decl.name.clone(), def_id);
+            self.insert_type_binding(
+                module,
+                &decl.name,
+                DefRef::GenericStruct(def_id),
+                decl.name_span,
+                vis,
+            );
             return;
         }
         let id = self.structs.len();
-        let c_name = self.alloc_c_name(sanitize_c_ident(&decl.name));
+        let c_name = self.alloc_c_name(base);
         self.structs.push(StructInfo {
             name: decl.name.clone(),
+            module,
             c_name,
             generic: None,
             span: decl.span,
@@ -446,31 +530,46 @@ impl<'a> Checker<'a> {
         });
         // One drop-hook slot per struct, filled in by register_drop_impl.
         self.drop_structs.push(None);
-        self.struct_by_name.insert(decl.name.clone(), id);
+        self.insert_type_binding(module, &decl.name, DefRef::Struct(id), decl.name_span, vis);
     }
 
     fn register_enum(&mut self, decl: &EnumDecl) {
-        if self.type_name_conflict(&decl.name).is_some() {
-            self.report_duplicate_type(&decl.name, decl.name_span);
+        let module = self.current_module;
+        let vis = self.item_visibility(decl.vis);
+        if let Some(previous) = self
+            .lookup_type_in(module, &decl.name)
+            .map(|binding| binding.span)
+        {
+            self.report_duplicate_type(&decl.name, decl.name_span, previous);
             return;
         }
+        let prefix = self.module_prefix(module);
+        let base = format!("{}{}", prefix, sanitize_c_ident(&decl.name));
         if !decl.generics.is_empty() {
             self.validate_generic_params(&decl.generics);
             let def_id = self.generic_enums.len();
             self.generic_enums.push(GEnumDef {
                 name: decl.name.clone(),
-                span: decl.span,
                 generics: decl.generics.clone(),
                 decl: decl.clone(),
                 instances: HashMap::new(),
+                module,
+                c_name_base: base,
             });
-            self.generic_enum_by_name.insert(decl.name.clone(), def_id);
+            self.insert_type_binding(
+                module,
+                &decl.name,
+                DefRef::GenericEnum(def_id),
+                decl.name_span,
+                vis,
+            );
             return;
         }
         let id = self.enums.len();
-        let c_name = self.alloc_c_name(sanitize_c_ident(&decl.name));
+        let c_name = self.alloc_c_name(base);
         self.enums.push(EnumInfo {
             name: decl.name.clone(),
+            module,
             c_name,
             generic: None,
             span: decl.span,
@@ -480,7 +579,7 @@ impl<'a> Checker<'a> {
         });
         // One drop-hook slot per enum, filled in by register_drop_impl.
         self.drop_enums.push(None);
-        self.enum_by_name.insert(decl.name.clone(), id);
+        self.insert_type_binding(module, &decl.name, DefRef::Enum(id), decl.name_span, vis);
     }
 
     /// Validate the shape of a generic parameter list (duplicate names E0403).
@@ -522,8 +621,13 @@ impl<'a> Checker<'a> {
     }
 
     fn register_alias(&mut self, decl: &TypeAliasDecl) {
-        if self.type_name_conflict(&decl.name).is_some() {
-            self.report_duplicate_type(&decl.name, decl.name_span);
+        let module = self.current_module;
+        let vis = self.item_visibility(decl.vis);
+        if let Some(previous) = self
+            .lookup_type_in(module, &decl.name)
+            .map(|binding| binding.span)
+        {
+            self.report_duplicate_type(&decl.name, decl.name_span, previous);
             return;
         }
         if !decl.generics.is_empty() {
@@ -536,23 +640,27 @@ impl<'a> Checker<'a> {
         let id = self.aliases.len();
         self.aliases.push(AliasInfo {
             name: decl.name.clone(),
+            module,
             span: decl.span,
             target: decl.ty.clone(),
             resolved: None,
             resolving: false,
         });
-        self.alias_by_name.insert(decl.name.clone(), id);
+        self.insert_type_binding(module, &decl.name, DefRef::Alias(id), decl.name_span, vis);
     }
 
     fn register_free_fn(&mut self, decl: &FnDecl) {
-        if let Some(previous) = self.fn_by_name.get(&decl.name).copied() {
-            self.report_duplicate_fn(decl, self.fns[previous].name_span);
+        let module = self.current_module;
+        let vis = self.item_visibility(decl.vis);
+        if let Some(previous) = self
+            .lookup_value_in(module, &decl.name)
+            .map(|binding| binding.span)
+        {
+            self.report_duplicate_fn(decl, previous);
             return;
         }
-        if self.generic_fn_by_name.contains_key(&decl.name) {
-            self.report_duplicate_fn(decl, decl.name_span);
-            return;
-        }
+        let prefix = self.module_prefix(module);
+        let base = format!("{}lsaca_fn_{}", prefix, sanitize_c_ident(&decl.name));
         if !decl.generics.is_empty() {
             self.validate_generic_params(&decl.generics);
             let def_id = self.generic_fns.len();
@@ -565,18 +673,27 @@ impl<'a> Checker<'a> {
                 owner: GenericOwner::Free,
                 instances: HashMap::new(),
                 origin: self.collecting_origin,
-                c_name_base: format!("lsaca_fn_{}", sanitize_c_ident(&decl.name)),
+                module,
+                c_name_base: base,
                 display_base: decl.name.clone(),
             });
-            self.generic_fn_by_name.insert(decl.name.clone(), def_id);
+            self.insert_value_binding(
+                module,
+                &decl.name,
+                DefRef::GenericFn(def_id),
+                decl.name_span,
+                vis,
+            );
             return;
         }
         let id = self.fns.len();
-        let c_name = self.alloc_c_name(format!("lsaca_fn_{}", sanitize_c_ident(&decl.name)));
+        let c_name = self.alloc_c_name(base);
         self.fns.push(FnInfo {
             name: decl.name.clone(),
             display: decl.name.clone(),
             c_name,
+            module,
+            vis,
             decl: decl.clone(),
             origin: self.collecting_origin,
             generic: None,
@@ -590,7 +707,7 @@ impl<'a> Checker<'a> {
             name_span: decl.name_span,
             span: decl.span,
         });
-        self.fn_by_name.insert(decl.name.clone(), id);
+        self.insert_value_binding(module, &decl.name, DefRef::Fn(id), decl.name_span, vis);
     }
 
     fn report_duplicate_fn(&mut self, decl: &FnDecl, previous_span: Span) {
@@ -659,16 +776,22 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let display = format!("{}::{}", type_name, func.name);
+            let prefix = self.module_prefix(self.current_module);
             let c_name = self.alloc_c_name(format!(
-                "lsaca_fn_{}_{}",
+                "{}lsaca_fn_{}_{}",
+                prefix,
                 sanitize_c_ident(&type_name),
                 sanitize_c_ident(&func.name)
             ));
             let id = self.fns.len();
+            let module = self.current_module;
+            let vis = self.item_visibility(func.vis);
             self.fns.push(FnInfo {
                 name: func.name.clone(),
                 display,
                 c_name,
+                module,
+                vis,
                 decl: func.clone(),
                 origin: self.collecting_origin,
                 generic: None,
@@ -695,6 +818,7 @@ impl<'a> Checker<'a> {
         }
         let impl_id = self.impls.len();
         let mut methods = Vec::new();
+        let prefix = self.module_prefix(self.current_module);
         for func in &block.fns {
             self.check_method_name_reserved(&block.ty_name, func);
             let gfn_id = self.register_generic_method(
@@ -703,7 +827,8 @@ impl<'a> Checker<'a> {
                 func,
                 GenericOwner::InherentImpl(impl_id),
                 format!(
-                    "lsaca_fn_{}_{}",
+                    "{}lsaca_fn_{}_{}",
+                    prefix,
                     sanitize_c_ident(&block.ty_name),
                     sanitize_c_ident(&func.name)
                 ),
@@ -716,6 +841,7 @@ impl<'a> Checker<'a> {
         }
         self.impls.push(ImplInfo {
             id: impl_id,
+            module: self.current_module,
             generics: block.generics.clone(),
             self_ty: block.ty.clone(),
             trait_ref: None,
@@ -790,16 +916,18 @@ impl<'a> Checker<'a> {
             return;
         }
         let impl_id = self.impls.len();
+        let prefix = self.module_prefix(self.current_module);
         let gfn_id = self.register_generic_method(
             impl_id,
             &block.generics,
             method,
             GenericOwner::TraitImpl(impl_id),
-            format!("lsaca_fn_Drop_{}", sanitize_c_ident(&type_name)),
+            format!("{}lsaca_fn_Drop_{}", prefix, sanitize_c_ident(&type_name)),
             "Drop::drop".to_string(),
         );
         self.impls.push(ImplInfo {
             id: impl_id,
+            module: self.current_module,
             generics: block.generics.clone(),
             self_ty: block.ty.clone(),
             trait_ref: Some(trait_ref.clone()),
@@ -893,16 +1021,22 @@ impl<'a> Checker<'a> {
     fn push_impl_fn(&mut self, owner: TypeKey, func: &FnDecl) -> usize {
         let type_name = self.type_name(owner);
         let display = format!("{}::{}", type_name, func.name);
+        let prefix = self.module_prefix(self.current_module);
         let c_name = self.alloc_c_name(format!(
-            "lsaca_fn_{}_{}",
+            "{}lsaca_fn_{}_{}",
+            prefix,
             sanitize_c_ident(&type_name),
             sanitize_c_ident(&func.name)
         ));
         let id = self.fns.len();
+        let module = self.current_module;
+        let vis = self.item_visibility(func.vis);
         self.fns.push(FnInfo {
             name: func.name.clone(),
             display,
             c_name,
+            module,
+            vis,
             decl: func.clone(),
             origin: self.collecting_origin,
             generic: None,
@@ -920,28 +1054,38 @@ impl<'a> Checker<'a> {
     }
 
     fn register_const(&mut self, decl: &ast::ConstDecl) {
-        if let Some(previous) = self.const_by_name.get(&decl.name) {
-            let previous_span = self.consts[*previous].decl.name_span;
+        let module = self.current_module;
+        let vis = self.item_visibility(decl.vis);
+        if let Some(previous) = self
+            .lookup_value_in(module, &decl.name)
+            .map(|binding| binding.span)
+        {
             let diag = Diagnostic::error(
                 format!("the name '{}' is defined multiple times", decl.name),
                 decl.name_span,
             )
             .with_code("E0428")
             .with_label(
-                previous_span,
+                previous,
                 format!("previous definition of '{}' here", decl.name),
             );
             self.diagnostics.push(diag);
             return;
         }
         let id = self.consts.len();
-        let c_name = self.alloc_c_name(format!("lsaca_const_{}", sanitize_c_ident(&decl.name)));
+        let prefix = self.module_prefix(module);
+        let c_name = self.alloc_c_name(format!(
+            "{}lsaca_const_{}",
+            prefix,
+            sanitize_c_ident(&decl.name)
+        ));
         self.consts.push(ConstItem {
             decl: decl.clone(),
             c_name,
+            module,
             state: ConstState::Unresolved,
         });
-        self.const_by_name.insert(decl.name.clone(), id);
+        self.insert_value_binding(module, &decl.name, DefRef::Const(id), decl.name_span, vis);
     }
 
     pub fn alloc_c_name(&mut self, base: String) -> String {
@@ -964,15 +1108,39 @@ impl<'a> Checker<'a> {
     /// Whether the target of an impl block names a user-defined struct or
     /// enum. Builtin types (`String`, `Vec<T>`, tuples, ...) can never be impl
     /// targets: they cannot gain inherent methods or trait implementations.
-    pub fn impl_target_is_user_type(&self, block: &ImplBlock) -> bool {
-        match &block.ty {
-            TypeExpr::Path { name, .. } => {
-                self.struct_by_name.contains_key(name)
-                    || self.enum_by_name.contains_key(name)
-                    || self.generic_struct_by_name.contains_key(name)
-                    || self.generic_enum_by_name.contains_key(name)
+    pub fn impl_target_is_user_type(&mut self, block: &ImplBlock) -> bool {
+        let TypeExpr::Path {
+            name, name_span, ..
+        } = &block.ty
+        else {
+            return false;
+        };
+        let name_span = *name_span;
+        let binding = if !name.contains("::") {
+            self.lookup_type_scoped(name)
+        } else {
+            let parts: Vec<&str> = name.split("::").collect();
+            let segments: Vec<(String, Span)> = parts[..parts.len() - 1]
+                .iter()
+                .map(|segment| ((*segment).to_string(), name_span))
+                .collect();
+            let Some((module, consumed)) = self.resolve_leading_modules(&segments, false) else {
+                return false;
+            };
+            if consumed != segments.len() {
+                return false;
             }
-            _ => false,
+            self.lookup_type_in(module, parts[parts.len() - 1])
+        };
+        match binding {
+            Some(binding) => matches!(
+                binding.def,
+                DefRef::Struct(_)
+                    | DefRef::Enum(_)
+                    | DefRef::GenericStruct(_)
+                    | DefRef::GenericEnum(_)
+            ),
+            None => false,
         }
     }
 
@@ -1123,61 +1291,124 @@ impl<'a> Checker<'a> {
                 self.validate_hash_map_type(&key, &value, span);
                 Some(ITy::hash_map(key, value))
             }
-            _ => {
-                if let Some(&id) = self.alias_by_name.get(name) {
-                    if !generics.is_empty() {
-                        self.error_at(
-                            format!("type alias '{}' does not take type arguments", name),
-                            span,
-                        );
-                    }
-                    return self.ensure_alias(id);
-                }
-                if let Some(&def_id) = self.generic_struct_by_name.get(name) {
-                    return self.instantiate_generic_struct_path(def_id, generics, self_key, span);
-                }
-                if let Some(&id) = self.struct_by_name.get(name) {
-                    if !generics.is_empty() {
-                        self.error_at(
-                            format!("struct '{}' does not take type arguments", name),
-                            span,
-                        );
-                    }
-                    return Some(ITy::Struct(id));
-                }
-                if let Some(&def_id) = self.generic_enum_by_name.get(name) {
-                    return self.instantiate_generic_enum_path(def_id, generics, self_key, span);
-                }
-                if let Some(&id) = self.enum_by_name.get(name) {
-                    if !generics.is_empty() {
-                        self.error_at(
-                            format!("enum '{}' does not take type arguments", name),
-                            span,
-                        );
-                    }
-                    return Some(ITy::Enum(id));
-                }
-                if self.trait_by_name.contains_key(name) {
-                    self.error_code(
-                        format!(
-                            "trait ({}) cannot be used as a type; trait objects are not supported",
-                            name
-                        ),
+            _ => self.resolve_user_type_path(name, span, generics, self_key),
+        }
+    }
+
+    /// Resolve a struct, enum, type alias or trait named by a path that is
+    /// either a single identifier or a double-colon qualified module path.
+    fn resolve_user_type_path(
+        &mut self,
+        name: &str,
+        span: Span,
+        generics: &[TypeExpr],
+        self_key: Option<TypeKey>,
+    ) -> Option<ITy> {
+        let parts: Vec<&str> = name.split("::").collect();
+        let binding = if parts.len() == 1 {
+            match self.lookup_type_scoped(name) {
+                Some(binding) => binding,
+                None => return self.report_unresolved_type(name, span),
+            }
+        } else {
+            let segments: Vec<(String, Span)> = parts[..parts.len() - 1]
+                .iter()
+                .map(|segment| ((*segment).to_string(), span))
+                .collect();
+            let Some((module, consumed)) = self.resolve_leading_modules(&segments, true) else {
+                return self.report_unresolved_type(name, span);
+            };
+            if consumed != segments.len() {
+                let missing = &parts[consumed];
+                let path = self.module_path_string(module);
+                self.error_code(
+                    format!("could not find '{}' in '{}'", missing, path),
+                    span,
+                    "E0433",
+                );
+                return None;
+            }
+            let item = parts[parts.len() - 1];
+            match self.lookup_type_in(module, item) {
+                Some(binding) => binding,
+                None => return self.report_unresolved_type(name, span),
+            }
+        };
+        if !self.check_binding_visible(&binding, span) {
+            return None;
+        }
+        self.type_binding_to_ty(name, &binding, span, generics, self_key)
+    }
+
+    fn type_binding_to_ty(
+        &mut self,
+        name: &str,
+        binding: &Binding,
+        span: Span,
+        generics: &[TypeExpr],
+        self_key: Option<TypeKey>,
+    ) -> Option<ITy> {
+        match binding.def {
+            DefRef::Alias(id) => {
+                if !generics.is_empty() {
+                    self.error_at(
+                        format!("type alias '{}' does not take type arguments", name),
                         span,
-                        "E0412",
                     );
-                    return None;
                 }
-                let mut diag =
-                    Diagnostic::error(format!("cannot find type '{}' in this scope", name), span)
-                        .with_code("E0412");
-                if let Some(suggestion) = self.suggest_type_name(name) {
-                    diag = diag.with_note(format!("did you mean '{}'?", suggestion));
+                self.ensure_alias(id)
+            }
+            DefRef::GenericStruct(def_id) => {
+                self.instantiate_generic_struct_path(def_id, generics, self_key, span)
+            }
+            DefRef::Struct(id) => {
+                if !generics.is_empty() {
+                    self.error_at(
+                        format!("struct '{}' does not take type arguments", name),
+                        span,
+                    );
                 }
-                self.diagnostics.push(diag);
+                Some(ITy::Struct(id))
+            }
+            DefRef::GenericEnum(def_id) => {
+                self.instantiate_generic_enum_path(def_id, generics, self_key, span)
+            }
+            DefRef::Enum(id) => {
+                if !generics.is_empty() {
+                    self.error_at(
+                        format!("enum '{}' does not take type arguments", name),
+                        span,
+                    );
+                }
+                Some(ITy::Enum(id))
+            }
+            DefRef::Trait(_) => {
+                self.error_code(
+                    format!(
+                        "trait ({}) cannot be used as a type; trait objects are not supported",
+                        name
+                    ),
+                    span,
+                    "E0412",
+                );
                 None
             }
+            DefRef::Fn(_) | DefRef::GenericFn(_) | DefRef::Const(_) => {
+                self.report_unresolved_type(name, span)
+            }
         }
+    }
+
+    fn report_unresolved_type(&mut self, name: &str, span: Span) -> Option<ITy> {
+        let mut diag =
+            Diagnostic::error(format!("cannot find type '{}' in this scope", name), span)
+                .with_code("E0412");
+        let last = name.rsplit("::").next().unwrap_or(name);
+        if let Some(suggestion) = self.suggest_type_name(last) {
+            diag = diag.with_note(format!("did you mean '{}'?", suggestion));
+        }
+        self.diagnostics.push(diag);
+        None
     }
 
     fn instantiate_generic_struct_path(
@@ -1303,16 +1534,15 @@ impl<'a> Checker<'a> {
     }
 
     pub fn suggest_type_name(&self, name: &str) -> Option<String> {
-        let mut candidates: Vec<&str> = Vec::new();
-        candidates.extend(self.struct_by_name.keys().map(|name| name.as_str()));
-        candidates.extend(self.enum_by_name.keys().map(|name| name.as_str()));
-        candidates.extend(self.alias_by_name.keys().map(|name| name.as_str()));
-        candidates.extend(self.generic_struct_by_name.keys().map(|name| name.as_str()));
-        candidates.extend(self.generic_enum_by_name.keys().map(|name| name.as_str()));
+        let mut candidates = self.type_names_scoped();
         candidates.sort_unstable();
         // Internal standard-library names are not a part of the language the
         // user writes: never suggest one.
-        candidates.retain(|candidate| !candidate.starts_with("__lsaca_"));
+        let candidates: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.as_str())
+            .filter(|candidate| !candidate.starts_with("__lsaca_"))
+            .collect();
         closest_name(name, &candidates)
     }
 
@@ -1331,10 +1561,13 @@ impl<'a> Checker<'a> {
             self.aliases[id].resolved = Some(placeholder.clone());
             return Some(placeholder);
         }
+        let previous_module = self.current_module;
+        self.current_module = self.aliases[id].module;
         self.aliases[id].resolving = true;
         let target = self.aliases[id].target.clone();
         let resolved = self.resolve_ty(&target, None);
         self.aliases[id].resolving = false;
+        self.current_module = previous_module;
         if let Some(ty) = &resolved {
             self.aliases[id].resolved = Some(ty.clone());
         }
@@ -1345,6 +1578,8 @@ impl<'a> Checker<'a> {
         if self.structs[id].fields_resolved {
             return;
         }
+        let previous_module = self.current_module;
+        self.current_module = self.structs[id].module;
         self.structs[id].fields_resolved = true;
         let decl_fields = self.structs[id].decl_fields.clone();
         let mut fields: Vec<StructField> = Vec::with_capacity(decl_fields.len());
@@ -1377,12 +1612,15 @@ impl<'a> Checker<'a> {
             });
         }
         self.structs[id].fields = fields;
+        self.current_module = previous_module;
     }
 
     pub fn ensure_enum_variants(&mut self, id: usize) {
         if self.enums[id].variants_resolved {
             return;
         }
+        let previous_module = self.current_module;
+        self.current_module = self.enums[id].module;
         self.enums[id].variants_resolved = true;
         let decl_variants = self.enums[id].decl_variants.clone();
         let enum_name = self.enums[id].name.clone();
@@ -1428,6 +1666,7 @@ impl<'a> Checker<'a> {
             });
         }
         self.enums[id].variants = variants;
+        self.current_module = previous_module;
     }
 
     pub fn resolve_all_types(&mut self) {
@@ -1451,6 +1690,8 @@ impl<'a> Checker<'a> {
         if self.fns[id].sig.is_some() {
             return;
         }
+        let previous_module = self.current_module;
+        self.current_module = self.fns[id].module;
         let decl = self.fns[id].decl.clone();
         let owner = self.fns[id].owner;
         let mut params: Vec<ITy> = Vec::with_capacity(decl.params.len());
@@ -1630,14 +1871,19 @@ impl<'a> Checker<'a> {
             ret_ref_source,
         });
         self.fns[id].param_cnames = param_cnames;
+        self.current_module = previous_module;
     }
 
     fn build_unit_variants(&mut self) {
-        self.unit_variants.clear();
+        for module in &mut self.modules {
+            module.unit_variants.clear();
+        }
         for (enum_id, enum_info) in self.enums.iter().enumerate() {
+            let module = enum_info.module;
             for (variant_index, variant) in enum_info.variants.iter().enumerate() {
                 if variant.fields.is_empty() {
-                    self.unit_variants
+                    self.modules[module]
+                        .unit_variants
                         .entry(variant.name.clone())
                         .or_default()
                         .push((enum_id, variant_index));

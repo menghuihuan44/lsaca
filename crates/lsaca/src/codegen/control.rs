@@ -23,12 +23,32 @@ impl<'a> Gen<'a> {
         match statement {
             HStmt::Let { pat, init, .. } => {
                 if let Some(init) = init {
-                    // Write the initialiser straight into the predeclared
-                    // local for a single binding: materialising it in a
-                    // temporary first would add a full deep copy.
-                    if !self.write_bind(pat, init) {
-                        let value = self.gen_owned(init);
-                        self.bind_let_pattern(pat, init, &value);
+                    if !pattern_binds_any(pat) {
+                        // A binding-free pattern such as `let _ = <init>;`:
+                        // the initialiser is still evaluated for its side
+                        // effects, but the value is dropped immediately.
+                        self.gen_discard(init);
+                    } else if !self.write_bind(pat, init) {
+                        // Write the initialiser straight into the predeclared
+                        // local for a single binding: materialising it in a
+                        // temporary first would add a full deep copy.
+                        //
+                        // A destructuring pattern whose initialiser is a place
+                        // of a type with a Drop hook must read the fields
+                        // straight out of that place. Copying the value into a
+                        // temporary would run the destructor on the copy (and
+                        // the original would still be dropped), so a Drop hook
+                        // would observe two drops for one value. The type
+                        // checker only admits Copy bindings under a Drop-hook
+                        // aggregate (E0509 for everything else), so reading the
+                        // place here never transfers ownership.
+                        if init.is_place() && self.program.drop_hook(&init.ty).is_some() {
+                            let place = self.gen_place(init);
+                            self.bind_let_pattern(pat, init, &place);
+                        } else {
+                            let value = self.gen_owned(init);
+                            self.bind_let_pattern(pat, init, &value);
+                        }
                     }
                 }
             }
@@ -48,6 +68,24 @@ impl<'a> Gen<'a> {
             }
         }
         self.stmt_cleanup();
+    }
+
+    /// Evaluate `expr` only for its side effects, discarding its value.
+    ///
+    /// Used for binding-free patterns such as `let _ = <init>;`: the
+    /// initialiser is still evaluated (calls run, indexing checks fire), but
+    /// no binding exists, so the value is dropped immediately. Like Rust's
+    /// wildcard pattern, reading a place does not move out of it; a
+    /// materialised temporary is released exactly once by
+    /// [`Gen::stmt_cleanup`]. The `(void)` use keeps the generated C free of
+    /// unused-variable and unused-but-set warnings.
+    fn gen_discard(&mut self, expr: &HExpr) {
+        let value = if expr.is_place() {
+            self.gen_place(expr)
+        } else {
+            self.gen_owned(expr)
+        };
+        self.w.line(format!("(void)({});", value));
     }
 
     /// Lower `let <name> = <init>` as a direct write into the local that
@@ -1230,5 +1268,23 @@ impl<'a> Gen<'a> {
         self.w.line(format!("return {};", result));
         self.block_terminated = true;
         self.fn_terminated = true;
+    }
+}
+
+/// Whether `pat` binds at least one local variable.
+///
+/// A pattern that binds nothing (for example `_` or `(_, _)`) still evaluates
+/// its scrutinee, but produces no binding to clean up, so the initialiser can
+/// be evaluated and discarded as a whole.
+fn pattern_binds_any(pat: &HPat) -> bool {
+    match &pat.kind {
+        HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => false,
+        HPatKind::Bind { .. } => true,
+        HPatKind::Tuple(parts) | HPatKind::Or(parts) => parts.iter().any(pattern_binds_any),
+        HPatKind::Struct { fields, .. } => fields.iter().any(|(_, part)| pattern_binds_any(part)),
+        HPatKind::Enum { args, .. } => args.iter().any(pattern_binds_any),
+        HPatKind::OptionSome(inner) | HPatKind::ResultOk(inner) | HPatKind::ResultErr(inner) => {
+            pattern_binds_any(inner)
+        }
     }
 }

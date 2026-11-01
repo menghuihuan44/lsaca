@@ -26,13 +26,14 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use crate::ast;
 use crate::codegen::{self, CodegenOptions, Generated};
-use crate::diag::Diagnostics;
+use crate::diag::{Diagnostic, Diagnostics};
 use crate::hir;
 use crate::lexer;
 use crate::parser;
 use crate::runtime;
-use crate::span::{SourceFile, Span};
+use crate::span::{SourceFile, SourceMap, Span};
 use crate::typeck;
 
 /// Stack size of the worker thread that runs the recursive compiler passes.
@@ -82,20 +83,267 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     "internal compiler error".to_string()
 }
 
-/// Front-end pipeline: lex, parse and type check one source file.
+/// The maximum module nesting depth. Deeper trees are rejected instead of
+/// risking a stack overflow in the recursive loader or the compiler passes.
+const MAX_MODULE_DEPTH: usize = 256;
+
+/// Front-end pipeline: load, lex, parse and type check a program.
+///
+/// A program is one or more crates. Standalone files ([Frontend::new] and
+/// [Frontend::load]) form a single crate; package mode ([Frontend::load_package])
+/// builds the crate graph of the root package plus its path dependencies (the
+/// package manager lives in [crate::package]).
+#[derive(Debug)]
 pub struct Frontend {
-    file: SourceFile,
+    /// Every source file of the compilation, with disjoint global spans.
+    sources: SourceMap,
+    /// All crates of the compilation; single-file mode contains one crate.
+    graph: ast::CrateGraph,
+    /// Whether the root crate must define `fn main()` (true for binaries,
+    /// false for library crates).
+    require_main: bool,
+    /// Whether the root crate's entry file is a binary root (src/main.ls or a
+    /// standalone file). A binary root without `fn main()` gets a specific
+    /// diagnostic instead of the library-package message.
+    binary_root: bool,
+    /// Diagnostics produced before semantic analysis: IO errors while loading
+    /// modules, invalid UTF-8, lexer and parser errors.
+    load_diagnostics: Diagnostics,
 }
 
 impl Frontend {
+    /// Build a front-end from in-memory source text.
+    ///
+    /// In-memory programs cannot load module files; a `mod name;` declaration
+    /// is reported as E0583 because there is no directory to resolve it against.
     pub fn new(file_name: impl Into<String>, source: impl Into<String>) -> Frontend {
+        let file_name = file_name.into();
+        let crate_name = crate_name_from_path(Path::new(&file_name));
+        let mut sources = SourceMap::new();
+        sources.add_file(file_name, source.into());
+        let mut diagnostics = Diagnostics::new();
+        let mut program = parse_file(&sources, 0, &mut diagnostics);
+        {
+            let mut loader = ModuleLoader {
+                sources: &mut sources,
+                diagnostics: &mut diagnostics,
+                stack: Vec::new(),
+            };
+            loader.expand_items(&mut program.items, None, 0);
+        }
         Frontend {
-            file: SourceFile::new(file_name, source),
+            sources,
+            graph: ast::CrateGraph::single(crate_name, program),
+            require_main: true,
+            binary_root: true,
+            load_diagnostics: diagnostics,
         }
     }
 
+    /// Load a program from a file on disk and resolve all of its module files.
+    ///
+    /// Only IO errors on the root file are returned as errors; problems with
+    /// module files become diagnostics that [Frontend::check] reports like any
+    /// other error, so a single run can report several missing or ambiguous
+    /// modules at once.
+    pub fn load(path: &Path) -> io::Result<Frontend> {
+        match run_on_compiler_stack(|| Self::load_inner(path)) {
+            Ok(result) => result,
+            Err(payload) => Err(io::Error::other(format!(
+                "internal compiler error while loading modules: {}",
+                panic_message(payload.as_ref())
+            ))),
+        }
+    }
+
+    /// Loading runs on the compiler stack because [ModuleLoader] recurses once
+    /// per module file; 256 levels need far more than the default 1 MiB stack.
+    fn load_inner(path: &Path) -> io::Result<Frontend> {
+        let root = fs::canonicalize(path)?;
+        let contents = read_source_text(&root)?;
+        let crate_name = crate_name_from_path(&root);
+        let mut sources = SourceMap::new();
+        sources.add_file(display_source_name(&root), contents);
+        let mut diagnostics = Diagnostics::new();
+        let mut program = parse_file(&sources, 0, &mut diagnostics);
+        let root_dir = root.parent().map(Path::to_path_buf);
+        {
+            let mut loader = ModuleLoader {
+                sources: &mut sources,
+                diagnostics: &mut diagnostics,
+                stack: vec![root],
+            };
+            loader.expand_items(&mut program.items, root_dir.as_deref(), 0);
+        }
+        Ok(Frontend {
+            sources,
+            graph: ast::CrateGraph::single(crate_name, program),
+            require_main: true,
+            binary_root: true,
+            load_diagnostics: diagnostics,
+        })
+    }
+
+    /// Load a package (or a member of one) starting from a directory.
+    ///
+    /// The nearest `lsaca.toml` is discovered walking up from `start_dir`,
+    /// its dependency graph is resolved, and every package contributes one
+    /// crate (root package last, its modules resolved relative to `src/`).
+    pub fn load_package(start_dir: &Path) -> Result<Frontend, LoadError> {
+        match run_on_compiler_stack(|| Self::load_package_inner(start_dir)) {
+            Ok(result) => result,
+            Err(payload) => Err(LoadError::Io(io::Error::other(format!(
+                "internal compiler error while loading the package: {}",
+                panic_message(payload.as_ref())
+            )))),
+        }
+    }
+
+    fn load_package_inner(start_dir: &Path) -> Result<Frontend, LoadError> {
+        let mut sources = SourceMap::new();
+        let mut diagnostics = Diagnostics::new();
+        let manifest = match crate::package::discover_manifest(start_dir) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => {
+                return Err(LoadError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no lsaca.toml found in this directory or any parent directory",
+                )));
+            }
+            Err(error) => return Err(LoadError::Io(error)),
+        };
+        // The resolver parses the manifest and everything it reaches, so the
+        // root manifest is registered in the source map exactly once.
+        let manifest_path = match fs::canonicalize(&manifest) {
+            Ok(path) => path,
+            Err(error) => return Err(LoadError::Io(error)),
+        };
+        let graph = match crate::package::resolve(&manifest_path, &mut sources, &mut diagnostics) {
+            Some(graph) => graph,
+            None => {
+                return Err(LoadError::Diagnostics {
+                    diagnostics,
+                    sources,
+                });
+            }
+        };
+        let root_package = graph.root;
+        let mut crates: Vec<ast::Crate> = Vec::new();
+        let mut binary_root = false;
+        for (index, package) in graph.packages.iter().enumerate() {
+            let is_root = index == root_package;
+            let binary = package.dir.join("src").join("main.ls");
+            let library = package.dir.join("src").join("lib.ls");
+            if is_root && binary.is_file() && library.is_file() {
+                // A package is either a binary or a library; guessing one would
+                // silently ignore the other, so ask the author to pick.
+                diagnostics.push(
+                    Diagnostic::error(
+                        format!(
+                            "package '{}' has both src/main.ls and src/lib.ls",
+                            package.name
+                        ),
+                        Span::empty(0),
+                    )
+                    .with_code("E0001")
+                    .with_note(
+                        "a package must be a binary (src/main.ls) or a library (src/lib.ls), not both"
+                            .to_string(),
+                    ),
+                );
+                return Err(LoadError::Diagnostics {
+                    diagnostics,
+                    sources,
+                });
+            }
+            if is_root {
+                binary_root = binary.is_file();
+            }
+            let root_file = if is_root && binary.is_file() {
+                binary
+            } else {
+                library
+            };
+            let canonical = match fs::canonicalize(&root_file) {
+                Ok(canonical) => canonical,
+                Err(error) => return Err(LoadError::Io(error)),
+            };
+            let contents = match read_source_text(&canonical) {
+                Ok(contents) => contents,
+                Err(error) => return Err(LoadError::Io(error)),
+            };
+            let index_in_sources = sources.add_file(display_source_name(&canonical), contents);
+            let mut program = parse_file(&sources, index_in_sources, &mut diagnostics);
+            let root_dir = canonical.parent().map(Path::to_path_buf);
+            {
+                let mut loader = ModuleLoader {
+                    sources: &mut sources,
+                    diagnostics: &mut diagnostics,
+                    stack: vec![canonical],
+                };
+                loader.expand_items(&mut program.items, root_dir.as_deref(), 0);
+            }
+            crates.push(ast::Crate {
+                name: package.name.clone(),
+                program,
+                is_dependency: package.is_dependency,
+            });
+        }
+        // Crate order follows the package graph (dependencies first, root
+        // last), so the root crate is the last one in the graph.
+        let root_index = crates.len().saturating_sub(1);
+        // A package whose crate root is src/main.ls must define fn main();
+        // a library package has no entry point. Checking the binary shape
+        // (not the presence of fn main) is what makes a missing entry point a
+        // diagnostic instead of silently accepting the package.
+        Ok(Frontend {
+            sources,
+            graph: ast::CrateGraph {
+                crates,
+                root: root_index,
+            },
+            require_main: binary_root,
+            binary_root,
+            load_diagnostics: diagnostics,
+        })
+    }
+
+    /// Every source file of the compilation.
+    pub fn sources(&self) -> &SourceMap {
+        &self.sources
+    }
+
+    /// The root source file (the file a diagnostic without a known span is
+    /// rendered against).
     pub fn file(&self) -> &SourceFile {
-        &self.file
+        self.sources.file(0)
+    }
+
+    /// Every crate taking part in the compilation.
+    pub fn graph(&self) -> &ast::CrateGraph {
+        &self.graph
+    }
+
+    /// Whether the root crate is a binary root: a standalone file or a package
+    /// with src/main.ls, even when it does not define fn main() yet.
+    pub fn has_binary_root(&self) -> bool {
+        self.binary_root
+    }
+
+    /// Whether the root crate defines a fn main() function.
+    pub fn has_main(&self) -> bool {
+        self.graph
+            .root_crate()
+            .program
+            .items
+            .iter()
+            .any(|item| matches!(item, ast::Item::Fn(function) if function.name == "main"))
+    }
+
+    /// Force the `fn main()` requirement on or off (only meaningful for
+    /// library crates and tests).
+    pub fn require_main(&mut self, require_main: bool) {
+        self.require_main = require_main;
     }
 
     /// Run the front-end. On success the returned HIR is ready for code
@@ -112,9 +360,7 @@ impl Frontend {
     /// similar). On failure the errors are returned as the error value, and
     /// they already include any warnings emitted before the failure.
     pub fn check_reporting(&self) -> Result<(hir::Program, Diagnostics), Diagnostics> {
-        let (tokens, mut diagnostics) = lexer::tokenize(self.file.text());
-        let (ast, parse_diagnostics) = parser::parse(&tokens, &self.file);
-        diagnostics.extend(parse_diagnostics);
+        let mut diagnostics = self.load_diagnostics.clone();
         if diagnostics.has_errors() {
             return Err(diagnostics);
         }
@@ -132,8 +378,11 @@ impl Frontend {
         // run on the large-stack worker thread: the parser already guarantees
         // that accepted syntax is at most 128 levels deep, which overflows the
         // default main-thread stack in debug builds.
+        let options = typeck::CheckOptions::new().require_main(self.require_main);
+        let graph = &self.graph;
+        let sources = self.sources();
         let checked = run_on_compiler_stack(|| {
-            typeck::check_reporting_with_prelude(&ast, prelude, &self.file)
+            typeck::check_crate_reporting_with_options(graph, prelude, sources, &options)
         });
         let (result, type_diagnostics) = match checked {
             Ok(checked) => checked,
@@ -159,6 +408,356 @@ impl Frontend {
                 Err(diagnostics)
             }
         }
+    }
+}
+
+/// An error from loading a package: either a plain IO error (missing root
+/// file) or accumulated diagnostics (bad manifest, missing modules, ...).
+#[derive(Debug)]
+pub enum LoadError {
+    Io(io::Error),
+    Diagnostics {
+        diagnostics: Diagnostics,
+        sources: SourceMap,
+    },
+}
+
+impl LoadError {
+    /// Render the error for the CLI. Diagnostics are rendered with their
+    /// source snippets; an IO error is rendered as a single line.
+    pub fn render(&self) -> String {
+        match self {
+            LoadError::Io(error) => format!("{}", error),
+            LoadError::Diagnostics {
+                diagnostics,
+                sources,
+            } => diagnostics.render(sources),
+        }
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadError::Io(error) => write!(formatter, "{}", error),
+            LoadError::Diagnostics { .. } => write!(formatter, "{}", self.render().trim_end()),
+        }
+    }
+}
+
+impl std::error::Error for LoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LoadError::Io(error) => Some(error),
+            LoadError::Diagnostics { .. } => None,
+        }
+    }
+}
+
+impl From<io::Error> for LoadError {
+    fn from(error: io::Error) -> LoadError {
+        LoadError::Io(error)
+    }
+}
+
+/// Reads and parses module files, rewriting external `mod name;` items into
+/// inline modules so the rest of the compiler only ever sees one module tree
+/// per crate.
+struct ModuleLoader<'a> {
+    sources: &'a mut SourceMap,
+    diagnostics: &'a mut Diagnostics,
+    /// Canonical paths of the module files currently being loaded, used to
+    /// detect circular module declarations.
+    stack: Vec<PathBuf>,
+}
+
+impl ModuleLoader<'_> {
+    /// Expand every module in one module item list.
+    ///
+    /// `dir` is the directory module files are resolved against: the parent
+    /// directory of the current file. It is `None` for in-memory programs,
+    /// where external modules are impossible by definition.
+    fn expand_items(&mut self, items: &mut Vec<ast::Item>, dir: Option<&Path>, depth: usize) {
+        if items.is_empty() {
+            return;
+        }
+        if depth > MAX_MODULE_DEPTH {
+            let span = items[0].span();
+            self.diagnostics.push(
+                Diagnostic::error(
+                    format!("module nesting is deeper than {} levels", MAX_MODULE_DEPTH),
+                    span,
+                )
+                .with_code("E0001"),
+            );
+            items.clear();
+            return;
+        }
+        let mut seen: Vec<(String, Span)> = Vec::new();
+        for item in items.iter_mut() {
+            let ast::Item::Mod(decl) = item else {
+                continue;
+            };
+            if let Some((_, previous)) = seen.iter().find(|(name, _)| name == &decl.name) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        format!("the name `{}` is defined multiple times", decl.name),
+                        decl.name_span,
+                    )
+                    .with_code("E0428")
+                    .with_label(*previous, "previous definition of the module here"),
+                );
+                decl.external = false;
+                decl.items.clear();
+                continue;
+            }
+            seen.push((decl.name.clone(), decl.name_span));
+            if decl.external {
+                let Some(dir) = dir else {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            format!(
+                                "cannot load module `{}` from an in-memory source",
+                                decl.name
+                            ),
+                            decl.name_span,
+                        )
+                        .with_code("E0583")
+                        .with_note(
+                            "the program was not loaded from a file, so there is no directory to find module files in",
+                        ),
+                    );
+                    decl.external = false;
+                    continue;
+                };
+                match self.load_module(decl, dir, depth) {
+                    Some((mut child_items, child_dir)) => {
+                        decl.external = false;
+                        decl.items.clear();
+                        decl.items.append(&mut child_items);
+                        self.expand_items(&mut decl.items, Some(&child_dir), depth + 1);
+                    }
+                    None => {
+                        decl.external = false;
+                        decl.items.clear();
+                    }
+                }
+            } else {
+                let child_dir = dir.map(|dir| dir.join(&decl.name));
+                self.expand_items(&mut decl.items, child_dir.as_deref(), depth + 1);
+            }
+        }
+    }
+
+    /// Load one external module file and parse it.
+    fn load_module(
+        &mut self,
+        decl: &ast::ModDecl,
+        parent_dir: &Path,
+        depth: usize,
+    ) -> Option<(Vec<ast::Item>, PathBuf)> {
+        let flat = parent_dir.join(format!("{}.ls", decl.name));
+        let nested = parent_dir.join(&decl.name).join("mod.ls");
+        let (path, child_dir) = match (flat.is_file(), nested.is_file()) {
+            (true, true) => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        format!(
+                            "file for module `{}` found at both {} and {}",
+                            decl.name,
+                            display_source_name(&flat),
+                            display_source_name(&nested)
+                        ),
+                        decl.name_span,
+                    )
+                    .with_code("E0761")
+                    .with_note(
+                        "delete or rename one of the two module files so only one definition exists",
+                    ),
+                );
+                return None;
+            }
+            (true, false) => (flat, parent_dir.join(&decl.name)),
+            (false, true) => (nested, parent_dir.join(&decl.name)),
+            (false, false) => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        format!("file not found for module `{}`", decl.name),
+                        decl.name_span,
+                    )
+                    .with_code("E0583")
+                    .with_note(format!(
+                        "expected one of: {}, {}",
+                        display_source_name(&flat),
+                        display_source_name(&nested)
+                    )),
+                );
+                return None;
+            }
+        };
+        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if let Some(start) = self.stack.iter().position(|entry| entry == &canonical) {
+            let mut chain: Vec<String> = self.stack[start..]
+                .iter()
+                .map(|entry| display_source_name(entry))
+                .collect();
+            chain.push(display_source_name(&canonical));
+            self.diagnostics.push(
+                Diagnostic::error(
+                    format!("circular module files: {}", chain.join(" -> ")),
+                    decl.name_span,
+                )
+                .with_code("E0001")
+                .with_note(format!("module `{}` was already being loaded", decl.name)),
+            );
+            return None;
+        }
+        let contents = match read_source_text(&path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        format!(
+                            "could not read module `{}` ({}): {}",
+                            decl.name,
+                            display_source_name(&path),
+                            error
+                        ),
+                        decl.name_span,
+                    )
+                    .with_code("E0583"),
+                );
+                return None;
+            }
+        };
+        let index = self.sources.add_file(display_source_name(&path), contents);
+        self.stack.push(canonical);
+        let mut program = parse_file(self.sources, index, self.diagnostics);
+        self.expand_items(&mut program.items, Some(&child_dir), depth + 1);
+        self.stack.pop();
+        Some((program.items, child_dir))
+    }
+}
+
+/// Read a source file, rejecting invalid UTF-8 with a clear message.
+fn read_source_text(path: &Path) -> io::Result<String> {
+    let bytes = fs::read(path)?;
+    String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not valid UTF-8", display_source_name(path)),
+        )
+    })
+}
+
+/// Tokenize one file with global spans.
+fn tokenize_source(file: &SourceFile) -> (Vec<lexer::Token>, Diagnostics) {
+    let (mut tokens, mut diagnostics) = lexer::tokenize(file.text());
+    let base = file.base();
+    if base != 0 {
+        for token in &mut tokens {
+            token.span = shift_span(token.span, base);
+        }
+        let mut shifted = Diagnostics::new();
+        for mut diagnostic in diagnostics.into_vec() {
+            diagnostic.span = shift_span(diagnostic.span, base);
+            for label in &mut diagnostic.labels {
+                label.span = shift_span(label.span, base);
+            }
+            shifted.push(diagnostic);
+        }
+        diagnostics = shifted;
+    }
+    (tokens, diagnostics)
+}
+
+fn shift_span(span: Span, base: u32) -> Span {
+    Span::new(
+        span.start.saturating_add(base),
+        span.end.saturating_add(base),
+    )
+}
+
+/// Lex and parse one already registered source file.
+fn parse_file(sources: &SourceMap, index: usize, diagnostics: &mut Diagnostics) -> ast::Program {
+    let file = sources.file(index);
+    let (tokens, lexer_diagnostics) = tokenize_source(file);
+    diagnostics.extend(lexer_diagnostics);
+    let (program, parse_diagnostics) = parser::parse(&tokens, file);
+    diagnostics.extend(parse_diagnostics);
+    program
+}
+
+/// A display name for a source file: relative to the current directory when
+/// possible, always with forward slashes.
+///
+/// Loaded paths are canonicalized, which on Windows turns them into verbatim
+/// paths of the form \\?\C:\...; those are normalized back to plain paths
+/// so diagnostics and panic locations show src/main.ls instead of //?/C:/...
+fn display_source_name(path: &Path) -> String {
+    let shown_path = normalize_path(path);
+    let cwd = env::current_dir().ok().map(|dir| normalize_path(&dir));
+    let shown = match cwd {
+        Some(cwd) => shown_path
+            .strip_prefix(&cwd)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| shown_path.clone()),
+        None => shown_path.clone(),
+    };
+    let text = shown.to_string_lossy().replace('\\', "/");
+    if text.is_empty() {
+        shown_path.to_string_lossy().replace('\\', "/")
+    } else {
+        text
+    }
+}
+
+/// Remove the Windows verbatim path prefix (\\?\ and \\?\UNC\) so paths
+/// compare and display like ordinary paths.
+fn normalize_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("\\\\?\\UNC\\") {
+        PathBuf::from(format!("\\\\{}", rest))
+    } else if let Some(rest) = text.strip_prefix("\\\\?\\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// The crate name of a standalone file: its file stem, sanitized into a
+/// lowercase identifier so it can be used in paths such as `crate_name::item`.
+fn crate_name_from_path(path: &Path) -> String {
+    let base = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("program");
+    let stem = base.strip_suffix(".ls").unwrap_or(base);
+    sanitize_crate_name(stem)
+}
+
+fn sanitize_crate_name(raw: &str) -> String {
+    let mut name = String::with_capacity(raw.len());
+    for (index, character) in raw.trim().chars().enumerate() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            if index == 0 && character.is_ascii_digit() {
+                name.push('_');
+            }
+            name.push(character.to_ascii_lowercase());
+        } else {
+            name.push('_');
+        }
+    }
+    if name.is_empty()
+        || !name
+            .chars()
+            .any(|character| character.is_ascii_alphanumeric())
+    {
+        // A name made only of separators (for example "---.ls") is not a
+        // useful crate name; fall back to the generic one.
+        String::from("program")
+    } else {
+        name
     }
 }
 
@@ -1214,6 +1813,7 @@ pub fn display_path(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::codegen::GeneratedUnit;
+    use crate::span::SourceLookup;
 
     /// Scratch directory under the workspace target directory.
     ///
@@ -1330,5 +1930,296 @@ mod tests {
                 "{disabled:?} should disable tracking"
             );
         }
+    }
+
+    /// Write one file below a scratch directory, creating parents as needed.
+    fn write_scratch(dir: &Path, relative: &str, contents: &str) {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("could not create a test directory");
+        }
+        fs::write(&path, contents).expect("could not write a test source file");
+    }
+
+    /// Load a program and return every diagnostic rendered for assertions.
+    fn load_and_render(root: &Path) -> Result<Frontend, String> {
+        match Frontend::load(root) {
+            Ok(frontend) => match frontend.check() {
+                Ok(_) => Ok(frontend),
+                Err(diagnostics) => Err(diagnostics.render(frontend.sources())),
+            },
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    #[test]
+    fn loads_external_module_files() {
+        let dir = scratch_dir("modules-ok");
+        write_scratch(&dir, "main.ls", "mod helper;\nfn main() { }\n");
+        write_scratch(&dir, "helper.ls", "pub fn helper() -> i64 { 7 }\n");
+        let frontend = Frontend::load(&dir.join("main.ls")).expect("the root file should load");
+        assert_eq!(frontend.sources().len(), 2, "both files are registered");
+        let root = frontend.graph().root_crate();
+        let module = root
+            .program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ast::Item::Mod(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("the module declaration survives loading");
+        assert_eq!(module.name, "helper");
+        assert!(!module.external, "external modules are rewritten inline");
+        assert_eq!(module.items.len(), 1, "the module body is loaded");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loads_nested_modules_relative_to_the_module_directory() {
+        let dir = scratch_dir("modules-nested");
+        write_scratch(&dir, "main.ls", "mod util;\nfn main() { }\n");
+        write_scratch(&dir, "util/mod.ls", "pub mod math;\n");
+        write_scratch(&dir, "util/math.ls", "pub fn value() -> i64 { 3 }\n");
+        let frontend =
+            Frontend::load(&dir.join("main.ls")).expect("the nested module tree should load");
+        assert_eq!(frontend.sources().len(), 3, "every file is registered");
+        let root = frontend.graph().root_crate();
+        let util = root
+            .program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ast::Item::Mod(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("the module declaration survives loading");
+        assert_eq!(util.name, "util");
+        let math = util
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ast::Item::Mod(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("the nested module is loaded");
+        assert_eq!(math.name, "math");
+        assert_eq!(math.items.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_module_files_are_reported() {
+        let dir = scratch_dir("modules-missing");
+        write_scratch(&dir, "main.ls", "mod absent;\nfn main() { }\n");
+        let rendered = load_and_render(&dir.join("main.ls")).expect_err("the module is missing");
+        assert!(
+            rendered.contains("file not found for module"),
+            "{}",
+            rendered
+        );
+        assert!(rendered.contains("not found"), "{}", rendered);
+        assert!(rendered.contains("E0583"), "{}", rendered);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ambiguous_module_files_are_reported() {
+        let dir = scratch_dir("modules-ambiguous");
+        write_scratch(&dir, "main.ls", "mod helper;\nfn main() { }\n");
+        write_scratch(&dir, "helper.ls", "pub fn helper() {}\n");
+        write_scratch(&dir, "helper/mod.ls", "pub fn helper() {}\n");
+        let rendered = load_and_render(&dir.join("main.ls")).expect_err("both files exist");
+        assert!(rendered.contains("E0761"), "{}", rendered);
+        assert!(rendered.contains("found at both"), "{}", rendered);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn circular_module_files_are_reported() {
+        let dir = scratch_dir("modules-circular");
+        // The module directory of a crate root file is its own directory, so
+        // "mod main;" inside main.ls asks for main.ls again: a cycle.
+        write_scratch(&dir, "main.ls", "mod main;\nfn main() { }\n");
+        let rendered = load_and_render(&dir.join("main.ls")).expect_err("the modules are circular");
+        assert!(rendered.contains("circular module files"), "{}", rendered);
+        assert!(rendered.contains("E0001"), "{}", rendered);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_module_declarations_are_reported() {
+        let dir = scratch_dir("modules-duplicate");
+        write_scratch(&dir, "main.ls", "mod helper;\nmod helper;\nfn main() { }\n");
+        write_scratch(&dir, "helper.ls", "pub fn helper() {}\n");
+        let rendered =
+            load_and_render(&dir.join("main.ls")).expect_err("the module is declared twice");
+        assert!(rendered.contains("E0428"), "{}", rendered);
+        assert!(rendered.contains("defined multiple times"), "{}", rendered);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_memory_sources_cannot_load_modules() {
+        let frontend = Frontend::new("memory.ls", "mod helper;\nfn main() { }\n");
+        let diagnostics = match frontend.check() {
+            Ok(_) => panic!("an external module cannot be loaded from memory"),
+            Err(diagnostics) => diagnostics,
+        };
+        let rendered = diagnostics.render(frontend.sources());
+        assert!(rendered.contains("E0583"), "{}", rendered);
+        assert!(rendered.contains("in-memory"), "{}", rendered);
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_sources() {
+        let dir = scratch_dir("modules-utf8");
+        write_scratch(&dir, "main.ls", "fn main() { }\n");
+        let frontend = Frontend::load(&dir.join("main.ls")).expect("the root file is valid");
+        assert_eq!(frontend.sources().len(), 1);
+        fs::write(dir.join("main2.ls"), b"mod bad;\n").expect("could not write a root file");
+        fs::write(dir.join("bad.ls"), [0xffu8, 0xfe]).expect("could not write raw bytes");
+        let rendered =
+            load_and_render(&dir.join("main2.ls")).expect_err("the module file is not UTF-8");
+        assert!(rendered.contains("could not read module"), "{}", rendered);
+        fs::write(dir.join("invalid_root.ls"), [0xffu8, 0xfe]).expect("could not write raw bytes");
+        let error = Frontend::load(&dir.join("invalid_root.ls"))
+            .expect_err("an invalid UTF-8 root file is an IO error");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crate_names_are_sanitized() {
+        let frontend = Frontend::new("Weird-Name 9.ls", "fn main() { }\n");
+        assert_eq!(frontend.graph().root_crate().name, "weird_name_9");
+        let fallback = Frontend::new("---.ls", "fn main() { }\n");
+        assert_eq!(fallback.graph().root_crate().name, "program");
+    }
+    #[test]
+    fn source_names_are_relative_and_have_no_windows_prefix() {
+        let dir = scratch_dir("display-names");
+        write_scratch(&dir, "main.ls", "mod helper;\nfn main() { }\n");
+        write_scratch(&dir, "helper.ls", "pub fn helper() {}\n");
+        let frontend = Frontend::load(&dir.join("main.ls")).expect("the program should load");
+        assert_eq!(frontend.sources().len(), 2);
+        for index in 0..frontend.sources().len() {
+            let name = frontend.sources().file(index).name();
+            assert!(!name.contains("//?/"), "verbatim prefix in {name}");
+            assert!(!name.contains('\\'), "backslashes in {name}");
+            assert!(name.ends_with(".ls"), "unexpected name {name}");
+        }
+        assert!(
+            frontend
+                .sources()
+                .file(0)
+                .name()
+                .contains("driver-test-tmp"),
+            "{} should be relative",
+            frontend.sources().file(0).name()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn package_case_dir(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/packages")
+            .join(name)
+    }
+
+    #[test]
+    fn loads_a_package_with_a_path_dependency() {
+        let frontend =
+            Frontend::load_package(&package_case_dir("with_dep")).expect("the package should load");
+        let names: Vec<&str> = frontend
+            .graph()
+            .crates
+            .iter()
+            .map(|krate| krate.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["greeting", "with_dep"]);
+        assert!(frontend.graph().crates[0].is_dependency);
+        assert!(!frontend.graph().crates[1].is_dependency);
+        assert_eq!(frontend.graph().root, 1);
+        assert!(frontend.has_main());
+        // Two crate roots plus the two manifests the resolver registers so
+        // manifest diagnostics can render.
+        assert_eq!(
+            frontend.sources().len(),
+            4,
+            "two manifests and two crate roots"
+        );
+        let roots: Vec<&str> = frontend
+            .graph()
+            .crates
+            .iter()
+            .map(|krate| {
+                frontend
+                    .sources()
+                    .file_of_span(krate.program.items[0].span())
+                    .map_or("", crate::span::SourceFile::name)
+            })
+            .collect();
+        assert!(
+            roots
+                .iter()
+                .any(|name| name.ends_with("greeting/src/lib.ls")),
+            "{roots:?}"
+        );
+    }
+
+    #[test]
+    fn loads_a_library_package_without_main() {
+        let frontend = Frontend::load_package(&package_case_dir("library_only"))
+            .expect("a library package should load");
+        assert!(!frontend.has_main());
+        assert_eq!(frontend.graph().crates.len(), 1);
+        assert_eq!(frontend.graph().root_crate().name, "library_only");
+    }
+
+    #[test]
+    fn missing_manifests_are_not_found() {
+        let dir = scratch_dir("no-manifest");
+        let error = Frontend::load_package(&dir).expect_err("a package needs a manifest");
+        match error {
+            LoadError::Io(io_error) => {
+                assert_eq!(io_error.kind(), io::ErrorKind::NotFound);
+                assert!(io_error.to_string().contains("no lsaca.toml"), "{io_error}");
+            }
+            other => panic!("expected an IO error, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_manifests_are_reported() {
+        let error = Frontend::load_package(&package_case_dir("bad_manifest"))
+            .expect_err("the manifest is malformed");
+        let rendered = error.render();
+        assert!(rendered.contains("E0001"), "{rendered}");
+        assert!(rendered.contains("name"), "{rendered}");
+    }
+
+    #[test]
+    fn dependency_errors_are_reported() {
+        let error = Frontend::load_package(&package_case_dir("missing_dep"))
+            .expect_err("the dependency is missing");
+        let rendered = error.render();
+        assert!(rendered.contains("E0001"), "{rendered}");
+        assert!(rendered.contains("does_not_exist"), "{rendered}");
+        let error = Frontend::load_package(&package_case_dir("cycle_a"))
+            .expect_err("the dependency cycle is rejected");
+        let rendered = error.render();
+        assert!(rendered.contains("cyclic package dependency"), "{rendered}");
+    }
+
+    #[test]
+    fn packages_cannot_be_both_a_binary_and_a_library() {
+        let error = Frontend::load_package(&package_case_dir("both_roots"))
+            .expect_err("a package with two roots must be rejected");
+        let rendered = error.render();
+        assert!(rendered.contains("E0001"), "{rendered}");
+        assert!(rendered.contains("src/main.ls"), "{rendered}");
+        assert!(rendered.contains("src/lib.ls"), "{rendered}");
     }
 }

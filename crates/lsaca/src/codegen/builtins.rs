@@ -24,6 +24,7 @@ const RESULT_UNWRAP_PANIC: &str =
     "called \u{0060}Result::unwrap()\u{0060} on an \u{0060}Err\u{0060} value";
 const ASSERT_PANIC: &str = "assertion failed";
 const ASSERT_EQ_PANIC: &str = "assertion \u{0060}left == right\u{0060} failed";
+const ASSERT_NE_PANIC: &str = "assertion \u{0060}left != right\u{0060} failed";
 const ASSERT_EQ_LEFT: &str = "\n  left: ";
 const ASSERT_EQ_RIGHT: &str = "\n  right: ";
 const CAPACITY_OVERFLOW: &str = "capacity overflow";
@@ -1520,6 +1521,7 @@ impl<'a> Gen<'a> {
             }
             HMacroKind::Assert => self.gen_assert(call, &loc, target),
             HMacroKind::AssertEq => self.gen_assert_eq(call, &loc, target),
+            HMacroKind::AssertNe => self.gen_assert_ne(call, &loc, target),
         }
     }
 
@@ -1954,6 +1956,21 @@ impl<'a> Gen<'a> {
     }
 
     fn gen_assert_eq(&mut self, call: &HMacroCall, loc: &str, target: &str) {
+        self.gen_assert_cmp(call, loc, target, false);
+    }
+
+    fn gen_assert_ne(&mut self, call: &HMacroCall, loc: &str, target: &str) {
+        self.gen_assert_cmp(call, loc, target, true);
+    }
+
+    /// Shared lowering of `assert_eq!`/`assert_ne!`.
+    ///
+    /// Both macros compare two borrowed operands and panic with Rust's default
+    /// diagnostic (the `left`/`right` debug lines) unless a custom format
+    /// message was supplied. `ne` selects the comparison direction: the
+    /// macro panics when the operands are equal. The `assert_eq!` output
+    /// stays byte-identical to the dedicated implementation.
+    fn gen_assert_cmp(&mut self, call: &HMacroCall, loc: &str, target: &str, ne: bool) {
         if call.args.len() < 2 {
             return;
         }
@@ -1963,17 +1980,21 @@ impl<'a> Gen<'a> {
         let right = self.gen_borrowed(&call.args[1]);
         let names = self.names;
         let equals = ops::eq_expr(names, &call.args[0].ty, &left, &right);
-        self.line(format!("if (!({})) {{", equals));
+        // `assert_eq!` panics when the operands differ, `assert_ne!` when they
+        // are equal; both conditions share the equality expression.
+        let condition = if ne { equals } else { format!("!({})", equals) };
+        self.line(format!("if ({}) {{", condition));
         self.w.indent();
         self.push_frame();
         if call.parts.is_empty() {
+            let panic_message = if ne { ASSERT_NE_PANIC } else { ASSERT_EQ_PANIC };
             let accumulator = self.new_plain_of("LsString*", "acc");
             self.line(format!("{} = ls_format_begin(0);", accumulator));
             self.line(format!(
                 "{} = ls_format_push_cstr({}, {});",
                 accumulator,
                 accumulator,
-                util::c_string_literal(ASSERT_EQ_PANIC)
+                util::c_string_literal(panic_message)
             ));
             self.line(format!(
                 "{} = ls_format_push_cstr({}, {});",

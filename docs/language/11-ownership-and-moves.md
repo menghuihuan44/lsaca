@@ -18,7 +18,7 @@ lsaca decides at compile time whether a type is Copy. The rule is structural: a 
 | Copy | `i64` and the other integer types, `f64` and the other float types, `bool`, `char`, unit `()`; shared references `&T` and mutable references `&mut T`; tuples, `Option` and `Result` whose parts are all Copy; user structs and enums whose fields are all Copy and that do not implement `Drop` |
 | Move-only | `String`, `Vec<T>`, `Rc<T>`, `Box<T>`; function values and closures; user structs and enums that contain a move-only type or implement `Drop` |
 
-Copy is derived automatically. There is no `impl Copy for ...` syntax in version 1.6.0; writing one is rejected. Move-only is the default for owned data, so the compiler derives move-onlyness the same way: a struct with a `String` field is move-only, while a struct with only `i64` fields is Copy. There are no ownership annotations to write: the type structure decides.
+Copy is derived automatically. There is no `impl Copy for ...` syntax in version 1.7.0; writing one is rejected. Move-only is the default for owned data, so the compiler derives move-onlyness the same way: a struct with a `String` field is move-only, while a struct with only `i64` fields is Copy. There are no ownership annotations to write: the type structure decides.
 
 ### Copy values can be used repeatedly
 
@@ -141,7 +141,7 @@ The argument to `consume` moves the `String` into the function; the function's r
 | `match`, `if let` and `while let` scrutinee when it is move-only | moves the scrutinee |
 | closure capture | captures by value (Copy values copy, move-only values move) |
 | discarded expression statement | the value is released at the end of the statement |
-| arguments of `println!`, `print!` and `format!`, operands of `assert!` and `assert_eq!`, operands of `==` and `!=`, `&expr`, reading a Copy value | the value is borrowed, not moved |
+| arguments of `println!`, `print!` and `format!`, operands of `assert!`, `assert_eq!` and `assert_ne!`, operands of `==` and `!=`, `&expr`, reading a Copy value | the value is borrowed, not moved |
 
 The last row is the reason a `String` can be printed or compared over and over without being moved: macros and comparison operators take their operands by reference. The following example uses `text` four times and still owns it afterwards:
 
@@ -469,7 +469,7 @@ A value with a Drop impl also cannot be moved out of a pattern (E0509, above), a
 
 ### Drop order and timing
 
-Drop order is deterministic in version 1.6.0. When a value is released:
+Drop order is deterministic in version 1.7.0. When a value is released:
 
 1. The type's own hook runs first (if it has one).
 2. Then the value's fields are released in declaration order, each running its own hook in turn.
@@ -846,7 +846,7 @@ Mutable references to a user struct or enum are supported only when the type is 
 * User-defined generics and traits exist since 1.5.0, but `Copy`, `Clone` and `Drop` remain the only compiler-known traits; there are no trait objects and no dynamic dispatch (see [Roadmap and deviations from Rust](16-roadmap.md)).
 * Since 1.5.0 user structs, enums, tuples, `Vec`, `Option`, `Result`, references and `HashMap` compare with `==`; function values do not (`E0369`).
 
-## Known limitations in version 1.6.0
+## Known limitations in version 1.7.0
 
 * `Copy` and `Clone` cannot be implemented (both are derived automatically); `Drop` keeps its special form, and user-defined traits can be implemented since 1.5.0.
 * There is no explicit lifetime syntax and references cannot be stored in struct or enum fields.

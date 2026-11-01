@@ -40,29 +40,28 @@ fn test_cache_root() -> PathBuf {
 /// or a human readable explanation of the first failing stage.
 fn build_program(name: &str, source: &str, release: bool) -> Result<PathBuf, String> {
     let frontend = Frontend::new(format!("{}.ls", name), source);
+    build_loaded(&frontend, name, release)
+}
+
+/// Build a program that was loaded from disk through the driver (modules or
+/// packages) and return the executable path.
+fn build_loaded(frontend: &Frontend, name: &str, release: bool) -> Result<PathBuf, String> {
     let program = match frontend.check() {
         Ok(program) => program,
         Err(diagnostics) => {
             return Err(format!(
                 "the front end rejected {}:\n{}",
                 name,
-                diagnostics.render(frontend.file())
+                diagnostics.render(frontend.sources())
             ));
         }
     };
-    let mut program_name = String::new();
-    for character in name.chars() {
-        if character.is_ascii_alphanumeric() || character == '_' {
-            program_name.push(character);
-        } else {
-            program_name.push('_');
-        }
-    }
+    let program_name = sanitize_test_name(name);
     let options = CodegenOptions {
         program_name: program_name.clone(),
         debug_checks: !release,
         emit_location_info: true,
-        source: Some(frontend.file().clone()),
+        sources: Some(frontend.sources().clone()),
         ..CodegenOptions::default()
     };
     let generated = driver::generate_c(&program, &options);
@@ -71,6 +70,44 @@ fn build_program(name: &str, source: &str, release: bool) -> Result<PathBuf, Str
         Ok(built) => Ok(built.executable),
         Err(error) => Err(format!("building {} failed:\n{}", name, error)),
     }
+}
+
+fn sanitize_test_name(name: &str) -> String {
+    let mut program_name = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            program_name.push(character);
+        } else {
+            program_name.push('_');
+        }
+    }
+    program_name
+}
+
+/// Run a program loaded from disk and return (stdout, stderr, exit code).
+fn run_loaded(frontend: &Frontend, name: &str) -> Result<(String, String, i32), String> {
+    let executable = build_loaded(frontend, name, false)?;
+    let output = match Command::new(&executable).output() {
+        Ok(output) => output,
+        Err(error) => return Err(format!("could not run {}: {}", name, error)),
+    };
+    Ok((
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        normalize(&String::from_utf8_lossy(&output.stderr)),
+        output.status.code().unwrap_or(-1),
+    ))
+}
+
+fn module_dir(case: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/programs/modules")
+        .join(case)
+}
+
+fn package_dir(case: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/packages")
+        .join(case)
 }
 
 fn normalize(text: &str) -> String {
@@ -674,6 +711,43 @@ fn cases() -> Vec<Case> {
             stderr_contains: &[],
         },
         Case {
+            name: "drop_copy_destructure",
+            source: include_str!("programs/drop_copy_destructure.ls"),
+            args: &[],
+            stdout: "1 2 1\ndrop pair\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "tail_negative",
+            source: include_str!("programs/tail_negative.ls"),
+            args: &[],
+            stdout: "-1\n2\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "assert_ne",
+            source: include_str!("programs/assert_ne.ls"),
+            args: &[],
+            stdout: "ok\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "assert_ne_fail",
+            source: include_str!("programs/assert_ne_fail.ls"),
+            args: &[],
+            stdout: "",
+            exit: 101,
+            stderr_contains: &[
+                "panicked at",
+                "assertion \x60left != right\x60 failed",
+                "left: 2",
+                "right: 2",
+            ],
+        },
+        Case {
             name: "vec_capacity",
             source: include_str!("programs/vec_capacity.ls"),
             args: &[],
@@ -1107,7 +1181,7 @@ fn frontend_rejects_invalid_programs() {
                 if !diagnostics.has_errors() {
                     problems.push(format!("{}: diagnostics do not contain an error", name));
                 }
-                let rendered = diagnostics.render(frontend.file());
+                let rendered = diagnostics.render(frontend.sources());
                 if !rendered.contains("error") {
                     problems.push(format!(
                         "{}: rendered diagnostics do not mention an error:\n{}",
@@ -1148,7 +1222,7 @@ fn rejects_try_operator_misuse() {
             ),
             Err(diagnostics) => diagnostics,
         };
-        let rendered = diagnostics.render(frontend.file());
+        let rendered = diagnostics.render(frontend.sources());
         assert!(
             rendered.contains("error"),
             "{}: rendered diagnostics do not mention an error:\n{}",
@@ -1175,7 +1249,7 @@ fn non_bool_conditions_are_rejected() {
         Ok(_) => panic!("expected condition type errors, but the program was accepted"),
         Err(diagnostics) => diagnostics,
     };
-    let rendered = diagnostics.render(frontend.file());
+    let rendered = diagnostics.render(frontend.sources());
     for missing in ["expected bool, found i64", "expected bool, found {integer}"] {
         assert!(
             rendered.contains(missing),
@@ -1196,7 +1270,7 @@ fn deeply_nested_expressions_are_rejected() {
         Ok(_) => panic!("expected a nesting error, but the program was accepted"),
         Err(diagnostics) => diagnostics,
     };
-    let rendered = diagnostics.render(frontend.file());
+    let rendered = diagnostics.render(frontend.sources());
     assert!(
         rendered.contains("this code is nested too deeply"),
         "rendered diagnostics do not mention deep nesting:\n{}",
@@ -1253,7 +1327,7 @@ fn format_specifier_errors_are_reported() {
                 name
             )),
             Err(diagnostics) => {
-                let rendered = diagnostics.render(frontend.file());
+                let rendered = diagnostics.render(frontend.sources());
                 for message in *expected {
                     if !rendered.contains(message) {
                         problems.push(format!(
@@ -1407,7 +1481,7 @@ fn borrow_errors_are_reported() {
             }
             Err(diagnostics) => diagnostics,
         };
-        let rendered = diagnostics.render(frontend.file());
+        let rendered = diagnostics.render(frontend.sources());
         for needle in *expected {
             if !rendered.contains(needle) {
                 problems.push(format!(
@@ -1444,6 +1518,16 @@ fn move_errors_are_reported() {
             &["error[E0509]", "implements Drop"],
         ),
         (
+            "bad_destructure_drop_struct",
+            include_str!("programs/bad_destructure_drop_struct.ls"),
+            &["error[E0509]", "implements Drop", "cannot move out"],
+        ),
+        (
+            "bad_destructure_drop_enum",
+            include_str!("programs/bad_destructure_drop_enum.ls"),
+            &["error[E0509]", "implements Drop", "cannot move out"],
+        ),
+        (
             "bad_move_while_borrowed",
             include_str!("programs/bad_move_while_borrowed.ls"),
             &["error[E0505]", "because it is borrowed"],
@@ -1467,7 +1551,7 @@ fn move_errors_are_reported() {
             }
             Err(diagnostics) => diagnostics,
         };
-        let rendered = diagnostics.render(frontend.file());
+        let rendered = diagnostics.render(frontend.sources());
         for needle in *expected {
             if !rendered.contains(needle) {
                 problems.push(format!(
@@ -1628,7 +1712,7 @@ fn v15_feature_errors_are_reported() {
                 name
             )),
             Err(diagnostics) => {
-                let rendered = diagnostics.render(frontend.file());
+                let rendered = diagnostics.render(frontend.sources());
                 for message in *expected {
                     if !rendered.contains(message) {
                         problems.push(format!(
@@ -1725,14 +1809,14 @@ fn large_programs_are_split_into_translation_units() {
         Ok(program) => program,
         Err(diagnostics) => panic!(
             "compile_large was rejected:\n{}",
-            diagnostics.render(frontend.file())
+            diagnostics.render(frontend.sources())
         ),
     };
     let options = CodegenOptions {
         program_name: "compile_large_split".to_string(),
         debug_checks: false,
         emit_location_info: true,
-        source: Some(frontend.file().clone()),
+        sources: Some(frontend.sources().clone()),
         ..CodegenOptions::default()
     };
     let generated = driver::generate_c(&program, &options);
@@ -1780,4 +1864,273 @@ fn large_programs_are_split_into_translation_units() {
     assert_eq!(stdout, "checksum=14655037\n");
     assert_eq!(output.status.code(), Some(0));
     assert!(!stderr.contains("reference-counted allocation"));
+}
+
+/// Multi-file programs: mod declarations load sibling files, use imports and
+/// pub visibility are enforced across modules.
+#[test]
+fn compiled_module_programs() {
+    if driver::find_c_compiler().is_err() {
+        eprintln!("skipping the module end-to-end tests: no C compiler found");
+        return;
+    }
+    let cases: &[(&str, &str)] = &[
+        ("math_basic", "5 20\n"),
+        ("nested_tree", "60\n"),
+        ("sibling_paths", "83\n"),
+        ("name_reuse", "42\n"),
+        ("reexport", "42\n"),
+        // Fields declared pub are visible from other modules; private fields
+        // stay module-private (see private_field above).
+        ("public_fields", "3 4\n12\n1 2\n"),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for (case, expected) in cases {
+        let path = module_dir(case).join("main.ls");
+        let frontend = match Frontend::load(&path) {
+            Ok(frontend) => frontend,
+            Err(error) => {
+                failures.push(format!("{}: could not load the program: {}", case, error));
+                continue;
+            }
+        };
+        match run_loaded(&frontend, case) {
+            Ok((stdout, stderr, exit)) => {
+                if stdout != *expected {
+                    failures.push(format!(
+                        "{}: stdout mismatch\n--- expected ---\n{:?}\n--- actual ---\n{:?}",
+                        case, expected, stdout
+                    ));
+                }
+                if exit != 0 {
+                    failures.push(format!("{}: exit code {}, expected 0", case, exit));
+                }
+                if stderr.contains("reference-counted allocation") {
+                    failures.push(format!("{}: leaked reference counted allocations", case));
+                }
+            }
+            Err(error) => failures.push(format!("{}: {}", case, error)),
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n\n"));
+    }
+}
+
+/// A panic raised inside a module must report the module file and its line,
+/// which exercises the multi-file source map used by code generation.
+#[test]
+fn module_panic_reports_the_module_location() {
+    if driver::find_c_compiler().is_err() {
+        eprintln!("skipping the module panic test: no C compiler found");
+        return;
+    }
+    let path = module_dir("panic_location").join("main.ls");
+    let frontend = Frontend::load(&path).expect("the panic_location fixture must load");
+    match run_loaded(&frontend, "module_panic") {
+        Ok((stdout, stderr, exit)) => {
+            assert_eq!(stdout, "");
+            assert_eq!(exit, 101, "a panic exits with 101: {}", stderr);
+            assert!(
+                stderr.contains("boom.ls"),
+                "the panic location must name the module file: {}",
+                stderr
+            );
+            assert!(
+                stderr.contains("boom from a module"),
+                "the panic message must be preserved: {}",
+                stderr
+            );
+        }
+        Err(error) => panic!("{}", error),
+    }
+}
+
+/// Module programs with visibility or import errors must be rejected with a
+/// precise diagnostic instead of compiling.
+#[test]
+fn module_diagnostics_are_reported() {
+    let cases: &[(&str, &[&str])] = &[
+        ("private_field", &["error[E0616]", "private"]),
+        ("glob_import", &["error[", "glob"]),
+        ("private_fn", &["error[E0603]", "private"]),
+        // A pub use must not widen the visibility of an item or a module.
+        ("reexport_private_item", &["error[E0364]", "private"]),
+        ("reexport_private_module", &["error[E0365]", "private"]),
+        // Diagnostics raised inside a module name the module file.
+        ("module_type_error", &["error[E0308]", "broken.ls"]),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for (case, expected) in cases {
+        let path = module_dir(case).join("main.ls");
+        let frontend = match Frontend::load(&path) {
+            Ok(frontend) => frontend,
+            Err(error) => {
+                failures.push(format!("{}: could not load the program: {}", case, error));
+                continue;
+            }
+        };
+        match frontend.check_reporting() {
+            Ok(_) => failures.push(format!("{}: the program was accepted", case)),
+            Err(diagnostics) => {
+                let rendered = diagnostics.render(frontend.sources());
+                for needle in *expected {
+                    if !rendered.contains(needle) {
+                        failures.push(format!(
+                            "{}: diagnostics do not mention {:?}:\n{}",
+                            case, needle, rendered
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n\n"));
+    }
+}
+
+/// Packages: lsaca.toml discovery, path dependencies compiled together, and
+/// the root binary package built and executed.
+#[test]
+fn compiled_package_programs() {
+    if driver::find_c_compiler().is_err() {
+        eprintln!("skipping the package end-to-end tests: no C compiler found");
+        return;
+    }
+    let cases: &[(&str, &str)] = &[
+        ("binary_hello", "hello from a package\n"),
+        ("with_dep", "hello, package\n42\n"),
+        ("uses_public", "1\n"),
+        // Cross-crate struct fields: pub fields of a public struct are visible
+        // to a dependent package.
+        ("field_dep", "7\nhello, field\n"),
+        // Public items of a dependency stay reachable across crates.
+        ("cross_crate_ok", "6\nheld\n"),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for (case, expected) in cases {
+        let dir = package_dir(case);
+        let frontend = match Frontend::load_package(&dir) {
+            Ok(frontend) => frontend,
+            Err(error) => {
+                failures.push(format!(
+                    "{}: could not load the package: {}",
+                    case,
+                    error.render()
+                ));
+                continue;
+            }
+        };
+        if !frontend.has_main() {
+            failures.push(format!(
+                "{}: expected a binary package with fn main()",
+                case
+            ));
+            continue;
+        }
+        match run_loaded(&frontend, case) {
+            Ok((stdout, stderr, exit)) => {
+                if stdout != *expected {
+                    failures.push(format!(
+                        "{}: stdout mismatch\n--- expected ---\n{:?}\n--- actual ---\n{:?}",
+                        case, expected, stdout
+                    ));
+                }
+                if exit != 0 {
+                    failures.push(format!("{}: exit code {}, expected 0", case, exit));
+                }
+                if stderr.contains("reference-counted allocation") {
+                    failures.push(format!("{}: leaked reference counted allocations", case));
+                }
+            }
+            Err(error) => failures.push(format!("{}: {}", case, error)),
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n\n"));
+    }
+}
+
+/// Library packages load and type check without a main function.
+#[test]
+fn library_packages_type_check_without_main() {
+    let dir = package_dir("library_only");
+    let frontend = Frontend::load_package(&dir).expect("the library package must load");
+    assert!(!frontend.has_main(), "a library package has no fn main()");
+    let result = frontend.check_reporting();
+    assert!(
+        result.is_ok(),
+        "the library package must type check: {:?}",
+        result
+            .err()
+            .map(|diagnostics| diagnostics.render(frontend.sources()))
+    );
+}
+
+/// A dependency crate exposes only its public items: a pub(crate) function
+/// must not be visible from the dependent crate.
+#[test]
+fn package_visibility_is_enforced() {
+    let dir = package_dir("uses_hidden");
+    let frontend = Frontend::load_package(&dir).expect("the package must load");
+    match frontend.check_reporting() {
+        Ok(_) => panic!("a pub(crate) dependency item must not be visible across crates"),
+        Err(diagnostics) => {
+            let rendered = diagnostics.render(frontend.sources());
+            for needle in ["error[E0603]", "private"] {
+                assert!(
+                    rendered.contains(needle),
+                    "diagnostics do not mention {:?}:\n{}",
+                    needle,
+                    rendered
+                );
+            }
+        }
+    }
+}
+
+/// Broken manifests and dependency graphs are reported as load diagnostics.
+#[test]
+fn package_diagnostics_are_reported() {
+    let cases: &[(&str, &[&str])] = &[
+        ("missing_dep", &["error", "absent"]),
+        ("bad_manifest", &["error", "name"]),
+        ("cycle_a", &["error", "cycle"]),
+        ("both_roots", &["error", "both"]),
+        // A private dependency field is not reachable from another crate.
+        ("private_field_access", &["error[E0616]", "private"]),
+        // pub(crate) items of a dependency crate stay inside that crate.
+        ("cross_crate_fn", &["error[E0603]", "private"]),
+        ("cross_crate_field", &["error[E0616]", "private"]),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for (case, expected) in cases {
+        let dir = package_dir(case);
+        let rendered = match Frontend::load_package(&dir) {
+            // Load-time problems (manifests, dependency graphs) are reported
+            // before type checking.
+            Err(error) => error.render(),
+            // Semantic problems such as private fields are typeck errors, so
+            // the loaded package must also be checked.
+            Ok(frontend) => match frontend.check_reporting() {
+                Ok(_) => {
+                    failures.push(format!("{}: the package was accepted", case));
+                    continue;
+                }
+                Err(diagnostics) => diagnostics.render(frontend.sources()),
+            },
+        };
+        for needle in *expected {
+            if !rendered.contains(needle) {
+                failures.push(format!(
+                    "{}: diagnostics do not mention {:?}:\n{}",
+                    case, needle, rendered
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n\n"));
+    }
 }

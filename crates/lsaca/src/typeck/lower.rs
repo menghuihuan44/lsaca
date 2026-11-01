@@ -22,7 +22,7 @@ impl<'a> Checker<'a> {
         let fns = self.lower_fns();
         let consts = self.lower_consts();
         let closures = self.lower_closures();
-        let main_fn = self.fn_by_name.get("main").copied().unwrap_or(0);
+        let main_fn = self.root_main_fn().unwrap_or(0);
         // "impl Drop for T" registration recorded one hook per user type. The
         // checker function ids and the lowered HIR function ids coincide
         // because lower_fns lowers every function in dense id order.

@@ -95,9 +95,9 @@ value returned from a `()` function is a compile error (`E0308`).
 
 ## Recursion
 
-Functions can call themselves and each other. Top-level items are visible
-throughout the compilation unit regardless of their order, so mutual recursion
-needs no forward declarations:
+Functions can call themselves and each other. Items are visible throughout
+their module regardless of their order (and across modules through `use` and
+module paths), so mutual recursion needs no forward declarations:
 
 ```ls
 fn factorial(n: i64) -> i64 {
@@ -189,7 +189,7 @@ Output:
 8 13
 ```
 
-One limitation remains in 1.6.0: function values do **not** support `==`, so
+One limitation remains in 1.7.0: function values do **not** support `==`, so
 comparing two of them is an error (`E0369`):
 
 ```ls,compile-fail

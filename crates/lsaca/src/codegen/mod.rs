@@ -43,9 +43,9 @@ pub struct CodegenOptions {
     pub emit_location_info: bool,
     /// Emit extra comments in the generated C (useful when debugging codegen).
     pub verbose: bool,
-    /// Source file used to resolve HIR spans into panic locations. When None,
+    /// Source map used to resolve HIR spans into panic locations. When None,
     /// diagnostics fall back to the program name with line 0, column 0.
-    pub source: Option<crate::span::SourceFile>,
+    pub sources: Option<crate::span::SourceMap>,
 }
 
 impl Default for CodegenOptions {
@@ -55,7 +55,7 @@ impl Default for CodegenOptions {
             debug_checks: true,
             emit_location_info: true,
             verbose: false,
-            source: None,
+            sources: None,
         }
     }
 }

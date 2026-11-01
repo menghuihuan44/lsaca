@@ -677,7 +677,7 @@ replacing bad bytes with U+FFFD.
 `read_line()` returns `Option<String>`: `None` at end of input, and
 `Some(line)` for a line with the line terminator removed. If the bytes read
 are not valid UTF-8, the whole program panics at the call site; there is no
-lossy variant in 1.6.0. `read_file` is the non-panicking form: it returns
+lossy variant in 1.7.0. `read_file` is the non-panicking form: it returns
 `Result<String, String>`, and a file whose bytes are not valid UTF-8 becomes
 `Err("stream did not contain valid UTF-8")`. `args()` panics if any argument
 is not valid UTF-8.
@@ -730,7 +730,7 @@ The printed order of a `HashMap` is not specified; the map prints its slots
 in the order the implementation stores them, which is deterministic for a given
 sequence of operations but is not an insertion order and is not a language
 guarantee. Content equality (`==`) ignores insertion order. The map is not
-iterable with `for` in 1.6.0; use `keys()` or `values()` first. See
+iterable with `for` in 1.7.0; use `keys()` or `values()` first. See
 [HashMap](20-hashmap.md) for the implementation and hashing notes.
 
 ## Differences from Rust
@@ -755,7 +755,7 @@ The character support follows Rust closely but stays inside lsaca's design:
 * The byte-oriented `String` API is unchanged from 1.5.0: `len`, `find` and
   `substring` use bytes, and `s[0]` is still rejected with E0608.
 
-## Known limitations in 1.6.0
+## Known limitations in 1.7.0
 
 * No character classification (alphabetic, numeric, whitespace) methods on
   `char`; Unicode property tables are only used internally by case mapping and
@@ -764,7 +764,7 @@ The character support follows Rust closely but stays inside lsaca's design:
   values.
 * No locale-aware collation: comparisons and sorting use code point order.
 * `substring` panics instead of returning an `Option`; a panic cannot be
-  caught in 1.6.0.
+  caught in 1.7.0.
 * Invalid UTF-8 on stdin or in arguments panics rather than returning an error.
 * `chars()` allocates a `Vec`; there is no borrowing character iterator.
 * `HashMap` iteration is still not available; keys with either `String` or
@@ -773,7 +773,7 @@ The character support follows Rust closely but stays inside lsaca's design:
 * Formatting a character ignores East Asian display width; a character counts
   as one column for width and alignment.
 
-See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-160)
+See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-170)
 for the complete list.
 
 ## Summary
@@ -801,4 +801,4 @@ for the complete list.
   and formatting rules.
 * [HashMap](20-hashmap.md) - the builtin map, including `char` keys.
 * [Roadmap and differences from Rust](16-roadmap.md) - the full set of
-  limitations in 1.6.0.
+  limitations in 1.7.0.

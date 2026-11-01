@@ -1,0 +1,1590 @@
+//! Robustness and fuzz tests for the v1.7 module tree and package front end.
+//!
+//! Every case runs inside a bounded worker thread (see run_bounded) so a
+//! regression that hangs the loader fails the test instead of hanging CI.
+//! Cases are intentionally adversarial: malformed module trees, malformed
+//! manifests, abused dependency graphs and random parser input. A case passes
+//! when the compiler reports a normal diagnostic and never panics.
+//!
+//! Scratch files live under CARGO_TARGET_TMPDIR (or target/) and are removed
+//! when the test finishes.
+
+use std::fs;
+use std::panic;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use lsaca::diag::Diagnostics;
+use lsaca::driver::{Frontend, LoadError};
+use lsaca::span::{SourceFile, SourceMap};
+use lsaca::{lexer, package, parser};
+
+// ---------------------------------------------------------------------------
+// Bounded worker and scratch directories
+// ---------------------------------------------------------------------------
+
+const CASE_BUDGET: Duration = Duration::from_secs(30);
+const SLOW_BUDGET: Duration = Duration::from_secs(180);
+
+static SCRATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Run one robustness case on a worker thread with a hard time bound.
+///
+/// A case that panics fails the test with the original panic. A case that
+/// exceeds the budget fails the test with a clear message; the worker thread
+/// is abandoned (the test binary exits afterwards).
+fn run_bounded<F>(case: &'static str, budget: Duration, body: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel::<bool>();
+    let handle = std::thread::Builder::new()
+        .name(format!("robustness-{case}"))
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let outcome = panic::catch_unwind(panic::AssertUnwindSafe(body));
+            let _ = sender.send(outcome.is_ok());
+            if let Err(payload) = outcome {
+                panic::resume_unwind(payload);
+            }
+        })
+        .expect("failed to spawn the robustness worker thread");
+    match receiver.recv_timeout(budget) {
+        Ok(healthy) => {
+            let joined = handle.join();
+            assert!(healthy, "robustness case {case} reported a worker failure");
+            if let Err(payload) = joined {
+                panic::resume_unwind(payload);
+            }
+        }
+        Err(_) => panic!(
+            "robustness case {case} did not finish within {} seconds",
+            budget.as_secs()
+        ),
+    }
+}
+
+fn case<F>(case: &'static str, body: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    run_bounded(case, CASE_BUDGET, body);
+}
+
+fn slow_case<F>(case: &'static str, body: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    run_bounded(case, SLOW_BUDGET, body);
+}
+
+/// A unique scratch directory removed on drop.
+struct Scratch {
+    dir: PathBuf,
+}
+
+impl Scratch {
+    fn new(tag: &str) -> Scratch {
+        let root = scratch_root();
+        fs::create_dir_all(&root).expect("failed to create the robustness scratch root");
+        let unique = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = root.join(format!(
+            "{}-{}-{}",
+            std::process::id(),
+            unique,
+            sanitize_tag(tag)
+        ));
+        fs::create_dir_all(&dir).expect("failed to create a robustness scratch directory");
+        Scratch { dir }
+    }
+
+    fn path(&self, relative: &str) -> PathBuf {
+        let mut path = self.dir.clone();
+        for part in relative.split('/') {
+            if !part.is_empty() && part != "." {
+                path.push(part);
+            }
+        }
+        path
+    }
+
+    fn write(&self, relative: &str, contents: &str) {
+        self.write_bytes(relative, contents.as_bytes());
+    }
+
+    fn write_bytes(&self, relative: &str, contents: &[u8]) {
+        let path = self.path(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("failed to create a scratch subdirectory");
+        }
+        fs::write(&path, contents).expect("failed to write a scratch file");
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn scratch_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+        return PathBuf::from(root);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("target")
+}
+
+fn sanitize_tag(tag: &str) -> String {
+    tag.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn repo_path(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic helpers
+// ---------------------------------------------------------------------------
+
+fn messages(diagnostics: &Diagnostics) -> String {
+    diagnostics
+        .as_slice()
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn has_code(diagnostics: &Diagnostics, code: &str) -> bool {
+    diagnostics
+        .as_slice()
+        .iter()
+        .any(|diagnostic| matches!(diagnostic.code, Some(found) if found == code))
+}
+
+/// Fail when the compiler produced something that looks like a crash.
+fn assert_clean_failure(case_name: &str, text: &str) {
+    assert!(
+        !text.trim().is_empty(),
+        "{case_name}: expected a diagnostic, got an empty message"
+    );
+    for marker in [
+        "panicked at",
+        "the compiler crashed",
+        "internal compiler error",
+        "stack overflow",
+        "RUST_BACKTRACE",
+    ] {
+        assert!(
+            !text.contains(marker),
+            "{case_name}: diagnostic contains crash marker {marker}: {text}"
+        );
+    }
+}
+
+fn assert_clean_diagnostics(case_name: &str, diagnostics: &Diagnostics) {
+    assert_clean_failure(case_name, &messages(diagnostics));
+}
+
+fn frontend_errors(frontend: &Frontend) -> Diagnostics {
+    match frontend.check() {
+        Ok(_) => Diagnostics::new(),
+        Err(diagnostics) => diagnostics,
+    }
+}
+
+fn rendered(frontend: &Frontend, diagnostics: &Diagnostics) -> String {
+    diagnostics.render(frontend.sources())
+}
+
+fn expect_clean_check(frontend: &Frontend) {
+    match frontend.check() {
+        Ok(_) => {}
+        Err(diagnostics) => panic!(
+            "expected the program to check cleanly, got:\n{}",
+            diagnostics.render(frontend.sources())
+        ),
+    }
+}
+
+fn load_ok(scratch: &Scratch, relative: &str) -> Frontend {
+    let path = scratch.path(relative);
+    match Frontend::load(&path) {
+        Ok(frontend) => frontend,
+        Err(error) => panic!("failed to load {relative}: {error}"),
+    }
+}
+
+fn failed_load_diagnostics(scratch: &Scratch, relative: &str) -> (Frontend, Diagnostics) {
+    let frontend = load_ok(scratch, relative);
+    let diagnostics = frontend_errors(&frontend);
+    (frontend, diagnostics)
+}
+
+fn source_diagnostics(name: &str, source: &str) -> Diagnostics {
+    let file = SourceFile::new(name, source);
+    let (tokens, mut diagnostics) = lexer::tokenize(source);
+    let (_, parse_diagnostics) = parser::parse(&tokens, &file);
+    diagnostics.extend(parse_diagnostics);
+    diagnostics
+}
+
+// ---------------------------------------------------------------------------
+// Package helpers
+// ---------------------------------------------------------------------------
+
+fn write_package(
+    scratch: &Scratch,
+    relative: &str,
+    manifest: &str,
+    main: Option<&str>,
+    library: Option<&str>,
+) -> PathBuf {
+    scratch.write(&format!("{relative}/lsaca.toml"), manifest);
+    if let Some(source) = main {
+        scratch.write(&format!("{relative}/src/main.ls"), source);
+    }
+    if let Some(source) = library {
+        scratch.write(&format!("{relative}/src/lib.ls"), source);
+    }
+    scratch.path(relative)
+}
+
+fn binary_package(scratch: &Scratch, relative: &str, manifest: &str) -> PathBuf {
+    write_package(scratch, relative, manifest, Some("fn main() { }\n"), None)
+}
+
+fn library_package(scratch: &Scratch, relative: &str, manifest: &str) -> PathBuf {
+    write_package(
+        scratch,
+        relative,
+        manifest,
+        None,
+        Some("pub fn value() -> i64 { 1 }\n"),
+    )
+}
+
+fn package_ok(scratch: &Scratch, relative: &str) -> Frontend {
+    let path = scratch.path(relative);
+    match Frontend::load_package(&path) {
+        Ok(frontend) => frontend,
+        Err(error) => panic!("package {relative} should load: {}", error.render()),
+    }
+}
+
+fn package_failure(scratch: &Scratch, relative: &str) -> String {
+    let path = scratch.path(relative);
+    match Frontend::load_package(&path) {
+        Ok(_) => panic!("package {relative} should have been rejected"),
+        Err(LoadError::Io(error)) => format!("{error}"),
+        Err(LoadError::Diagnostics {
+            diagnostics,
+            sources,
+        }) => diagnostics.render(&sources),
+    }
+}
+
+fn manifest_diagnostics(scratch: &Scratch, relative: &str) -> (bool, Diagnostics, SourceMap) {
+    let path = scratch.path(relative);
+    let mut sources = SourceMap::new();
+    let mut diagnostics = Diagnostics::new();
+    let parsed = package::parse_manifest(&path, &mut sources, &mut diagnostics);
+    (parsed.is_some(), diagnostics, sources)
+}
+
+/// Write a module chain: main.ls declares m000, m000 declares m001, and so on.
+///
+/// Module resolution is strictly tree shaped: the file for `mNNN` lives in the
+/// child directory of its parent module, so the chain is written as nested
+/// directories (`m000.ls` then `m000/m001.ls` then `m000/m001/m002.ls`).
+fn write_module_chain(scratch: &Scratch, relative: &str, length: usize) {
+    scratch.write(&format!("{relative}/main.ls"), "mod m000;\nfn main() { }\n");
+    for index in 0..length {
+        let contents = if index + 1 < length {
+            format!("mod m{:03};\n", index + 1)
+        } else {
+            "pub fn leaf() -> i64 { 7 }\n".to_string()
+        };
+        let mut path = relative.to_string();
+        for parent in 0..index {
+            path.push_str(&format!("/m{parent:03}"));
+        }
+        path.push_str(&format!("/m{index:03}.ls"));
+        scratch.write(&path, &contents);
+    }
+}
+
+/// Write a dependency chain: app depends on dep000, which depends on dep001...
+fn write_dependency_chain(scratch: &Scratch, length: usize) {
+    let manifest = String::from(
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ndep000 = { path = \"deps/dep000\" }\n",
+    );
+    scratch.write("app/lsaca.toml", &manifest);
+    scratch.write("app/src/main.ls", "fn main() { }\n");
+    for index in 0..length {
+        let name = format!("dep{:03}", index);
+        let next = index + 1;
+        let mut dep_manifest = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n");
+        if next < length {
+            dep_manifest.push_str("\n[dependencies]\n");
+            dep_manifest.push_str(&format!(
+                "dep{:03} = {{ path = \"../dep{:03}\" }}\n",
+                next, next
+            ));
+        }
+        scratch.write(&format!("app/deps/{name}/lsaca.toml"), &dep_manifest);
+        scratch.write(
+            &format!("app/deps/{name}/src/lib.ls"),
+            "pub fn value() -> i64 { 1 }\n",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Malformed module trees
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rejects_missing_module_files() {
+    case("missing-module", || {
+        let scratch = Scratch::new("missing-module");
+        scratch.write("main.ls", "mod absent;\nfn main() { }\n");
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        assert!(
+            has_code(&diagnostics, "E0583"),
+            "expected E0583: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("file not found for module"), "{text}");
+        assert!(text.contains("not found"), "{text}");
+        assert_clean_failure("missing module", &text);
+    });
+}
+
+#[test]
+fn rejects_ambiguous_module_files() {
+    case("ambiguous-module", || {
+        let scratch = Scratch::new("ambiguous-module");
+        scratch.write("main.ls", "mod both;\nfn main() { }\n");
+        scratch.write("both.ls", "pub fn flat() -> i64 { 1 }\n");
+        scratch.write("both/mod.ls", "pub fn nested() -> i64 { 2 }\n");
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        assert!(
+            has_code(&diagnostics, "E0761"),
+            "expected E0761: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("found at both"), "{text}");
+        assert_clean_failure("ambiguous module", &text);
+    });
+}
+
+#[test]
+fn rejects_duplicate_module_declarations() {
+    case("duplicate-module", || {
+        let scratch = Scratch::new("duplicate-module");
+        scratch.write("main.ls", "mod dup;\nmod dup;\nfn main() { }\n");
+        scratch.write("dup.ls", "pub fn value() -> i64 { 1 }\n");
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        assert!(
+            has_code(&diagnostics, "E0428"),
+            "expected E0428: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("defined multiple times"), "{text}");
+        assert_clean_failure("duplicate module", &text);
+    });
+}
+
+#[test]
+fn rejects_circular_module_files() {
+    case("circular-module", || {
+        let scratch = Scratch::new("circular-module");
+        // Module resolution is strictly tree shaped, so the file of a module
+        // always lives strictly below the directory of its parent module. The
+        // one reachable cycle is a root file that declares a module with its
+        // own file stem: the flat candidate is the root file itself.
+        scratch.write("helper.ls", "mod helper;\n");
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "helper.ls");
+        assert!(
+            has_code(&diagnostics, "E0001"),
+            "expected E0001: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("circular module files"), "{text}");
+        assert!(text.contains("helper.ls"), "{text}");
+        assert_clean_failure("circular module", &text);
+    });
+}
+
+#[test]
+fn references_to_parent_files_resolve_as_missing_modules() {
+    case("parent-module-reference", || {
+        // Modules form a tree: a module file's children are looked up in that
+        // module's own directory, so a reference back to the root file is a
+        // missing module rather than a cycle.
+        let scratch = Scratch::new("parent-module-reference");
+        scratch.write("main.ls", "mod helper;\nfn main() { }\n");
+        scratch.write("helper.ls", "mod main;\n");
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        assert!(
+            has_code(&diagnostics, "E0583"),
+            "expected E0583: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("file not found for module `main`"), "{text}");
+        assert_clean_failure("parent module reference", &text);
+    });
+}
+
+#[test]
+fn rejects_self_referential_module_file() {
+    case("self-module", || {
+        let scratch = Scratch::new("self-module");
+        scratch.write("main.ls", "mod main;\nfn main() { }\n");
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        assert!(
+            has_code(&diagnostics, "E0001"),
+            "expected E0001: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("circular module files"), "{text}");
+        assert_clean_failure("self module", &text);
+    });
+}
+
+#[test]
+fn rejects_module_chain_deeper_than_256() {
+    case("deep-module-chain", || {
+        let scratch = Scratch::new("deep-module-chain");
+        write_module_chain(&scratch, "deep", 300);
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "deep/main.ls");
+        assert!(
+            has_code(&diagnostics, "E0001"),
+            "expected E0001: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("nesting is deeper than 256"), "{text}");
+        assert_clean_failure("deep module chain", &text);
+    });
+}
+
+#[test]
+fn loads_module_chain_within_the_limit() {
+    case("module-chain-ok", || {
+        let scratch = Scratch::new("module-chain-ok");
+        write_module_chain(&scratch, "chain", 100);
+        let frontend = load_ok(&scratch, "chain/main.ls");
+        assert_eq!(
+            frontend.sources().len(),
+            101,
+            "one source per loaded module file"
+        );
+        let diagnostics = frontend_errors(&frontend);
+        assert!(!diagnostics.has_errors(), "{}", messages(&diagnostics));
+    });
+}
+
+#[test]
+fn allows_empty_module_files() {
+    case("empty-module", || {
+        let scratch = Scratch::new("empty-module");
+        scratch.write("main.ls", "mod empty;\nfn main() { }\n");
+        scratch.write("empty.ls", "");
+        let frontend = load_ok(&scratch, "main.ls");
+        assert_eq!(frontend.sources().len(), 2);
+        expect_clean_check(&frontend);
+    });
+}
+
+#[test]
+fn rejects_invalid_utf8_root_file() {
+    case("invalid-utf8-root", || {
+        let scratch = Scratch::new("invalid-utf8-root");
+        scratch.write_bytes("main.ls", &[0x66, 0x6e, 0xff, 0xfe, 0x00, 0x01]);
+        let path = scratch.path("main.ls");
+        match Frontend::load(&path) {
+            Ok(_) => panic!("invalid UTF-8 root file should not load"),
+            Err(error) => {
+                let text = format!("{error}");
+                assert!(text.contains("not valid UTF-8"), "{text}");
+                assert_clean_failure("invalid utf8 root", &text);
+            }
+        }
+    });
+}
+
+#[test]
+fn rejects_invalid_utf8_module_file() {
+    case("invalid-utf8-module", || {
+        let scratch = Scratch::new("invalid-utf8-module");
+        scratch.write("main.ls", "mod broken;\nfn main() { }\n");
+        scratch.write_bytes("broken.ls", &[0x6d, 0x6f, 0x64, 0x20, 0xff]);
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        assert!(
+            has_code(&diagnostics, "E0583"),
+            "expected E0583: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("could not read module"), "{text}");
+        assert!(text.contains("not valid UTF-8"), "{text}");
+        assert_clean_failure("invalid utf8 module", &text);
+    });
+}
+
+#[test]
+fn accepts_bom_and_crlf_sources() {
+    case("bom-crlf", || {
+        let scratch = Scratch::new("bom-crlf");
+        let main = "\u{feff}mod helper;\r\nfn main() { }\r\n";
+        scratch.write("main.ls", main);
+        scratch.write("helper.ls", "\u{feff}\r\npub fn value() -> i64 { 1 }\r\n");
+        let frontend = load_ok(&scratch, "main.ls");
+        assert_eq!(frontend.sources().len(), 2);
+        expect_clean_check(&frontend);
+    });
+}
+
+#[test]
+fn loads_one_megabyte_module_file() {
+    slow_case("large-module", || {
+        let scratch = Scratch::new("large-module");
+        scratch.write("main.ls", "mod big;\nfn main() { }\n");
+        let mut big = String::from("// large module padding\n");
+        big.push_str(&"// a filler comment line to grow the file\n".repeat(25_000));
+        big.push_str("pub fn value() -> i64 { 7 }\n");
+        assert!(big.len() > 1_000_000);
+        scratch.write("big.ls", &big);
+        let frontend = load_ok(&scratch, "main.ls");
+        assert_eq!(frontend.sources().len(), 2);
+        assert_eq!(frontend.sources().file(1).text().len(), big.len());
+    });
+}
+
+#[test]
+fn reports_malformed_module_source_cleanly() {
+    case("malformed-module", || {
+        let scratch = Scratch::new("malformed-module");
+        scratch.write("main.ls", "mod broken;\nfn main() { }\n");
+        scratch.write("broken.ls", "fn broken( { let =\n");
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        assert!(
+            diagnostics.has_errors(),
+            "expected parse errors in the module file"
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert_clean_failure("malformed module source", &text);
+    });
+}
+
+#[test]
+fn loads_nested_module_directories() {
+    case("nested-module-dir", || {
+        let scratch = Scratch::new("nested-module-dir");
+        scratch.write("main.ls", "mod util;\nfn main() { }\n");
+        scratch.write(
+            "util/mod.ls",
+            "mod math;\npub fn id(value: i64) -> i64 { value }\n",
+        );
+        scratch.write(
+            "util/math.ls",
+            "pub fn double(value: i64) -> i64 { value * 2 }\n",
+        );
+        let frontend = load_ok(&scratch, "main.ls");
+        assert_eq!(frontend.sources().len(), 3);
+        expect_clean_check(&frontend);
+    });
+}
+
+#[test]
+fn loads_many_sibling_modules() {
+    case("many-siblings", || {
+        let scratch = Scratch::new("many-siblings");
+        let mut main = String::new();
+        for index in 0..50 {
+            main.push_str(&format!("mod part{index};\n"));
+        }
+        main.push_str("fn main() { }\n");
+        scratch.write("main.ls", &main);
+        for index in 0..50 {
+            scratch.write(&format!("part{index}.ls"), "pub fn value() -> i64 { 1 }\n");
+        }
+        let frontend = load_ok(&scratch, "main.ls");
+        assert_eq!(frontend.sources().len(), 51);
+    });
+}
+
+#[test]
+fn rejects_deeply_nested_inline_modules() {
+    case("deep-inline-modules", || {
+        let scratch = Scratch::new("deep-inline-modules");
+        let mut source = String::new();
+        for index in 0..300 {
+            source.push_str(&format!("mod level{index} {{ "));
+        }
+        source.push_str("fn leaf() { } ");
+        for _ in 0..300 {
+            source.push('}');
+        }
+        source.push_str("\nfn main() { }\n");
+        scratch.write("main.ls", &source);
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        assert!(
+            has_code(&diagnostics, "E0001"),
+            "expected E0001: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("nested too deeply"), "{text}");
+        assert_clean_failure("deep inline modules", &text);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Malformed manifests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rejects_invalid_manifest_syntax() {
+    case("bad-manifests", || {
+        let scratch = Scratch::new("bad-manifests");
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "bad-toml",
+                "[package\nname = \"app\"\n",
+                "malformed table header",
+            ),
+            (
+                "unknown-section",
+                "[package]\nname = \"app\"\n\n[features]\nfoo = 1\n",
+                "unknown section",
+            ),
+            (
+                "unknown-key",
+                "[package]\nname = \"app\"\nauthor = \"me\"\n",
+                "unknown key",
+            ),
+            ("outside-table", "name = \"app\"\n", "inside"),
+            (
+                "duplicate-table",
+                "[package]\nname = \"app\"\n\n[package]\nname = \"other\"\n",
+                "more than once",
+            ),
+            (
+                "duplicate-key",
+                "[package]\nname = \"app\"\nname = \"other\"\n",
+                "duplicate",
+            ),
+        ];
+        for (name, manifest, expected) in cases {
+            let relative = format!("manifests/{name}");
+            scratch.write(&format!("{relative}/lsaca.toml"), manifest);
+            let (parsed, diagnostics, sources) =
+                manifest_diagnostics(&scratch, &format!("{relative}/lsaca.toml"));
+            assert!(!parsed, "{name}: malformed manifest should be rejected");
+            assert!(
+                has_code(&diagnostics, "E0001"),
+                "{name}: expected E0001: {}",
+                messages(&diagnostics)
+            );
+            let text = diagnostics.render(&sources);
+            assert!(
+                text.to_lowercase().contains(&expected.to_lowercase()),
+                "{name}: expected message to contain {expected}: {text}"
+            );
+            assert_clean_failure(name, &text);
+        }
+    });
+}
+
+#[test]
+fn rejects_invalid_package_names() {
+    case("bad-names", || {
+        let scratch = Scratch::new("bad-names");
+        for name in ["Hello", "9app", "_", "", "app-name", "fn", "APP"] {
+            let relative = format!("names/{}/lsaca.toml", sanitize_tag(name));
+            scratch.write(
+                &relative,
+                &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+            );
+            let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, &relative);
+            assert!(!parsed, "package name {name:?} should be rejected");
+            assert!(has_code(&diagnostics, "E0001"), "{name:?}: expected E0001");
+            let text = diagnostics.render(&sources);
+            assert!(
+                text.to_lowercase().contains("name"),
+                "{name:?}: expected a name diagnostic: {text}"
+            );
+            assert_clean_failure("invalid package name", &text);
+        }
+    });
+}
+
+#[test]
+fn accepts_valid_package_names() {
+    case("good-names", || {
+        let scratch = Scratch::new("good-names");
+        for name in ["app", "a", "a1", "_x", "my_crate2"] {
+            let relative = format!("names/{}/lsaca.toml", sanitize_tag(name));
+            scratch.write(&relative, &format!("[package]\nname = \"{name}\"\n"));
+            let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, &relative);
+            assert!(
+                parsed,
+                "{name:?} should be accepted: {}",
+                diagnostics.render(&sources)
+            );
+        }
+    });
+}
+
+#[test]
+fn rejects_invalid_versions() {
+    case("bad-versions", || {
+        let scratch = Scratch::new("bad-versions");
+        for version in ["1.2", "abc", "1.2.3.4", "1..2"] {
+            let relative = format!("versions/{}/lsaca.toml", sanitize_tag(version));
+            scratch.write(
+                &relative,
+                &format!("[package]\nname = \"app\"\nversion = \"{version}\"\n"),
+            );
+            let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, &relative);
+            assert!(!parsed, "version {version:?} should be rejected");
+            let text = diagnostics.render(&sources);
+            assert!(
+                text.contains("version"),
+                "{version:?}: expected a version diagnostic: {text}"
+            );
+            assert_clean_failure("invalid version", &text);
+        }
+    });
+}
+
+#[test]
+fn manifest_defaults_to_version_zero_one_zero() {
+    case("default-version", || {
+        let scratch = Scratch::new("default-version");
+        let manifest = "[package]\nname = \"app\"\n";
+        scratch.write("app/lsaca.toml", manifest);
+        let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, "app/lsaca.toml");
+        assert!(
+            parsed,
+            "minimal manifest should be accepted: {}",
+            diagnostics.render(&sources)
+        );
+        let path = scratch.path("app/lsaca.toml");
+        let mut sources = SourceMap::new();
+        let mut diagnostics = Diagnostics::new();
+        let parsed = package::parse_manifest(&path, &mut sources, &mut diagnostics)
+            .expect("minimal manifest should parse");
+        assert_eq!(parsed.package.version, "0.1.0");
+        assert_eq!(parsed.package.name, "app");
+        assert!(parsed.dependencies.is_empty());
+    });
+}
+
+#[test]
+fn rejects_missing_package_table() {
+    case("missing-package", || {
+        let scratch = Scratch::new("missing-package");
+        for (name, manifest) in [("empty", ""), ("only-deps", "[dependencies]\n")] {
+            let relative = format!("missing/{name}/lsaca.toml");
+            scratch.write(&relative, manifest);
+            let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, &relative);
+            assert!(
+                !parsed,
+                "{name}: manifest without [package] should be rejected"
+            );
+            assert!(has_code(&diagnostics, "E0001"));
+            let text = diagnostics.render(&sources);
+            assert!(text.contains("[package]"), "{name}: {text}");
+            assert_clean_failure(name, &text);
+        }
+    });
+}
+
+#[test]
+fn rejects_missing_package_name() {
+    case("missing-name", || {
+        let scratch = Scratch::new("missing-name");
+        scratch.write("app/lsaca.toml", "[package]\nversion = \"0.1.0\"\n");
+        let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, "app/lsaca.toml");
+        assert!(
+            !parsed,
+            "manifest without a package name should be rejected"
+        );
+        let text = diagnostics.render(&sources);
+        assert!(text.contains("name"), "{text}");
+        assert_clean_failure("missing package name", &text);
+    });
+}
+
+#[test]
+fn rejects_malformed_dependency_entries() {
+    case("bad-dependencies", || {
+        let scratch = Scratch::new("bad-dependencies");
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "plain-string",
+                "[dependencies]\nfoo = \"nope\"\n",
+                "malformed dependency",
+            ),
+            (
+                "bad-path",
+                "[dependencies]\nfoo = { path = 3 }\n",
+                "double-quoted string",
+            ),
+            (
+                "unterminated",
+                "[dependencies]\nfoo = { path = \"../dep\" \n",
+                "malformed dependency",
+            ),
+            (
+                "unknown-key",
+                "[dependencies]\nfoo = { version = \"1.0\" }\n",
+                "malformed dependency",
+            ),
+        ];
+        for (name, dependencies, expected) in cases {
+            let relative = format!("deps/{name}/lsaca.toml");
+            scratch.write(
+                &relative,
+                &format!("[package]\nname = \"app\"\n\n{dependencies}"),
+            );
+            let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, &relative);
+            assert!(!parsed, "{name}: malformed dependency should be rejected");
+            assert!(has_code(&diagnostics, "E0001"), "{name}: expected E0001");
+            let text = diagnostics.render(&sources);
+            assert!(
+                text.to_lowercase().contains(&expected.to_lowercase()),
+                "{name}: expected a message containing {expected}: {text}"
+            );
+            assert_clean_failure(name, &text);
+        }
+    });
+}
+
+#[test]
+fn rejects_duplicate_dependency_declarations() {
+    case("duplicate-dep", || {
+        let scratch = Scratch::new("duplicate-dep");
+        scratch.write(
+            "app/lsaca.toml",
+            "[package]\nname = \"app\"\n\n[dependencies]\nfoo = { path = \"../foo\" }\nfoo = { path = \"../bar\" }\n",
+        );
+        let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, "app/lsaca.toml");
+        assert!(
+            !parsed,
+            "duplicate dependency declarations should be rejected"
+        );
+        let text = diagnostics.render(&sources);
+        assert!(text.contains("duplicate dependency"), "{text}");
+        assert_clean_failure("duplicate dependency", &text);
+    });
+}
+
+#[test]
+fn rejects_non_utf8_manifest() {
+    case("non-utf8-manifest", || {
+        let scratch = Scratch::new("non-utf8-manifest");
+        scratch.write_bytes("app/lsaca.toml", &[0xff, 0xfe, 0x00, 0x5b, 0x70]);
+        let (parsed, diagnostics, sources) = manifest_diagnostics(&scratch, "app/lsaca.toml");
+        assert!(!parsed, "non-UTF-8 manifest should be rejected");
+        assert!(has_code(&diagnostics, "E0001"));
+        let text = diagnostics.render(&sources);
+        assert!(text.contains("could not read package manifest"), "{text}");
+        assert_clean_failure("non-utf8 manifest", &text);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Package loading and dependency graphs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rejects_package_without_a_manifest() {
+    case("no-manifest", || {
+        let scratch = Scratch::new("no-manifest");
+        scratch.write("empty/placeholder.txt", "not a package\n");
+        let text = package_failure(&scratch, "empty");
+        assert!(text.contains("no lsaca.toml found"), "{text}");
+        assert_clean_failure("missing manifest", &text);
+    });
+}
+
+#[test]
+fn rejects_package_without_source_roots() {
+    case("no-source-roots", || {
+        let scratch = Scratch::new("no-source-roots");
+        scratch.write("app/lsaca.toml", "[package]\nname = \"app\"\n");
+        let text = package_failure(&scratch, "app");
+        assert_clean_failure("missing source roots", &text);
+    });
+}
+
+#[test]
+fn rejects_package_with_non_utf8_root_source() {
+    case("non-utf8-root", || {
+        let scratch = Scratch::new("non-utf8-root");
+        scratch.write("app/lsaca.toml", "[package]\nname = \"app\"\n");
+        scratch.write_bytes("app/src/main.ls", &[0x66, 0x6e, 0xff]);
+        let text = package_failure(&scratch, "app");
+        assert!(text.contains("not valid UTF-8"), "{text}");
+        assert_clean_failure("non-utf8 package source", &text);
+    });
+}
+
+#[test]
+fn reports_non_utf8_module_inside_a_package() {
+    case("non-utf8-package-module", || {
+        let scratch = Scratch::new("non-utf8-package-module");
+        scratch.write("app/lsaca.toml", "[package]\nname = \"app\"\n");
+        scratch.write("app/src/main.ls", "mod helper;\nfn main() { }\n");
+        scratch.write_bytes("app/src/helper.ls", &[0x6d, 0xff]);
+        let frontend = package_ok(&scratch, "app");
+        let diagnostics = frontend_errors(&frontend);
+        assert!(
+            has_code(&diagnostics, "E0583"),
+            "expected E0583: {}",
+            messages(&diagnostics)
+        );
+        let text = rendered(&frontend, &diagnostics);
+        assert!(text.contains("could not read module"), "{text}");
+        assert_clean_failure("non-utf8 package module", &text);
+    });
+}
+
+#[test]
+fn loads_minimal_binary_package() {
+    case("minimal-binary", || {
+        let scratch = Scratch::new("minimal-binary");
+        binary_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        );
+        let frontend = package_ok(&scratch, "app");
+        assert_eq!(frontend.graph().crates.len(), 1);
+        assert!(
+            frontend.has_main(),
+            "binary package should expose a main function"
+        );
+        expect_clean_check(&frontend);
+    });
+}
+
+#[test]
+fn loads_library_package_without_main() {
+    case("library-package", || {
+        let scratch = Scratch::new("library-package");
+        library_package(
+            &scratch,
+            "lib",
+            "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+        );
+        let frontend = package_ok(&scratch, "lib");
+        assert_eq!(frontend.graph().crates.len(), 1);
+        assert!(
+            !frontend.has_main(),
+            "library package should not require main"
+        );
+        expect_clean_check(&frontend);
+    });
+}
+
+#[test]
+fn rejects_self_dependency() {
+    case("self-dependency", || {
+        let scratch = Scratch::new("self-dependency");
+        binary_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\n\n[dependencies]\napp = { path = \".\" }\n",
+        );
+        let text = package_failure(&scratch, "app");
+        assert!(text.contains("cannot depend on itself"), "{text}");
+        assert_clean_failure("self dependency", &text);
+    });
+}
+
+#[test]
+fn rejects_missing_dependency_directory() {
+    case("missing-dep-dir", || {
+        let scratch = Scratch::new("missing-dep-dir");
+        binary_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\n\n[dependencies]\ndep = { path = \"../does_not_exist\" }\n",
+        );
+        let text = package_failure(&scratch, "app");
+        assert!(text.contains("does not exist"), "{text}");
+        assert_clean_failure("missing dependency directory", &text);
+    });
+}
+
+#[test]
+fn rejects_dependency_without_a_manifest() {
+    case("dep-without-manifest", || {
+        let scratch = Scratch::new("dep-without-manifest");
+        binary_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        );
+        scratch.write("dep/placeholder.txt", "not a package\n");
+        let text = package_failure(&scratch, "app");
+        assert!(text.contains("lsaca.toml"), "{text}");
+        assert_clean_failure("dependency without manifest", &text);
+    });
+}
+
+#[test]
+fn rejects_binary_only_dependency() {
+    case("binary-dep", || {
+        let scratch = Scratch::new("binary-dep");
+        binary_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        );
+        binary_package(&scratch, "dep", "[package]\nname = \"dep\"\n");
+        let text = package_failure(&scratch, "app");
+        assert!(text.contains("not a library"), "{text}");
+        assert_clean_failure("binary-only dependency", &text);
+    });
+}
+
+#[test]
+fn rejects_two_paths_with_the_same_package_name() {
+    case("duplicate-package-name", || {
+        let scratch = Scratch::new("duplicate-package-name");
+        binary_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\n\n[dependencies]\nfirst = { path = \"../first\" }\nsecond = { path = \"../second\" }\n",
+        );
+        library_package(&scratch, "first", "[package]\nname = \"same\"\n");
+        library_package(&scratch, "second", "[package]\nname = \"same\"\n");
+        let text = package_failure(&scratch, "app");
+        assert!(text.contains("two different paths"), "{text}");
+        assert_clean_failure("duplicate package name", &text);
+    });
+}
+
+#[test]
+fn rejects_cyclic_package_dependencies() {
+    case("cyclic-packages", || {
+        let scratch = Scratch::new("cyclic-packages");
+        binary_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\n\n[dependencies]\ncycle_a = { path = \"../cycle_a\" }\n",
+        );
+        library_package(
+            &scratch,
+            "cycle_a",
+            "[package]\nname = \"cycle_a\"\n\n[dependencies]\ncycle_b = { path = \"../cycle_b\" }\n",
+        );
+        library_package(
+            &scratch,
+            "cycle_b",
+            "[package]\nname = \"cycle_b\"\n\n[dependencies]\ncycle_a = { path = \"../cycle_a\" }\n",
+        );
+        let text = package_failure(&scratch, "app");
+        assert!(text.contains("cyclic package dependency"), "{text}");
+        assert_clean_failure("cyclic package dependencies", &text);
+    });
+}
+
+#[test]
+fn loads_diamond_dependency_graph() {
+    case("diamond", || {
+        let scratch = Scratch::new("diamond");
+        binary_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\n\n[dependencies]\nleft = { path = \"../left\" }\nright = { path = \"../right\" }\n",
+        );
+        for name in ["left", "right"] {
+            library_package(
+                &scratch,
+                name,
+                &format!(
+                    "[package]\nname = \"{name}\"\n\n[dependencies]\nbase = {{ path = \"../base\" }}\n"
+                ),
+            );
+        }
+        library_package(&scratch, "base", "[package]\nname = \"base\"\n");
+        let frontend = package_ok(&scratch, "app");
+        let crates = &frontend.graph().crates;
+        assert_eq!(
+            crates.len(),
+            4,
+            "base, left, right and app are one crate each"
+        );
+        assert_eq!(crates[0].name, "base");
+        assert_eq!(crates[crates.len() - 1].name, "app");
+        for krate in &crates[..3] {
+            assert!(krate.is_dependency, "{} should be a dependency", krate.name);
+        }
+        assert!(!crates[crates.len() - 1].is_dependency);
+        let first_order: Vec<String> = crates.iter().map(|krate| krate.name.clone()).collect();
+        let second_order: Vec<String> = package_ok(&scratch, "app")
+            .graph()
+            .crates
+            .iter()
+            .map(|krate| krate.name.clone())
+            .collect();
+        assert_eq!(
+            first_order, second_order,
+            "dependency order must be deterministic"
+        );
+    });
+}
+
+#[test]
+fn loads_deep_dependency_chain() {
+    case("dependency-chain-40", || {
+        let scratch = Scratch::new("dependency-chain-40");
+        write_dependency_chain(&scratch, 40);
+        let frontend = package_ok(&scratch, "app");
+        let crates = &frontend.graph().crates;
+        assert_eq!(crates.len(), 41);
+        assert_eq!(
+            crates[0].name, "dep039",
+            "deepest dependency must come first"
+        );
+        assert_eq!(crates[crates.len() - 1].name, "app");
+        // Every crate contributes at least its root source file; manifests are
+        // registered in the same source map as well.
+        assert!(
+            frontend.sources().len() >= crates.len(),
+            "expected at least one source per crate, got {}",
+            frontend.sources().len()
+        );
+    });
+}
+
+#[test]
+fn handles_very_deep_dependency_chain() {
+    slow_case("dependency-chain-200", || {
+        let scratch = Scratch::new("dependency-chain-200");
+        write_dependency_chain(&scratch, 200);
+        match Frontend::load_package(&scratch.path("app")) {
+            Ok(frontend) => {
+                assert_eq!(frontend.graph().crates.len(), 201);
+            }
+            Err(error) => {
+                let text = error.render();
+                assert_clean_failure("deep dependency chain", &text);
+            }
+        }
+    });
+}
+
+#[test]
+fn package_with_both_source_roots_is_handled_cleanly() {
+    case("both-source-roots", || {
+        // target/v17/DESIGN.md section 6 asks for a dedicated E0001 here; at the
+        // time of writing the driver picks src/main.ls. Either behavior is
+        // accepted as long as it fails or loads cleanly without a panic.
+        let scratch = Scratch::new("both-source-roots");
+        write_package(
+            &scratch,
+            "app",
+            "[package]\nname = \"app\"\n",
+            Some("fn main() { }\n"),
+            Some("pub fn helper() -> i64 { 1 }\n"),
+        );
+        match Frontend::load_package(&scratch.path("app")) {
+            Ok(frontend) => {
+                assert_eq!(frontend.graph().crates.len(), 1);
+                assert!(!frontend.sources().is_empty());
+            }
+            Err(error) => {
+                let text = error.render();
+                assert_clean_failure("both source roots", &text);
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Existing module and package fixtures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn existing_module_fixtures_load_without_crashing() {
+    slow_case("module-fixtures", || {
+        for name in [
+            "math_basic",
+            "nested_tree",
+            "sibling_paths",
+            "name_reuse",
+            "reexport",
+            "private_field",
+            "glob_import",
+            "private_fn",
+            "panic_location",
+        ] {
+            let path = repo_path(&format!("tests/programs/modules/{name}/main.ls"));
+            let frontend = match Frontend::load(&path) {
+                Ok(frontend) => frontend,
+                Err(error) => panic!("fixture {name} should load: {error}"),
+            };
+            assert!(
+                frontend.sources().len() >= 2,
+                "fixture {name} should load its module files"
+            );
+            match frontend.check_reporting() {
+                Ok(_) => {}
+                Err(diagnostics) => {
+                    let text = diagnostics.render(frontend.sources());
+                    assert_clean_failure(&format!("fixture {name}"), &text);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn existing_package_fixtures_load_without_crashing() {
+    slow_case("package-fixtures", || {
+        for (name, expect_main) in [
+            ("binary_hello", Some(true)),
+            ("greeting", Some(false)),
+            ("with_dep", Some(true)),
+            ("library_only", Some(false)),
+        ] {
+            let path = repo_path(&format!("tests/packages/{name}"));
+            let frontend = match Frontend::load_package(&path) {
+                Ok(frontend) => frontend,
+                Err(error) => panic!("fixture {name} should load: {}", error.render()),
+            };
+            if let Some(expect_main) = expect_main {
+                assert_eq!(frontend.has_main(), expect_main, "fixture {name}");
+            }
+            match frontend.check_reporting() {
+                Ok(_) => {}
+                Err(diagnostics) => {
+                    let text = diagnostics.render(frontend.sources());
+                    assert_clean_failure(&format!("package fixture {name}"), &text);
+                }
+            }
+        }
+        for name in ["missing_dep", "bad_manifest", "cycle_a"] {
+            let path = repo_path(&format!("tests/packages/{name}"));
+            let text = match Frontend::load_package(&path) {
+                Ok(_) => panic!("package fixture {name} should fail to load"),
+                Err(LoadError::Io(error)) => format!("{error}"),
+                Err(LoadError::Diagnostics {
+                    diagnostics,
+                    sources,
+                }) => diagnostics.render(&sources),
+            };
+            assert_clean_failure(&format!("package fixture {name}"), &text);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Parser fuzz: malformed mod/use/pub snippets and random token storms
+// ---------------------------------------------------------------------------
+
+const MALFORMED_SNIPPETS: &[&str] = &[
+    "",
+    "mod",
+    "mod ;",
+    "mod 1;",
+    "mod a",
+    "mod a b;",
+    "mod a;",
+    "mod a {",
+    "mod a { }",
+    "mod a { mod b; }",
+    "mod a; mod a;",
+    "mod a::b;",
+    "mod a;\nmod a;",
+    "use",
+    "use ;",
+    "use ::",
+    "use ::a;",
+    "use a",
+    "use a::",
+    "use a::;",
+    "use a::*;",
+    "use a::{b};",
+    "use a::{b,};",
+    "use a::{b as c};",
+    "use a::b as;",
+    "use crate;",
+    "use crate::;",
+    "use crate::{a, b};",
+    "use super::super::x;",
+    "use self;",
+    "use a::::b;",
+    "use a::{::b};",
+    "use a::b::{c::{d}};",
+    "use {};",
+    "use {a};",
+    "use *;",
+    "pub",
+    "pub ;",
+    "pub pub fn f() { }",
+    "pub mod;",
+    "pub use ;",
+    "pub(crate) fn f() { }",
+    "pub(super) mod a;",
+    "pub(in crate::a) fn f() { }",
+    "pub mod a { pub use b::c; mod b; }",
+    "fn main( { }",
+    "mod \u{6a21};",
+    "mod a; // trailing",
+    "/* mod a; */",
+    "use a::b; /* unterminated",
+    "mod a { /* nested */ }",
+];
+
+#[test]
+fn malformed_mod_use_pub_snippets_do_not_panic() {
+    case("snippet-fuzz", || {
+        for snippet in MALFORMED_SNIPPETS {
+            let diagnostics = source_diagnostics("snippet.ls", snippet);
+            let text = messages(&diagnostics);
+            if !text.is_empty() {
+                assert_clean_failure("malformed snippet", &text);
+            }
+        }
+    });
+}
+
+fn next_random(state: &mut u64) -> u64 {
+    let mut value = *state;
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    *state = value;
+    value
+}
+
+const STORM_TOKENS: &[&str] = &[
+    "mod", "use", "pub", "fn", "main", "crate", "super", "self", "as", "struct", "enum", "trait",
+    "impl", "let", "mut", "const", "return", "if", "else", "while", "loop", "match", "type",
+    "true", "false", "{", "}", "(", ")", "[", "]", "<", ">", "::", ":", ";", ",", ".", "=", "==",
+    "*", "&", "+", "-", "->", "=>", "|", "||", "1", "2", "0", "\"text\"", "'c'", "#", "@", "!",
+    "?", "%", "^", "~", "/", "//", "/*", "*/", "\\", "\u{0}",
+];
+
+fn random_storm(state: &mut u64, token_count: usize) -> String {
+    let mut source = String::new();
+    for index in 0..token_count {
+        if index > 0 {
+            source.push(' ');
+        }
+        let pick = (next_random(state) as usize) % STORM_TOKENS.len();
+        source.push_str(STORM_TOKENS[pick]);
+    }
+    source
+}
+
+#[test]
+fn random_token_storms_do_not_panic_in_the_parser() {
+    case("storm-parser", || {
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        for iteration in 0..200 {
+            let token_count = 1 + (iteration * 7) % 80;
+            let source = random_storm(&mut state, token_count);
+            let diagnostics = source_diagnostics("storm.ls", &source);
+            let text = messages(&diagnostics);
+            if !text.is_empty() {
+                assert_clean_failure("token storm", &text);
+            }
+        }
+    });
+}
+
+#[test]
+fn random_token_storms_do_not_panic_in_the_frontend() {
+    slow_case("storm-frontend", || {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for iteration in 0..60 {
+            let token_count = 1 + (iteration * 13) % 120;
+            let source = random_storm(&mut state, token_count);
+            let frontend = Frontend::new("storm.ls", source);
+            match frontend.check_reporting() {
+                Ok(_) => {}
+                Err(diagnostics) => {
+                    let text = diagnostics.render(frontend.sources());
+                    assert_clean_failure("frontend token storm", &text);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn in_memory_modules_are_reported_as_missing() {
+    case("in-memory-modules", || {
+        let frontend = Frontend::new("main.ls", "mod helper;\nfn main() { }\n");
+        match frontend.check() {
+            Ok(_) => panic!("in-memory module declarations cannot be resolved"),
+            Err(diagnostics) => {
+                assert!(
+                    has_code(&diagnostics, "E0583"),
+                    "expected E0583: {}",
+                    messages(&diagnostics)
+                );
+                let text = diagnostics.render(frontend.sources());
+                assert!(text.contains("in-memory"), "{text}");
+                assert_clean_failure("in-memory modules", &text);
+            }
+        }
+    });
+}
+
+#[test]
+fn deeply_nested_expressions_are_rejected() {
+    case("deep-expressions", || {
+        let mut additive = String::from("fn main() { let value = 1");
+        for _ in 0..5000 {
+            additive.push_str(" + 1");
+        }
+        additive.push_str("; }\n");
+        let diagnostics = source_diagnostics("deep_add.ls", &additive);
+        assert!(
+            diagnostics.has_errors(),
+            "deep additive chain should be rejected"
+        );
+        assert!(
+            has_code(&diagnostics, "E0001"),
+            "expected E0001: {}",
+            messages(&diagnostics)
+        );
+        assert!(
+            messages(&diagnostics).contains("nested too deeply"),
+            "{}",
+            messages(&diagnostics)
+        );
+
+        let mut parens = String::from("fn main() { let value = ");
+        for _ in 0..3000 {
+            parens.push('(');
+        }
+        parens.push('1');
+        for _ in 0..3000 {
+            parens.push(')');
+        }
+        parens.push_str("; }\n");
+        let diagnostics = source_diagnostics("deep_parens.ls", &parens);
+        assert!(
+            diagnostics.has_errors(),
+            "deep parentheses should be rejected"
+        );
+        assert_clean_diagnostics("deep parentheses", &diagnostics);
+    });
+}
+
+#[test]
+fn huge_integer_literal_is_rejected_cleanly() {
+    case("huge-int", || {
+        let mut source = String::from("fn main() { let value = ");
+        source.push_str(&"9".repeat(50_000));
+        source.push_str("; }\n");
+        let diagnostics = source_diagnostics("huge_int.ls", &source);
+        assert!(
+            has_code(&diagnostics, "E0002"),
+            "expected E0002: {}",
+            messages(&diagnostics)
+        );
+        assert!(
+            messages(&diagnostics).contains("too large"),
+            "{}",
+            messages(&diagnostics)
+        );
+        assert_clean_diagnostics("huge integer literal", &diagnostics);
+    });
+}
+
+#[test]
+fn huge_string_literal_is_handled_within_the_budget() {
+    slow_case("huge-string", || {
+        let mut source = String::from("fn main() { let value = \"");
+        source.push_str(&"x".repeat(1_000_000));
+        source.push_str("\"; }\n");
+        let diagnostics = source_diagnostics("huge_string.ls", &source);
+        let text = messages(&diagnostics);
+        if !text.is_empty() {
+            assert_clean_failure("huge string literal", &text);
+        }
+    });
+}
+
+#[test]
+fn unterminated_constructs_are_reported_cleanly() {
+    case("unterminated", || {
+        let cases: &[(&str, &str, &str)] = &[
+            ("unterminated-string", "\"abc", "E0004"),
+            ("unterminated-comment", "fn main() { /*", "E0006"),
+            ("unterminated-char", "'a", "E0004"),
+        ];
+        for (name, source, expected) in cases {
+            let diagnostics = source_diagnostics("unterminated.ls", source);
+            assert!(diagnostics.has_errors(), "{name}: expected an error");
+            assert!(
+                has_code(&diagnostics, expected),
+                "{name}: expected {expected}: {}",
+                messages(&diagnostics)
+            );
+            assert_clean_diagnostics(name, &diagnostics);
+        }
+    });
+}
+
+#[test]
+fn nul_and_control_characters_are_reported_cleanly() {
+    case("control-characters", || {
+        let cases = [
+            "fn main() { let \u{0} = 1; }",
+            "fn main() { let value = 1; }\u{7}",
+            "\u{1}\u{2}\u{3}",
+        ];
+        for source in cases {
+            let diagnostics = source_diagnostics("control.ls", source);
+            let text = messages(&diagnostics);
+            assert!(
+                !text.is_empty(),
+                "control characters should produce diagnostics"
+            );
+            assert_clean_failure("control characters", &text);
+        }
+    });
+}
+
+#[test]
+fn valid_sources_with_bom_and_crlf_parse_cleanly() {
+    case("bom-crlf-parse", || {
+        let source = "\u{feff}struct Point {\r\n    x: i64,\r\n    y: i64,\r\n}\r\n\r\nfn main() {\r\n    let point = Point { x: 1, y: 2 };\r\n}\r\n";
+        let diagnostics = source_diagnostics("crlf.ls", source);
+        assert!(!diagnostics.has_errors(), "{}", messages(&diagnostics));
+    });
+}

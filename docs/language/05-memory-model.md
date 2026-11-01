@@ -98,8 +98,8 @@ use their value by value and therefore move it when the type is move-only:
 * an expression statement that discards the value.
 
 These positions only borrow and never move their operand: `format!`,
-`println!` and the other formatting macros, `assert!`/`assert_eq!`,
-`==`/`!=`, `&place`/`&mut place`, field reads of Copy fields, method receivers
+`println!` and the other formatting macros,
+`assert!`/`assert_eq!`/`assert_ne!`, `==`/`!=`, `&place`/`&mut place`, field reads of Copy fields, method receivers
 of `&self`/`&mut self` methods, mutating builtin methods such as `push_str`,
 `push`, `set` or the `Option`/`Result` combinators, and the map methods whose
 key is copied (`get`, `get_with`, `contains_key`, `remove`).

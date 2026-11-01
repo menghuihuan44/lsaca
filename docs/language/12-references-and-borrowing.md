@@ -30,7 +30,7 @@ not keep its referent alive on its own, and the compiler only accepts a borrow w
 owner provably outlives its last use. There are no lifetime annotations — a borrow ends at
 the last point where the reference is used — and the checker is conservative inside a
 single expression (two mutable borrows there are rejected even when Rust would accept
-them; see [Known limitations](#known-limitations-in-version-160)). Since 1.4 the ownership
+them; see [Known limitations](#known-limitations-in-version-170)). Since 1.4 the ownership
 and move checks (E0382, E0507, E0505) run alongside the reference checks, so moving a
 value while a borrow of it is live is rejected too.
 
@@ -1268,7 +1268,7 @@ error[E0498]: references cannot be captured by closures
 lsaca: example-45.ls: could not compile example-45.ls due to previous error(s)
 ```
 
-Mutable references to owned heap types are supported in version 1.6.0: a
+Mutable references to owned heap types are supported in version 1.7.0: a
 `&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>` can be a parameter, a
 local binding or a return value, and the callee mutates the payload in place:
 
@@ -1477,7 +1477,7 @@ stays alive.
 Errors without a code (parser level): `reference patterns are not supported; match a
 reference scrutinee directly, bindings become references`.
 
-## Known limitations in version 1.6.0
+## Known limitations in version 1.7.0
 
 Version 1.3.0 introduced references, 1.4.0 added ownership and moves on top of
 them, and 1.5.0 added `==` between references. The current restrictions are:
@@ -1529,7 +1529,7 @@ them, and 1.5.0 added `==` between references. The current restrictions are:
 - References cannot be stored in aggregates or captured by closures; they can be
   compared with `==` since 1.5.0 (the comparison reads the pointed-to values).
   Mutable references to `String`, `Vec`, `Rc` and `Box` *are* allowed as
-  parameters, locals and return values in version 1.6.0.
+  parameters, locals and return values in version 1.7.0.
 
 ## What next
 

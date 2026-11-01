@@ -204,7 +204,7 @@ impl<'a> Gen<'a> {
             return "NULL, 0, 0".to_string();
         }
         let (file, line, col) =
-            util::source_location(self.options.source.as_ref(), &self.program.name, span);
+            util::source_location(self.options.sources.as_ref(), &self.program.name, span);
         format!("{}, {}, {}", file, line, col)
     }
 

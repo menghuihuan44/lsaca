@@ -41,7 +41,7 @@ pub fn is_iterator_sugar_name(name: &str) -> bool {
 
 impl<'a> Checker<'a> {
     fn prelude_fn(&self, name: &str) -> Option<usize> {
-        self.generic_fn_by_name.get(name).copied()
+        self.lookup_generic_fn(name)
     }
 
     /// The item type produced by a receiver that implements `Iterator<T>`.
@@ -49,7 +49,7 @@ impl<'a> Checker<'a> {
         let (impl_id, impl_args) = self.find_trait_impl(receiver_ty, "Iterator")?;
         self.check_impl_coherence(impl_id, span);
         let info = self.impls.get(impl_id)?.clone();
-        self.validate_generic_bounds(&info.generics, &impl_args, span);
+        self.validate_generic_bounds(&info.generics, &impl_args, span, info.module);
         let trait_args = self.trait_impl_args(impl_id, &impl_args)?;
         trait_args.first().cloned()
     }

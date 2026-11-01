@@ -20,7 +20,7 @@ fn generate_project_source(name: &str, source: &str, debug_checks: bool) -> supe
     let options = CodegenOptions {
         program_name: name.to_string(),
         debug_checks,
-        source: Some(frontend.file().clone()),
+        sources: Some(frontend.sources().clone()),
         ..CodegenOptions::default()
     };
     generate(&program, &options)
@@ -187,6 +187,63 @@ fn lowers_panics_and_assertions() {
     assert!(eq_c.contains("right:"));
 }
 
+#[test]
+fn lowers_assert_ne_with_its_own_diagnostic() {
+    // `assert_ne!` reuses the equality expression, but panics when the operands
+    // compare equal: the guard must not carry the extra logical negation that
+    // `assert_eq!` keeps for byte-identical output.
+    let (ne_c, _) = generate_source(
+        "assert_ne",
+        "fn main() {\n    let a = 1;\n    let b = 2;\n    assert_ne!(a, b);\n}\n",
+        true,
+    );
+    assert!(
+        ne_c.contains("left != right"),
+        "default assert_ne message missing:\n{ne_c}"
+    );
+    let ne_body = main_function_body(&ne_c);
+    let ne_condition = panic_condition_line(ne_body);
+    assert!(
+        ne_condition.trim_start().starts_with("if ("),
+        "assert_ne guard is not a positive equality test: {ne_condition}"
+    );
+    assert!(
+        !ne_condition.trim_start().starts_with("if (!"),
+        "assert_ne guard must not be negated: {ne_condition}"
+    );
+    assert!(
+        ne_condition.contains("=="),
+        "assert_ne guard does not compare for equality: {ne_condition}"
+    );
+    // The `assert_eq!` guard keeps its historical negated shape.
+    let (eq_c, _) = generate_source(
+        "assert_eq_guard",
+        "fn main() {\n    assert_eq!(1, 2);\n}\n",
+        true,
+    );
+    let eq_body = main_function_body(&eq_c);
+    let eq_condition = panic_condition_line(eq_body);
+    assert!(
+        eq_condition.trim_start().starts_with("if (!"),
+        "assert_eq guard lost its negated shape: {eq_condition}"
+    );
+    // Both macros accept the optional custom format message, which replaces the
+    // default left/right diagnostic.
+    let (custom_ne_c, _) = generate_source(
+        "assert_ne_message",
+        "fn main() {\n    let a = 1;\n    assert_ne!(a, a + 1, \"numbers must differ\");\n}\n",
+        true,
+    );
+    assert!(
+        custom_ne_c.contains("numbers must differ"),
+        "custom assert_ne message missing:\n{custom_ne_c}"
+    );
+    assert!(
+        !custom_ne_c.contains("left != right"),
+        "custom assert_ne message should replace the default diagnostic:\n{custom_ne_c}"
+    );
+}
+
 const VEC: &str =
     "fn main() {\n    let v = vec![10, 20, 30];\n    let x = v[1];\n    println!(\"{}\", x);\n}\n";
 
@@ -239,7 +296,7 @@ fn omits_location_information_when_disabled() {
         program_name: "noloc".to_string(),
         debug_checks: true,
         emit_location_info: false,
-        source: Some(frontend.file().clone()),
+        sources: Some(frontend.sources().clone()),
         ..CodegenOptions::default()
     };
     let main_c = generate(&program, &options).main_c;
@@ -444,6 +501,21 @@ fn main_function_body(main_c: &str) -> &str {
     &main_c[start..end]
 }
 
+/// The `if (...)` guard of the first default-diagnostic panic in `body`.
+///
+/// `assert_eq!`/`assert_ne!` build their default diagnostic with
+/// `ls_format_begin`, so the guard is the last `if` line before it.
+fn panic_condition_line(body: &str) -> &str {
+    let panic_at = body
+        .find("ls_format_begin(0)")
+        .expect("expected a default diagnostic panic");
+    body[..panic_at]
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("if ("))
+        .expect("expected a guarded panic")
+}
+
 const MOVE_BIND_PROGRAM: &str = r#"
 fn main() {
     let mut values: Vec<i64> = Vec::with_capacity(4);
@@ -474,6 +546,67 @@ fn moves_fresh_values_into_locals_instead_of_copying() {
     assert!(
         !body.contains(" = ls_str_clone("),
         "binding a fresh String cloned it:\n{body}"
+    );
+}
+
+const WILDCARD_LET_PROGRAM: &str = r#"
+fn main() {
+    let item = 5;
+    let _ = item;
+    let text = String::from("hello");
+    let _ = text;
+    let _ = String::from("scratch");
+    println!("{} {}", item, text);
+}
+"#;
+
+#[test]
+fn discards_wildcard_initialisers_without_leftover_temporaries() {
+    let (main_c, _) = generate_source("wildcard_let_fixture", WILDCARD_LET_PROGRAM, true);
+    let body = main_function_body(&main_c);
+
+    // `let _ = <place>;` reads the place without moving out of it: the owner
+    // keeps its value and the wildcard emits a discard, not a temporary.
+    assert!(
+        body.contains("(void)(v1);"),
+        "the wildcard read of the scalar local was not emitted:\n{body}"
+    );
+    assert!(
+        body.contains("(void)(v2);"),
+        "the wildcard read of the String local was not emitted:\n{body}"
+    );
+    assert!(
+        !body.contains(" = v1;") && !body.contains(" = v2;"),
+        "a wildcard read materialised a copy of the place:\n{body}"
+    );
+
+    // `let _ = <owned temporary>;` still evaluates the initialiser (its side
+    // effects must run) and releases the value exactly once. A leftover
+    // set-but-unused temporary would break `-Werror` builds.
+    let mut discarded = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("(void)(") else {
+            continue;
+        };
+        let Some(name) = rest.strip_suffix(");") else {
+            continue;
+        };
+        if name.starts_with('t') && name[1..].chars().all(|ch| ch.is_ascii_digit()) {
+            discarded.push(name.to_string());
+        }
+    }
+    assert_eq!(
+        discarded.len(),
+        1,
+        "expected exactly one discarded temporary:\n{body}"
+    );
+    let temporary = &discarded[0];
+    let release = format!("ls_release((void*)({}));", temporary);
+    assert_eq!(
+        body.matches(release.as_str()).count(),
+        1,
+        "the discarded temporary must be released exactly once:\n{body}"
     );
 }
 
@@ -1763,4 +1896,130 @@ fn splits_large_programs_into_deterministic_translation_units() {
         assert_eq!(left.file_name, right.file_name);
         assert_eq!(left.contents, right.contents);
     }
+}
+/// Builds `fn main() { let value = 10 / 0; }` with the division carrying `span`.
+fn division_program(name: &str, span: crate::span::Span) -> crate::hir::Program {
+    use crate::hir::{
+        HBinaryOp, HBlock, HExpr, HExprKind, HFn, HLit, HPat, HPatKind, HStmt, Program,
+    };
+    use crate::types::{IntTy, Ty};
+
+    fn int_literal(value: i128) -> HExpr {
+        HExpr::new(
+            Ty::i64(),
+            HExprKind::Lit(HLit::Int {
+                value,
+                int_ty: IntTy::I64,
+            }),
+            crate::span::Span::empty(0),
+        )
+    }
+
+    let divide = HExpr::new(
+        Ty::i64(),
+        HExprKind::Binary {
+            op: HBinaryOp::Div,
+            lhs: Box::new(int_literal(10)),
+            rhs: Box::new(int_literal(0)),
+        },
+        span,
+    );
+    let pat = HPat {
+        ty: Ty::i64(),
+        kind: HPatKind::Bind {
+            c_name: "v1".to_string(),
+            name: "value".to_string(),
+        },
+        span: crate::span::Span::empty(0),
+    };
+    let main = HFn {
+        name: "main".to_string(),
+        c_name: "lsaca_fn_main".to_string(),
+        params: Vec::new(),
+        ret: Ty::unit(),
+        self_kind: None,
+        body: HBlock {
+            stmts: vec![HStmt::Let {
+                pat,
+                init: Some(divide),
+                span: crate::span::Span::empty(0),
+            }],
+            tail: None,
+            span: crate::span::Span::empty(0),
+        },
+        span: crate::span::Span::empty(0),
+    };
+    let mut program = Program {
+        name: name.to_string(),
+        structs: Vec::new(),
+        enums: Vec::new(),
+        fns: vec![main],
+        consts: Vec::new(),
+        closures: Vec::new(),
+        main_fn: 0,
+        copy_structs: Vec::new(),
+        copy_enums: Vec::new(),
+        drop_structs: Vec::new(),
+        drop_enums: Vec::new(),
+    };
+    program.classify_types(Vec::new(), Vec::new());
+    program
+}
+
+#[test]
+fn resolves_panic_locations_through_a_multi_file_source_map() {
+    use crate::span::{SourceMap, Span};
+
+    // Two files in one global source space: the division lives in the second.
+    let mut sources = SourceMap::new();
+    sources.add_file("a.ls", "fn other() {}\n");
+    let b_text = "fn helper() {\n    let value = 10 / 0;\n}\n";
+    let b_index = sources.add_file("b.ls", b_text);
+    let b_base = sources.file(b_index).base();
+    let local_start = b_text.find("10 / 0").expect("marker is present") as u32;
+    let span = Span::new(b_base + local_start, b_base + local_start + 6);
+
+    let (file, line, col) = sources.location(span).expect("the span resolves");
+    assert_eq!(file.name(), "b.ls");
+    assert_eq!((line, col), (2, 17));
+
+    let program = division_program("multi", span);
+    let options = CodegenOptions {
+        program_name: "multi".to_string(),
+        sources: Some(sources.clone()),
+        ..CodegenOptions::default()
+    };
+    let main_c = generate(&program, &options).main_c;
+    assert!(
+        main_c.contains("\"b.ls\", 2, 17)"),
+        "the panic location does not point into b.ls:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("ls_div_i64_checked("),
+        "the division is not checked:\n{main_c}"
+    );
+
+    // Without a source map the location falls back to the program name at 0:0.
+    let fallback_options = CodegenOptions {
+        program_name: "multi".to_string(),
+        ..CodegenOptions::default()
+    };
+    let fallback = generate(&program, &fallback_options).main_c;
+    assert!(
+        fallback.contains("\"multi\", 0, 0)"),
+        "a missing source map did not fall back to the program name:\n{fallback}"
+    );
+    assert!(!fallback.contains("\"b.ls\""));
+
+    // An empty map resolves no spans and uses the same fallback.
+    let empty_options = CodegenOptions {
+        program_name: "multi".to_string(),
+        sources: Some(SourceMap::new()),
+        ..CodegenOptions::default()
+    };
+    let empty = generate(&program, &empty_options).main_c;
+    assert!(
+        empty.contains("\"multi\", 0, 0)"),
+        "an empty source map did not fall back to the program name:\n{empty}"
+    );
 }

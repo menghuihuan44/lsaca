@@ -7,12 +7,13 @@ use super::items::{
     AliasInfo, ConstItem, ConstState, ConstVal, EnumInfo, FnInfo, StructInfo, TypeKey,
 };
 use super::itype::{ITy, Infer};
+use super::modules::{ImportLeaf, ModuleId, ModuleInfo};
 use super::refs::Provenance;
 use super::traits::TraitInfo;
 use super::tree::{TBlock, TClosure, TExpr, TStmt};
 use crate::ast::ImplBlock;
 use crate::diag::{Diagnostic, Diagnostics};
-use crate::span::{SourceFile, Span};
+use crate::span::{SourceLookup, Span};
 use crate::types::{SelfKind, Ty};
 
 /// A local binding in scope.
@@ -79,23 +80,40 @@ impl Frame {
 }
 
 pub struct Checker<'a> {
-    /// Kept so callers can render diagnostics against the source file.
+    /// The source files of the program being checked. Diagnostics produced by
+    /// the checker carry global spans, so rendering them needs the same map.
     #[allow(dead_code)]
-    pub file: &'a SourceFile,
+    pub sources: &'a dyn SourceLookup,
     pub structs: Vec<StructInfo>,
     pub enums: Vec<EnumInfo>,
     pub aliases: Vec<AliasInfo>,
     pub consts: Vec<ConstItem>,
     pub fns: Vec<FnInfo>,
-    pub struct_by_name: HashMap<String, usize>,
-    pub enum_by_name: HashMap<String, usize>,
-    pub alias_by_name: HashMap<String, usize>,
-    pub const_by_name: HashMap<String, usize>,
-    pub fn_by_name: HashMap<String, usize>,
     /// Methods and associated functions keyed by (owner type, name).
     pub methods: HashMap<(TypeKey, String), usize>,
-    /// Unit variant names in scope for pattern resolution.
-    pub unit_variants: HashMap<String, Vec<(usize, usize)>>,
+    // -- version 1.7 module tree --------------------------------------------
+    /// One module per crate root, declared module and the embedded prelude.
+    pub modules: Vec<ModuleInfo>,
+    /// Items collected for every module, parallel to `modules`.
+    pub module_items: Vec<Vec<crate::ast::Item>>,
+    /// Module whose scope is used to resolve names right now.
+    pub current_module: ModuleId,
+    /// Module that privacy is evaluated from. Normally this is
+    /// [Self::current_module], but descending a path into another module keeps
+    /// the module the path is written in, so private items of the target module
+    /// stay private exactly as in Rust.
+    pub access_module: Option<ModuleId>,
+    /// Root module of every crate in the graph.
+    pub crate_roots: Vec<ModuleId>,
+    pub crate_names: Vec<String>,
+    pub crate_is_dependency: Vec<bool>,
+    /// Dependency crates reachable through the extern prelude.
+    pub crate_by_name: HashMap<String, usize>,
+    pub root_crate: usize,
+    /// Root module of the embedded prelude, if any.
+    pub prelude_module: Option<ModuleId>,
+    /// Use-tree leaves collected but not resolved yet.
+    pub pending_imports: Vec<ImportLeaf>,
     pub used_c_names: HashSet<String>,
     pub c_name_counter: usize,
     pub infer: Infer,
@@ -127,6 +145,10 @@ pub struct Checker<'a> {
     /// pattern currently being checked. A by-value binding of a type with drop
     /// glue below such a layer is E0509.
     pub pattern_nesting: usize,
+    /// Types with a user `impl Drop` hook that enclose the pattern currently
+    /// being checked. Destructuring them can never move non-Copy parts out
+    /// (E0509), so by-value bindings below such a layer are rejected.
+    pub pattern_drop_hook_stack: Vec<ITy>,
     /// Generic struct declarations, instantiated on demand.
     pub generic_structs: Vec<GStructDef>,
     /// Generic enum declarations, instantiated on demand.
@@ -139,16 +161,9 @@ pub struct Checker<'a> {
     /// prelude) has registered its type and trait names. Deferring them lets
     /// user impls name traits that come from the prelude (for example
     /// `Iterator`) regardless of collection order.
-    pub pending_impls: Vec<(ImplBlock, DefOrigin)>,
+    pub pending_impls: Vec<(ImplBlock, DefOrigin, ModuleId)>,
     /// Registered trait declarations.
     pub traits: Vec<TraitInfo>,
-    pub trait_by_name: HashMap<String, usize>,
-    /// Generic struct declarations by name.
-    pub generic_struct_by_name: HashMap<String, usize>,
-    /// Generic enum declarations by name.
-    pub generic_enum_by_name: HashMap<String, usize>,
-    /// Generic free functions by name.
-    pub generic_fn_by_name: HashMap<String, usize>,
     /// Generic parameter environments, innermost last. Also holds "Self" for
     /// instantiated impl methods.
     pub generic_env: Vec<HashMap<String, ITy>>,
@@ -156,6 +171,9 @@ pub struct Checker<'a> {
     pub pending_fns: Vec<usize>,
     /// Origin assigned to items registered right now.
     pub collecting_origin: DefOrigin,
+    /// True while registering the embedded standard library: its items are
+    /// recorded as `pub` so user code can see them.
+    pub force_public_items: bool,
     /// True while resolving a type only to build an expression hint; generic
     /// instantiations with unknown arguments degrade to a fresh variable
     /// instead of reporting E0282.
@@ -176,21 +194,26 @@ fn diagnostic_item_name(name: &str) -> String {
 }
 
 impl<'a> Checker<'a> {
-    pub fn new(file: &'a SourceFile) -> Checker<'a> {
+    pub fn new(sources: &'a dyn SourceLookup) -> Checker<'a> {
         Checker {
-            file,
+            sources,
             structs: Vec::new(),
             enums: Vec::new(),
             aliases: Vec::new(),
             consts: Vec::new(),
             fns: Vec::new(),
-            struct_by_name: HashMap::new(),
-            enum_by_name: HashMap::new(),
-            alias_by_name: HashMap::new(),
-            const_by_name: HashMap::new(),
-            fn_by_name: HashMap::new(),
             methods: HashMap::new(),
-            unit_variants: HashMap::new(),
+            modules: Vec::new(),
+            module_items: Vec::new(),
+            current_module: 0,
+            access_module: None,
+            crate_roots: Vec::new(),
+            crate_names: Vec::new(),
+            crate_is_dependency: Vec::new(),
+            crate_by_name: HashMap::new(),
+            root_crate: 0,
+            prelude_module: None,
+            pending_imports: Vec::new(),
             used_c_names: HashSet::new(),
             c_name_counter: 0,
             infer: Infer::new(),
@@ -207,23 +230,64 @@ impl<'a> Checker<'a> {
             drop_structs: Vec::new(),
             drop_enums: Vec::new(),
             pattern_nesting: 0,
+            pattern_drop_hook_stack: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
             generic_fns: Vec::new(),
             impls: Vec::new(),
             pending_impls: Vec::new(),
             traits: Vec::new(),
-            trait_by_name: HashMap::new(),
-            generic_struct_by_name: HashMap::new(),
-            generic_enum_by_name: HashMap::new(),
-            generic_fn_by_name: HashMap::new(),
             generic_env: Vec::new(),
             pending_fns: Vec::new(),
             collecting_origin: DefOrigin::User,
+            force_public_items: false,
             probing: false,
             probe_quiet: false,
             reported_hash_map_key_errors: HashSet::new(),
         }
+    }
+
+    // -- module context -----------------------------------------------------
+
+    /// Run `f` with `module` as the module whose scope owns the item being
+    /// resolved, then restore the previous module.
+    ///
+    /// Type expressions are owned by the item that declares them (an impl's
+    /// self type, a generic function's signature, a trait's method signature).
+    /// Resolving such a type while checking an instantiation triggered from a
+    /// different module must temporarily switch the scope to the declaring
+    /// module; otherwise a prelude adapter instantiated for a user type could
+    /// not name that user type.
+    pub fn with_module<R>(&mut self, module: ModuleId, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.current_module;
+        self.current_module = module;
+        let result = f(self);
+        self.current_module = previous;
+        result
+    }
+    /// The module privacy checks are evaluated from.
+    pub fn privacy_module(&self) -> ModuleId {
+        self.access_module.unwrap_or(self.current_module)
+    }
+
+    /// Run `f` with `module` as the resolution scope while keeping privacy
+    /// evaluated from the module that named the path.
+    ///
+    /// Descending `outer::inner` must not make private items of `outer` or
+    /// `inner` visible: a path is still written in the module it appears in.
+    pub fn with_resolved_module<R>(
+        &mut self,
+        module: ModuleId,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_module = self.current_module;
+        let previous_access = self.access_module;
+        self.access_module = Some(previous_module);
+        self.current_module = module;
+        let result = f(self);
+        self.current_module = previous_module;
+        self.access_module = previous_access;
+        result
     }
 
     // -- diagnostics --------------------------------------------------------
@@ -657,6 +721,8 @@ impl<'a> Checker<'a> {
         let generic = self.fns[id].generic.clone();
         let self_ty = self.fns[id].self_ty.clone();
         let diagnostics_before = self.diagnostics.len();
+        let previous_module = self.current_module;
+        self.current_module = self.fns[id].module;
         self.current_fn = id;
         let mut pushed_env = false;
         if let Some(instance) = generic
@@ -732,6 +798,7 @@ impl<'a> Checker<'a> {
                     .push(crate::prelude::internal_error(diagnostic));
             }
         }
+        self.current_module = previous_module;
     }
 
     /// Check a block, opening a fresh scope for its statements.

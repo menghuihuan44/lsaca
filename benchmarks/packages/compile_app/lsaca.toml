@@ -1,0 +1,7 @@
+[package]
+name = "compile_app"
+version = "0.1.0"
+
+[dependencies]
+util_a = { path = "../util_a" }
+util_b = { path = "../util_b" }

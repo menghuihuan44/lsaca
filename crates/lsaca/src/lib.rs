@@ -26,6 +26,7 @@ pub mod driver;
 pub mod hir;
 pub mod lexer;
 pub mod moveck;
+pub mod package;
 pub mod parser;
 pub mod prelude;
 pub mod runtime;

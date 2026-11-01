@@ -6,7 +6,7 @@
 //! token stream always ends with TokenKind::Eof.
 
 use crate::diag::{Diagnostic, Diagnostics};
-use crate::span::Span;
+use crate::span::{SourceFile, Span};
 
 /// A single token.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +51,10 @@ pub enum TokenKind {
     KwPub,
     KwMove,
     KwTrait,
+    KwCrate,
+    KwMod,
+    KwSuper,
+    KwUse,
     // Punctuation
     LParen,
     RParen,
@@ -164,6 +168,10 @@ impl std::fmt::Display for TokenKind {
             TokenKind::KwPub => write!(f, "pub"),
             TokenKind::KwMove => write!(f, "move"),
             TokenKind::KwTrait => write!(f, "trait"),
+            TokenKind::KwCrate => write!(f, "crate"),
+            TokenKind::KwMod => write!(f, "mod"),
+            TokenKind::KwSuper => write!(f, "super"),
+            TokenKind::KwUse => write!(f, "use"),
             TokenKind::LParen => write!(f, "("),
             TokenKind::RParen => write!(f, ")"),
             TokenKind::LBrace => write!(f, "{{"),
@@ -231,7 +239,28 @@ const E_CHAR_LITERAL: &str = "E0007";
 /// Lexical errors are accumulated in the returned diagnostics; the token stream
 /// always ends with TokenKind::Eof so that the parser can recover.
 pub fn tokenize(source: &str) -> (Vec<Token>, Diagnostics) {
-    let mut lexer = Lexer::new(source);
+    let mut lexer = Lexer::new(source, 0);
+    lexer.run();
+    let Lexer {
+        tokens,
+        diagnostics,
+        ..
+    } = lexer;
+    (tokens, diagnostics)
+}
+
+/// Tokenize one source file, translating every span into the file's global
+/// coordinate space.
+///
+/// `SourceFile::base` is added to the start and end of every token span (and to
+/// every lexical diagnostic), so token spans can be compared with spans from
+/// other files without knowing which file they came from. The final `Eof` token
+/// sits at `[file.end(), file.end())`.
+///
+/// This is the entry point the driver uses; [`tokenize`] remains the local-span
+/// convenience wrapper for tests and tools that work on a bare string.
+pub fn tokenize_file(file: &SourceFile) -> (Vec<Token>, Diagnostics) {
+    let mut lexer = Lexer::new(file.text(), file.base());
     lexer.run();
     let Lexer {
         tokens,
@@ -242,9 +271,13 @@ pub fn tokenize(source: &str) -> (Vec<Token>, Diagnostics) {
 }
 
 /// Internal lexer state. Kept private so the public surface stays just
-/// Token, TokenKind and tokenize.
+/// Token, TokenKind, tokenize and tokenize_file.
 struct Lexer<'a> {
     source: &'a str,
+    /// Global byte offset of the first byte of `source` within the crate's
+    /// concatenated source space. Used to translate local spans into global
+    /// ones; see [`Lexer::offset`].
+    base: u32,
     /// Byte offset of the next character to scan. Always on a char boundary.
     pos: usize,
     tokens: Vec<Token>,
@@ -252,13 +285,22 @@ struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Lexer<'a> {
+    fn new(source: &'a str, base: u32) -> Lexer<'a> {
         Lexer {
             source,
+            base,
             pos: 0,
             tokens: Vec::with_capacity(source.len() / 3 + 1),
             diagnostics: Diagnostics::new(),
         }
+    }
+
+    /// Translate a local byte offset into a global one.
+    fn offset(&self, local: usize) -> u32 {
+        // Source files larger than u32::MAX bytes are rejected by the driver, so
+        // this clamp is only defensive; saturating_add keeps it panic-free.
+        let local = u32::try_from(local).unwrap_or(u32::MAX);
+        self.base.saturating_add(local)
     }
 
     fn run(&mut self) {
@@ -329,10 +371,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn push(&mut self, kind: TokenKind, start: usize, end: usize) {
-        self.tokens.push(Token {
-            kind,
-            span: Span::from_usize(start, end),
-        });
+        let end = end.max(start);
+        let span = Span::new(self.offset(start), self.offset(end));
+        self.tokens.push(Token { kind, span });
     }
 
     fn report_error(
@@ -343,8 +384,9 @@ impl<'a> Lexer<'a> {
         end: usize,
     ) {
         let end = end.max(start);
+        let span = Span::new(self.offset(start), self.offset(end));
         self.diagnostics
-            .push(Diagnostic::error(message, Span::from_usize(start, end)).with_code(code));
+            .push(Diagnostic::error(message, span).with_code(code));
     }
 
     // -----------------------------------------------------------------------
@@ -442,6 +484,10 @@ impl<'a> Lexer<'a> {
             "pub" => TokenKind::KwPub,
             "move" => TokenKind::KwMove,
             "trait" => TokenKind::KwTrait,
+            "crate" => TokenKind::KwCrate,
+            "mod" => TokenKind::KwMod,
+            "super" => TokenKind::KwSuper,
+            "use" => TokenKind::KwUse,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Ident(text.to_string()),
         };
@@ -1207,7 +1253,8 @@ mod tests {
     #[test]
     fn identifiers_and_keywords() {
         let source = "fn let mut const struct enum impl type if else match while loop for in \
-                      return break continue true false as self Self pub move trait";
+                      return break continue true false as self Self pub move trait \
+                      crate mod super use";
         let expected = vec![
             TokenKind::KwFn,
             TokenKind::KwLet,
@@ -1235,9 +1282,96 @@ mod tests {
             TokenKind::KwPub,
             TokenKind::KwMove,
             TokenKind::KwTrait,
+            TokenKind::KwCrate,
+            TokenKind::KwMod,
+            TokenKind::KwSuper,
+            TokenKind::KwUse,
             TokenKind::Eof,
         ];
         assert_eq!(kinds(source), expected);
+    }
+
+    #[test]
+    fn module_keywords_are_reserved() {
+        use TokenKind::*;
+        assert_eq!(
+            kinds("crate mod super use"),
+            vec![KwCrate, KwMod, KwSuper, KwUse, Eof]
+        );
+        // Words that merely contain a keyword stay identifiers.
+        assert_eq!(
+            kinds("crates module superb useful"),
+            vec![
+                Ident("crates".to_string()),
+                Ident("module".to_string()),
+                Ident("superb".to_string()),
+                Ident("useful".to_string()),
+                Eof,
+            ]
+        );
+        assert_eq!(KwCrate.to_string(), "crate");
+        assert_eq!(KwMod.to_string(), "mod");
+        assert_eq!(KwSuper.to_string(), "super");
+        assert_eq!(KwUse.to_string(), "use");
+        for keyword in [KwCrate, KwMod, KwSuper, KwUse] {
+            assert_eq!(keyword.describe(), keyword.to_string());
+        }
+    }
+
+    #[test]
+    fn tokenize_file_offsets_spans_globally() {
+        let source = "mod a;\n";
+        let file = SourceFile::with_base("lib.ls", source, 100);
+        let (tokens, diagnostics) = tokenize_file(&file);
+        assert!(diagnostics.is_empty(), "{:?}", diagnostics.into_vec());
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| (token.kind.clone(), token.span))
+                .collect::<Vec<_>>(),
+            vec![
+                (TokenKind::KwMod, Span::new(100, 103)),
+                (TokenKind::Ident("a".to_string()), Span::new(104, 105)),
+                (TokenKind::Semi, Span::new(105, 106)),
+                (TokenKind::Eof, Span::empty(file.end())),
+            ]
+        );
+        // The global spans localize back to exactly the source bytes.
+        assert_eq!(file.local_span(tokens[0].span), Span::new(0, 3));
+        assert_eq!(file.local_span(tokens[1].span), Span::new(4, 5));
+        assert_eq!(source.get(4..5), Some("a"));
+    }
+
+    #[test]
+    fn tokenize_file_shifts_diagnostic_spans() {
+        let file = SourceFile::with_base("main.ls", "let x = #;", 50);
+        let (tokens, diagnostics) = tokenize_file(&file);
+        assert_eq!(
+            tokens.last().map(|token| token.kind.clone()),
+            Some(TokenKind::Eof)
+        );
+        assert_eq!(
+            tokens.last().map(|token| token.span),
+            Some(Span::empty(file.end()))
+        );
+        let diagnostics = diagnostics.into_vec();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, Some("E0001"));
+        // '#' is at local offset 8, so its global span is 58..59.
+        assert_eq!(diagnostics[0].span, Span::new(58, 59));
+    }
+
+    #[test]
+    fn tokenize_keeps_local_spans() {
+        let file = SourceFile::with_base("lib.ls", "let x = 1;", 1000);
+        let (local_tokens, _) = tokenize(file.text());
+        let (file_tokens, _) = tokenize_file(&file);
+        assert_eq!(local_tokens.len(), file_tokens.len());
+        for (local, global) in local_tokens.iter().zip(&file_tokens) {
+            assert_eq!(local.kind, global.kind);
+            assert_eq!(global.span.start, local.span.start + 1000);
+            assert_eq!(global.span.end, local.span.end + 1000);
+        }
     }
 
     #[test]

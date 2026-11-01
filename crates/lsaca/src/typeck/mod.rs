@@ -12,6 +12,7 @@ mod items;
 mod iterators;
 mod itype;
 mod lower;
+mod modules;
 mod ownership;
 mod patterns;
 mod refs;
@@ -21,20 +22,49 @@ mod tree;
 use std::path::Path;
 
 use crate::diag::{Diagnostic, Diagnostics, Severity, Span, sort_and_dedup};
-use crate::span::SourceFile;
+use crate::span::SourceLookup;
 use crate::{ast, hir};
 
 use self::check::Checker;
-use self::generics::DefOrigin;
 use self::itype::ITy;
+
+/// Options that control a crate-level type check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckOptions {
+    /// Whether the root crate must define a `main` entry point. Library
+    /// crates and dependency crates are checked with this set to `false`.
+    pub require_main: bool,
+}
+
+impl CheckOptions {
+    /// Options for a normal application: `main` is required.
+    pub fn new() -> CheckOptions {
+        CheckOptions { require_main: true }
+    }
+
+    /// Set whether the checked program must define `main`.
+    pub fn require_main(mut self, require_main: bool) -> CheckOptions {
+        self.require_main = require_main;
+        self
+    }
+}
+
+impl Default for CheckOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Type check a parsed program and lower it to the fully typed HIR.
 ///
 /// This is the original frozen entry point: warnings are only surfaced when
 /// the check fails. Use [check_reporting] when warnings from successful
 /// checks matter.
-pub fn check(program: &ast::Program, file: &SourceFile) -> Result<hir::Program, Diagnostics> {
-    check_reporting(program, file).0
+pub fn check(
+    program: &ast::Program,
+    sources: &dyn SourceLookup,
+) -> Result<hir::Program, Diagnostics> {
+    check_reporting(program, sources).0
 }
 
 /// Type check a parsed program and lower it to the fully typed HIR, also
@@ -45,9 +75,9 @@ pub fn check(program: &ast::Program, file: &SourceFile) -> Result<hir::Program, 
 /// deduplicated deterministically.
 pub fn check_reporting(
     program: &ast::Program,
-    file: &SourceFile,
+    sources: &dyn SourceLookup,
 ) -> (Result<hir::Program, Diagnostics>, Diagnostics) {
-    check_reporting_with_prelude(program, None, file)
+    check_reporting_with_prelude(program, None, sources)
 }
 
 /// Type check a user program together with the standard-library prelude.
@@ -60,9 +90,9 @@ pub fn check_reporting(
 pub fn check_with_prelude(
     program: &ast::Program,
     prelude: Option<&ast::Program>,
-    file: &SourceFile,
+    sources: &dyn SourceLookup,
 ) -> Result<hir::Program, Diagnostics> {
-    check_reporting_with_prelude(program, prelude, file).0
+    check_reporting_with_prelude(program, prelude, sources).0
 }
 
 /// Like [check_with_prelude] but also returns the warnings of a successful
@@ -70,20 +100,111 @@ pub fn check_with_prelude(
 pub fn check_reporting_with_prelude(
     program: &ast::Program,
     prelude: Option<&ast::Program>,
-    file: &SourceFile,
+    sources: &dyn SourceLookup,
 ) -> (Result<hir::Program, Diagnostics>, Diagnostics) {
-    let mut checker = Checker::new(file);
-    checker.collect_items_only(program, DefOrigin::User);
-    if let Some(prelude) = prelude {
-        checker.collect_items_only(prelude, DefOrigin::Prelude);
+    check_reporting_with_options(program, prelude, sources, &CheckOptions::default())
+}
+
+/// Like [check_reporting_with_prelude] but with explicit options.
+fn check_reporting_with_options(
+    program: &ast::Program,
+    prelude: Option<&ast::Program>,
+    sources: &dyn SourceLookup,
+    options: &CheckOptions,
+) -> (Result<hir::Program, Diagnostics>, Diagnostics) {
+    let name = program_name(sources);
+    check_program_reporting(program, prelude, sources, name, options.require_main)
+}
+
+/// Type check a whole crate graph, lowering the root crate to HIR.
+pub fn check_crate(
+    graph: &ast::CrateGraph,
+    sources: &dyn SourceLookup,
+) -> Result<hir::Program, Diagnostics> {
+    check_crate_reporting_with_options(graph, None, sources, &CheckOptions::default()).0
+}
+
+/// Type check a crate graph together with the standard-library prelude.
+pub fn check_crate_with_prelude(
+    graph: &ast::CrateGraph,
+    prelude: Option<&ast::Program>,
+    sources: &dyn SourceLookup,
+) -> Result<hir::Program, Diagnostics> {
+    check_crate_reporting_with_options(graph, prelude, sources, &CheckOptions::default()).0
+}
+
+/// Like [check_crate_with_prelude] but also returns warnings and honours
+/// [CheckOptions].
+pub fn check_crate_reporting_with_options(
+    graph: &ast::CrateGraph,
+    prelude: Option<&ast::Program>,
+    sources: &dyn SourceLookup,
+    options: &CheckOptions,
+) -> (Result<hir::Program, Diagnostics>, Diagnostics) {
+    let mut checker = Checker::new(sources);
+    // Dependency crates are registered first: their items are visible to the
+    // root crate through the extern prelude (uniform paths), but only the root
+    // crate is lowered to HIR.
+    for (index, krate) in graph.crates.iter().enumerate() {
+        if index == graph.root {
+            continue;
+        }
+        let crate_id = checker.begin_crate(&krate.name, true);
+        let root_module = checker.crate_roots[crate_id];
+        checker.collect_program_items(root_module, &krate.program.items);
     }
+    let root = graph.root_crate();
+    let root_id = checker.begin_crate(&root.name, root.is_dependency);
+    checker.root_crate = root_id;
+    let root_module = checker.crate_roots[root_id];
+    checker.collect_program_items(root_module, &root.program.items);
+    collect_prelude(&mut checker, prelude);
+    finish_program_check(checker, root.name.clone(), options.require_main)
+}
+
+/// Shared implementation of the single-program and crate entry points.
+fn check_program_reporting(
+    program: &ast::Program,
+    prelude: Option<&ast::Program>,
+    sources: &dyn SourceLookup,
+    name: String,
+    require_main: bool,
+) -> (Result<hir::Program, Diagnostics>, Diagnostics) {
+    let mut checker = Checker::new(sources);
+    let crate_id = checker.begin_crate(&name, false);
+    checker.root_crate = crate_id;
+    let root_module = checker.crate_roots[crate_id];
+    checker.collect_program_items(root_module, &program.items);
+    collect_prelude(&mut checker, prelude);
+    finish_program_check(checker, name, require_main)
+}
+
+/// Register the embedded standard library as a separate crate. Its items are
+/// generic and only reach the HIR when instantiated.
+fn collect_prelude(checker: &mut Checker<'_>, prelude: Option<&ast::Program>) {
+    let Some(prelude) = prelude else {
+        return;
+    };
+    let crate_id = checker.begin_prelude_crate("std");
+    let root_module = checker.crate_roots[crate_id];
+    checker.collect_program_items(root_module, &prelude.items);
+}
+
+/// Run the shared pipeline over every collected crate and lower the root crate.
+fn finish_program_check(
+    mut checker: Checker<'_>,
+    name: String,
+    require_main: bool,
+) -> (Result<hir::Program, Diagnostics>, Diagnostics) {
+    checker.register_collected_items();
+    checker.process_imports();
     checker.register_pending_impls();
     checker.resolve_all_types();
     for id in 0..checker.consts.len() {
         checker.ensure_const(id);
     }
     checker.check_all_fns();
-    validate_main(&mut checker);
+    validate_main(&mut checker, require_main);
 
     let collected = std::mem::take(&mut checker.diagnostics);
     let (mut errors, mut warnings) = split_diagnostics(collected);
@@ -95,7 +216,6 @@ pub fn check_reporting_with_prelude(
         return (Err(errors), warnings);
     }
 
-    let name = program_name(file);
     let program = checker.build_hir(name);
 
     // Lowering can report additional diagnostics (for example unresolved
@@ -146,8 +266,11 @@ fn split_diagnostics(diagnostics: Diagnostics) -> (Diagnostics, Diagnostics) {
     (errors, warnings)
 }
 
-fn validate_main(checker: &mut Checker<'_>) {
-    let main_id = match checker.fn_by_name.get("main").copied() {
+fn validate_main(checker: &mut Checker<'_>, require_main: bool) {
+    if !require_main {
+        return;
+    }
+    let main_id = match checker.root_main_fn() {
         Some(main_id) => main_id,
         None => {
             let mut diagnostic =
@@ -184,7 +307,10 @@ fn validate_main(checker: &mut Checker<'_>) {
     }
 }
 
-fn program_name(file: &SourceFile) -> String {
+fn program_name(sources: &dyn SourceLookup) -> String {
+    let Some(file) = sources.primary_file() else {
+        return "program".to_string();
+    };
     let raw = file.name();
     let base = Path::new(raw)
         .file_name()
@@ -206,6 +332,8 @@ mod tests {
     use crate::hir::{
         ConstValue, HBuiltinAssoc, HBuiltinMethod, HExpr, HExprKind, HPatKind, HStmt,
     };
+    use crate::span::{SourceFile, SourceMap};
+    use crate::typeck::generics::DefOrigin;
     use crate::types::{FloatTy, IntTy, SelfKind, Ty};
 
     fn parse_source(source: &str) -> (ast::Program, SourceFile, Diagnostics) {
@@ -279,14 +407,18 @@ mod tests {
             messages(&parse_diagnostics)
         );
         let mut checker = Checker::new(&file);
+        let crate_id = checker.begin_crate("program", false);
+        checker.root_crate = crate_id;
         checker.collect_items_only(&program, DefOrigin::User);
+        checker.register_collected_items();
+        checker.process_imports();
         checker.register_pending_impls();
         checker.resolve_all_types();
         for id in 0..checker.consts.len() {
             checker.ensure_const(id);
         }
         checker.check_all_fns();
-        validate_main(&mut checker);
+        validate_main(&mut checker, true);
         let mut diagnostics = checker.diagnostics;
         sort_and_dedup(&mut diagnostics);
         diagnostics
@@ -1004,6 +1136,66 @@ fn main() {
         );
         let diagnostics = expect_errors("fn main() { assert_eq!(1, 2, 3); }");
         assert!(has_code(&diagnostics, "E0061"));
+    }
+
+    #[test]
+    fn checks_assert_ne_macro() {
+        let program = expect_ok(
+            r#"fn main() {
+    assert_ne!(1, 2);
+    assert_ne!(String::from("a"), String::from("b"));
+    assert_ne!(true, false);
+    assert_ne!(1, 2, "numbers must differ");
+    assert_ne!(1, 2, "expected {} and {}", 3, 4);
+}"#,
+        );
+        let body = &main_fn(&program).body;
+        let mut assert_ne_calls = 0;
+        for stmt in &body.stmts {
+            if let HStmt::Expr(expr) = stmt
+                && let HExprKind::Macro(call) = &expr.kind
+                && call.kind == crate::hir::HMacroKind::AssertNe
+            {
+                assert_ne_calls += 1;
+                assert_eq!(call.args.len(), 2);
+            }
+        }
+        assert_eq!(assert_ne_calls, 5);
+    }
+
+    #[test]
+    fn rejects_malformed_assert_ne_macro() {
+        let diagnostics = expect_errors("fn main() { assert_ne!(1); }");
+        assert!(
+            has_code(&diagnostics, "E0061"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "assert_ne! takes 2 arguments"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+
+        let diagnostics = expect_errors("fn main() { assert_ne!(1, true); }");
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+
+        let diagnostics = expect_errors(
+            r#"fn first() -> i64 { 1 }
+fn second() -> i64 { 2 }
+fn main() {
+    assert_ne!(first, second);
+}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "assert_ne! requires a type that supports !="),
+            "{:?}",
+            messages(&diagnostics)
+        );
     }
 
     #[test]
@@ -3264,6 +3456,132 @@ fn main() {
         );
     }
 
+    #[test]
+    fn rejects_destructuring_a_drop_enum_by_value_with_non_copy_payloads() {
+        let diagnostics = expect_errors(
+            r#"enum Payload {
+    Text(String),
+    Number(i64),
+}
+
+impl Drop for Payload {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let value = Payload::Text(String::from("x"));
+    match value {
+        Payload::Text(text) => println!("{}", text),
+        Payload::Number(number) => println!("{}", number),
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0509"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "implements Drop"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_destructuring_a_drop_enum_by_value_in_match_arms() {
+        let diagnostics = expect_errors(
+            r#"enum Payload {
+    Text(String),
+    Number(i64),
+}
+
+impl Drop for Payload {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let value = Payload::Text(String::from("x"));
+    match value {
+        Payload::Text(text) => println!("{}", text),
+        Payload::Number(number) => println!("{}", number),
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0509"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_destructuring_a_drop_struct_by_value() {
+        let diagnostics = expect_errors(
+            r#"struct Payload {
+    text: String,
+}
+
+impl Drop for Payload {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let value = Payload {
+        text: String::from("x"),
+    };
+    let Payload { text } = value;
+    println!("{}", text);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0509"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn allows_copying_fields_out_of_drop_types_by_value() {
+        expect_ok(
+            r#"struct Payload {
+    number: i64,
+}
+
+impl Drop for Payload {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let value = Payload { number: 3 };
+    let Payload { number } = value;
+    println!("{}", number);
+}"#,
+        );
+    }
+
+    #[test]
+    fn allows_copying_payloads_out_of_drop_enums_by_value() {
+        expect_ok(
+            r#"enum Payload {
+    Number(i64),
+    Text(String),
+}
+
+impl Drop for Payload {
+    fn drop(&mut self) {}
+}
+
+fn main() {
+    let value = Payload::Number(3);
+    match value {
+        Payload::Number(number) => println!("{}", number),
+        Payload::Text(_) => {}
+    }
+}"#,
+        );
+    }
+
     // -----------------------------------------------------------------
     // Version 1.4 ownership: mutable references to heap values
     // -----------------------------------------------------------------
@@ -4825,6 +5143,739 @@ fn main() {
             "double negation must overflow: {:?}",
             messages(&diagnostics)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Modules, use paths and visibility
+    // -----------------------------------------------------------------
+
+    fn parse_program(source: &str) -> ast::Program {
+        let (program, _file, diagnostics) = parse_source(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected parse errors: {:?}",
+            messages(&diagnostics)
+        );
+        program
+    }
+
+    fn check_crate_programs(
+        crates: &[(&str, &str)],
+        root: usize,
+        require_main: bool,
+    ) -> Result<hir::Program, Diagnostics> {
+        let programs: Vec<ast::Program> = crates
+            .iter()
+            .map(|(_name, source)| parse_program(source))
+            .collect();
+        let mut sources = SourceMap::new();
+        for (name, source) in crates {
+            sources.add_file(*name, *source);
+        }
+        let graph = ast::CrateGraph {
+            crates: programs
+                .into_iter()
+                .enumerate()
+                .map(|(index, program)| ast::Crate {
+                    name: crates[index].0.to_string(),
+                    program,
+                    is_dependency: index != root,
+                })
+                .collect(),
+            root,
+        };
+        let options = CheckOptions::new().require_main(require_main);
+        check_crate_reporting_with_options(&graph, None, &sources, &options).0
+    }
+
+    fn expect_crate_ok(crates: &[(&str, &str)], root: usize) -> hir::Program {
+        match check_crate_programs(crates, root, true) {
+            Ok(program) => program,
+            Err(diagnostics) => panic!(
+                "expected the crate graph to type check, got: {:?}",
+                messages(&diagnostics)
+            ),
+        }
+    }
+
+    fn expect_crate_errors(crates: &[(&str, &str)], root: usize) -> Diagnostics {
+        match check_crate_programs(crates, root, true) {
+            Ok(_) => panic!("expected crate errors, but the graph type checked"),
+            Err(diagnostics) => diagnostics,
+        }
+    }
+
+    #[test]
+    fn inline_module_paths_resolve() {
+        expect_ok(
+            r#"
+mod math {
+    pub fn add(left: i64, right: i64) -> i64 { left + right }
+    pub const SCALE: i64 = 10;
+    pub struct Meter { pub value: i64 }
+    pub enum State { On, Off }
+}
+fn main() {
+    let total = math::add(math::SCALE, 5);
+    let meter = math::Meter { value: total };
+    let state = math::State::On;
+    match state {
+        math::State::On => { println!("{}", meter.value); }
+        math::State::Off => {}
+    }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn nested_modules_and_super_paths_resolve() {
+        expect_ok(
+            r#"
+mod outer {
+    fn hidden() -> i64 { 1 }
+    pub mod inner {
+        pub fn call() -> i64 { super::hidden() + 1 }
+        pub fn root_call() -> i64 { crate::top_level() }
+    }
+}
+pub fn top_level() -> i64 { 3 }
+fn main() {
+    println!("{}", outer::inner::call());
+    println!("{}", outer::inner::root_call());
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn sibling_module_paths_resolve() {
+        expect_ok(
+            r#"
+mod first {
+    pub fn value() -> i64 { 1 }
+}
+mod second {
+    pub fn value() -> i64 { super::first::value() + 1 }
+}
+fn main() { println!("{}", second::value()); }
+"#,
+        );
+    }
+
+    #[test]
+    fn use_paths_import_items_and_aliases() {
+        expect_ok(
+            r#"
+mod math {
+    pub fn add(left: i64, right: i64) -> i64 { left + right }
+    pub fn multiply(left: i64, right: i64) -> i64 { left * right }
+    pub const SCALE: i64 = 2;
+    pub struct Point { pub x: i64, pub y: i64 }
+}
+use math::{add, multiply as mul, SCALE, Point};
+fn main() {
+    let total = add(SCALE, mul(2, 3));
+    let point = Point { x: total, y: 1 };
+    println!("{} {}", point.x, point.y);
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn use_imports_child_modules_and_reexports() {
+        expect_ok(
+            r#"
+mod inner {
+    pub fn answer() -> i64 { 42 }
+}
+mod api {
+    pub use crate::inner::answer;
+}
+use api::answer;
+fn main() {
+    println!("{}", answer());
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn use_imports_modules_directly() {
+        expect_ok(
+            r#"
+mod holder {
+    pub mod inner {
+        pub fn value() -> i64 { 5 }
+    }
+}
+use holder::inner;
+fn main() { println!("{}", inner::value()); }
+"#,
+        );
+    }
+
+    #[test]
+    fn use_self_and_super_paths_resolve() {
+        expect_ok(
+            r#"
+mod outer {
+    pub fn top() -> i64 { 7 }
+    pub mod child {
+        use super::top;
+        pub fn call() -> i64 { top() }
+    }
+}
+mod self_import {
+    use self::helper::value;
+    mod helper { pub fn value() -> i64 { 9 } }
+    pub fn call() -> i64 { value() }
+}
+fn main() {
+    println!("{}", outer::child::call());
+    println!("{}", self_import::call());
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn private_items_are_not_visible_through_module_paths() {
+        let diagnostics = expect_errors(
+            r#"
+mod helper {
+    fn hidden() -> i64 { 1 }
+    pub fn visible() -> i64 { 2 }
+}
+fn main() { println!("{}", helper::hidden()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0603"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "private"));
+    }
+
+    #[test]
+    fn private_nested_modules_are_not_visible_outside() {
+        let diagnostics = expect_errors(
+            r#"
+mod outer {
+    mod inner {
+        pub fn value() -> i64 { 1 }
+    }
+}
+fn main() { println!("{}", outer::inner::value()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0603"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn private_items_are_visible_to_descendant_modules() {
+        expect_ok(
+            r#"
+mod outer {
+    fn hidden() -> i64 { 1 }
+    pub mod inner {
+        pub fn call() -> i64 { super::hidden() }
+    }
+}
+fn main() { println!("{}", outer::inner::call()); }
+"#,
+        );
+    }
+
+    #[test]
+    fn unresolved_use_paths_report_e0432() {
+        let diagnostics = expect_errors(
+            r#"
+mod helper {
+    pub fn visible() -> i64 { 1 }
+}
+use helper::missing;
+fn main() { println!("{}", missing()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0432"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "unresolved import"));
+    }
+
+    #[test]
+    fn super_at_the_crate_root_reports_e0433() {
+        let diagnostics = expect_errors(
+            r#"
+pub fn value() -> i64 { 1 }
+use super::value;
+fn main() { println!("{}", value()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0433"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "super"));
+    }
+
+    #[test]
+    fn conflicting_imports_report_e0252() {
+        let diagnostics = expect_errors(
+            r#"
+mod a { pub fn f() -> i64 { 1 } }
+mod b { pub fn f() -> i64 { 2 } }
+use a::f;
+use b::f;
+fn main() { println!("{}", f()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0252"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn imports_conflicting_with_local_items_report_e0255() {
+        let diagnostics = expect_errors(
+            r#"
+mod a { pub fn f() -> i64 { 1 } }
+fn f() -> i64 { 2 }
+use a::f;
+fn main() { println!("{}", f()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0255"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn duplicate_module_names_report_e0428() {
+        let diagnostics = expect_errors(
+            r#"
+mod duplicated {}
+mod duplicated {}
+fn main() {}
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0428"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn glob_imports_are_rejected() {
+        let diagnostics = expect_errors(
+            r#"
+mod a { pub fn f() -> i64 { 1 } }
+use a::*;
+fn main() { println!("{}", f()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0432"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "glob"));
+    }
+
+    #[test]
+    fn module_type_and_enum_paths_resolve() {
+        expect_ok(
+            r#"
+mod types {
+    pub struct Meter { pub value: i64 }
+    pub enum State { On, Off }
+    pub type Pair = (i64, i64);
+}
+fn measure(meter: types::Meter) -> i64 { meter.value }
+fn classify(state: types::State) -> i64 {
+    match state {
+        types::State::On => 1,
+        types::State::Off => 2,
+    }
+}
+fn pair() -> types::Pair { (1, 2) }
+fn main() {
+    let meter = types::Meter { value: pair().0 };
+    println!("{} {}", measure(meter), classify(types::State::On));
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn private_fields_report_e0616_outside_their_module() {
+        let diagnostics = expect_errors(
+            r#"
+mod point {
+    pub struct Point { x: i64, y: i64 }
+    pub fn make() -> Point { Point { x: 1, y: 2 } }
+}
+fn main() {
+    let point = point::make();
+    println!("{}", point.x);
+}
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0616"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "private"));
+    }
+
+    #[test]
+    fn public_fields_are_visible_across_modules() {
+        expect_ok(
+            r#"
+mod point {
+    pub struct Point { pub x: i64, pub y: i64 }
+    pub fn make() -> Point { Point { x: 3, y: 4 } }
+}
+fn main() {
+    let point = point::make();
+    println!("{} {}", point.x, point.y);
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn private_fields_in_struct_literals_report_e0451() {
+        let diagnostics = expect_errors(
+            r#"
+mod point {
+    pub struct Point { x: i64 }
+    pub fn make() -> Point { Point { x: 1 } }
+}
+fn main() {
+    let point = point::Point { x: 2 };
+    println!("{}", point.x);
+}
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0451"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn private_fields_in_patterns_report_e0451() {
+        let diagnostics = expect_errors(
+            r#"
+mod point {
+    pub struct Point { x: i64 }
+    pub fn make() -> Point { Point { x: 1 } }
+}
+fn main() {
+    let point = point::make();
+    let point::Point { x } = point;
+    println!("{}", x);
+}
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0451"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn private_methods_report_e0624() {
+        let diagnostics = expect_errors(
+            r#"
+mod counter {
+    pub struct Counter { pub value: i64 }
+    impl Counter {
+        pub fn new(value: i64) -> Counter { Counter { value } }
+        fn secret(&self) -> i64 { self.value }
+    }
+    pub fn make() -> Counter { Counter::new(1) }
+}
+fn main() {
+    let counter = counter::make();
+    println!("{}", counter.secret());
+}
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0624"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "private"));
+    }
+
+    #[test]
+    fn private_associated_functions_report_e0624() {
+        let diagnostics = expect_errors(
+            r#"
+mod counter {
+    pub struct Counter { pub value: i64 }
+    impl Counter {
+        fn new() -> Counter { Counter { value: 1 } }
+        pub fn zero() -> Counter { Counter { value: 0 } }
+    }
+}
+fn main() {
+    let counter = counter::Counter::new();
+    println!("{}", counter.value);
+}
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0624"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn widening_item_reexports_report_e0364() {
+        let diagnostics = expect_errors(
+            r#"
+mod helper {
+    pub(crate) fn only_in_crate() -> i64 { 1 }
+}
+pub use helper::only_in_crate;
+fn main() { println!("{}", only_in_crate()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0364"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn widening_module_reexports_report_e0365() {
+        let diagnostics = expect_errors(
+            r#"
+mod holder {
+    pub(crate) mod inner {
+        pub fn value() -> i64 { 1 }
+    }
+}
+pub use holder::inner;
+fn main() { println!("{}", inner::value()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0365"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn deep_paths_into_missing_modules_report_e0433() {
+        let diagnostics = expect_errors(
+            r#"
+mod a { pub fn f() -> i64 { 1 } }
+fn main() { println!("{}", a::b::c::f()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0433"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Crate graphs, cross-crate visibility and entry points
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn dependency_crate_items_are_visible_to_the_root() {
+        let program = expect_crate_ok(
+            &[
+                (
+                    "greeting",
+                    r#"
+pub fn greet(name: String) -> String { String::from("hello, ") + name }
+pub const ANSWER: i64 = 42;
+pub struct Counter { pub value: i64 }
+pub fn counter() -> Counter { Counter { value: 7 } }
+"#,
+                ),
+                (
+                    "app",
+                    r#"
+use greeting::{counter, greet, ANSWER, Counter};
+fn main() {
+    let counted: Counter = counter();
+    println!("{}", counted.value);
+    println!("{}", ANSWER);
+    println!("{}", greet(String::from("crate")));
+}
+"#,
+                ),
+            ],
+            1,
+        );
+        assert!(find_fn(&program, "main").is_some());
+    }
+
+    #[test]
+    fn pub_crate_items_are_not_visible_across_crates() {
+        let diagnostics = expect_crate_errors(
+            &[
+                (
+                    "hidden_api",
+                    r#"
+pub(crate) fn hidden() -> i64 { 1 }
+pub fn visible() -> i64 { 2 }
+"#,
+                ),
+                (
+                    "app",
+                    r#"
+use hidden_api::hidden;
+fn main() { println!("{}", hidden()); }
+"#,
+                ),
+            ],
+            1,
+        );
+        assert!(
+            has_code(&diagnostics, "E0603"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn private_fields_of_dependency_structs_report_e0616() {
+        let diagnostics = expect_crate_errors(
+            &[
+                (
+                    "greeting",
+                    r#"
+pub struct Counter { value: i64 }
+pub fn counter() -> Counter { Counter { value: 7 } }
+"#,
+                ),
+                (
+                    "app",
+                    r#"
+use greeting::counter;
+fn main() {
+    let counted = counter();
+    println!("{}", counted.value);
+}
+"#,
+                ),
+            ],
+            1,
+        );
+        assert!(
+            has_code(&diagnostics, "E0616"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn public_fields_of_dependency_structs_are_visible() {
+        let program = expect_crate_ok(
+            &[
+                (
+                    "greeting",
+                    r#"
+pub struct Counter { pub value: i64 }
+pub fn counter() -> Counter { Counter { value: 7 } }
+"#,
+                ),
+                (
+                    "app",
+                    r#"
+use greeting::counter;
+fn main() {
+    let counted = counter();
+    println!("{}", counted.value);
+}
+"#,
+                ),
+            ],
+            1,
+        );
+        assert!(find_fn(&program, "main").is_some());
+    }
+
+    #[test]
+    fn library_crates_check_without_main_when_not_required() {
+        let crates: &[(&str, &str)] = &[(
+            "library",
+            r#"
+pub fn double(value: i64) -> i64 { value * 2 }
+pub struct Config { pub level: i64 }
+"#,
+        )];
+        let result = check_crate_programs(crates, 0, false);
+        match result {
+            Ok(program) => assert_eq!(program.main_fn, 0),
+            Err(diagnostics) => panic!(
+                "expected the library crate to type check, got: {:?}",
+                messages(&diagnostics)
+            ),
+        }
+    }
+
+    #[test]
+    fn crate_mode_requires_a_main_function_by_default() {
+        let crates: &[(&str, &str)] = &[(
+            "library",
+            "pub fn double(value: i64) -> i64 { value * 2 }\n",
+        )];
+        let diagnostics = expect_crate_errors(crates, 0);
+        assert!(
+            has_code(&diagnostics, "E0601"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn the_root_crate_name_is_used_for_the_hir_program() {
+        let program = expect_crate_ok(
+            &[
+                ("dep", "pub fn value() -> i64 { 1 }\n"),
+                (
+                    "named_root",
+                    r#"
+use dep::value;
+fn main() { println!("{}", value()); }
+"#,
+                ),
+            ],
+            1,
+        );
+        assert_eq!(program.name, "named_root");
     }
 
     // -----------------------------------------------------------------

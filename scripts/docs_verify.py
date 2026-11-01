@@ -16,6 +16,13 @@ Recognised info-string markers:
     ls,args=a,b             pass "a" and "b" to the program after "--"
     ls,stdin=a|b|c          feed a newline-separated stream on stdin
     ls,exit=N               expect exit code N (normal run)
+    ls,check                run "check", expect exit 0 and the printed message
+    ls,tree                 multi-file example: the fence body is a file tree, each
+                            file starting with a line "--- relative/path"; the
+                            entry file is main.ls at the tree root
+    ls,tree,package=DIR     package example: the same tree run in package mode
+                            with DIR (which contains lsaca.toml) as the working
+                            directory
 
 The expected output is the text fenced block that follows the example,
 optionally preceded by a one-line label (Output:, Error: or Panic:). A fenced
@@ -41,9 +48,9 @@ DOCS = REPO_ROOT / "docs"
 DEFAULT_WORK = REPO_ROOT / "target" / "docs-tmp" / "work"
 DEFAULT_TMP = REPO_ROOT / "target" / "docs-tmp" / "tmp"
 BIN_CANDIDATES = (
+    REPO_ROOT / "target" / "v17" / "bin" / "lsaca.exe",
     REPO_ROOT / "target" / "release" / "lsaca.exe",
     REPO_ROOT / "target" / "debug" / "lsaca.exe",
-    REPO_ROOT / "target" / "v16" / "bin" / "lsaca.exe",
 )
 
 BT = chr(96)
@@ -95,6 +102,9 @@ def parse_markers(info):
         "compile_fail": False,
         "panic": False,
         "release": False,
+        "check": False,
+        "tree": False,
+        "package": None,
         "args": None,
         "stdin": None,
         "exit": None,
@@ -113,6 +123,12 @@ def parse_markers(info):
         elif part.startswith("args="):
             desc["args"] = ",".join([part[len("args="):]] + parts[index + 1:]).strip(",")
             break
+        elif part == "check":
+            desc["check"] = True
+        elif part == "tree":
+            desc["tree"] = True
+        elif part.startswith("package="):
+            desc["package"] = part[len("package="):].strip()
         elif part.startswith("stdin="):
             desc["stdin"] = part[len("stdin="):]
         elif part.startswith("exit="):
@@ -123,6 +139,52 @@ def parse_markers(info):
         else:
             desc["unknown"].append(part)
     return desc
+
+
+TREE_FILE_RE = re.compile(r"^--- (.*)$")
+
+
+def write_tree(tree_root, body_lines):
+    """Write a multi-file tree example; return an error message, or None."""
+    files = []
+    current_path = None
+    current = []
+    for line in body_lines:
+        match = TREE_FILE_RE.match(line)
+        if match:
+            if current_path is not None:
+                files.append((current_path, current))
+            current_path = match.group(1).strip()
+            current = []
+        elif current_path is None:
+            if line.strip():
+                return "text before the first '--- <path>' section of a tree example"
+        else:
+            current.append(line)
+    if current_path is not None:
+        files.append((current_path, current))
+    if not files:
+        return "no '--- <path>' file sections in the tree example"
+    seen = set()
+    if tree_root.exists():
+        shutil.rmtree(tree_root, ignore_errors=True)
+    for path, content in files:
+        rel = path.replace("\\", "/")
+        if not rel or rel.startswith("/") or re.match(r"^[A-Za-z]:", rel) or ".." in rel.split("/"):
+            return "tree file path must be relative: " + repr(path)
+        if rel in seen:
+            return "duplicate file in a tree example: " + rel
+        seen.add(rel)
+        lines = list(content)
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+        target = tree_root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        text = "\n".join(lines)
+        if text:
+            text += "\n"
+        target.write_text(text, encoding="utf-8", newline="\n")
+    return None
 
 
 def expected_after(lines, fences_by_start, example):
@@ -157,24 +219,29 @@ def normalize(text, strip_debug_lines=False):
     return "\n".join(result)
 
 
-def build_command(binary, name, desc):
-    if desc["compile_fail"]:
-        return [binary, "check", name]
+def build_command(binary, program, desc):
+    """Build the compiler command; program is the entry file, or None in package mode."""
+    if desc["compile_fail"] or desc["check"]:
+        command = [binary, "check"]
+        if program is not None:
+            command.append(program)
+        return command
     command = [binary, "run"]
     if desc["release"]:
         command.append("-r")
-    command.append(name)
+    if program is not None:
+        command.append(program)
     if desc["args"]:
         command.append("--")
         command.extend([part for part in desc["args"].split(",") if part])
     return command
 
 
-def run_example(binary, name, desc, workdir, env, timeout):
+def run_example(binary, program, desc, workdir, env, timeout):
     stdin_bytes = None
     if desc["stdin"] is not None:
         stdin_bytes = desc["stdin"].replace("|", "\n").encode("utf-8")
-    command = build_command(binary, name, desc)
+    command = build_command(binary, program, desc)
     try:
         completed = subprocess.run(
             command,
@@ -203,12 +270,14 @@ def expected_exit(desc):
         return 101
     if desc["compile_fail"]:
         return None
+    if desc["check"]:
+        return 0
     return desc["exit"] if desc["exit"] is not None else 0
 
 
-def describe_failure(rel, example_no, want_exit_text, expected_text, actual_exit, actual_text, command):
+def describe_failure(rel, display_name, want_exit_text, expected_text, actual_exit, actual_text, command):
     lines = []
-    lines.append("FAIL " + rel + " example-" + example_no + ".ls")
+    lines.append("FAIL " + rel + " " + display_name)
     lines.append("  command: " + " ".join(command))
     lines.append("  exit: got " + str(actual_exit) + ", expected " + str(want_exit_text))
     if expected_text != actual_text:
@@ -327,23 +396,47 @@ def main(argv):
             example_no += 1
             checked += 1
             total_checked += 1
-            name = "example-" + str(example_no).zfill(2) + ".ls"
-            source = "\n".join(fence["body"]) + "\n"
-            (page_dir / name).write_text(source, encoding="utf-8", newline="\n")
             expected_text, label = expected_after(lines, fences_by_start, fence)
             if desc["unknown"]:
-                print("SKIP " + rel + " " + name + ": unknown marker(s) " + ", ".join(desc["unknown"]))
+                print("SKIP " + rel + " example-" + str(example_no).zfill(2) + ": unknown marker(s) " + ", ".join(desc["unknown"]))
                 skipped += 1
                 total_skipped += 1
                 continue
             if expected_text is None:
-                failures.append("FAIL " + rel + " " + name + ": no expected Output:/Error:/Panic: text block found")
+                failures.append("FAIL " + rel + " example-" + str(example_no).zfill(2) + ": no expected Output:/Error:/Panic: text block found")
                 failed += 1
                 total_failed += 1
                 continue
-            result = run_example(str(binary_path), name, desc, page_dir, env, args.timeout)
+            program = "example-" + str(example_no).zfill(2) + ".ls"
+            workdir = page_dir
+            failure_name = program
+            setup_error = None
+            if desc["tree"]:
+                failure_name = "tree-example-" + str(example_no).zfill(2)
+                tree_root = page_dir / failure_name
+                setup_error = write_tree(tree_root, fence["body"])
+                if setup_error is None:
+                    if desc["package"]:
+                        workdir = tree_root / desc["package"]
+                        program = None
+                        if not (workdir / "lsaca.toml").is_file():
+                            setup_error = "tree has no " + desc["package"] + "/lsaca.toml"
+                    else:
+                        workdir = tree_root
+                        program = "main.ls"
+                        if not (tree_root / "main.ls").is_file():
+                            setup_error = "tree has no main.ls at its root"
+            else:
+                source = "\n".join(fence["body"]) + "\n"
+                (page_dir / program).write_text(source, encoding="utf-8", newline="\n")
+            if setup_error is not None:
+                failures.append("FAIL " + rel + " " + failure_name + ": " + setup_error)
+                failed += 1
+                total_failed += 1
+                continue
+            result = run_example(str(binary_path), program, desc, workdir, env, args.timeout)
             if result["timeout"]:
-                failures.append("FAIL " + rel + " " + name + ": timed out after " + str(args.timeout) + " s")
+                failures.append("FAIL " + rel + " " + failure_name + ": timed out after " + str(args.timeout) + " s")
                 failed += 1
                 total_failed += 1
                 continue
@@ -355,7 +448,7 @@ def main(argv):
             else:
                 exit_ok = actual_exit == want_exit
                 want_exit_text = str(want_exit)
-            if desc["compile_fail"] or desc["panic"]:
+            if desc["compile_fail"] or desc["panic"] or desc["check"]:
                 actual_text = result["stderr"] + result["stdout"]
             else:
                 actual_text = result["stdout"]
@@ -365,14 +458,14 @@ def main(argv):
                 passed += 1
                 total_passed += 1
                 if args.verbose:
-                    print("PASS " + rel + " " + name)
+                    print("PASS " + rel + " " + failure_name)
             else:
                 failed += 1
                 total_failed += 1
                 failures.append(
                     describe_failure(
                         rel,
-                        str(example_no).zfill(2),
+                        failure_name,
                         want_exit_text,
                         expected_clean,
                         actual_exit,

@@ -87,8 +87,16 @@ impl<'a> Checker<'a> {
         // check_binding_pattern. Top-level identifier bindings (let x = ..., a
         // lone match arm binding, a closure parameter) stay allowed.
         let compound = !matches!(&pat.kind, PatternKind::Wild | PatternKind::Binding { .. });
+        // Destructuring a value whose type has a user `impl Drop` hook can never
+        // move non-Copy parts out of it (E0509); remember the aggregate type so
+        // the binding check below can name it.
+        let mut destructured_drop_type = false;
         if compound {
             self.pattern_nesting += 1;
+            if self.type_implements_drop(&expected) {
+                self.pattern_drop_hook_stack.push(expected.clone());
+                destructured_drop_type = true;
+            }
         }
         let checked = match &pat.kind {
             PatternKind::Wild => TPat::new(expected, TPatKind::Wild, pat.span),
@@ -111,6 +119,9 @@ impl<'a> Checker<'a> {
         };
         if compound {
             self.pattern_nesting -= 1;
+            if destructured_drop_type {
+                self.pattern_drop_hook_stack.pop();
+            }
         }
         checked
     }
@@ -141,23 +152,23 @@ impl<'a> Checker<'a> {
         let binding_ty = self.ergonomic_binding_type(&pointee, expected);
         // A plain identifier is a unit variant pattern when the expected type
         // is an enum that has a matching unit variant.
-        if let ITy::Enum(enum_id) = &pointee
-            && let Some(entries) = self.unit_variants.get(name).cloned()
-            && let Some((_, variant)) = entries.iter().find(|(id, _)| id == enum_id)
-        {
-            return TPat::new(
-                pointee.clone(),
-                TPatKind::Enum {
-                    enum_id: *enum_id,
-                    variant: *variant,
-                    args: Vec::new(),
-                },
-                span,
-            );
+        if let ITy::Enum(enum_id) = &pointee {
+            let entries = self.unit_variants_scoped(name);
+            if let Some((_, variant)) = entries.iter().find(|(id, _)| id == enum_id) {
+                return TPat::new(
+                    pointee.clone(),
+                    TPatKind::Enum {
+                        enum_id: *enum_id,
+                        variant: *variant,
+                        args: Vec::new(),
+                    },
+                    span,
+                );
+            }
         }
         // A plain identifier is a constant pattern when a constant with that
         // name is in scope.
-        if let Some(&const_id) = self.const_by_name.get(name) {
+        if let Some(const_id) = self.lookup_const(name) {
             return self.check_const_pattern(const_id, &pointee, span);
         }
         // Moving a value with drop glue out of a compound pattern is E0509: the
@@ -178,6 +189,28 @@ impl<'a> Checker<'a> {
                     .to_string(),
             );
             self.diagnostics.push(diag);
+        } else if let Some(aggregate) = self.pattern_drop_hook_stack.last().cloned() {
+            // The value being destructured has its own `impl Drop` hook: Rust
+            // forbids moving any non-Copy part out of it in a pattern. Copy
+            // fields may still be copied.
+            let by_value = !matches!(self.infer.resolve(&binding_ty), ITy::Ref { .. });
+            if by_value && !self.is_copy_ty(&binding_ty) {
+                let described = self.describe_resolved(&aggregate);
+                let diag = Diagnostic::error(
+                    format!(
+                        "cannot move out of a value of type {} in a pattern because it implements Drop; use references instead",
+                        described
+                    ),
+                    span,
+                )
+                .with_code("E0509")
+                .with_span_label(span)
+                .with_note(
+                    "values of a type that implements Drop cannot be destructured by value; match or borrow through a reference instead"
+                        .to_string(),
+                );
+                self.diagnostics.push(diag);
+            }
         }
         if let Some(overrides) = overrides
             && let Some(info) = overrides.get(name)
@@ -367,6 +400,14 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     seen[index] = true;
+                    if !self.field_visible(struct_id, index) {
+                        let struct_name = self.struct_name(struct_id);
+                        self.error_code(
+                            format!("field {} of struct {} is private", field.name, struct_name),
+                            field.name_span,
+                            "E0451",
+                        );
+                    }
                     let field_ty = struct_fields[index].2.clone();
                     let checked = self.check_pattern_inner(&field.pat, &field_ty, overrides);
                     assigned[index] = Some(checked);
@@ -573,6 +614,60 @@ impl<'a> Checker<'a> {
         }
         let type_name = path.segments[path.segments.len() - 2].name.clone();
         let variant_name = path.segments[path.segments.len() - 1].name.clone();
+        // Uniform path resolution: the leading segments may name a module.
+        if path.segments.len() > 2 {
+            let prefix_len = path.segments.len() - 2;
+            match self.resolve_path_prefix(path, prefix_len, true) {
+                Some((module, consumed)) if consumed > 0 && consumed == prefix_len => {
+                    if !self.check_type_visible_in(module, &type_name, path.span) {
+                        return TPat::new(expected.clone(), TPatKind::Wild, span);
+                    }
+                    return self.with_resolved_module(module, |checker| {
+                        checker.check_enum_variant_pattern_inner(
+                            &type_name,
+                            &variant_name,
+                            args,
+                            expected,
+                            span,
+                            overrides,
+                        )
+                    });
+                }
+                Some((module, consumed)) => {
+                    let module_path = self.module_path_string(module);
+                    self.error_code(
+                        format!(
+                            "could not find '{}' in '{}'",
+                            path.segments[consumed].name, module_path
+                        ),
+                        path.span,
+                        "E0433",
+                    );
+                    return TPat::new(expected.clone(), TPatKind::Wild, span);
+                }
+                None => return TPat::new(expected.clone(), TPatKind::Wild, span),
+            }
+        }
+        self.check_enum_variant_pattern_inner(
+            &type_name,
+            &variant_name,
+            args,
+            expected,
+            span,
+            overrides,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_enum_variant_pattern_inner(
+        &mut self,
+        type_name: &str,
+        variant_name: &str,
+        args: &[Pattern],
+        expected: &ITy,
+        span: Span,
+        overrides: Option<&HashMap<String, BindingInfo>>,
+    ) -> TPat {
         let enum_id = if type_name == "Self" {
             if let Some(ITy::Enum(id)) = self.current_self_ty() {
                 Some(id)
@@ -589,7 +684,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-        } else if let Some(&def_id) = self.generic_enum_by_name.get(&type_name) {
+        } else if let Some(def_id) = self.lookup_generic_enum(type_name) {
             // A generic enum pattern inherits its instance from the scrutinee.
             let resolved = self.infer.resolve(expected);
             match resolved {
@@ -614,7 +709,7 @@ impl<'a> Checker<'a> {
                 }
             }
         } else {
-            match self.enum_by_name.get(&type_name).copied() {
+            match self.lookup_enum(type_name) {
                 Some(id) => Some(id),
                 None => {
                     self.error_code(
@@ -657,7 +752,7 @@ impl<'a> Checker<'a> {
                 )
                 .with_code("E0599")
                 .with_span_label(span);
-                if let Some(suggestion) = super::items::closest_name(&variant_name, &names) {
+                if let Some(suggestion) = super::items::closest_name(variant_name, &names) {
                     diag = diag.with_note(format!("did you mean {}?", suggestion));
                 }
                 self.diagnostics.push(diag);
@@ -770,16 +865,6 @@ impl<'a> Checker<'a> {
         expected: &ITy,
         span: Span,
     ) -> Option<usize> {
-        let name = if path.segments.len() == 1 {
-            path.segments[0].name.clone()
-        } else {
-            self.error_code(
-                "expected a struct pattern path".to_string(),
-                path.span,
-                "E0532",
-            );
-            return None;
-        };
         if path
             .segments
             .iter()
@@ -791,7 +876,45 @@ impl<'a> Checker<'a> {
                 "E0107",
             );
         }
-        if let Some(id) = self.struct_by_name.get(&name).copied() {
+        if path.segments.len() > 1 {
+            // Uniform path resolution: the leading segments may name a module.
+            let last = path.segments.len() - 1;
+            let name = path.segments[last].name.clone();
+            match self.resolve_path_prefix(path, last, true) {
+                Some((module, consumed)) if consumed > 0 && consumed == last => {
+                    if !self.check_type_visible_in(module, &name, path.span) {
+                        return None;
+                    }
+                    return self.with_resolved_module(module, |checker| {
+                        checker.resolve_pattern_struct_named(&name, expected, span)
+                    });
+                }
+                Some((module, consumed)) => {
+                    let module_path = self.module_path_string(module);
+                    self.error_code(
+                        format!(
+                            "could not find '{}' in '{}'",
+                            path.segments[consumed].name, module_path
+                        ),
+                        path.span,
+                        "E0433",
+                    );
+                    return None;
+                }
+                None => return None,
+            }
+        }
+        let name = path.segments[0].name.clone();
+        self.resolve_pattern_struct_named(&name, expected, span)
+    }
+
+    fn resolve_pattern_struct_named(
+        &mut self,
+        name: &str,
+        expected: &ITy,
+        span: Span,
+    ) -> Option<usize> {
+        if let Some(id) = self.lookup_struct(name) {
             return Some(id);
         }
         if name == "Self" {
@@ -810,7 +933,7 @@ impl<'a> Checker<'a> {
         }
         // The concrete instance of a generic struct in a pattern is determined
         // by the scrutinee type; patterns never take turbofish arguments.
-        if let Some(&def_id) = self.generic_struct_by_name.get(&name) {
+        if let Some(def_id) = self.lookup_generic_struct(name) {
             let resolved = self.infer.resolve(expected);
             if let ITy::Struct(struct_id) = resolved
                 && self
@@ -830,7 +953,7 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
-        if self.enum_by_name.contains_key(&name) {
+        if self.lookup_enum(name).is_some() {
             self.error_code(
                 format!("expected a struct pattern, found enum {}", name),
                 span,
@@ -842,7 +965,7 @@ impl<'a> Checker<'a> {
             Diagnostic::error(format!("cannot find struct {} in this scope", name), span)
                 .with_code("E0412")
                 .with_span_label(span);
-        if let Some(suggestion) = self.suggest_type_name(&name) {
+        if let Some(suggestion) = self.suggest_type_name(name) {
             diag = diag.with_note(format!("did you mean {}?", suggestion));
         }
         self.diagnostics.push(diag);

@@ -1,0 +1,6 @@
+[package]
+name = "field_dep"
+version = "0.1.0"
+
+[dependencies]
+greeting = { path = "../greeting" }

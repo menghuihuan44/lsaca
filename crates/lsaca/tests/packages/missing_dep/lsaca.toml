@@ -1,0 +1,5 @@
+[package]
+name = "missing_dep"
+
+[dependencies]
+absent = { path = "../does_not_exist" }

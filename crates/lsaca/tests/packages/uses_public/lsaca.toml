@@ -1,0 +1,6 @@
+[package]
+name = "uses_public"
+version = "0.1.0"
+
+[dependencies]
+hidden_api = { path = "../hidden_api" }

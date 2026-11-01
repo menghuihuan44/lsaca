@@ -14,6 +14,7 @@ use crate::typeck::check::Checker;
 use crate::typeck::generics::ImplInfo;
 use crate::typeck::items::TypeKey;
 use crate::typeck::itype::ITy;
+use crate::typeck::modules::ModuleId;
 use crate::typeck::tree::{TExpr, TExprKind};
 use crate::types::SelfKind;
 
@@ -84,6 +85,22 @@ impl<'a> Checker<'a> {
     /// Check the argument expressions of a generic call, inferring the type
     /// arguments of the enclosing generic item from the value shapes.
     fn infer_callable_args(
+        &mut self,
+        generics: &[ast::GenericParam],
+        params: &[ast::Param],
+        args: &[ast::Expr],
+        span: Span,
+        module: ModuleId,
+    ) -> (HashMap<String, ITy>, Vec<TExpr>, bool) {
+        let previous_module = self.current_module;
+        self.current_module = module;
+        let result = self.infer_callable_args_inner(generics, params, args, span);
+        self.current_module = previous_module;
+        result
+    }
+
+    /// [Self::infer_callable_args] with the callee's module already in scope.
+    fn infer_callable_args_inner(
         &mut self,
         generics: &[ast::GenericParam],
         params: &[ast::Param],
@@ -268,7 +285,7 @@ impl<'a> Checker<'a> {
             return self.check_plain_args(args, span);
         }
         let (env, checked, ok) =
-            self.infer_callable_args(&def.generics, &def.decl.params, args, span);
+            self.infer_callable_args(&def.generics, &def.decl.params, args, span, def.module);
         let type_args = match self.resolve_env_args(&def.generics, &env, span) {
             Some(type_args) => type_args,
             None => {
@@ -375,12 +392,12 @@ impl<'a> Checker<'a> {
             None => return self.check_plain_args(args, span),
         };
         let (env, checked, ok) =
-            self.infer_callable_args(&info.generics, &gfn.decl.params, args, span);
+            self.infer_callable_args(&info.generics, &gfn.decl.params, args, span, info.module);
         let impl_args = match self.resolve_env_args(&info.generics, &env, span) {
             Some(impl_args) => impl_args,
             None => return TExpr::new(ITy::Never, TExprKind::Break, span),
         };
-        self.validate_generic_bounds(&info.generics, &impl_args, span);
+        self.validate_generic_bounds(&info.generics, &impl_args, span, info.module);
         let fn_id = match self.instantiate_generic_fn(gfn_id, impl_args, span) {
             Some(fn_id) => fn_id,
             None => return TExpr::new(ITy::Never, TExprKind::Break, span),
@@ -395,11 +412,11 @@ impl<'a> Checker<'a> {
         explicit: &[ast::TypeExpr],
         span: Span,
     ) -> Option<ITy> {
-        if let Some(&def_id) = self.generic_struct_by_name.get(type_name) {
+        if let Some(def_id) = self.lookup_generic_struct(type_name) {
             let args = self.resolve_concrete_type_args(explicit, span)?;
             return self.instantiate_struct(def_id, args, span).map(ITy::Struct);
         }
-        if let Some(&def_id) = self.generic_enum_by_name.get(type_name) {
+        if let Some(def_id) = self.lookup_generic_enum(type_name) {
             let args = self.resolve_concrete_type_args(explicit, span)?;
             return self.instantiate_enum(def_id, args, span).map(ITy::Enum);
         }
@@ -456,6 +473,15 @@ impl<'a> Checker<'a> {
         if let Some(owner_key) = owner_key
             && let Some(fn_id) = self.methods.get(&(owner_key, item.to_string())).copied()
         {
+            if !self.method_visible(fn_id) {
+                let owner_name = self.type_name(owner_key);
+                self.error_code(
+                    format!("associated function {}::{} is private", owner_name, item),
+                    span,
+                    "E0624",
+                );
+                return self.check_plain_args(args, span);
+            }
             if self.fns[fn_id].self_kind.is_none() {
                 return self.check_direct_call(fn_id, None, args, span, hint);
             }
@@ -569,7 +595,7 @@ impl<'a> Checker<'a> {
         if self.generic_assoc_candidates_exist(type_name, item) {
             return self.check_generic_assoc_call(type_name, explicit, item, args, span, hint);
         }
-        let def_id = match self.generic_enum_by_name.get(type_name).copied() {
+        let def_id = match self.lookup_generic_enum(type_name) {
             Some(def_id) => def_id,
             None => return self.check_plain_args(args, span),
         };

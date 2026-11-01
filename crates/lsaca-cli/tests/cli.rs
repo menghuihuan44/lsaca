@@ -115,8 +115,9 @@ fn help_is_printed_without_a_file() {
     assert!(output.status.success());
     for expected in [
         "USAGE:",
-        "run <file.ls>",
-        "check <file.ls>",
+        "run [FILE.ls]",
+        "check [FILE.ls]",
+        "new <DIR>",
         "COMMANDS:",
         "EXIT CODES:",
     ] {
@@ -521,4 +522,217 @@ fn invalid_compiler_is_reported() {
         "expected an explanatory compiler error, got {:?}",
         stderr
     );
+}
+
+/// Create a package directory with a manifest and source files.
+fn create_package(dir: &Path, manifest: &str, files: &[(&str, &str)]) {
+    fs::create_dir_all(dir).expect("could not create the package directory");
+    fs::write(dir.join("lsaca.toml"), manifest).expect("could not write lsaca.toml");
+    for (relative, contents) in files {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("could not create a source directory");
+        }
+        fs::write(&path, contents).expect("could not write a package source file");
+    }
+}
+
+#[test]
+fn new_creates_a_runnable_binary_package() {
+    let dir = unique_dir("new-package");
+    let package = dir.join("hello_pkg");
+    let output = lsaca()
+        .arg("new")
+        .arg(&package)
+        .output()
+        .expect("could not run lsaca");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "lsaca new failed: {:?}",
+        stderr
+    );
+    assert!(
+        stderr.contains("created binary package"),
+        "expected a creation message, got {:?}",
+        stderr
+    );
+    assert!(package.join("lsaca.toml").is_file());
+    assert!(package.join("src/main.ls").is_file());
+    let run = lsaca()
+        .arg("run")
+        .current_dir(&package)
+        .output()
+        .expect("could not run lsaca");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "package run failed: {:?}",
+        stderr
+    );
+    assert_eq!(stdout, "Hello, world!\n");
+    // Creating a package in a non-empty directory must fail cleanly.
+    let again = lsaca()
+        .arg("new")
+        .arg(&package)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(again.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        stderr.contains("not empty"),
+        "unexpected error: {:?}",
+        stderr
+    );
+}
+
+#[test]
+fn missing_manifest_is_a_usage_error() {
+    let dir = unique_dir("no-manifest");
+    let output = lsaca()
+        .arg("check")
+        .current_dir(&dir)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no lsaca.toml found"),
+        "expected a manifest discovery error, got {:?}",
+        stderr
+    );
+}
+
+#[test]
+fn library_packages_check_but_do_not_run() {
+    let dir = unique_dir("library-package");
+    let package = dir.join("util_lib");
+    create_package(
+        &package,
+        "[package]\nname = \"util_lib\"\nversion = \"0.1.0\"\n",
+        &[("src/lib.ls", "pub fn answer() -> i64 { 42 }\n")],
+    );
+    let check = lsaca()
+        .arg("check")
+        .current_dir(&package)
+        .output()
+        .expect("could not run lsaca");
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert_eq!(
+        check.status.code(),
+        Some(0),
+        "a library package should type check: {:?}",
+        stderr
+    );
+    let run = lsaca()
+        .arg("run")
+        .current_dir(&package)
+        .output()
+        .expect("could not run lsaca");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(1));
+    assert!(
+        stderr.contains("library package"),
+        "expected a library-package error, got {:?}",
+        stderr
+    );
+    // emit-c and build need an entry point too: a library would otherwise
+    // produce a C executable rooted at an arbitrary exported function.
+    for command in ["build", "emit-c"] {
+        let output = lsaca()
+            .arg(command)
+            .current_dir(&package)
+            .output()
+            .expect("could not run lsaca");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "expected '{}' to reject a library package: {:?}",
+            command,
+            stderr
+        );
+        assert!(
+            stderr.contains("library package"),
+            "expected a library-package error for '{}', got {:?}",
+            command,
+            stderr
+        );
+    }
+}
+
+#[test]
+fn binary_packages_without_main_get_a_specific_error() {
+    let dir = unique_dir("missing-main-package");
+    let package = dir.join("no_main");
+    create_package(
+        &package,
+        "[package]\nname = \"no_main\"\nversion = \"0.1.0\"\n",
+        &[("src/main.ls", "pub fn helper() -> i64 { 1 }\n")],
+    );
+    let run = lsaca()
+        .arg("run")
+        .current_dir(&package)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(run.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("no fn main()"),
+        "expected a missing-main error, got {:?}",
+        stderr
+    );
+    // Type checking reports the missing entry point as a diagnostic.
+    let check = lsaca()
+        .arg("check")
+        .current_dir(&package)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(check.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(
+        stderr.contains("main"),
+        "expected a missing-main diagnostic, got {:?}",
+        stderr
+    );
+}
+
+#[test]
+fn package_dependencies_are_built_together() {
+    let dir = unique_dir("package-dependency");
+    let dependency = dir.join("greeting");
+    create_package(
+        &dependency,
+        "[package]\nname = \"greeting\"\nversion = \"0.1.0\"\n",
+        &[(
+            "src/lib.ls",
+            "pub fn greet(name: String) -> String {\n    String::from(\"hello, \") + name\n}\n",
+        )],
+    );
+    let app = dir.join("app");
+    create_package(
+        &app,
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ngreeting = { path = \"../greeting\" }\n",
+        &[(
+            "src/main.ls",
+            "use greeting::greet;\n\nfn main() {\n    println!(\"{}\", greet(String::from(\"package\")));\n}\n",
+        )],
+    );
+    let output = lsaca()
+        .arg("run")
+        .current_dir(&app)
+        .output()
+        .expect("could not run lsaca");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "package run failed: {:?}",
+        stderr
+    );
+    assert_eq!(stdout, "hello, package\n");
 }

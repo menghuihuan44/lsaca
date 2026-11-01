@@ -24,6 +24,8 @@ pub enum Item {
     Const(ConstDecl),
     TypeAlias(TypeAliasDecl),
     Trait(TraitDecl),
+    Mod(ModDecl),
+    Use(UseDecl),
 }
 
 impl Item {
@@ -36,6 +38,8 @@ impl Item {
             Item::Const(item) => item.span,
             Item::TypeAlias(item) => item.span,
             Item::Trait(item) => item.span,
+            Item::Mod(item) => item.span,
+            Item::Use(item) => item.span,
         }
     }
 
@@ -48,7 +52,141 @@ impl Item {
             Item::Const(item) => &item.name,
             Item::TypeAlias(item) => &item.name,
             Item::Trait(item) => &item.name,
+            Item::Mod(item) => &item.name,
+            // Imports introduce several names at once; they have no single name.
+            Item::Use(_) => "",
         }
+    }
+}
+
+/// Item and field visibility.
+///
+/// A field without a modifier is private to the module that defines the
+/// struct; `pub` fields are visible wherever the struct is visible, and
+/// `pub(crate)` fields are visible only inside their own crate. Enum
+/// tuple-variant fields are public whenever the enum itself is visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    /// Visible in the defining module and its descendant modules (default).
+    #[default]
+    Private,
+    /// Visible from every crate taking part in the compilation.
+    Public,
+    /// Visible anywhere inside the defining crate (`pub(crate)`).
+    Crate,
+}
+
+impl Visibility {
+    pub fn is_public(self) -> bool {
+        matches!(self, Visibility::Public)
+    }
+}
+
+/// A module declaration: `mod name;` (external file) or `mod name { .. }`
+/// (inline). The driver loads external modules and rewrites them into inline
+/// declarations, so type checking only ever sees inline modules.
+#[derive(Debug, Clone)]
+pub struct ModDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub vis: Visibility,
+    /// True for `mod name;`; the driver replaces it by an inline module once
+    /// the module file has been parsed.
+    pub external: bool,
+    pub items: Vec<Item>,
+    pub span: Span,
+}
+
+impl ModDecl {
+    pub fn is_inline(&self) -> bool {
+        !self.external
+    }
+}
+
+/// A `use` import declaration.
+#[derive(Debug, Clone)]
+pub struct UseDecl {
+    pub vis: Visibility,
+    pub tree: UseTree,
+    pub span: Span,
+}
+
+/// The tree on the right of a `use` declaration.
+#[derive(Debug, Clone)]
+pub enum UseTree {
+    /// A single segment: `use prelude_name;` or the leaf of a path.
+    Name { name: String, name_span: Span },
+    /// A leaf renamed with `as`: `use a::b as c;`.
+    Alias {
+        name: String,
+        name_span: Span,
+        alias: String,
+        alias_span: Span,
+    },
+    /// A path segment with a remaining tree: `use a::b;` or `use a::{b, c};`.
+    Path {
+        segment: String,
+        segment_span: Span,
+        rest: Box<UseTree>,
+        span: Span,
+    },
+    /// A brace group: `use a::{b, c as d};`.
+    Group { items: Vec<UseTree>, span: Span },
+    /// `use a::*;`; parsed for good error messages, rejected by type checking.
+    Glob { span: Span },
+}
+
+impl UseTree {
+    pub fn span(&self) -> Span {
+        match self {
+            UseTree::Name { name_span, .. } => *name_span,
+            UseTree::Alias {
+                name_span,
+                alias_span,
+                ..
+            } => name_span.join(*alias_span),
+            UseTree::Path { span, .. } => *span,
+            UseTree::Group { span, .. } => *span,
+            UseTree::Glob { span } => *span,
+        }
+    }
+}
+
+/// One crate (one package's source tree) taking part in a compilation.
+#[derive(Debug, Clone)]
+pub struct Crate {
+    pub name: String,
+    pub program: Program,
+    /// True for dependency packages; the root package is not a dependency.
+    pub is_dependency: bool,
+}
+
+/// Every crate compiled together, plus the index of the root crate.
+#[derive(Debug, Clone)]
+pub struct CrateGraph {
+    pub crates: Vec<Crate>,
+    pub root: usize,
+}
+
+impl CrateGraph {
+    /// A graph with exactly one crate: standalone-file mode.
+    pub fn single(name: impl Into<String>, program: Program) -> CrateGraph {
+        CrateGraph {
+            crates: vec![Crate {
+                name: name.into(),
+                program,
+                is_dependency: false,
+            }],
+            root: 0,
+        }
+    }
+
+    pub fn root_crate(&self) -> &Crate {
+        &self.crates[self.root]
+    }
+
+    pub fn root_program(&self) -> &Program {
+        &self.root_crate().program
     }
 }
 
@@ -68,6 +206,7 @@ pub struct GenericParam {
 pub struct FnDecl {
     pub name: String,
     pub name_span: Span,
+    pub vis: Visibility,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
     /// None means the function returns the unit type.
@@ -93,6 +232,7 @@ pub struct Param {
 pub struct StructDecl {
     pub name: String,
     pub name_span: Span,
+    pub vis: Visibility,
     pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDef>,
     pub span: Span,
@@ -102,6 +242,8 @@ pub struct StructDecl {
 pub struct FieldDef {
     pub name: String,
     pub name_span: Span,
+    /// Parsed for compatibility; fields are private to their module in v1.7.
+    pub vis: Visibility,
     pub ty: TypeExpr,
 }
 
@@ -109,6 +251,7 @@ pub struct FieldDef {
 pub struct EnumDecl {
     pub name: String,
     pub name_span: Span,
+    pub vis: Visibility,
     pub generics: Vec<GenericParam>,
     pub variants: Vec<VariantDef>,
     pub span: Span,
@@ -155,6 +298,7 @@ pub struct TraitMethod {
 pub struct TraitDecl {
     pub name: String,
     pub name_span: Span,
+    pub vis: Visibility,
     pub generics: Vec<GenericParam>,
     pub methods: Vec<TraitMethod>,
     pub span: Span,
@@ -180,6 +324,7 @@ pub struct ImplBlock {
 pub struct ConstDecl {
     pub name: String,
     pub name_span: Span,
+    pub vis: Visibility,
     pub ty: TypeExpr,
     pub value: Expr,
     pub span: Span,
@@ -189,6 +334,7 @@ pub struct ConstDecl {
 pub struct TypeAliasDecl {
     pub name: String,
     pub name_span: Span,
+    pub vis: Visibility,
     pub generics: Vec<GenericParam>,
     pub ty: TypeExpr,
     pub span: Span,
@@ -762,6 +908,58 @@ impl Item {
             Item::Const(decl) => decl.for_each_span_mut(visit),
             Item::TypeAlias(decl) => decl.for_each_span_mut(visit),
             Item::Trait(decl) => decl.for_each_span_mut(visit),
+            Item::Mod(decl) => decl.for_each_span_mut(visit),
+            Item::Use(decl) => decl.for_each_span_mut(visit),
+        }
+    }
+}
+
+impl ModDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for item in &mut self.items {
+            item.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl UseDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.span);
+        self.tree.for_each_span_mut(visit);
+    }
+}
+
+impl UseTree {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        match self {
+            UseTree::Name { name_span, .. } => visit(name_span),
+            UseTree::Alias {
+                name_span,
+                alias_span,
+                ..
+            } => {
+                visit(name_span);
+                visit(alias_span);
+            }
+            UseTree::Path {
+                segment_span,
+                rest,
+                span,
+                ..
+            } => {
+                visit(segment_span);
+                visit(span);
+                rest.for_each_span_mut(visit);
+            }
+            UseTree::Group { items, span } => {
+                visit(span);
+                for item in items {
+                    item.for_each_span_mut(visit);
+                }
+            }
+            UseTree::Glob { span } => visit(span),
         }
     }
 }

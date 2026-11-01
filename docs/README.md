@@ -7,13 +7,17 @@ translates it to portable C17. A
 tiny C runtime provides a standard library and the memory management machinery,
 and the compiler builds the generated C itself with the system C compiler, so
 the result is a normal native executable. CMake is optional: pass `--cmake` to
-build through the emitted CMake project instead.
+build through the emitted CMake project instead. A program can be a single
+file, or a crate split across modules and files, or a package with path
+dependencies; see [Modules](language/23-modules.md) and
+[Packages](language/24-packages.md).
 
 This documentation set is the reference for the language as of **version
-1.6.0**. It is split into short pages, one per topic, so you can read it
+1.7.0**. It is split into short pages, one per topic, so you can read it
 linearly from [Getting started](language/01-getting-started.md) or jump straight
 to the part you need. Every runnable example on these pages has been executed
-with the 1.6.0 compiler and shows its real output.
+with the 1.7.0 compiler and shows its real output, including the multi-file and
+package examples.
 
 ## Why lsaca?
 
@@ -24,24 +28,26 @@ with the 1.6.0 compiler and shows its real output.
   `Drop` trait and mutable references to owned heap types; version 1.5 adds
   user-defined generics and traits, lazy iterators and the builtin
   `HashMap<K, V>`; version 1.6 adds the `char` scalar type and makes every
-  `String` a guaranteed-valid UTF-8 string with character-aware methods.
-  `Copy` and `Clone` are derived for you and there are still no lifetime
-  annotations to write.
+  `String` a guaranteed-valid UTF-8 string with character-aware methods; version
+  1.7 adds modules, multi-file crates and a package manager with path
+  dependencies. `Copy` and `Clone` are derived for you and there are still no
+  lifetime annotations to write.
 * **Memory safety without a tracing garbage collector.** Values are managed by
   **ORC**: automatic reference counting plus a trial-deletion (Bacon-Rajan)
   cycle collector. Ownership decides when a value can be moved and when
   `Drop` runs; acyclic data is freed deterministically when its last owner is
   released, cycles are collected automatically, and there is no stop-the-world
   tracing GC.
-* **A small, complete language.** One source file is one compilation unit. The
-  items are `fn`, `struct`, `enum`, `impl`, `trait`, `const` and `type`; the
-  standard library is built in: `String`, `Vec<T>`, `HashMap<K, V>`,
-  `Option<T>`, `Result<T, E>`, `Rc<T>`, `Box<T>` and the lazy iterator adapters.
-  Version 1.2 added the postfix `?` operator and the Option/Result combinators;
-  1.3 added non-owning references and borrowing; 1.4 added ownership, moves,
-  `.clone()` and `Drop`; 1.5 adds user-defined generics, traits, iterators and
-  `HashMap`; 1.6 adds the `char` type, Unicode-aware `String` methods and a
-  Swiss-Table `HashMap`.
+* **A small, complete language.** A program is one crate: a root file plus the
+  modules it declares, compiled as one unit. The items are `fn`, `struct`,
+  `enum`, `impl`, `trait`, `const`, `type`, `mod` and `use`; the standard library
+  is built in: `String`, `Vec<T>`, `HashMap<K, V>`, `Option<T>`, `Result<T, E>`,
+  `Rc<T>`, `Box<T>` and the lazy iterator adapters. Version 1.2 added the postfix
+  `?` operator and the Option/Result combinators; 1.3 added non-owning
+  references and borrowing; 1.4 added ownership, moves, `.clone()` and `Drop`;
+  1.5 added user-defined generics, traits, iterators and `HashMap`; 1.6 added the
+  `char` type, Unicode-aware `String` methods and a Swiss-Table `HashMap`; 1.7
+  adds modules, multi-file crates and packages with path dependencies.
 * **Predictable native output, built directly.** The compiler emits readable
   C17 plus a small vendored runtime; by default it compiles and links that C
   itself, with no CMake, no Ninja and no extra configuration step. It also
@@ -49,21 +55,25 @@ with the 1.6.0 compiler and shows its real output.
   or embedded in another build, and `--cmake` builds through it when you want
   the platform's CMake pipeline.
 * **Fast builds.** On the reference machine a cold build of a benchmark program
-  takes about 0.91-1.22 s (1.83 s for the deliberately large `compile_large`
-  program, which emits a 395,372-byte `main.c` - about 0.40 MB - plus three
-  generated units, about 1.17 MB of program C in all), and a cached rebuild of an
-  unchanged program takes 14-21 ms (244 ms for `compile_large`). Runtime objects
-  are compiled once per
-  profile and reused. These figures were measured on 1.6.0; full details are on
-  the [Benchmarks](language/21-benchmarks.md) page.
+  takes about 0.98-1.17 s (1.84 s for the deliberately large `compile_large`
+  program, which records 349,472 bytes - about 0.35 MB - of generated program C in
+  `main.c`; 2.38 s for the multi-file `modules_compile` crate and 1.48 s for the
+  three-package `package_compile` project), and a cached rebuild of an unchanged
+  program takes 16-20 ms (238 ms for `compile_large`, 199 ms for
+  `modules_compile`, 42 ms for `package_compile`). Runtime objects are compiled
+  once per profile and reused. These figures were measured on 1.7.0; full details
+  are on the [Benchmarks](language/21-benchmarks.md) page.
 * **A useful subset, honestly documented.** Version 1.1.0 added `Box<T>` and
   format widths/precision; 1.2.0 added `?` and the combinators; 1.3.0 added
   references and the borrow checker; 1.4.0 added ownership, moves, `.clone()` and
   `Drop`; 1.5.0 added user-defined generics and traits, lazy iterators,
-  `HashMap<K, V>` and a 16-program benchmark suite; 1.6.0 adds the `char` type,
-  UTF-8-validated strings with Unicode case and whitespace handling, and a
-  Swiss-Table `HashMap` (19-program suite). Known implementation
-  limitations are listed in
+  `HashMap<K, V>` and a 16-program benchmark suite; 1.6.0 added the `char` type,
+  UTF-8-validated strings with Unicode case and whitespace handling and a
+  Swiss-Table `HashMap` (19-program suite); 1.7.0 adds modules, multi-file
+  crates, a package manager with path dependencies and `lsaca new`, and extends
+  the benchmark suite to 21 programs with compile-time workloads for multi-file
+  crates and packages. Known
+  implementation limitations are listed in
   [Roadmap and differences from Rust](language/16-roadmap.md) rather than
   hidden.
 
@@ -88,10 +98,11 @@ That program prints `Some(2) None` then `hello, world`, and is explained step by
 step in [Getting started](language/01-getting-started.md). Because ownership is
 new since 1.4.0, a program that reuses a heap value after giving it away needs an
 explicit `.clone()`; see [Ownership and moves](language/11-ownership-and-moves.md).
-The 1.5 and 1.6 features have their own pages:
+The feature releases have their own pages:
 [Generics](language/17-generics.md), [Traits](language/18-traits.md),
-[Iterators](language/19-iterators.md), [HashMap](language/20-hashmap.md) and
-[Characters and Unicode](language/22-characters-and-unicode.md).
+[Iterators](language/19-iterators.md), [HashMap](language/20-hashmap.md),
+[Characters and Unicode](language/22-characters-and-unicode.md),
+[Modules](language/23-modules.md) and [Packages](language/24-packages.md).
 More complete programs live in the repository's `examples/` directory, including
 [`examples/ownership.ls`](../examples/ownership.ls), which demonstrates moves,
 `.clone()` and a `Drop` hook end to end,
@@ -109,7 +120,7 @@ reference material.
 | Page | What it covers |
 | --- | --- |
 | [01 Getting started](language/01-getting-started.md) | Requirements, building the compiler, the first program, the direct and CMake backends, the CLI and exit codes. |
-| [02 Program structure](language/02-program-structure.md) | Compilation units, the seven item kinds, `main`, nesting and the complete EBNF grammar. |
+| [02 Program structure](language/02-program-structure.md) | Crates and compilation units, the nine item kinds, modules, `main`, nesting and the complete EBNF grammar. |
 | [03 Lexical structure](language/03-lexical-structure.md) | Identifiers, keywords, comments, integer/float/string/character literals, escapes and booleans. |
 | [04 Types](language/04-types.md) | Primitive and builtin types including `char`, `Copy` and move-only types, tuples, function types, `Self`, type inference and `as` casts. |
 | [05 Memory model](language/05-memory-model.md) | Ownership, moves, `Drop`, ORC reference counting, copy-on-write, iterator and `HashMap` ownership, `Box<T>`, `Rc<T>` cycles, the cycle collector and leak tracking. |
@@ -130,6 +141,8 @@ reference material.
 | [20 HashMap](language/20-hashmap.md) | The builtin `HashMap<K, V>`: construction, allowed key types, ownership of keys and values, lookup and mutation, the Swiss-Table layout, iteration order and equality. |
 | [21 Benchmarks](language/21-benchmarks.md) | Measured compile times, runtime and memory against C, Rust, Python and Node. |
 | [22 Characters and Unicode](language/22-characters-and-unicode.md) | The `char` type, character literals and escapes, Unicode scalar values, UTF-8 `String` APIs, byte indices versus character indices, Unicode case mapping and whitespace, `Debug` escaping and validated text input. |
+| [23 Modules](language/23-modules.md) | Inline and external modules, the module file layout, `crate`/`self`/`super` paths, `use` trees, visibility, multi-file diagnostics and how modules are compiled. |
+| [24 Packages](language/24-packages.md) | The `lsaca.toml` manifest, path dependencies and the dependency graph, `src/main.ls` versus `src/lib.ls`, `lsaca new`, package mode for `run`/`build`/`check`/`emit-c` and the resulting C project. |
 
 ## Building the compiler
 
@@ -154,6 +167,14 @@ compiler itself has no dependencies beyond the Rust standard library.
 * Blocks marked `compile-fail` show a program the front end rejects, followed
   by the exact diagnostic text. Blocks marked `panic` show a program that
   compiles but panics at run time.
+* A multi-file program is shown in one block marked `tree`: the block body is a
+  file tree, each file introduced by a `--- relative/path` line, and `main.ls`
+  at the root is the entry file. A block marked `tree,package=DIR` is a package
+  tree whose manifest is `DIR/lsaca.toml`; it is compiled and run in package
+  mode from inside `DIR`. Both forms follow the same `Output:`/`Error:`
+  convention as single-file examples.
+* A block marked `check` runs `lsaca check` instead of `lsaca run`: it shows the
+  front end output for a program that is expected to be accepted.
 * Syntax-only fragments and the grammar use `rust` or `ebnf` blocks; shell
   sessions use `console` blocks. These are not executable examples.
 * "Debug build" means the default profile used when `-r`/`--release` is absent:

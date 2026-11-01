@@ -1,0 +1,6 @@
+[package]
+name = "util_b"
+version = "0.1.0"
+
+[dependencies]
+util_a = { path = "../util_a" }

@@ -11,6 +11,7 @@ use super::check::Checker;
 use super::generics::{GFnDef, GenericOwner, ImplInfo, ImplMethod};
 use super::items::sanitize_c_ident;
 use super::itype::ITy;
+use super::modules::{DefRef, ModuleId};
 use crate::ast::{self, GenericParam, ImplBlock, TraitDecl, TraitMethod, TraitRef};
 use crate::diag::Diagnostic;
 use crate::span::Span;
@@ -20,8 +21,7 @@ use crate::types::SelfKind;
 #[derive(Clone, Debug)]
 pub struct TraitInfo {
     pub name: String,
-    pub name_span: Span,
-    pub span: Span,
+    pub module: ModuleId,
     pub generics: Vec<GenericParam>,
     pub methods: Vec<TraitMethod>,
 }
@@ -33,32 +33,13 @@ impl<'a> Checker<'a> {
 
     /// Register a trait declaration, validating its shape.
     pub fn register_trait_decl(&mut self, decl: &TraitDecl) {
-        if self.trait_by_name.contains_key(&decl.name) {
-            let previous = self.trait_by_name[&decl.name];
-            let previous_span = self.traits[previous].name_span;
-            let diag = Diagnostic::error(
-                format!("the name '{}' is defined multiple times", decl.name),
-                decl.name_span,
-            )
-            .with_code("E0428")
-            .with_label(
-                previous_span,
-                format!("previous definition of '{}' here", decl.name),
-            );
-            self.diagnostics.push(diag);
-            return;
-        }
-        if let Some(previous) = self.type_name_conflict(&decl.name) {
-            let diag = Diagnostic::error(
-                format!("the name '{}' is defined multiple times", decl.name),
-                decl.name_span,
-            )
-            .with_code("E0428")
-            .with_label(
-                previous,
-                format!("previous definition of '{}' here", decl.name),
-            );
-            self.diagnostics.push(diag);
+        let module = self.current_module;
+        let vis = self.item_visibility(decl.vis);
+        if let Some(previous) = self
+            .lookup_type_in(module, &decl.name)
+            .map(|binding| binding.span)
+        {
+            self.report_duplicate_type(&decl.name, decl.name_span, previous);
             return;
         }
         let mut seen: HashMap<String, Span> = HashMap::new();
@@ -113,18 +94,17 @@ impl<'a> Checker<'a> {
         let id = self.traits.len();
         self.traits.push(TraitInfo {
             name: decl.name.clone(),
-            name_span: decl.name_span,
-            span: decl.span,
+            module,
             generics: decl.generics.clone(),
             methods: decl.methods.clone(),
         });
-        self.trait_by_name.insert(decl.name.clone(), id);
+        self.insert_type_binding(module, &decl.name, DefRef::Trait(id), decl.name_span, vis);
     }
 
     /// Register a trait impl block (not a Drop impl, which keeps its v1.4
     /// short-circuit path for concrete types).
     pub fn register_trait_impl_block(&mut self, block: &ImplBlock, trait_ref: &TraitRef) {
-        let trait_id = match self.trait_by_name.get(&trait_ref.name).copied() {
+        let trait_id = match self.lookup_trait(&trait_ref.name) {
             Some(id) => id,
             None => {
                 self.error_code(
@@ -181,6 +161,7 @@ impl<'a> Checker<'a> {
         }
         self.impls.push(ImplInfo {
             id: impl_id,
+            module: self.current_module,
             generics: block.generics.clone(),
             self_ty: block.ty.clone(),
             trait_ref: Some(trait_ref.clone()),
@@ -242,6 +223,7 @@ impl<'a> Checker<'a> {
             owner,
             instances: HashMap::new(),
             origin: self.collecting_origin,
+            module: self.current_module,
             c_name_base,
             display_base,
         });
@@ -303,12 +285,14 @@ impl<'a> Checker<'a> {
         }
         let quiet = self.probe_quiet;
         self.probe_quiet = true;
-        let matched = self.infer_args_from_ty(&info.self_ty, receiver, &mut env, info.span);
+        let matched = self.with_module(info.module, |checker| {
+            checker.infer_args_from_ty(&info.self_ty, receiver, &mut env, info.span)
+        });
         self.probe_quiet = quiet;
         if !matched {
             return None;
         }
-        let resolved_trait_args = self.resolve_trait_args(&trait_ref, &env)?;
+        let resolved_trait_args = self.resolve_trait_args(&trait_ref, &env, info.module)?;
         if resolved_trait_args.len() != trait_args.len() {
             return None;
         }
@@ -332,11 +316,12 @@ impl<'a> Checker<'a> {
         &mut self,
         trait_ref: &ast::TraitRef,
         env: &HashMap<String, ITy>,
+        module: ModuleId,
     ) -> Option<Vec<ITy>> {
         self.push_generic_env(env.clone());
         let mut out = Vec::with_capacity(trait_ref.args.len());
         for expr in &trait_ref.args {
-            match self.resolve_ty(expr, None) {
+            match self.with_module(module, |checker| checker.resolve_ty(expr, None)) {
                 Some(ty) => out.push(self.infer.resolve(&ty)),
                 None => {
                     self.pop_generic_env();
@@ -360,7 +345,7 @@ impl<'a> Checker<'a> {
         let mut out = Vec::with_capacity(trait_ref.args.len());
         let mut failed = false;
         for expr in &trait_ref.args {
-            match self.resolve_ty(expr, None) {
+            match self.with_module(info.module, |checker| checker.resolve_ty(expr, None)) {
                 Some(ty) => out.push(ty),
                 None => failed = true,
             }
@@ -393,7 +378,7 @@ impl<'a> Checker<'a> {
             Some(trait_ref) => trait_ref.clone(),
             None => return,
         };
-        let trait_id = match self.trait_by_name.get(&trait_ref.name).copied() {
+        let trait_id = match self.lookup_trait(&trait_ref.name) {
             Some(id) => id,
             None => return,
         };
@@ -454,7 +439,7 @@ impl<'a> Checker<'a> {
             Some(trait_ref) => trait_ref.clone(),
             None => return,
         };
-        let trait_id = match self.trait_by_name.get(&trait_ref.name).copied() {
+        let trait_id = match self.lookup_trait(&trait_ref.name) {
             Some(id) => id,
             None => return,
         };
@@ -476,6 +461,10 @@ impl<'a> Checker<'a> {
             env.insert(param.name.clone(), arg.clone());
         }
         env.insert("Self".to_string(), impl_self.clone());
+        // Trait method signatures are declared by the trait: resolve them in
+        // the trait's module even though dispatch happens from user code.
+        let previous_module = self.current_module;
+        self.current_module = trait_info.module;
         self.push_generic_env(env);
         let mut trait_params: Vec<ITy> = Vec::with_capacity(trait_method.params.len());
         for param in &trait_method.params {
@@ -517,6 +506,7 @@ impl<'a> Checker<'a> {
             None => ITy::Unit,
         };
         self.pop_generic_env();
+        self.current_module = previous_module;
         let fn_sig = match self.fns.get(fn_id).and_then(|info| info.sig.clone()) {
             Some(sig) => sig,
             None => return,
@@ -605,7 +595,7 @@ impl<'a> Checker<'a> {
             if info.trait_ref.is_some() {
                 self.check_impl_coherence(impl_id, span);
             }
-            self.validate_generic_bounds(&info.generics, &args, span);
+            self.validate_generic_bounds(&info.generics, &args, span, info.module);
             if let Some(fn_id) = self.instantiate_generic_fn(gfn_id, args.clone(), span) {
                 if info.trait_ref.is_some() {
                     self.verify_trait_method_signature(impl_id, &args, method, span, fn_id);
@@ -707,7 +697,7 @@ impl<'a> Checker<'a> {
             if info.trait_ref.is_some() {
                 self.check_impl_coherence(impl_id, span);
             }
-            self.validate_generic_bounds(&info.generics, &args, span);
+            self.validate_generic_bounds(&info.generics, &args, span, info.module);
             if let Some(fn_id) = self.instantiate_generic_fn(gfn_id, args, span) {
                 matches.push(fn_id);
             }
@@ -729,7 +719,7 @@ impl<'a> Checker<'a> {
         receiver: &ITy,
         trait_name: &str,
     ) -> Option<(usize, Vec<ITy>)> {
-        let trait_id = self.trait_by_name.get(trait_name).copied()?;
+        let trait_id = self.lookup_trait(trait_name)?;
         let trait_arity = self.traits[trait_id].generics.len();
         let impl_count = self.impls.len();
         for impl_id in 0..impl_count {

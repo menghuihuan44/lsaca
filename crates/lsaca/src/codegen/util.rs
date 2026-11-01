@@ -4,7 +4,7 @@
 //! Everything here is pure and deterministic; the code generator never relies
 //! on hash map iteration order.
 
-use crate::span::SourceFile;
+use crate::span::SourceMap;
 use crate::types::{FloatTy, IntTy};
 
 /// Sanitize a name so that it can be used as a C identifier suffix.
@@ -125,20 +125,25 @@ pub fn char_literal(ch: char) -> String {
     format!("((uint32_t)0x{:X})", ch as u32)
 }
 
-/// The escaped C file name plus resolved line/column for panic call sites.
+/// The escaped C file name plus resolved 1-based line/column for panic call
+/// sites.
+///
+/// The span is a global offset into the source map: a multi-file program
+/// renders the file that actually contains the location. When no map is
+/// available, or the map is empty, the location falls back to the program name
+/// with line 0, column 0 so generated C never depends on a missing file.
 pub fn source_location(
-    source: Option<&SourceFile>,
-    fallback_name: &str,
+    sources: Option<&SourceMap>,
+    fallback_program_name: &str,
     span: crate::span::Span,
 ) -> (String, u32, u32) {
-    match source {
-        Some(file) => {
-            let (line, col) = file.line_col(span.start);
+    match sources.and_then(|sources| sources.location(span)) {
+        Some((file, line, col)) => {
             let line = line.min(u32::MAX as usize) as u32;
             let col = col.min(u32::MAX as usize) as u32;
             (c_string_literal(file.name()), line, col)
         }
-        None => (c_string_literal(fallback_name), 0, 0),
+        None => (c_string_literal(fallback_program_name), 0, 0),
     }
 }
 

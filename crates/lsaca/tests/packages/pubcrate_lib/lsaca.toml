@@ -1,0 +1,3 @@
+[package]
+name = "pubcrate_lib"
+version = "0.1.0"

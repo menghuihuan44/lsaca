@@ -388,7 +388,7 @@ CASES = [
         "kind": "check",
         "source": "hashmap_for_loop",
         "docs": [("docs/language/20-hashmap.md", [
-            "cannot be iterated with for in 1.6.0",
+            "cannot be iterated with for in 1.7.0",
         ])],
         "stderr_contains": ["cannot iterate over a value of type HashMap<i64, i64>"],
     },

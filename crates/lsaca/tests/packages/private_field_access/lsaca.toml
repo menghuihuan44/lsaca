@@ -1,0 +1,6 @@
+[package]
+name = "private_field_access"
+version = "0.1.0"
+
+[dependencies]
+greeting = { path = "../greeting" }

@@ -35,7 +35,9 @@ pub fn parse(tokens: &[Token], file: &SourceFile) -> (Program, Diagnostics) {
                 (program, parser.diagnostics)
             });
         match spawned {
-            Ok(handle) => handle.join().unwrap_or_else(|_| parser_failure()),
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|_| parser_failure(file.base())),
             // A thread could not be spawned (for example because the process
             // hit a resource limit); parse on the current thread instead.
             Err(_) => {
@@ -49,11 +51,11 @@ pub fn parse(tokens: &[Token], file: &SourceFile) -> (Program, Diagnostics) {
 }
 
 /// Result returned when the parser thread itself failed.
-fn parser_failure() -> (Program, Diagnostics) {
+fn parser_failure(base: u32) -> (Program, Diagnostics) {
     let mut diagnostics = Diagnostics::new();
     diagnostics.error(
         "internal parser error: the parser thread failed",
-        Span::new(0, 0),
+        Span::empty(base),
     );
     (Program { items: Vec::new() }, diagnostics)
 }
@@ -141,7 +143,7 @@ impl<'a> Parser<'a> {
             Some(token) if matches!(token.kind, TokenKind::Eof) => token.clone(),
             _ => Token {
                 kind: TokenKind::Eof,
-                span: Span::empty(file.len() as u32),
+                span: Span::empty(file.end()),
             },
         };
         Parser {
@@ -258,9 +260,12 @@ impl<'a> Parser<'a> {
     }
 
     fn token_text(&self, span: Span) -> String {
+        // Spans are global; slice the file text through the file's local view
+        // of the span.
+        let local = self.file.local_span(span);
         self.file
             .text()
-            .get(span.start as usize..span.end as usize)
+            .get(local.start as usize..local.end as usize)
             .map(|text| text.to_string())
             .unwrap_or_default()
     }
@@ -374,7 +379,9 @@ impl<'a> Parser<'a> {
             // The recovered tree is shallow enough to keep, but the recursive
             // descent guard may still have rejected part of the input.
             if self.reported_deep_nesting {
-                let span = self.deep_nesting_span.unwrap_or_else(|| Span::new(0, 0));
+                let span = self
+                    .deep_nesting_span
+                    .unwrap_or_else(|| Span::empty(self.file.base()));
                 self.report_depth_error_only(span);
             }
             return;
@@ -438,7 +445,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Accepts a plain identifier or the keyword `Self` as a type name.
+    /// Accepts a plain identifier, `Self`, or a module-path keyword (`crate`,
+    /// `self`, `super`) as the first segment of a type path.
     fn expect_type_name_ident(&mut self) -> (String, Span) {
         match self.kind() {
             TokenKind::KwSelfTy => {
@@ -446,10 +454,27 @@ impl<'a> Parser<'a> {
                 self.bump();
                 ("Self".to_string(), span)
             }
+            TokenKind::KwCrate => {
+                let span = self.span();
+                self.bump();
+                ("crate".to_string(), span)
+            }
+            TokenKind::KwSuper => {
+                let span = self.span();
+                self.bump();
+                ("super".to_string(), span)
+            }
+            TokenKind::KwSelf => {
+                let span = self.span();
+                self.bump();
+                ("self".to_string(), span)
+            }
             _ => self.expect_ident("type name"),
         }
     }
 
+    /// Accepts an identifier, `self`/`Self`, or the module-path keywords
+    /// `crate` and `super` as a path segment.
     fn expect_path_ident(&mut self) -> (String, Span) {
         match self.kind() {
             TokenKind::Ident(name) => {
@@ -468,14 +493,33 @@ impl<'a> Parser<'a> {
                 self.bump();
                 ("Self".to_string(), span)
             }
+            TokenKind::KwCrate => {
+                let span = self.span();
+                self.bump();
+                ("crate".to_string(), span)
+            }
+            TokenKind::KwSuper => {
+                let span = self.span();
+                self.bump();
+                ("super".to_string(), span)
+            }
             _ => self.expect_ident("identifier"),
         }
     }
 
+    /// Whether the current tokens begin an item declaration, including a
+    /// visibility prefix (`pub` or `pub(crate)`).
     fn is_item_start(&self) -> bool {
         let mut offset = 0usize;
         if matches!(self.kind(), TokenKind::KwPub) {
             offset = 1;
+            // pub(crate) puts three more tokens before the item keyword.
+            if matches!(self.peek_kind_at(1), Some(TokenKind::LParen))
+                && matches!(self.peek_kind_at(2), Some(TokenKind::KwCrate))
+                && matches!(self.peek_kind_at(3), Some(TokenKind::RParen))
+            {
+                offset = 4;
+            }
         }
         match self.tokens.get(self.pos.saturating_add(offset)) {
             Some(token) => matches!(
@@ -487,9 +531,26 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwConst
                     | TokenKind::KwType
                     | TokenKind::KwTrait
+                    | TokenKind::KwMod
+                    | TokenKind::KwUse
             ),
             None => false,
         }
+    }
+
+    /// Whether the current token starts a block-like expression, which in
+    /// statement position is parsed as a statement ending at its closing
+    /// brace (the Rust statement rule).
+    fn starts_block_like_statement(&self) -> bool {
+        matches!(
+            self.peek_kind(),
+            TokenKind::KwIf
+                | TokenKind::KwMatch
+                | TokenKind::KwLoop
+                | TokenKind::KwWhile
+                | TokenKind::KwFor
+                | TokenKind::LBrace
+        )
     }
 
     fn starts_expression(&self) -> bool {
@@ -510,6 +571,8 @@ impl<'a> Parser<'a> {
                 | TokenKind::KwMove
                 | TokenKind::KwSelf
                 | TokenKind::KwSelfTy
+                | TokenKind::KwCrate
+                | TokenKind::KwSuper
                 | TokenKind::LParen
                 | TokenKind::LBrace
                 | TokenKind::LBracket
@@ -527,9 +590,19 @@ impl<'a> Parser<'a> {
     // Recovery
     // ---------------------------------------------------------------------
 
-    /// Skip to the next item keyword at the top level.
+    /// Skip to the next item boundary after a malformed item: the next item
+    /// keyword, a semicolon, the end of the enclosing block or end of file.
     fn synchronize_item(&mut self) {
-        while !self.at_eof() && !self.is_item_start() {
+        while !self.at_eof()
+            && !self.is_item_start()
+            && !self.at(TokenKind::RBrace)
+            && !self.at(TokenKind::Semi)
+        {
+            self.bump();
+        }
+        // A stray semicolon is consumed so recovery does not report the same
+        // position twice.
+        if self.at(TokenKind::Semi) {
             self.bump();
         }
     }
@@ -551,27 +624,35 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> Option<Item> {
-        let had_pub = self.eat(TokenKind::KwPub).is_some();
+        let vis = self.parse_visibility();
         match self.peek_kind() {
-            TokenKind::KwFn => Some(Item::Fn(self.parse_fn_decl(None))),
-            TokenKind::KwStruct => Some(Item::Struct(self.parse_struct_decl())),
-            TokenKind::KwEnum => Some(Item::Enum(self.parse_enum_decl())),
+            TokenKind::KwFn => Some(Item::Fn(self.parse_fn_decl(None, vis))),
+            TokenKind::KwStruct => Some(Item::Struct(self.parse_struct_decl(vis))),
+            TokenKind::KwEnum => Some(Item::Enum(self.parse_enum_decl(vis))),
             TokenKind::KwImpl => Some(Item::Impl(self.parse_impl_block())),
-            TokenKind::KwConst => Some(Item::Const(self.parse_const_decl())),
-            TokenKind::KwType => Some(Item::TypeAlias(self.parse_type_alias())),
-            TokenKind::KwTrait => Some(Item::Trait(self.parse_trait_decl())),
-            TokenKind::Eof => None,
+            TokenKind::KwConst => Some(Item::Const(self.parse_const_decl(vis))),
+            TokenKind::KwType => Some(Item::TypeAlias(self.parse_type_alias(vis))),
+            TokenKind::KwTrait => Some(Item::Trait(self.parse_trait_decl(vis))),
+            TokenKind::KwMod => Some(Item::Mod(self.parse_mod_decl(vis))),
+            TokenKind::KwUse => Some(Item::Use(self.parse_use_decl(vis))),
+            TokenKind::Eof => {
+                if !matches!(vis, Visibility::Private) {
+                    let span = self.span();
+                    self.error("expected an item after pub", span);
+                }
+                None
+            }
             _ => {
                 let found = self.peek_kind().describe();
                 let span = self.span();
                 self.error(
                     format!(
-                        "expected an item (fn, struct, enum, impl, const, type or trait), found {}",
+                        "expected an item (fn, struct, enum, impl, const, type, trait, mod or use), found {}",
                         found
                     ),
                     span,
                 );
-                if had_pub {
+                if !matches!(vis, Visibility::Private) {
                     self.error("expected an item after pub", span);
                 }
                 self.synchronize_item();
@@ -580,7 +661,277 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_fn_decl(&mut self, impl_ty: Option<&TypeExpr>) -> FnDecl {
+    /// Parse a visibility modifier: `pub`, `pub(crate)` or nothing.
+    ///
+    /// The design contract defers every other restricted form (`pub(super)`,
+    /// `pub(self)`, `pub(in path)`); they are rejected here with E0001 so that
+    /// the declaration after them still parses.
+    fn parse_visibility(&mut self) -> Visibility {
+        if self.eat(TokenKind::KwPub).is_none() {
+            return Visibility::Private;
+        }
+        if !self.at(TokenKind::LParen) {
+            return Visibility::Public;
+        }
+        self.bump();
+        if self.eat(TokenKind::KwCrate).is_some() {
+            self.expect(TokenKind::RParen, "')' after pub(crate)");
+            return Visibility::Crate;
+        }
+        let span = self.span();
+        let found = self.peek_kind().describe();
+        self.error_coded(
+            E_SYNTAX,
+            format!(
+                "restricted visibility is not supported; use 'pub' or 'pub(crate)', found {}",
+                found
+            ),
+            span,
+        );
+        // Skip the parenthesized form so the declaration after it still parses.
+        let mut depth = 1usize;
+        while depth > 0 && !self.at_eof() {
+            if self.at(TokenKind::LParen) {
+                depth += 1;
+                self.bump();
+            } else if self.at(TokenKind::RParen) {
+                depth -= 1;
+                self.bump();
+            } else {
+                self.bump();
+            }
+        }
+        Visibility::Private
+    }
+
+    /// Parse a module declaration: `mod name;` (external file module) or
+    /// `mod name { items }` (inline module). Nested items are parsed by the
+    /// ordinary item parser, so modules can be nested arbitrarily and may
+    /// contain their own `mod` and `use` declarations.
+    fn parse_mod_decl(&mut self, vis: Visibility) -> ModDecl {
+        let mod_token = self.expect(TokenKind::KwMod, "mod");
+        let start = mod_token
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.span());
+        let (name, name_span) = self.expect_ident("module name");
+        if self.eat(TokenKind::Semi).is_some() {
+            return ModDecl {
+                name,
+                name_span,
+                vis,
+                external: true,
+                items: Vec::new(),
+                span: start.join(self.prev_span()),
+            };
+        }
+        if self.at(TokenKind::LBrace) {
+            self.bump();
+            let mut items = Vec::new();
+            if self.enter_nesting() {
+                loop {
+                    if self.at(TokenKind::RBrace) || self.at_eof() {
+                        break;
+                    }
+                    let before = self.pos;
+                    if let Some(item) = self.parse_item() {
+                        items.push(item);
+                    }
+                    self.ensure_progress(before);
+                }
+                self.leave_nesting();
+                let end = self
+                    .expect(TokenKind::RBrace, "'}' after module body")
+                    .map(|token| token.span)
+                    .unwrap_or_else(|| self.prev_span());
+                return ModDecl {
+                    name,
+                    name_span,
+                    vis,
+                    external: false,
+                    items,
+                    span: start.join(end),
+                };
+            }
+            // Too deeply nested: the recursion guard has already reported the
+            // problem. Skip the whole body so parsing can continue after it.
+            self.skip_braced_body();
+            return ModDecl {
+                name,
+                name_span,
+                vis,
+                external: false,
+                items,
+                span: start.join(self.prev_span()),
+            };
+        }
+        let span = self.span();
+        self.error("expected ';' or '{' after module name", span);
+        // Recovery: treat the malformed declaration as an external module so
+        // the parser can continue with the next item.
+        ModDecl {
+            name,
+            name_span,
+            vis,
+            external: true,
+            items: Vec::new(),
+            span: start.join(name_span),
+        }
+    }
+
+    /// Skip a braced body whose opening `{` has already been consumed.
+    fn skip_braced_body(&mut self) {
+        let mut depth = 1usize;
+        while depth > 0 && !self.at_eof() {
+            if self.at(TokenKind::LBrace) {
+                depth += 1;
+                self.bump();
+            } else if self.at(TokenKind::RBrace) {
+                depth -= 1;
+                self.bump();
+            } else {
+                self.bump();
+            }
+        }
+    }
+
+    /// Parse a use declaration: `use path;` and its `as`, `::`, group and glob
+    /// forms. The tree shape is preserved exactly; resolution and re-export
+    /// rules are checked by the type checker.
+    fn parse_use_decl(&mut self, vis: Visibility) -> UseDecl {
+        let use_token = self.expect(TokenKind::KwUse, "use");
+        let start = use_token
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.span());
+        let tree = self.parse_use_tree();
+        let end = self
+            .expect(TokenKind::Semi, "';' after use declaration")
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.prev_span());
+        UseDecl {
+            vis,
+            tree,
+            span: start.join(end),
+        }
+    }
+
+    /// Parse one use tree, guarding the recursive group form against
+    /// pathologically deep input.
+    fn parse_use_tree(&mut self) -> UseTree {
+        if !self.enter_nesting() {
+            // The recursion guard reported the problem; return a placeholder
+            // without consuming anything so the enclosing group loop can make
+            // progress token by token.
+            let span = self.span();
+            return UseTree::Glob { span };
+        }
+        let tree = self.parse_use_tree_inner();
+        self.leave_nesting();
+        tree
+    }
+
+    fn parse_use_tree_inner(&mut self) -> UseTree {
+        if self.at(TokenKind::Star) {
+            let star = self.bump();
+            return UseTree::Glob { span: star.span };
+        }
+        if self.at(TokenKind::LBrace) {
+            return self.parse_use_group();
+        }
+        let (name, name_span) = match self.parse_use_segment() {
+            Some(segment) => segment,
+            None => {
+                let span = self.span();
+                let found = self.peek_kind().describe();
+                self.error(
+                    format!("expected a module path in use declaration, found {}", found),
+                    span,
+                );
+                return UseTree::Name {
+                    name: "<error>".to_string(),
+                    name_span: span,
+                };
+            }
+        };
+        if self.eat(TokenKind::KwAs).is_some() {
+            let (alias, alias_span) = self.expect_ident("use alias name");
+            return UseTree::Alias {
+                name,
+                name_span,
+                alias,
+                alias_span,
+            };
+        }
+        if self.eat(TokenKind::ColonColon).is_some() {
+            let rest = self.parse_use_tree();
+            let span = name_span.join(rest.span());
+            return UseTree::Path {
+                segment: name,
+                segment_span: name_span,
+                rest: Box::new(rest),
+                span,
+            };
+        }
+        UseTree::Name { name, name_span }
+    }
+
+    /// Parse a braced use group: `{a, b as c, d::e, *}`. Trailing commas are
+    /// allowed and groups nest.
+    fn parse_use_group(&mut self) -> UseTree {
+        let lb = self.bump();
+        let mut items = Vec::new();
+        loop {
+            if self.at(TokenKind::RBrace) || self.at_eof() {
+                break;
+            }
+            let before = self.pos;
+            items.push(self.parse_use_tree());
+            self.ensure_progress(before);
+            if self.eat(TokenKind::Comma).is_some() {
+                continue;
+            }
+            break;
+        }
+        let rb = self
+            .expect(TokenKind::RBrace, "'}' in use group")
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.prev_span());
+        UseTree::Group {
+            items,
+            span: lb.span.join(rb),
+        }
+    }
+
+    /// Parse one path segment of a use tree. `crate`, `self` and `super` are
+    /// keywords, so they need their own arms; dependency crate names arrive as
+    /// plain identifiers.
+    fn parse_use_segment(&mut self) -> Option<(String, Span)> {
+        match self.kind() {
+            TokenKind::Ident(name) => {
+                let name = name.clone();
+                let span = self.span();
+                self.bump();
+                Some((name, span))
+            }
+            TokenKind::KwCrate => {
+                let span = self.span();
+                self.bump();
+                Some(("crate".to_string(), span))
+            }
+            TokenKind::KwSelf => {
+                let span = self.span();
+                self.bump();
+                Some(("self".to_string(), span))
+            }
+            TokenKind::KwSuper => {
+                let span = self.span();
+                self.bump();
+                Some(("super".to_string(), span))
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_fn_decl(&mut self, impl_ty: Option<&TypeExpr>, vis: Visibility) -> FnDecl {
         let fn_token = self.expect(TokenKind::KwFn, "fn");
         let start = fn_token
             .map(|token| token.span)
@@ -608,6 +959,7 @@ impl<'a> Parser<'a> {
         FnDecl {
             name,
             name_span,
+            vis,
             generics,
             params,
             ret,
@@ -704,7 +1056,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_struct_decl(&mut self) -> StructDecl {
+    fn parse_struct_decl(&mut self, vis: Visibility) -> StructDecl {
         let struct_token = self.expect(TokenKind::KwStruct, "struct");
         let start = struct_token
             .map(|token| token.span)
@@ -722,15 +1074,14 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
-            // A written `pub` on a field is accepted and ignored: version 1.5
-            // has no field visibility.
-            self.eat(TokenKind::KwPub);
+            let field_vis = self.parse_visibility();
             let (field_name, field_span) = self.expect_ident("field name");
             self.expect(TokenKind::Colon, "':' after field name");
             let ty = self.parse_type();
             fields.push(FieldDef {
                 name: field_name,
                 name_span: field_span,
+                vis: field_vis,
                 ty,
             });
             self.ensure_progress(before);
@@ -746,13 +1097,14 @@ impl<'a> Parser<'a> {
         StructDecl {
             name,
             name_span,
+            vis,
             generics,
             fields,
             span: start.join(end),
         }
     }
 
-    fn parse_enum_decl(&mut self) -> EnumDecl {
+    fn parse_enum_decl(&mut self, vis: Visibility) -> EnumDecl {
         let enum_token = self.expect(TokenKind::KwEnum, "enum");
         let start = enum_token
             .map(|token| token.span)
@@ -770,9 +1122,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
-            // A written `pub` on a variant is accepted and ignored: version
-            // 1.5 has no variant visibility.
-            self.eat(TokenKind::KwPub);
+            // A written visibility on a variant is accepted for forward
+            // compatibility; variants inherit the visibility of the enum.
+            let _ = self.parse_visibility();
             let (variant_name, variant_span) = self.expect_ident("variant name");
             let mut fields = Vec::new();
             let mut end = variant_span;
@@ -813,6 +1165,7 @@ impl<'a> Parser<'a> {
         EnumDecl {
             name,
             name_span,
+            vis,
             generics,
             variants,
             span: start.join(end),
@@ -842,13 +1195,13 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
-            let had_pub = self.eat(TokenKind::KwPub).is_some();
+            let method_vis = self.parse_visibility();
             if self.at(TokenKind::KwFn) {
-                fns.push(self.parse_fn_decl(Some(&ty)));
+                fns.push(self.parse_fn_decl(Some(&ty), method_vis));
             } else {
                 let span = self.span();
                 self.error(
-                    if had_pub {
+                    if !matches!(method_vis, Visibility::Private) {
                         "expected a function after pub in impl block"
                     } else {
                         "expected a function in impl block"
@@ -984,7 +1337,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a trait declaration. Version 1.5 traits only carry method
     /// signatures: every method takes a receiver and ends with a semicolon.
-    fn parse_trait_decl(&mut self) -> TraitDecl {
+    fn parse_trait_decl(&mut self, vis: Visibility) -> TraitDecl {
         let start = self.span();
         self.expect(TokenKind::KwTrait, "'trait'");
         let (name, name_span) = self.expect_ident("trait name");
@@ -1017,6 +1370,7 @@ impl<'a> Parser<'a> {
             return TraitDecl {
                 name,
                 name_span,
+                vis,
                 generics,
                 methods,
                 span: start.join(end),
@@ -1027,8 +1381,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
-            // A written pub before a trait method is accepted and ignored.
-            self.eat(TokenKind::KwPub);
+            // A written visibility before a trait method is accepted and
+            // ignored: trait methods are public through the implementing type.
+            let _ = self.parse_visibility();
             if self.at(TokenKind::KwFn) {
                 methods.push(self.parse_trait_method());
             } else {
@@ -1049,6 +1404,7 @@ impl<'a> Parser<'a> {
         TraitDecl {
             name,
             name_span,
+            vis,
             generics,
             methods,
             span: start.join(end),
@@ -1174,7 +1530,7 @@ impl<'a> Parser<'a> {
         (params, self_kind)
     }
 
-    fn parse_const_decl(&mut self) -> ConstDecl {
+    fn parse_const_decl(&mut self, vis: Visibility) -> ConstDecl {
         let const_token = self.expect(TokenKind::KwConst, "const");
         let start = const_token
             .map(|token| token.span)
@@ -1191,13 +1547,14 @@ impl<'a> Parser<'a> {
         ConstDecl {
             name,
             name_span,
+            vis,
             ty,
             value,
             span: start.join(end),
         }
     }
 
-    fn parse_type_alias(&mut self) -> TypeAliasDecl {
+    fn parse_type_alias(&mut self, vis: Visibility) -> TypeAliasDecl {
         let type_token = self.expect(TokenKind::KwType, "type");
         let start = type_token
             .map(|token| token.span)
@@ -1224,6 +1581,7 @@ impl<'a> Parser<'a> {
         TypeAliasDecl {
             name,
             name_span,
+            vis,
             generics,
             ty,
             span: start.join(end),
@@ -1597,7 +1955,9 @@ impl<'a> Parser<'a> {
                 self.parse_pattern()
             }
             TokenKind::LParen => self.parse_tuple_pattern(),
-            TokenKind::Ident(_) | TokenKind::KwSelfTy => self.parse_path_pattern(),
+            TokenKind::Ident(_) | TokenKind::KwSelfTy | TokenKind::KwCrate | TokenKind::KwSuper => {
+                self.parse_path_pattern()
+            }
             _ => {
                 let found = self.peek_kind().describe();
                 let span = self.span();
@@ -1839,6 +2199,24 @@ impl<'a> Parser<'a> {
             if self.is_item_start() {
                 if let Some(item) = self.parse_item() {
                     stmts.push(Stmt::Item(item));
+                }
+                self.ensure_progress(before);
+                continue;
+            }
+            if self.starts_block_like_statement() {
+                // Rust statement rule: a block-like expression in statement
+                // position is a statement that ends at its closing brace.
+                // Without this, a while loop followed by a negative literal
+                // would be parsed as a subtraction and the intended tail
+                // expression would vanish.
+                let expr = self.parse_unary();
+                if self.eat(TokenKind::Semi).is_some() {
+                    stmts.push(Stmt::Expr(expr));
+                } else if self.at(TokenKind::RBrace) || self.at_eof() {
+                    tail = Some(Box::new(expr));
+                    break;
+                } else {
+                    stmts.push(Stmt::Expr(expr));
                 }
                 self.ensure_progress(before);
                 continue;
@@ -2403,7 +2781,7 @@ impl<'a> Parser<'a> {
                 };
                 Expr::new(ExprKind::Return(value), span)
             }
-            TokenKind::KwSelf | TokenKind::KwSelfTy => {
+            TokenKind::KwSelf | TokenKind::KwSelfTy | TokenKind::KwCrate | TokenKind::KwSuper => {
                 let path = self.parse_path();
                 let span = path.span;
                 // Self { .. } is a struct literal like any other named struct:
@@ -3067,6 +3445,14 @@ impl<'a> AstNode<'a> {
                         }
                     }
                 }
+                Item::Mod(decl) => {
+                    for item in &decl.items {
+                        stack.push((AstNode::Item(item), depth));
+                    }
+                }
+                // Use declarations contribute no recursive AST children: they
+                // carry only names and spans.
+                Item::Use(_) => {}
             },
             AstNode::Fn(decl) => {
                 push_generic_bounds(stack, &decl.generics, depth);
@@ -4751,6 +5137,429 @@ impl Point {
         }
     }
 
+    fn module_at(program: &Program, index: usize) -> &ModDecl {
+        match &program.items[index] {
+            Item::Mod(module) => module,
+            other => panic!("expected a module at item {}, got {:?}", index, other),
+        }
+    }
+
+    fn use_at(program: &Program, index: usize) -> &UseDecl {
+        match &program.items[index] {
+            Item::Use(use_decl) => use_decl,
+            other => panic!(
+                "expected a use declaration at item {}, got {:?}",
+                index, other
+            ),
+        }
+    }
+
+    fn tree_name(tree: &UseTree) -> &str {
+        match tree {
+            UseTree::Name { name, .. } => name,
+            other => panic!("expected a use name, got {:?}", other),
+        }
+    }
+
+    fn tree_path(tree: &UseTree) -> (&str, &UseTree) {
+        match tree {
+            UseTree::Path { segment, rest, .. } => (segment.as_str(), rest.as_ref()),
+            other => panic!("expected a use path, got {:?}", other),
+        }
+    }
+
+    fn tree_group_items(tree: &UseTree) -> &[UseTree] {
+        match tree {
+            UseTree::Group { items, .. } => items,
+            other => panic!("expected a use group, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_visibility_forms() {
+        let source = "pub fn exported() {}\npub(crate) fn crate_visible() {}\nfn private() {}\npub struct Public { pub field: i64, hidden: i64 }\npub enum Choice { A, pub B }\npub const VALUE: i64 = 1;\npub type Alias = i64;\npub trait Behavior { pub fn run(&self); }\nstruct Plain { value: i64 }\npub mod exported_module {}";
+        let program = parse_ok(source);
+        assert_eq!(program.items.len(), 10);
+        match &program.items[0] {
+            Item::Fn(function) => {
+                assert_eq!(function.name, "exported");
+                assert_eq!(function.vis, Visibility::Public);
+            }
+            other => panic!("expected a function, got {:?}", other),
+        }
+        match &program.items[1] {
+            Item::Fn(function) => {
+                assert_eq!(function.name, "crate_visible");
+                assert_eq!(function.vis, Visibility::Crate);
+            }
+            other => panic!("expected a function, got {:?}", other),
+        }
+        match &program.items[2] {
+            Item::Fn(function) => {
+                assert_eq!(function.name, "private");
+                assert_eq!(function.vis, Visibility::Private);
+            }
+            other => panic!("expected a function, got {:?}", other),
+        }
+        match &program.items[3] {
+            Item::Struct(declaration) => {
+                assert_eq!(declaration.name, "Public");
+                assert_eq!(declaration.vis, Visibility::Public);
+                assert_eq!(declaration.fields.len(), 2);
+                assert_eq!(declaration.fields[0].vis, Visibility::Public);
+                assert_eq!(declaration.fields[1].vis, Visibility::Private);
+            }
+            other => panic!("expected a struct, got {:?}", other),
+        }
+        match &program.items[4] {
+            Item::Enum(declaration) => {
+                assert_eq!(declaration.name, "Choice");
+                assert_eq!(declaration.vis, Visibility::Public);
+                assert_eq!(declaration.variants.len(), 2);
+            }
+            other => panic!("expected an enum, got {:?}", other),
+        }
+        match &program.items[5] {
+            Item::Const(declaration) => {
+                assert_eq!(declaration.name, "VALUE");
+                assert_eq!(declaration.vis, Visibility::Public);
+            }
+            other => panic!("expected a const, got {:?}", other),
+        }
+        match &program.items[6] {
+            Item::TypeAlias(declaration) => {
+                assert_eq!(declaration.name, "Alias");
+                assert_eq!(declaration.vis, Visibility::Public);
+            }
+            other => panic!("expected a type alias, got {:?}", other),
+        }
+        match &program.items[7] {
+            Item::Trait(declaration) => {
+                assert_eq!(declaration.name, "Behavior");
+                assert_eq!(declaration.vis, Visibility::Public);
+                assert_eq!(declaration.methods.len(), 1);
+                assert_eq!(declaration.methods[0].name, "run");
+            }
+            other => panic!("expected a trait, got {:?}", other),
+        }
+        match &program.items[8] {
+            Item::Struct(declaration) => assert_eq!(declaration.vis, Visibility::Private),
+            other => panic!("expected a struct, got {:?}", other),
+        }
+        let module = module_at(&program, 9);
+        assert_eq!(module.name, "exported_module");
+        assert_eq!(module.vis, Visibility::Public);
+        assert!(module.is_inline());
+
+        let program = parse_ok("impl Point { pub fn get(&self) -> i64 { 1 } fn hidden(&self) {} }");
+        match &program.items[0] {
+            Item::Impl(block) => {
+                assert_eq!(block.fns.len(), 2);
+                assert_eq!(block.fns[0].name, "get");
+                assert_eq!(block.fns[0].vis, Visibility::Public);
+                assert_eq!(block.fns[1].vis, Visibility::Private);
+            }
+            other => panic!("expected an impl, got {:?}", other),
+        }
+
+        let program = parse_ok("mod holder { pub(crate) struct S { pub x: i64 } }");
+        let module = module_at(&program, 0);
+        match &module.items[0] {
+            Item::Struct(declaration) => {
+                assert_eq!(declaration.vis, Visibility::Crate);
+                assert_eq!(declaration.fields[0].vis, Visibility::Public);
+            }
+            other => panic!("expected a struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_restricted_visibility_but_keeps_parsing() {
+        let (program, diagnostics) = parse_source(
+            "pub(super) fn f() {}\npub(in crate::a) struct S { x: i64 }\nfn after() {}",
+        );
+        let messages = messages(&diagnostics);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.contains("restricted visibility is not supported"))
+                .count(),
+            2,
+            "unexpected messages: {:?}",
+            messages
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some(E_SYNTAX))
+        );
+        assert_eq!(program.items.len(), 3);
+        match &program.items[0] {
+            Item::Fn(function) => {
+                assert_eq!(function.name, "f");
+                assert_eq!(function.vis, Visibility::Private);
+            }
+            other => panic!("expected a function, got {:?}", other),
+        }
+        fn_named(&program, "after");
+
+        assert_eq!("expected an item after pub", parse_errors("pub")[0]);
+        assert_eq!("expected an item after pub", parse_errors("pub(crate)")[0]);
+        let messages = parse_errors("pub ;");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message == "expected an item after pub"),
+            "unexpected messages: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn parses_mod_declarations() {
+        let source = "mod external;\npub mod shared { fn inner() {} }\nmod inline { fn helper() {} use crate::other; }\nmod outer { mod inner { const N: i64 = 1; } }\nfn main() { mod local { fn f() {} } use local::f; }\n";
+        let program = parse_ok(source);
+        assert_eq!(program.items.len(), 5);
+        let external = module_at(&program, 0);
+        assert_eq!(external.name, "external");
+        assert_eq!(external.vis, Visibility::Private);
+        assert!(external.external);
+        assert!(!external.is_inline());
+        assert!(external.items.is_empty());
+        let shared = module_at(&program, 1);
+        assert_eq!(shared.name, "shared");
+        assert_eq!(shared.vis, Visibility::Public);
+        assert!(shared.is_inline());
+        assert!(!shared.external);
+        assert_eq!(shared.items.len(), 1);
+        let inline = module_at(&program, 2);
+        assert_eq!(inline.name, "inline");
+        assert_eq!(inline.items.len(), 2);
+        match &inline.items[0] {
+            Item::Fn(function) => assert_eq!(function.name, "helper"),
+            other => panic!("expected a function, got {:?}", other),
+        }
+        let imported = match &inline.items[1] {
+            Item::Use(use_decl) => use_decl,
+            other => panic!("expected a use declaration, got {:?}", other),
+        };
+        let (segment, rest) = tree_path(&imported.tree);
+        assert_eq!(segment, "crate");
+        assert_eq!(tree_name(rest), "other");
+        let outer = module_at(&program, 3);
+        let inner = match &outer.items[0] {
+            Item::Mod(module) => module,
+            other => panic!("expected a module, got {:?}", other),
+        };
+        assert_eq!(inner.name, "inner");
+        match &inner.items[0] {
+            Item::Const(constant) => {
+                assert_eq!(constant.name, "N");
+                assert_eq!(constant.vis, Visibility::Private);
+            }
+            other => panic!("expected a const, got {:?}", other),
+        }
+        let statements = main_stmts(&program);
+        assert_eq!(statements.len(), 2);
+        assert!(matches!(&statements[0], Stmt::Item(Item::Mod(module)) if module.name == "local"));
+        assert!(matches!(&statements[1], Stmt::Item(Item::Use(_))));
+    }
+
+    #[test]
+    fn parses_use_declarations() {
+        let source = "use first;\nuse second as alias;\nuse a::b;\nuse a::b as c;\nuse a::{b, c as d, e::f};\nuse nested::{inner::{x, y}, z,};\nuse glob::*;\nuse crate::mine;\nuse self::local;\nuse super::parent;\npub use reexport::thing;\n";
+        let program = parse_ok(source);
+        assert_eq!(program.items.len(), 11);
+        assert_eq!(use_at(&program, 0).vis, Visibility::Private);
+        assert_eq!(tree_name(&use_at(&program, 0).tree), "first");
+        match &use_at(&program, 1).tree {
+            UseTree::Alias { name, alias, .. } => {
+                assert_eq!(name, "second");
+                assert_eq!(alias, "alias");
+            }
+            other => panic!("expected an alias use tree, got {:?}", other),
+        }
+        let (segment, rest) = tree_path(&use_at(&program, 2).tree);
+        assert_eq!(segment, "a");
+        assert_eq!(tree_name(rest), "b");
+        let (segment, rest) = tree_path(&use_at(&program, 3).tree);
+        assert_eq!(segment, "a");
+        match rest {
+            UseTree::Alias { name, alias, .. } => {
+                assert_eq!(name, "b");
+                assert_eq!(alias, "c");
+            }
+            other => panic!("expected an alias use tree, got {:?}", other),
+        }
+        let (segment, rest) = tree_path(&use_at(&program, 4).tree);
+        assert_eq!(segment, "a");
+        let group = tree_group_items(rest);
+        assert_eq!(group.len(), 3);
+        assert_eq!(tree_name(&group[0]), "b");
+        match &group[1] {
+            UseTree::Alias { name, alias, .. } => {
+                assert_eq!(name, "c");
+                assert_eq!(alias, "d");
+            }
+            other => panic!("expected an alias use tree, got {:?}", other),
+        }
+        let (segment, rest) = tree_path(&group[2]);
+        assert_eq!(segment, "e");
+        assert_eq!(tree_name(rest), "f");
+        let (segment, rest) = tree_path(&use_at(&program, 5).tree);
+        assert_eq!(segment, "nested");
+        let nested_items = tree_group_items(rest);
+        assert_eq!(nested_items.len(), 2);
+        let (inner_segment, inner_rest) = tree_path(&nested_items[0]);
+        assert_eq!(inner_segment, "inner");
+        let inner_items = tree_group_items(inner_rest);
+        assert_eq!(inner_items.len(), 2);
+        assert_eq!(tree_name(&inner_items[0]), "x");
+        assert_eq!(tree_name(&inner_items[1]), "y");
+        assert_eq!(tree_name(&nested_items[1]), "z");
+        let (segment, rest) = tree_path(&use_at(&program, 6).tree);
+        assert_eq!(segment, "glob");
+        assert!(matches!(rest, UseTree::Glob { .. }));
+        let (segment, rest) = tree_path(&use_at(&program, 7).tree);
+        assert_eq!(segment, "crate");
+        assert_eq!(tree_name(rest), "mine");
+        let (segment, rest) = tree_path(&use_at(&program, 8).tree);
+        assert_eq!(segment, "self");
+        assert_eq!(tree_name(rest), "local");
+        let (segment, rest) = tree_path(&use_at(&program, 9).tree);
+        assert_eq!(segment, "super");
+        assert_eq!(tree_name(rest), "parent");
+        let reexport = use_at(&program, 10);
+        assert_eq!(reexport.vis, Visibility::Public);
+        let (segment, rest) = tree_path(&reexport.tree);
+        assert_eq!(segment, "reexport");
+        assert_eq!(tree_name(rest), "thing");
+    }
+
+    #[test]
+    fn parses_with_global_spans_from_tokenize_file() {
+        let text = "pub fn f() {}\nmod m { fn g() {} }\n";
+        let file = SourceFile::with_base("lib.ls", text, 1000);
+        let (tokens, lexer_diagnostics) = crate::lexer::tokenize_file(&file);
+        assert!(
+            !lexer_diagnostics.has_errors(),
+            "unexpected lexer errors: {:?}",
+            messages(&lexer_diagnostics)
+        );
+        let (program, diagnostics) = parse(&tokens, &file);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected parse errors: {:?}",
+            messages(&diagnostics)
+        );
+        assert_eq!(program.items.len(), 2);
+        for item in &program.items {
+            let span = item.span();
+            assert!(
+                span.start >= file.base() && span.end <= file.end(),
+                "item span {:?} is not inside the file [{}, {}]",
+                span,
+                file.base(),
+                file.end()
+            );
+        }
+        let function = fn_named(&program, "f");
+        assert_eq!(function.name_span, Span::new(1007, 1008));
+        let module = module_at(&program, 1);
+        assert_eq!(module.name, "m");
+        let eof = tokens.last().expect("the token stream ends with Eof");
+        assert_eq!(eof.kind, crate::lexer::TokenKind::Eof);
+        assert_eq!(eof.span, Span::empty(file.end()));
+    }
+
+    #[test]
+    fn parser_diagnostics_use_global_spans() {
+        let text = "enum { A }\n";
+        let file = SourceFile::with_base("bad.ls", text, 500);
+        let (tokens, _) = crate::lexer::tokenize_file(&file);
+        let (program, diagnostics) = parse(&tokens, &file);
+        assert_eq!(program.items.len(), 1);
+        assert!(diagnostics.has_errors());
+        for diagnostic in diagnostics.iter() {
+            assert!(
+                diagnostic.span.start >= file.base() && diagnostic.span.end <= file.end(),
+                "diagnostic span {:?} is not inside the file [{}, {}]",
+                diagnostic.span,
+                file.base(),
+                file.end()
+            );
+        }
+        let messages = messages(&diagnostics);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("expected enum name")),
+            "unexpected messages: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn recovers_from_malformed_modules_and_use_trees() {
+        let messages = parse_errors("mod ;");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("expected module name")),
+            "unexpected messages: {:?}",
+            messages
+        );
+
+        let messages = parse_errors("mod foo");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("expected ';' or '{' after module name")),
+            "unexpected messages: {:?}",
+            messages
+        );
+
+        let messages = parse_errors("use ;");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("expected a module path in use declaration")),
+            "unexpected messages: {:?}",
+            messages
+        );
+
+        let messages = parse_errors("use a::");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("expected a module path in use declaration")),
+            "unexpected messages: {:?}",
+            messages
+        );
+
+        let messages = parse_errors("use a::{b c};");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("expected '}' in use group")),
+            "unexpected messages: {:?}",
+            messages
+        );
+
+        assert_eq!("expected an item after pub", parse_errors("pub")[0]);
+        assert_eq!("expected an item after pub", parse_errors("pub(crate)")[0]);
+
+        let (program, diagnostics) =
+            parse_source("mod broken { let x = 1; }\nuse a::{b c};\nfn after() {}");
+        assert!(diagnostics.has_errors());
+        assert!(matches!(&program.items[0], Item::Mod(module) if module.name == "broken"));
+        assert!(matches!(&program.items[1], Item::Use(_)));
+        assert_eq!(fn_named(&program, "after").name, "after");
+
+        let messages = parse_errors("mod broken { fn f() {}");
+        assert!(!messages.is_empty());
+    }
+
     #[test]
     fn parses_let_statements() {
         let source = "fn main() { let x: i64 = 1; let mut y = 2; let z; }";
@@ -4800,6 +5609,31 @@ impl Point {
         assert_eq!(*op, BinaryOp::Add);
         assert_eq!(as_int(lhs), 1);
         assert_eq!(as_int(rhs), 2);
+    }
+
+    #[test]
+    fn block_like_statements_end_at_their_closing_brace() {
+        // A block-like expression in statement position is a statement, so
+        // the negative literal that follows it is the tail expression of the
+        // block rather than a subtraction.
+        let program = parse_ok("fn main() { while true { break; } -1 }");
+        let stmts = main_stmts(&program);
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            matches!(&stmts[0], Stmt::Expr(expr) if matches!(&expr.kind, ExprKind::While { .. }))
+        );
+        match &main_tail(&program).kind {
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } => assert!(matches!(expr.kind, ExprKind::Lit(Lit::Int { .. }))),
+            other => panic!("expected a negative literal tail, got {:?}", other),
+        }
+
+        // A block-like expression in final position is still the block tail.
+        let program = parse_ok("fn main() { if true { 1 } else { 2 } }");
+        assert!(main_stmts(&program).is_empty());
+        assert!(matches!(&main_tail(&program).kind, ExprKind::If(_)));
     }
 
     #[test]

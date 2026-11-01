@@ -104,4 +104,100 @@ impl<'a> Checker<'a> {
             _ => self.is_plain_value_type(&ty),
         }
     }
+
+    /// Whether a value of this type is copied implicitly (Rust's `Copy`) rather
+    /// than moved.
+    ///
+    /// This mirrors [crate::hir::Program::is_copy] while checking, and keeps a
+    /// visited set so recursive types such as
+    /// `struct Node { next: Option<Box<Node>> }` terminate. A user type is Copy
+    /// when it has no `impl Drop` hook of its own and every field or variant
+    /// payload is Copy.
+    pub fn is_copy_ty(&mut self, ty: &ITy) -> bool {
+        let mut visiting = HashSet::new();
+        self.is_copy_ty_inner(ty, &mut visiting)
+    }
+
+    fn is_copy_ty_inner(&mut self, ty: &ITy, visiting: &mut HashSet<TypeKey>) -> bool {
+        let ty = self.infer.resolve(ty);
+        match &ty {
+            ITy::Struct(id) => {
+                if self.drop_structs.get(*id).and_then(|hook| *hook).is_some() {
+                    return false;
+                }
+                let key = TypeKey::Struct(*id);
+                if !visiting.insert(key) {
+                    return true;
+                }
+                self.ensure_struct_fields(*id);
+                let fields: Vec<ITy> = self
+                    .structs
+                    .get(*id)
+                    .map(|info| info.fields.iter().map(|field| field.ty.clone()).collect())
+                    .unwrap_or_default();
+                let copied = fields
+                    .iter()
+                    .all(|field| self.is_copy_ty_inner(field, visiting));
+                visiting.remove(&key);
+                copied
+            }
+            ITy::Enum(id) => {
+                if self.drop_enums.get(*id).and_then(|hook| *hook).is_some() {
+                    return false;
+                }
+                let key = TypeKey::Enum(*id);
+                if !visiting.insert(key) {
+                    return true;
+                }
+                self.ensure_enum_variants(*id);
+                let payloads: Vec<ITy> = self
+                    .enums
+                    .get(*id)
+                    .map(|info| {
+                        info.variants
+                            .iter()
+                            .flat_map(|variant| variant.fields.iter().cloned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let copied = payloads
+                    .iter()
+                    .all(|payload| self.is_copy_ty_inner(payload, visiting));
+                visiting.remove(&key);
+                copied
+            }
+            ITy::Option(inner) => self.is_copy_ty_inner(inner, visiting),
+            ITy::Result(ok, err) => {
+                self.is_copy_ty_inner(ok, visiting) && self.is_copy_ty_inner(err, visiting)
+            }
+            ITy::Tuple(elems) => elems
+                .iter()
+                .all(|elem| self.is_copy_ty_inner(elem, visiting)),
+            ITy::String
+            | ITy::Vec(_)
+            | ITy::Rc(_)
+            | ITy::Box(_)
+            | ITy::HashMap(_, _)
+            | ITy::Fn(..) => false,
+            ITy::Unit
+            | ITy::Bool
+            | ITy::Char
+            | ITy::Int(_)
+            | ITy::Float(_)
+            | ITy::Ref { .. }
+            | ITy::Never
+            | ITy::Var(_) => true,
+        }
+    }
+
+    /// Whether the type itself (not merely one of its fields) has a user
+    /// `impl Drop` hook. This is the Rust rule for "cannot destructure a type
+    /// that implements Drop by value".
+    pub fn type_implements_drop(&self, ty: &ITy) -> bool {
+        match self.infer.resolve(ty) {
+            ITy::Struct(id) => self.drop_structs.get(id).and_then(|hook| *hook).is_some(),
+            ITy::Enum(id) => self.drop_enums.get(id).and_then(|hook| *hook).is_some(),
+            _ => false,
+        }
+    }
 }

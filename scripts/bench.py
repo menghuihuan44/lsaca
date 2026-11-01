@@ -195,6 +195,30 @@ PROGRAMS = {
         "languages": ["lsaca"],
         "compile_only": True,
     },
+    "modules_compile": {
+        "expected": "checksum=547598677",
+        "description": "multi-module program: one crate root (main.ls) plus eight sibling "
+                       "module files, about 3,600 lines in total, with structs, enums, "
+                       "generics, trait impls, strings, vectors and hash maps; used to "
+                       "measure the multi-file build path",
+        "workload": {"modules": 8, "files": 9, "lines": 3587},
+        "languages": ["lsaca"],
+        "compile_only": True,
+        "project": "benchmarks/programs/modules_compile",
+        "project_kind": "modules",
+    },
+    "package_compile": {
+        "expected": "checksum=417367897",
+        "description": "package with path dependencies: the binary package compile_app plus "
+                       "the library packages util_a and util_b (util_b depends on util_a), "
+                       "about 1,090 lines spread over thirteen files, used to measure "
+                       "package-mode builds",
+        "workload": {"packages": 3, "module_files": 10, "files": 13, "lines": 1088},
+        "languages": ["lsaca"],
+        "compile_only": True,
+        "project": "benchmarks/packages/compile_app",
+        "project_kind": "package",
+    },
 }
 
 LANGUAGES = ["lsaca", "c", "rust", "python", "node"]
@@ -990,14 +1014,29 @@ class Harness:
     # -- builds -----------------------------------------------------------
 
     def build_lsaca(self, program, src, outdir):
+        return self._build_with_fallback(
+            program,
+            lambda: self.build_lsaca_official(program, src, outdir),
+            lambda: self.build_lsaca_fallback(program, src, outdir),
+        )
+
+    def _build_with_fallback(self, program, official_builder, fallback_builder):
+        """Run the default lsaca build, falling back to emit-c + gcc when needed.
+
+        The official builder performs one default 'lsaca build' (cold plus the
+        cached repeats) and returns its record; the fallback builder performs the
+        emit-c + direct gcc path.  Both file-based and project (multi-file or
+        package) workloads share this switching logic so they record the same
+        build modes and warnings.
+        """
         if self.args.build_mode == "fallback":
-            record = self.build_lsaca_fallback(program, src, outdir)
+            record = fallback_builder()
             record["mode"] = "fallback"
             self.lsaca_mode = "fallback"
             return record
         if self.lsaca_mode != "fallback":
             try:
-                record = self.build_lsaca_official(program, src, outdir)
+                record = official_builder()
                 record["mode"] = "official"
                 self.lsaca_mode = "official"
                 return record
@@ -1013,13 +1052,150 @@ class Harness:
                 )
                 eprint("[bench] NOTE: default lsaca build failed, using emit-c + gcc fallback")
                 eprint("[bench]       " + first_line)
-                record = self.build_lsaca_fallback(program, src, outdir)
+                record = fallback_builder()
                 record["mode"] = "fallback"
                 record["official_attempt_error"] = tail(str(exc), 2000)
                 return record
-        record = self.build_lsaca_fallback(program, src, outdir)
+        record = fallback_builder()
         record["mode"] = "fallback"
         return record
+
+    # -- project builds (multi-file and package workloads) -----------------
+
+    def project_dir(self, spec):
+        return self.root / spec["project"]
+
+    def project_entry_point(self, spec):
+        """Return the source file a project workload builds from.
+
+        Multi-module projects are built by passing their crate root file to the
+        compiler (standalone file mode); packages are built in package mode from
+        the package directory, so their entry point is only used for reporting.
+        """
+        project = self.project_dir(spec)
+        if spec["project_kind"] == "package":
+            return project / "src" / "main.ls"
+        return project / "main.ls"
+
+    def package_name(self, project):
+        """Best-effort read of the name field from a package manifest."""
+        manifest = project / "lsaca.toml"
+        if not manifest.is_file():
+            return None
+        try:
+            text = manifest.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        match = re.search(r'^\s*name\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
+        return match.group(1) if match else None
+
+    def project_build_command(self, spec, outdir):
+        """Return (argv, cwd) for one default 'lsaca build -r' of a project.
+
+        Multi-module projects pass their crate root file explicitly so module
+        files are discovered relative to it; packages run in package mode (no
+        file argument) from the package directory that contains lsaca.toml.
+        """
+        project = self.project_dir(spec)
+        if spec["project_kind"] == "package":
+            return [self.compiler, "build", "-r", "-o", str(outdir)], project
+        root = self.project_entry_point(spec)
+        return [self.compiler, "build", "-r", str(root), "-o", str(outdir)], self.root
+
+    def project_fallback_emit_args(self, spec):
+        project = self.project_dir(spec)
+        if spec["project_kind"] == "package":
+            return ["emit-c", "-r"], project
+        return ["emit-c", "-r", str(self.project_entry_point(spec))], self.root
+
+    def find_project_exe(self, program, spec, outdir):
+        if spec["project_kind"] == "package":
+            name = self.package_name(self.project_dir(spec))
+            if name:
+                candidate = outdir / (name + (".exe" if os.name == "nt" else ""))
+                if candidate.is_file():
+                    return candidate
+        else:
+            candidate = outdir / ("main" + (".exe" if os.name == "nt" else ""))
+            if candidate.is_file():
+                return candidate
+        return self.find_built_exe(outdir, program)
+
+    def build_project(self, program, spec, outdir):
+        project = self.project_dir(spec)
+        if not project.is_dir():
+            raise HarnessError(
+                "missing benchmark project for %s: %s"
+                % (program, rel_path(project, self.root))
+            )
+        return self._build_with_fallback(
+            program,
+            lambda: self.build_project_official(program, spec, outdir),
+            lambda: self.build_project_fallback(program, spec, outdir),
+        )
+
+    def build_project_official(self, program, spec, outdir):
+        cache = self.fresh_cache_dir(program + "-official-cold")
+        env = dict(self.env)
+        env["LSACA_CACHE_DIR"] = str(cache)
+        outdir.mkdir(parents=True, exist_ok=True)
+        cmd, cwd = self.project_build_command(spec, outdir)
+        proc, cold_s = timed_run(cmd, env, cwd=cwd, timeout=self.args.official_timeout)
+        if proc.returncode != 0:
+            raise HarnessError(
+                "official lsaca build failed for %s (exit %s):\n%s"
+                % (program, proc.returncode, describe_failure(proc))
+            )
+        exe = self.find_project_exe(program, spec, outdir)
+        if exe is None:
+            raise HarnessError(
+                "official lsaca build reported success but no executable was found in %s"
+                % rel_path(outdir, self.root)
+            )
+        cached = []
+        for _ in range(self.compile_repeats):
+            proc_cached, cached_s = timed_run(
+                cmd, env, cwd=cwd, timeout=self.args.official_timeout
+            )
+            if proc_cached.returncode != 0:
+                raise HarnessError(
+                    "cached lsaca build failed for %s (exit %s):\n%s"
+                    % (program, proc_cached.returncode, describe_failure(proc_cached))
+                )
+            cached.append(round(cached_s, 6))
+        # Sum every generated C file of the project (a multi-module or package
+        # build emits one or more translation units per source file).
+        generated_files = sorted(
+            (path for path in cache.rglob("*.c") if path.is_file()),
+            key=lambda path: str(path),
+        )
+        generated_c_bytes = (
+            sum(path.stat().st_size for path in generated_files) if generated_files else None
+        )
+        layout = (
+            "package mode: 'lsaca build -r' with no file argument from the package "
+            "directory (the manifest is discovered upward and path dependencies are built)"
+            if spec["project_kind"] == "package"
+            else "multi-file mode: 'lsaca build -r <crate root>' where the root file's "
+            "'mod' declarations load the sibling module files"
+        )
+        return {
+            "kind": "lsaca-official",
+            "backend": self.default_backend,
+            "cold_s": round(cold_s, 6),
+            "cached_runs_s": cached,
+            "cached_median_s": round(statistics.median(cached), 6) if cached else None,
+            "generated_c_bytes": generated_c_bytes,
+            "generated_c_files": len(generated_files) or None,
+            "exe": rel_path(exe, self.root),
+            "note": "cold build runs one default 'lsaca build -r' with a fresh "
+                    "LSACA_CACHE_DIR (%s); the cached build re-uses the same cache "
+                    "directory and only re-links the executable" % layout,
+        }
+
+    def build_project_fallback(self, program, spec, outdir):
+        emit_args, cwd = self.project_fallback_emit_args(spec)
+        return self._fallback_build(program, outdir, emit_args, cwd)
 
     def build_lsaca_official(self, program, src, outdir):
         cache = self.fresh_cache_dir(program + "-official-cold")
@@ -1069,6 +1245,12 @@ class Harness:
         }
 
     def build_lsaca_fallback(self, program, src, outdir):
+        return self._fallback_build(
+            program, outdir, ["emit-c", "-r", str(src)], self.root
+        )
+
+    def _fallback_build(self, program, outdir, emit_args, cwd):
+        """lsaca emit-c (release) plus a direct gcc -O2 -DNDEBUG compile."""
         gen = outdir / "generated"
         outdir.mkdir(parents=True, exist_ok=True)
         env = dict(self.env)
@@ -1077,9 +1259,9 @@ class Harness:
         for _ in range(self.compile_repeats):
             shutil.rmtree(gen, ignore_errors=True)
             proc, emit_s = timed_run(
-                [self.compiler, "emit-c", "-r", str(src), "-o", str(gen)],
+                [self.compiler] + list(emit_args) + ["-o", str(gen)],
                 env,
-                cwd=self.root,
+                cwd=cwd,
                 timeout=120,
             )
             if proc.returncode != 0:
@@ -1273,15 +1455,27 @@ class Harness:
         for program in self.programs:
             spec = PROGRAMS[program]
             compile_only = bool(spec.get("compile_only"))
+            is_project = bool(spec.get("project"))
+            if is_project and not self.project_dir(spec).is_dir():
+                raise HarnessError(
+                    "missing benchmark project for %s: %s"
+                    % (program, rel_path(self.project_dir(spec), self.root))
+                )
+            if is_project:
+                sources = {
+                    "lsaca": rel_path(self.project_entry_point(spec), self.root)
+                }
+            else:
+                sources = {
+                    language: rel_path(self.src_path(program, language), self.root)
+                    for language in program_languages[program]
+                }
             entry = {
                 "expected": spec["expected"],
                 "description": spec["description"],
                 "workload": spec["workload"],
                 "compile_only": compile_only,
-                "sources": {
-                    language: rel_path(self.src_path(program, language), self.root)
-                    for language in program_languages[program]
-                },
+                "sources": sources,
                 "languages": {},
             }
             for language in program_languages[program]:
@@ -1291,23 +1485,28 @@ class Harness:
                     self.warnings.append("%s/%s skipped: %s" % (program, language, reason))
                     entry["languages"][language] = {"skipped": reason}
                     continue
-                src = self.src_path(program, language)
-                if not src.is_file():
-                    raise HarnessError(
-                        "missing source file for %s/%s: %s"
-                        % (program, language, rel_path(src, self.root))
-                    )
                 outdir = self.build_dir(program, language)
-                if language == "lsaca":
-                    compile_record = self.build_lsaca(program, src, outdir)
-                elif language in ("c", "rust"):
-                    compile_record = self.build_native(language, program, src, outdir)
+                if is_project:
+                    # Multi-file and package workloads only exist for lsaca and
+                    # are built from a project directory rather than one source file.
+                    compile_record = self.build_project(program, spec, outdir)
                 else:
-                    compile_record = {
-                        "kind": "interpreted",
-                        "exe": None,
-                        "note": "interpreted language: no ahead-of-time compile step",
-                    }
+                    src = self.src_path(program, language)
+                    if not src.is_file():
+                        raise HarnessError(
+                            "missing source file for %s/%s: %s"
+                            % (program, language, rel_path(src, self.root))
+                        )
+                    if language == "lsaca":
+                        compile_record = self.build_lsaca(program, src, outdir)
+                    elif language in ("c", "rust"):
+                        compile_record = self.build_native(language, program, src, outdir)
+                    else:
+                        compile_record = {
+                            "kind": "interpreted",
+                            "exe": None,
+                            "note": "interpreted language: no ahead-of-time compile step",
+                        }
                 if compile_only:
                     entry["languages"][language] = {
                         "compile": compile_record,
@@ -1494,12 +1693,29 @@ def render_markdown(results):
         lines.append("")
     if compile_only_programs:
         lines.append(
-            "> %s: compile-only workload(s). They are generated sources used to measure "
-            "how the lsaca build time scales with program size; they are not executed in "
+            "> %s: compile-only workload(s). They measure how the lsaca build time "
+            "scales with program size and project layout; they are not executed in "
             "the runtime or peak-memory tables."
             % ", ".join(compile_only_programs)
         )
         lines.append("")
+        project_notes = []
+        for name in compile_only_programs:
+            project_kind = (PROGRAMS.get(name) or {}).get("project_kind")
+            if project_kind == "package":
+                project_notes.append(
+                    "%s is a package with path dependencies built in package mode (no "
+                    "file argument; the manifest is discovered from the package "
+                    "directory)" % name
+                )
+            elif project_kind == "modules":
+                project_notes.append(
+                    "%s is a multi-module program built from its crate root file, which "
+                    "loads the sibling module files" % name
+                )
+        if project_notes:
+            lines.append("> " + "; ".join(project_notes) + ".")
+            lines.append("")
     if runtime_programs:
         lines.append("## Runtime (median (min), milliseconds; lower is better)")
         lines.append("")

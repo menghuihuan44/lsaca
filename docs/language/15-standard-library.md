@@ -1,10 +1,13 @@
 # Standard library
 
-lsaca has no imports and no module system: everything in this page is a builtin
-that is always in scope. Builtin generic types are `Vec<T>`, `HashMap<K, V>`,
-`Option<T>`, `Result<T, E>`, `Rc<T>` and `Box<T>`; `String` and the scalar types
-are non-generic. The `fn main()` program can use all of them without
-declarations. This page describes the library of version 1.6.0.
+Everything in this page is a builtin of the prelude: it is in scope in every
+module of every crate without an import, whether or not the program uses `mod`
+or a package. Builtin generic types are `Vec<T>`, `HashMap<K, V>`, `Option<T>`,
+`Result<T, E>`, `Rc<T>` and `Box<T>`; `String` and the scalar types are
+non-generic. The prelude also provides the generic functions behind the
+iterator adapters (see [Iterators](19-iterators.md)); those are ordinary public
+items of the standard library, not a source file you can edit. This page
+describes the library of version 1.7.0.
 
 The page is organised by builtin: formatting first, because every example in the
 documentation uses it, then `String`, `Vec`, iterators, `HashMap`, `Option`
@@ -1423,17 +1426,25 @@ error[E0308]: mismatched types
 lsaca: example-43.ls: could not compile example-43.ls due to previous error(s)
 ```
 
-## assert and vec macros
+## Assertion and vec macros
 
 | Macro | Behavior |
 | --- | --- |
 | `assert!(condition)` | `condition` must be a `bool`; panics with `assertion failed` when it is false |
 | `assert_eq!(left, right)` | panics when `left != right`; prints both operands |
+| `assert_ne!(left, right)` | panics when `left == right`; prints both operands. Also accepts a message: `assert_ne!(left, right, "format", args…)` |
 | `vec![…]` / `vec![value; count]` | builds a `Vec` |
 
-`assert_eq!` needs `==` support for the operand type, so it works on integers,
-floats, booleans, `String` and `Box`, but not on `Vec`, `Option`, `Result`,
-tuples, structs or enums.
+`assert_eq!` and `assert_ne!` need `==` support for the operand type. Since 1.5
+`==` is structural for every value type except function values: integers,
+floats, booleans, `char`, `String`, `Box<T>`, references, `Vec`, `Option`,
+`Result`, tuples, structs, enums and `HashMap` all compare, so the assertion
+macros work on all of them; comparing function values is `E0369`.
+
+`assert_ne!` also accepts an optional message: `assert_ne!(left, right,
+"format", args…)` panics with the formatted message instead of the default
+`left`/`right` report. The message form of `assert_ne!` is the only one in
+1.7.0: `assert_eq!` and `assert!` take exactly the operands shown above.
 
 The argument of `assert!` must be `bool`; `assert!(n)` for an integer `n` is a
 type error (`E0308`). Write the comparison explicitly: `assert!(n > 0)`.
@@ -1443,6 +1454,7 @@ fn main() {
     assert!(1 + 1 == 2);
     assert_eq!(2 + 2, 4);
     assert_eq!(String::from("a"), String::from("a"));
+    assert_ne!(2 + 2, 5, "math is broken: {}", 7);
     println!("assertions passed");
 }
 ```
@@ -1513,6 +1525,8 @@ The panic conditions in the builtin library are:
 | shift overflow (Debug) | `attempt to shift left with overflow` |
 | `assert!(false)` | `assertion failed` |
 | `assert_eq!` mismatch | `assertion left == right failed` plus `left:`/`right:` lines |
+| `assert_ne!` mismatch | `assertion left != right failed` plus `left:`/`right:` lines |
+| `assert_ne!` with a message | the formatted message |
 | `panic!(message)` | the formatted message |
 
 ## Exit codes

@@ -48,6 +48,8 @@ impl<'a> Checker<'a> {
             }
             ConstState::Done { .. } => return,
         }
+        let previous_module = self.current_module;
+        self.current_module = self.consts[id].module;
         self.consts[id].state = ConstState::InProgress;
         let decl = self.consts[id].decl.clone();
         if decl.ty.span().is_empty() {
@@ -114,6 +116,7 @@ impl<'a> Checker<'a> {
             ty: finalized,
             value,
         };
+        self.current_module = previous_module;
     }
 
     fn fold_expr(&mut self, expr: &TExpr) -> FoldOutcome {

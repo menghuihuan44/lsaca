@@ -36,7 +36,7 @@ cargo build --release
 Expected output:
 
 ```text
-lsaca 1.6.0
+lsaca 1.7.0
 ```
 
 The compiler is a single binary at `target/release/lsaca` (`lsaca.exe` on
@@ -57,6 +57,7 @@ fn main() {
 Output:
 ```text
 hello, world!
+```
 ```
 
 Compile and run it with a single command:
@@ -100,7 +101,7 @@ without lsaca.
 ## A slightly larger tour
 
 The following program uses a struct, an `impl` block, a `Box<T>`, an `Rc<T>`
-cell, the `?` operator and a format specifier, all verified to work in 1.6.0:
+cell, the `?` operator and a format specifier, all verified to work in 1.7.0:
 
 ```ls
 struct Point {
@@ -178,15 +179,77 @@ and `Vec` are move-only, so `let shared = counter.clone()` keeps the counter usa
 values by value moves it; `.clone()` makes an independent second value. See
 [Ownership and moves](11-ownership-and-moves.md).
 
+## Multi-file programs and packages
+
+Since 1.7.0 a program does not have to be one file. Modules have their own
+chapter ([Modules](23-modules.md)); this is the shortest path to a working
+multi-file program.
+
+The file named on the command line is the **crate root**. A `mod math;`
+declaration in it loads `math.ls` (or `math/mod.ls`) from the same directory:
+
+```ls,tree
+--- main.ls
+mod math;
+
+use math::double;
+
+fn main() {
+    println!("double: {}", double(21));
+}
+--- math.ls
+pub fn double(value: i64) -> i64 {
+    value * 2
+}
+```
+
+Output:
+
+```text
+double: 42
+```
+
+`math` is a module of the root crate. The `pub fn double` in `math.ls` is
+visible from the root because it is `pub`, and `use math::double;` imports it
+under its own name. Run this example with `lsaca run main.ls` from a directory
+containing both files.
+
+For a project with dependencies and a package manifest, use a package instead.
+`lsaca new demo` creates the skeleton of a binary package:
+
+```console
+$ lsaca new demo
+lsaca: created binary package 'demo' in demo
+lsaca: next: cd demo && lsaca run
+$ cd demo
+$ lsaca run
+Hello, world!
+```
+
+```text
+demo/
+├── lsaca.toml
+└── src/
+    └── main.ls
+```
+
+With no `FILE.ls` argument, `run`, `build`, `check` and `emit-c` work on
+the nearest package found walking up from the current directory, and packages
+declared in `[dependencies]` are compiled together with it. See
+[Packages](24-packages.md).
+
 ## How compilation works
 
 The compiler is a classic front end followed by C code generation:
 
 ```text
-source .ls
+source files: one root file, external modules and package dependency crates
    |
    v
-lexer -> parser (AST) -> name resolution + type checker -> typed IR
+lexer + parser (one AST per file) -> module tree and crate graph
+   |
+   v
+name resolution + type checker (whole graph) -> typed IR
    |
    v
 C17 code generator (main.c, split into lsaca_unit_N.c for very large programs)
@@ -207,8 +270,9 @@ generated C project:
 ```
 
 The type checker rejects the program before any C is generated, so a program
-either type-checks completely or not at all. Diagnostics are reported on the
-source file with line and column, in a rustc-like layout (see
+either type-checks completely or not at all. Diagnostics are reported with the
+file name, line and column of the file they belong to (the root file or any
+module file), in a rustc-like layout (see
 [Diagnostics](#diagnostics) below). The C runtime implements the standard
 library, reference counting, the cycle collector, string/vector storage and the
 panic machinery.
@@ -274,14 +338,16 @@ runtime defines.
 
 ## Command-line interface
 
-`lsaca` takes exactly one command and an optional `.ls` file:
+`lsaca` takes one command. `run`, `build`, `emit-c` and `check` also take an
+optional `FILE.ls`; with no file they operate on the nearest package:
 
 | Command | Description |
 | --- | --- |
-| `lsaca run <file.ls> [-- args...]` | Compile, build (using the build cache) and run the program. Arguments after `--` are passed to the program and visible through `args()`. |
-| `lsaca build <file.ls>` | Compile and build a native executable in the output directory (default: next to the source). |
-| `lsaca emit-c <file.ls>` | Write the generated C project only; do not compile or link it. |
-| `lsaca check <file.ls>` | Run the front end only: lexing, parsing, name resolution and type checking. Fast; useful in editors and CI. |
+| `lsaca run [FILE.ls] [-- args...]` | Compile, build (using the build cache) and run the program. Arguments after `--` are passed to the program and visible through `args()`. |
+| `lsaca build [FILE.ls]` | Compile and build a native executable in the output directory (default: next to the source). |
+| `lsaca emit-c [FILE.ls]` | Write the generated C project only; do not compile or link it. |
+| `lsaca check [FILE.ls]` | Run the front end only: module loading, lexing, parsing, name resolution and type checking. Fast; useful in editors and CI. |
+| `lsaca new <DIR>` | Create a new binary package in `DIR`: an `lsaca.toml` manifest and a hello-world `src/main.ls`. |
 | `lsaca version` | Print the compiler version. |
 | `lsaca help` | Print the help text. |
 
@@ -296,21 +362,34 @@ Options:
 | `--cmake` | Build through the generated CMake project instead of the built-in direct C compiler backend. Requires CMake 3.16+ and a generator (Ninja or MinGW Makefiles). |
 | `-h`, `--help` | Print the help text. |
 
-The complete help text of version 1.6.0:
+In **file mode** the compile commands take one `FILE.ls` and ignore any
+manifest. In **package mode** (no `FILE.ls`) they find the nearest
+`lsaca.toml` by walking up from the current directory, and every package in
+its dependency graph is checked and compiled together. A command that needs a
+package but finds no manifest exits with code `2` and
+`lsaca: no lsaca.toml found in this directory or any parent directory`;
+`lsaca new` is the only command that always needs an explicit directory.
+
+The complete help text of version 1.7.0:
 
 ```console
-lsaca 1.6.0 - a small statically typed language with an ORC memory model
+lsaca 1.7.0 - a small statically typed language with an ORC memory model
 
 USAGE:
-    lsaca <COMMAND> [OPTIONS]
+    lsaca <COMMAND> [OPTIONS] [FILE.ls]
 
 COMMANDS:
-    run <file.ls> [-- args...]   compile, build (cached) and run the program
-    build <file.ls>              compile and build a native executable
-    emit-c <file.ls>             write the generated C project only
-    check <file.ls>              run the front end and report diagnostics
+    run [FILE.ls] [-- args...]   compile, build (cached) and run the program
+    build [FILE.ls]              compile and build a native executable
+    emit-c [FILE.ls]             write the generated C project only
+    check [FILE.ls]              run the front end and report diagnostics
+    new <DIR>                    create a new binary package
     version                      print the compiler version
     help                         print this help
+
+When no FILE.ls is given, run/build/emit-c/check operate on the package whose
+lsaca.toml is the nearest one walking up from the current directory. Package
+dependencies declared in [dependencies] with a path are compiled together.
 
 OPTIONS:
     -r, --release                build with optimizations and wrapping arithmetic
@@ -338,7 +417,9 @@ and `lsaca emit-c --cmake hello.ls` fail with
 `'--cmake' for 'lsaca emit-c'`) and exit with `2`. `version` and `help`
 take no arguments at all; `lsaca version --cmake` and `lsaca help --cmake`
 fail with `lsaca: unexpected argument '--cmake' for 'lsaca version'`
-(respectively `'--cmake' for 'lsaca help'`) and exit with `2`.
+(respectively `'--cmake' for 'lsaca help'`) and exit with `2`. A bare argument that
+ends in `.ls` is treated as `lsaca run <file>`; `lsaca new` takes exactly one
+directory and no other options.
 
 ## Exit codes
 
@@ -348,7 +429,7 @@ The CLI and the compiled programs share a small, predictable set of exit codes:
 | --- | --- | --- |
 | `0` | CLI / program | Success. |
 | `1` | CLI | A compile or build error (diagnostics were printed). |
-| `2` | CLI | Command line usage error: missing command, unknown command, missing file argument, unknown option. |
+| `2` | CLI | Command line usage error: missing command, unknown command, missing file argument, unknown option, or no package manifest found in package mode. |
 | `101` | program | The program panicked. `lsaca run` propagates the child's status, so the CLI also exits 101. |
 | other | program | Whatever the program passes to `exit(n)`, or returns on a normal path. |
 
@@ -374,88 +455,11 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-03.ls:2:23
+  --> example-04.ls:2:23
    |
  2 |     let answer: i64 = "forty-two";
    |                       ^^^^^^^^^^^
    = note: expected i64, found String
 
-lsaca: example-03.ls: could not compile example-03.ls due to previous error(s)
+lsaca: example-04.ls: could not compile example-04.ls due to previous error(s)
 ```
-
-`lsaca check` exits `1` when there are errors and prints
-`lsaca: <file>: ok` to stderr when the file is clean. Warnings (for example
-unreachable match arms) do not change the exit code. Warnings and errors can
-both be produced in one run; the summary line is printed once at the end.
-
-## Build cache and environment
-
-`lsaca run` and `lsaca build` cache generated C, executable and compiled
-runtime objects by a content hash of the source, the compiler version and the
-build mode. The cache lives, in order of preference:
-
-1. `LSACA_CACHE_DIR`, when set (created if needed);
-2. the system temporary directory, when that path is ASCII-only and writable;
-3. `.lsaca-build-cache` in the current working directory.
-
-Within the cache, each compilation gets a directory named after its content
-hash (holding the generated C sources and the build tree), and the compiled C
-runtime objects are shared under `_runtime/<hash>/`. The runtime is compiled
-once per profile and then reused, so only the new program's generated unit or
-units have to be compiled. `-v` prints every C compiler invocation verbatim, including the flags
-for the chosen profile.
-
-On this project's development machine, a cold release build of a small program
-like `hello.ls` takes roughly 1-2 s and a cached rebuild a few tens of
-milliseconds; timings vary with the C compiler and the machine. See
-[Benchmarks](21-benchmarks.md) for the measured numbers.
-
-Environment variables understood by the compiler and the generated runtime:
-
-| Variable | Effect |
-| --- | --- |
-| `LSACA_CC` | C compiler command used for `run`/`build` (overrides `CC`). |
-| `LSACA_JOBS` | Parallel build jobs for the C compiler (or for CMake when `--cmake` is used). |
-| `LSACA_CACHE_DIR` | Overrides the build cache location. |
-| `LSACA_DEBUG_RC` | Read by the compiler: when set to `1`, the runtime is compiled with `-DLSACA_DEBUG_RC`, so reference-counted allocations are tracked and a leak report is printed at shutdown in every profile, including Release. Emitted CMake projects expose the same switch as `-DLSACA_DEBUG_RC=ON`. |
-
-## Troubleshooting
-
-* **`lsaca: cannot read <file>: ... (os error 2)`** — the source path does not
-  exist or cannot be read. Check the path quoting; the message after the colon
-  is the operating system's localized text.
-* **No C compiler found or the C compiler fails** — make sure a C17 compiler
-  (`gcc` or `clang`) is on `PATH`; set `LSACA_CC` to pick a specific compiler.
-  Run with `-v` to see the exact commands.
-* **CMake errors** — CMake is only needed when you pass `--cmake`. Either drop
-  the flag (the default backend needs no CMake) or install CMake 3.16+ with a
-  supported generator, such as Ninja or MinGW Makefiles. Run with `-v` to see
-  the CMake commands.
-* **The program panics with `attempt to add with overflow`** — the Debug
-  profile checks integer overflow. Either the arithmetic is genuinely wrong or
-  you want release semantics; pass `-r` for wrapping arithmetic.
-* **The program panics with `index out of bounds`** — indexing is always
-  bounds-checked, in Debug and Release. Check the index; `get()` returns
-  `Option<T>` instead of panicking.
-* **A stale build after editing the compiler** — the cache key includes the
-  compiler version/content; if in doubt delete `LSACA_CACHE_DIR` (or
-  `.lsaca-build-cache`) contents.
-* **Leak report at exit** — only printed when leak tracking is enabled; a
-  non-zero report for a program that neither panicked nor called `exit` is a
-  compiler/runtime bug, not a language feature. See
-  [Memory model](05-memory-model.md).
-
-## What next
-
-* Learn the shape of a program: [Program structure](02-program-structure.md).
-* See every literal and token: [Lexical structure](03-lexical-structure.md).
-* Borrow values without giving up ownership: [References and
-  borrowing](12-references-and-borrowing.md).
-* Understand the memory model before writing large programs:
-  [Memory model: ORC](05-memory-model.md).
-* Browse the built-in API: [Standard library](15-standard-library.md).
-* Explore the 1.6 features: [Characters and
-  Unicode](22-characters-and-unicode.md), [Generics](17-generics.md),
-  [Traits](18-traits.md), [Iterators](19-iterators.md) and
-  [HashMap](20-hashmap.md).
-* Compare with Rust and see the roadmap: [Roadmap](16-roadmap.md).

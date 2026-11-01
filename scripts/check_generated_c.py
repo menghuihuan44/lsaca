@@ -9,20 +9,31 @@ Selection (default):
 
   * every fixture in crates/lsaca/tests/programs/*.ls except names starting
     with bad_ (those are front-end rejection tests);
+  * every module-tree fixture crates/lsaca/tests/programs/modules/<name>/main.ls;
+  * every package fixture crates/lsaca/tests/packages/<name> that carries an
+    lsaca.toml manifest (emit-c runs from the package directory with no source
+    path argument, exactly like the CLI package mode);
   * every examples/*.ls program.
 
-The annotated negative fixtures (panic/argv/stderr fixtures and the two
-documented compile-error fixtures iter_collect_no_type.ls and
-iter_sum_non_numeric.ls) are intentionally selected: their expected failure keeps
-the report honest about what the tree currently accepts. By default a run exits
-0 when the only failures are annotated negatives; pass --strict to make any
-annotated failure fail the run.
+The annotated negative fixtures (panic/argv/stderr fixtures, documented
+compile-error fixtures such as iter_collect_no_type.ls and iter_sum_non_numeric.ls,
+the negative module and package fixtures, and library-only packages whose emit-c
+is rejected by design) are intentionally selected:
+their expected failure keeps the report honest about what the tree currently
+accepts. By default a run exits 0 when the only failures are annotated
+negatives; pass --strict to make any annotated failure fail the run.
+
+Annotations that demand a rejection (documented compile-error, load-error and
+module rejection fixtures) are also checked in the other direction: if such a
+fixture compiles and runs, the report lists it under wrong acceptance and the
+run fails, because the front end accepted a program the contract rejects.
 
 Usage:
 
   python scripts/check_generated_c.py
   python scripts/check_generated_c.py --list
   python scripts/check_generated_c.py --only refs --only hashmap
+  python scripts/check_generated_c.py --only modules/ --only tests/packages
   python scripts/check_generated_c.py --profile release --jobs 4
   python scripts/check_generated_c.py --bin target/debug/lsaca.exe
   python scripts/check_generated_c.py --summary-only --jobs 4
@@ -31,7 +42,9 @@ Usage:
 Per program and per requested profile:
 
   1. emit the C project twice into two directories (release adds -r) and
-     require both emit runs to exit 0;
+     require both emit runs to exit 0; multi-file module programs are emitted
+     from the repository root and package programs from their package
+     directory;
   2. compare every generated file byte-for-byte between the two emissions
      (main.c, lsaca_rt.h, lsaca_rt_internal.h, the runtime .c files and
      CMakeLists.txt) to enforce deterministic code generation;
@@ -92,7 +105,11 @@ SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parent.parent
 EXAMPLES_DIR = REPO_ROOT / "examples"
 FIXTURES_DIR = REPO_ROOT / "crates" / "lsaca" / "tests" / "programs"
+MODULES_DIR = FIXTURES_DIR / "modules"
+PACKAGES_DIR = REPO_ROOT / "crates" / "lsaca" / "tests" / "packages"
 BAD_FIXTURE_PREFIX = "bad_"
+MODULE_MAIN = "main.ls"
+PACKAGE_MANIFEST = "lsaca.toml"
 
 # --- generated project contract (mirrors runtime::sources()) --------------
 
@@ -190,7 +207,37 @@ EXPECTED_FAILURE_REASONS = {
     "crates/lsaca/tests/programs/vec_capacity_negative.ls": "panic fixture; e2e expects exit 101",
     "crates/lsaca/tests/programs/iter_collect_no_type.ls": "documented compile-error fixture (collect needs a known Vec<T>)",
     "crates/lsaca/tests/programs/iter_sum_non_numeric.ls": "documented compile-error fixture (sum supports only i64/f64)",
+    # Module-tree fixtures that document rejections.
+    "crates/lsaca/tests/programs/modules/private_field/main.ls": "documented compile-error fixture (E0616 private field access)",
+    "crates/lsaca/tests/programs/modules/glob_import/main.ls": "documented compile-error fixture (glob imports are not supported)",
+    "crates/lsaca/tests/programs/modules/private_fn/main.ls": "documented compile-error fixture (E0603 private function)",
+    "crates/lsaca/tests/programs/modules/reexport_private_item/main.ls": "documented compile-error fixture (E0364: pub use must not widen item visibility)",
+    "crates/lsaca/tests/programs/modules/reexport_private_module/main.ls": "documented compile-error fixture (E0365: pub use must not widen module visibility)",
+    "crates/lsaca/tests/programs/modules/panic_location/main.ls": "panic fixture; e2e checks the module panic location and exit 101",
+    # Package fixtures that document load failures.
+    "crates/lsaca/tests/packages/missing_dep": "documented load-error fixture (dependency path does not exist)",
+    "crates/lsaca/tests/packages/bad_manifest": "documented load-error fixture (manifest name must be a string)",
+    "crates/lsaca/tests/packages/cycle_a": "documented load-error fixture (cyclic package dependency)",
+    "crates/lsaca/tests/packages/cycle_b": "documented load-error fixture (cyclic package dependency)",
+    "crates/lsaca/tests/packages/uses_hidden": "documented compile-error fixture (E0603 private item from a dependency)",
+    "crates/lsaca/tests/programs/assert_ne_fail.ls": "panic fixture; e2e expects exit 101 with the assert_ne message",
+    "crates/lsaca/tests/programs/modules/module_type_error/main.ls": "documented compile-error fixture (E0308 inside a module file)",
+    "crates/lsaca/tests/packages/both_roots": "documented reject-before-codegen fixture (package has both src/main.ls and src/lib.ls)",
+    "crates/lsaca/tests/packages/cross_crate_field": "documented compile-error fixture (E0616 private field from a dependency)",
+    "crates/lsaca/tests/packages/cross_crate_fn": "documented compile-error fixture (E0603 pub(crate) function from a dependency)",
+    "crates/lsaca/tests/packages/private_field_access": "documented compile-error fixture (E0616 private field)",
+    # A library package has no entry point, so emit-c rejects it on purpose:
+    # only check is defined for libraries.
+    "crates/lsaca/tests/packages/greeting": "documented reject-before-codegen fixture (library package)",
+    "crates/lsaca/tests/packages/hidden_api": "documented reject-before-codegen fixture (library package)",
+    "crates/lsaca/tests/packages/library_only": "documented reject-before-codegen fixture (library package)",
+    "crates/lsaca/tests/packages/pubcrate_lib": "documented reject-before-codegen fixture (library package)",
 }
+
+# Module fixtures whose directory name starts with this prefix are explicit
+# negative fixtures: the front end must reject them with a clean diagnostic, so
+# their emit-c failure is expected in the generated-C report.
+MODULE_NEGATIVE_PREFIX = "audit_neg_"
 
 
 class UsageError(Exception):
@@ -216,6 +263,8 @@ class StepFailed(Exception):
 class Source:
     path: Path
     display: str
+    kind: str = "file"           # "file", "module" or "package"
+    cwd: Optional[Path] = None   # emit-c working directory (package sources)
 
 
 @dataclass(frozen=True)
@@ -255,10 +304,15 @@ class ProgramResult:
     source: Source
     profiles: list = field(default_factory=list)
     expected: str = ""
+    wrong_acceptance: bool = False
 
     @property
     def ok(self) -> bool:
-        return bool(self.profiles) and all(profile.ok for profile in self.profiles)
+        return (
+            bool(self.profiles)
+            and all(profile.ok for profile in self.profiles)
+            and not self.wrong_acceptance
+        )
 
     @property
     def total_ms(self) -> int:
@@ -447,9 +501,26 @@ def run_command(
 
 # --- source selection ------------------------------------------------------
 
+def selection_text(stats: dict) -> str:
+    """Stable one-line description of the selected source mix."""
+    return (
+        f"examples={stats['examples']} fixtures={stats['fixtures']} "
+        f"excluded_bad={stats['excluded_bad']} modules={stats['modules']} "
+        f"packages={stats['packages']}"
+    )
+
+
 def select_sources(only: Sequence[str]) -> tuple[list, dict]:
     fixtures = sorted(FIXTURES_DIR.glob("*.ls"), key=lambda path: path.name)
     examples = sorted(EXAMPLES_DIR.glob("*.ls"), key=lambda path: path.name)
+    modules = sorted(
+        (path for path in MODULES_DIR.glob("*/" + MODULE_MAIN) if path.is_file()),
+        key=lambda path: path.parent.name,
+    )
+    packages = sorted(
+        (path for path in PACKAGES_DIR.glob("*/" + PACKAGE_MANIFEST) if path.is_file()),
+        key=lambda path: path.parent.name,
+    )
     sources = []
     excluded_bad = 0
     for path in fixtures:
@@ -459,6 +530,20 @@ def select_sources(only: Sequence[str]) -> tuple[list, dict]:
         sources.append(Source(path=path.resolve(), display=display_path(path)))
     for path in examples:
         sources.append(Source(path=path.resolve(), display=display_path(path)))
+    for path in modules:
+        sources.append(
+            Source(path=path.resolve(), display=display_path(path), kind="module")
+        )
+    for path in packages:
+        package_dir = path.parent.resolve()
+        sources.append(
+            Source(
+                path=package_dir,
+                display=display_path(package_dir),
+                kind="package",
+                cwd=package_dir,
+            )
+        )
     if only:
         needles = [needle.lower() for needle in only]
         sources = [
@@ -471,8 +556,18 @@ def select_sources(only: Sequence[str]) -> tuple[list, dict]:
     if not sources:
         raise UsageError("no programs selected")
     stats = {
-        "examples": sum(1 for source in sources if source.display.startswith("examples/")),
-        "fixtures": sum(1 for source in sources if not source.display.startswith("examples/")),
+        "examples": sum(
+            1
+            for source in sources
+            if source.kind == "file" and source.display.startswith("examples/")
+        ),
+        "fixtures": sum(
+            1
+            for source in sources
+            if source.kind == "file" and not source.display.startswith("examples/")
+        ),
+        "modules": sum(1 for source in sources if source.kind == "module"),
+        "packages": sum(1 for source in sources if source.kind == "package"),
         "excluded_bad": excluded_bad,
         "selected": len(sources),
     }
@@ -542,8 +637,11 @@ def emit_project(config: Config, source: Source, profile: str, emit_dir: Path, e
     argv = [config.bin_path, "emit-c"]
     if profile == "release":
         argv.append("-r")
-    argv.extend(["-o", emit_dir, source.path])
-    completed, elapsed_ms = run_command(argv, REPO_ROOT, EMIT_TIMEOUT, env)
+    argv.extend(["-o", emit_dir])
+    if source.kind != "package":
+        argv.append(source.path)
+    cwd = source.cwd if source.cwd is not None else REPO_ROOT
+    completed, elapsed_ms = run_command(argv, cwd, EMIT_TIMEOUT, env)
     if completed.returncode != 0:
         raise StepFailed(
             "compiler-exit",
@@ -674,13 +772,43 @@ def check_profile(
     return result
 
 
+def expected_failure_reason(source: Source) -> str:
+    """Human-readable reason when a program is an annotated negative fixture."""
+    reason = EXPECTED_FAILURE_REASONS.get(source.display, "")
+    if reason:
+        return reason
+    if source.kind == "module":
+        name = source.path.parent.name
+        if name.startswith(MODULE_NEGATIVE_PREFIX):
+            return f"documented module rejection fixture ({name})"
+    return ""
+
+
+# Annotated fixtures with these reason prefixes must be rejected before C is
+# generated. If such a fixture compiles and runs instead, the front end accepted
+# a program the contract says it must reject: that is reported as a wrong
+# acceptance failure and always fails the run (it is not merely a known-negative
+# fixture that failed as documented).
+REQUIRED_REJECTION_PREFIXES = (
+    "documented compile-error fixture",
+    "documented load-error fixture",
+    "documented module rejection fixture",
+    "documented reject-before-codegen fixture",
+)
+
+
+def expects_compiler_rejection(reason: str) -> bool:
+    """True when an annotation demands rejection rather than tolerating failure."""
+    return reason.startswith(REQUIRED_REJECTION_PREFIXES)
+
+
 def check_program(config: Config, source: Source, index: int) -> ProgramResult:
     """Verify one program under every requested profile."""
     program_dir = config.workdir / "programs" / (f"{index:03d}-" + source_name(source))
     env = child_env(config.workdir, config.compiler)
     profiles = list(PROFILE_ORDER) if config.profile == "both" else [config.profile]
     result = ProgramResult(source=source)
-    result.expected = EXPECTED_FAILURE_REASONS.get(source.display, "")
+    result.expected = expected_failure_reason(source)
     rejected_in: Optional[str] = None
     for profile in profiles:
         if rejected_in is not None:
@@ -693,6 +821,8 @@ def check_program(config: Config, source: Source, index: int) -> ProgramResult:
         result.profiles.append(profile_result)
         if profile_result.category == "compiler-exit":
             rejected_in = profile
+    if result.ok and expects_compiler_rejection(result.expected):
+        result.wrong_acceptance = True
     return result
 
 
@@ -731,6 +861,13 @@ def profile_status(profile: ProfileResult) -> str:
 
 
 def format_program_line(result: ProgramResult) -> str:
+    if result.wrong_acceptance:
+        statuses = " ".join(f"{profile.profile}=ok" for profile in result.profiles)
+        return (
+            f"FAIL {result.source.display} accepted {statuses} "
+            f"detail=<compiled and ran, but the fixture must be rejected: "
+            f"{result.expected}>"
+        )
     if result.ok:
         statuses = " ".join(f"{profile.profile}=ok" for profile in result.profiles)
         return f"PASS {result.source.display} {statuses} total={result.total_ms}ms"
@@ -787,14 +924,21 @@ def build_report(
         programs.append(
             {
                 "path": result.source.display,
+                "kind": result.source.kind,
                 "ok": result.ok,
                 "expected": result.expected,
+                "wrong_acceptance": result.wrong_acceptance,
                 "total_ms": result.total_ms,
                 "profiles": entries,
             }
         )
     failed_programs = sum(1 for result in results if not result.ok)
-    expected_failures = [result for result in results if not result.ok and result.expected]
+    wrong_acceptance = [result for result in results if result.wrong_acceptance]
+    expected_failures = [
+        result
+        for result in results
+        if not result.ok and result.expected and not result.wrong_acceptance
+    ]
     unexpected_failures = [result for result in results if not result.ok and not result.expected]
     return {
         "schema": 1,
@@ -817,9 +961,13 @@ def build_report(
             "categories": dict(sorted(categories.items())),
             "expected_failures": len(expected_failures),
             "unexpected_failures": len(unexpected_failures),
+            "wrong_acceptance": len(wrong_acceptance),
             "expected_failure_programs": [result.source.display for result in expected_failures],
             "unexpected_failure_programs": [
                 result.source.display for result in unexpected_failures
+            ],
+            "wrong_acceptance_programs": [
+                result.source.display for result in wrong_acceptance
             ],
         },
         "programs": programs,
@@ -976,11 +1124,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.list_only:
         for source in sources:
-            print(f"LIST {source.display}")
-        print(
-            f"LIST total={stats['selected']} (examples={stats['examples']} "
-            f"fixtures={stats['fixtures']} excluded_bad={stats['excluded_bad']})"
-        )
+            suffix = "" if source.kind == "file" else f" [{source.kind}]"
+            print(f"LIST {source.display}{suffix}")
+        print(f"LIST total={stats['selected']} ({selection_text(stats)})")
         return 0
 
     try:
@@ -1016,10 +1162,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("check_generated_c: generated C project verification")
     print(f"lsaca: {config.bin_path} [{config.bin_version}]")
     print(f"compiler: {config.compiler} [{config.compiler_version}]")
-    print(
-        f"programs: {stats['selected']} (examples={stats['examples']} "
-        f"fixtures={stats['fixtures']} excluded_bad={stats['excluded_bad']})"
-    )
+    print(f"programs: {stats['selected']} ({selection_text(stats)})")
     print(f"profiles: {profiles_text}; jobs: {config.jobs}")
     print(f"workdir: {config.workdir}")
     print()
@@ -1059,6 +1202,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         )
         print(f"unexpected failures: {summary['unexpected_failures']} program(s) need triage")
+    if summary["wrong_acceptance"]:
+        print(
+            f"wrong acceptance: {summary['wrong_acceptance']} fixture(s) must be rejected "
+            "but compiled and ran"
+        )
+        for path in summary["wrong_acceptance_programs"]:
+            print(f"  accepted: {path}")
     print(f"elapsed: {elapsed_ms}ms")
 
     json_ok = True
@@ -1075,7 +1225,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         shutil.rmtree(config.workdir, ignore_errors=True)
 
     strict = getattr(args, "strict", False)
-    failing = summary["failed_programs"] if strict else summary["unexpected_failures"]
+    if strict:
+        failing = summary["failed_programs"]
+    else:
+        failing = summary["unexpected_failures"] + summary["wrong_acceptance"]
     ok = not failing and json_ok
     print("GENERATED-C OK" if ok else "GENERATED-C FAIL")
     return 0 if ok else 1

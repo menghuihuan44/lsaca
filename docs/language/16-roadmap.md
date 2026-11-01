@@ -3,7 +3,7 @@
 lsaca borrows Rust's surface syntax and some of its semantics, but it is a
 smaller language with an explicitly different memory model. This page lists the
 intentional differences, the known gaps in the current release, and what is
-planned next. It describes lsaca **1.6.0**.
+planned next. It describes lsaca **1.7.0**.
 
 ## Intentional deviations from Rust
 
@@ -39,8 +39,16 @@ these areas.
    user struct or enum that contains a heap field is still rejected (`E0498`).
    There is no lifetime syntax: elision follows fixed rules. See
    [References and borrowing](12-references-and-borrowing.md).
-3. **No modules, crates or imports.** A program is one `.ls` file; all items are
-   in one namespace. See [Program structure](02-program-structure.md).
+3. **Modules and packages are compile-time organisation.** Version 1.7 adds
+   `mod`/`use`, visibility and multi-file crates, plus a small package manager for
+   path dependencies. Modules are erased before code generation: the crate graph
+   is resolved and flattened into one program, with no dynamic linking, no
+   separate compilation and no runtime lookup. Imports are explicit and non-glob
+   (glob imports are rejected), visibility has three levels (private, `pub(crate)`
+   and `pub`) with no `pub(super)`/`pub(in path)`, and only the root crate has an
+   entry point. Packages use a strict `lsaca.toml` subset with path dependencies
+   only: no registry, git dependencies, workspaces, features or lockfile. See
+   [Modules](23-modules.md) and [Packages](24-packages.md).
 4. **Generics are monomorphized and late-checked; traits are static.** Version
    1.5 adds user-defined generics and traits, with deliberate limits: generic
    items are structs, enums, free functions, inherent impls and trait impls;
@@ -112,7 +120,7 @@ these areas.
 15. **No unsafety.** There is no `unsafe`, no FFI and no threads. The generated C
     is not exposed to the language.
 
-## Known limitations in 1.6.0
+## Known limitations in 1.7.0
 
 The following are implementation gaps or deliberate restrictions in the current
 release, verified against the shipped compiler. They are expected to be fixed
@@ -157,9 +165,18 @@ in later releases; avoid them in code you intend to keep.
 | Iterators | `.iter()` consumes a `Vec`; no `rev`, `zip`, `chain`, `flat_map`, `for_each` or `size_hint`; no `into_iter`/`iter_mut`; `collect` needs a known target type (`E0282`); `sum` supports `i64`/`f64` only (`E0277`) | Use the provided adapters; annotate `collect` results |
 | HashMap | Keys are limited to `i64`, `u64`, `bool`, `String` and `char`; no `for`-loop iteration, no entry API and no `HashMap::from`; `get`/`values()` clone the value (`keys()` always clones the keys); printed order is slot order (deterministic for a given sequence of operations, but not insertion order and not guaranteed) | Use `keys()`/`values()` into a `Vec`; use `get_with` for non-cloneable values |
 | HashMap hashing | The hash is deterministic and non-cryptographic; it is not designed to resist adversarial inputs | Do not expose a map directly to untrusted keys |
+| Module files | A module is found only by the `name.ls` / `name/mod.ls` rule: no path attributes, no conditional compilation, no directory scan and no include mechanism; a module file must be valid UTF-8 (`E0583` otherwise) | Keep the conventional layout; rename or move files instead of annotating them |
+| Module cycles | The tree of `mod` declarations must be acyclic: circular module files are `E0001` | Move shared items down into a module that does not depend back |
+| Glob imports | `use path::*;` parses but the resolver rejects it (`E0432`) | List the names, use a group `{ … }`, or re-export with `pub use` |
+| Restricted visibility | `pub(super)` and `pub(in path)` are rejected (`E0001`); the only levels are private, `pub(crate)` and `pub` | Use `pub(crate)` or restructure the module tree |
+| Package dependencies | Path dependencies only: `util = { path = "../util" }`; no registry, git, version resolution, workspace, features or lockfile, and dependency versions are metadata | Keep dependencies as sibling directories in the repository |
+| Package layout | A package is a binary (`src/main.ls`) or a library (`src/lib.ls`); a library-only package can only be `check`ed (run, build and emit-c need `src/main.ls`), a binary root without `fn main` fails `check` with `E0601`, and a package that has both files is rejected with `E0001` | Split libraries and binaries into separate packages |
+| Manifest subset | `lsaca.toml` is a strict line-oriented TOML subset: only `[package]` and `[dependencies]`, double-quoted strings and one inline `{ path = … }` per dependency; any other key or section is `E0001` | Keep manifests minimal |
+| Package graph | Two different paths providing the same package name, dependency cycles and self-dependencies are rejected (`E0001`) | Give every package a unique name and keep the dependency graph acyclic |
+| Separate compilation | The whole crate graph is resolved, checked and emitted as one program on every build; there is no per-module or per-package incremental artifact | Rely on the build cache, which skips a whole unchanged program |
 | Function values | Function and closure values are move-only and have no `==` (`E0369`); `.clone()` on a value holding a closure shares the captured environment instead of copying it | Storing them in aggregates works since 1.5; clone when the shared environment is intended |
 
-## Not in version 1.6.0
+## Not in version 1.7.0
 
 The roadmap items that are still open:
 
@@ -170,16 +187,18 @@ The roadmap items that are still open:
 * generic type aliases, `where` clauses, associated types and const generics;
 * other collections (`HashSet`, `BTreeMap`, deques) and additional iterator
   adapters;
-* modules, imports and multi-file programs;
+* glob imports, restricted visibility (`pub(super)`, `pub(in path)`) and module
+  aliases;
+* registry dependencies, git dependencies, workspaces, features, lockfiles and
+  Cargo compatibility;
 * user-defined macros and attributes;
 * threads;
-* a package manager;
-* incremental compilation;
-* a language server (LSP).
+* separate compilation and per-crate incremental compilation;
+* a language server (LSP) and a formatter.
 
 A plausible order for closing these gaps:
 
-* **v1.7** — modules, a package manager and a language server.
+* **v1.8** — a language server, a formatter and incremental compilation.
 
 Items already delivered, intentionally no longer on the list:
 
@@ -204,8 +223,9 @@ Items already delivered, intentionally no longer on the list:
   and `Box` — **delivered in 1.5.0**;
 * `?` directly after block-like expressions, and `Self { … }`/`Self::new(…)`
   in expression position — **delivered in 1.5.0**;
-* `pub` accepted (and ignored) on struct fields, enum variants and trait methods —
-  **delivered in 1.5.0**;
+* `pub` accepted on struct fields, enum variants and trait methods —
+  **delivered in 1.5.0** (field and module visibility are enforced since
+  1.7.0);
 * the `char` type and character literals — **delivered in 1.6.0**;
 * a `String` that is always valid UTF-8, with character-oriented methods,
   Unicode case mapping and Unicode whitespace trimming — **delivered in 1.6.0**;
@@ -213,31 +233,41 @@ Items already delivered, intentionally no longer on the list:
 * UTF-8 validation of `read_line`, `args` and `read_file` — **delivered in
   1.6.0**;
 * a Swiss-Table `HashMap` with a stronger deterministic hash and `char` keys —
-  **delivered in 1.6.0**.
+  **delivered in 1.6.0**;
+* modules, imports and multi-file crates, with cross-file diagnostics —
+  **delivered in 1.7.0**;
+* a package manager with `lsaca.toml`, path dependencies, dependency-cycle
+  detection, `lsaca new` and package mode for `run`/`build`/`check`/`emit-c` —
+  **delivered in 1.7.0**;
+* a type checking fix that rejects by-value destructuring of a `Drop`-containing
+  enum payload instead of emitting code that drops it twice (`E0509`), and the
+  `assert_ne!` macro — **delivered in 1.7.0**.
 
-## Language and runtime in 1.6.0
+## Language and runtime in 1.7.0
 
-Version 1.6.0 is a **language and runtime release**. It adds:
+Version 1.7.0 is a **program organisation release**: it adds modules and packages
+without changing the runtime representation of any value. It adds:
 
-* **A real character type.** `char` is a `Copy` 32-bit Unicode scalar value
-  with character literals, escapes, literal patterns, comparisons, casts and
-  formatting. See [Characters and Unicode](22-characters-and-unicode.md).
-* **UTF-8 strings with a character API.** Every `String` is valid UTF-8:
-  `char_count`, `chars`, `char_at`, `push(char)`, `pop`,
-  `is_char_boundary` and `String::from_char` were added, and `substring`
-  now panics unless both byte indices are character boundaries. Case mapping
-  and `trim` follow Unicode, and `Debug` escaping is Unicode-aware.
-* **Validated UTF-8 input.** `read_line()`, `args()` and `read_file()` reject
-  invalid UTF-8 instead of silently replacing bytes.
-* **A Swiss-Table `HashMap`.** The map is now a real Swiss Table: control-byte
-  metadata, 16-slot groups, bit-mask probing, a 7/8 load factor, tombstones and
-  a stronger deterministic hash. `char` joins the key types. Its iteration
-  order remains unspecified in the documentation.
-* **Audit-driven hardening.** Version 1.6.0 fixed a batch of generated-C and
-  runtime defects found by the release audits, and added regression tests for
-  them.
+* **Modules and multi-file crates.** `mod` declarations (inline and external
+  files), `use` imports with groups, aliases and `pub use` re-exports,
+  `crate`/`self`/`super` paths, private/`pub(crate)`/`pub` visibility and
+  cross-file diagnostics that point into the owning file. The whole crate graph
+  is resolved and type-checked as one program. See [Modules](23-modules.md).
+* **A package manager.** `lsaca.toml` with a `[package]` table and path
+  `[dependencies]`, dependency resolution with cycle detection, the
+  `src/main.ls`/`src/lib.ls` layout, `lsaca new` and package mode for
+  `run`/`build`/`check`/`emit-c`. See [Packages](24-packages.md).
+* **One program, one C project.** Module boundaries are erased during type
+  checking: the flattened program carries module-qualified C names, the root
+  module of the root crate keeps its pre-1.7 names, and the C ABI of every value
+  is unchanged from 1.6.0. There is no separate compilation and no runtime
+  module lookup.
+* **Bug fixes.** A type checking hole that let a by-value destructuring pattern
+  move a `Drop`-containing enum payload out of an owning scrutinee (dropping it
+  twice) is now rejected with `E0509`, and the `assert_ne!` macro completes the
+  assertion family.
 
-The compiler and runtime organization keeps the v1.5 shape:
+The compiler and runtime organization keeps the v1.6 shape:
 
 * **Direct C compiler backend by default.** `lsaca run` and `lsaca build` write
   the generated C into the build cache, invoke the C compiler for every generated
@@ -252,21 +282,25 @@ The compiler and runtime organization keeps the v1.5 shape:
   produces a single, unchanged `main.c`.
 * **Split runtime sources.** The runtime is built from several translation
   units — `lsaca_rt.c`, `lsaca_rt_string.c`, `lsaca_rt_vec.c`,
-  `lsaca_rt_fmt.c`, `lsaca_rt_map.c` and, new in 1.6.0,
-  `lsaca_rt_unicode.c` — plus the public `lsaca_rt.h` and internal
-  `lsaca_rt_internal.h`, and the generated Unicode table header
-  `lsaca_rt_unicode.h`; the generated `CMakeLists.txt` lists every runtime C
-  file.
+  `lsaca_rt_fmt.c`, `lsaca_rt_map.c` and `lsaca_rt_unicode.c` — plus the public
+  `lsaca_rt.h` and internal `lsaca_rt_internal.h`, and the generated Unicode
+  table header `lsaca_rt_unicode.h`; the generated `CMakeLists.txt` lists every
+  runtime C file.
 * **Generated Unicode tables.** `lsaca_rt_unicode.c` is generated from Python's
   Unicode database by `scripts/gen_unicode_tables.py` and committed; rerunning
   the script reproduces it byte for byte.
 * **Cached runtime objects.** Compiled runtime objects live per profile under
   `<cache>/_runtime/<hash>/` and are reused, so a new program only recompiles
   its own generated program unit or units and links.
+* **One content-hashed build cache.** The cache key hashes the complete generated
+  C program — every source file, module and package dependency — together with
+  the runtime sources, the compiler path and the build mode, so editing any file
+  in the crate graph invalidates the cache, while an unchanged program is reused
+  as a whole.
 * **Embedded prelude.** The `Iterator` trait and its adapters live in
   `crates/lsaca/src/prelude.ls`, written in lsaca and embedded in the compiler.
   A program can use `Iterator` and the adapter methods without importing
-  anything.
+  anything; the prelude is in scope in every module of every crate.
 
 Compile-time, runtime and memory measurements are republished with each
 release; see [Benchmarks](21-benchmarks.md), alongside the comparison with C,
@@ -274,38 +308,44 @@ Rust, Python and Node.
 
 ## Compatibility
 
-lsaca 1.6.0 is **not** a purely additive release. Programs from 1.5.0 keep
-compiling in most cases, but several outputs and a few expressions change:
+lsaca 1.7.0 is mostly additive: single-file programs from 1.6.0 keep compiling
+and their generated C is unchanged, but the release reserves new syntax and
+turns `pub` into a real visibility modifier:
 
-* case mapping: `to_uppercase`/`to_lowercase` now apply the full Unicode
-  mapping, so `"ß"` uppercases to `"SS"` instead of staying `"ß"`;
-* trimming: `trim` strips Unicode whitespace, not just ASCII whitespace;
-* substring: `substring` still takes a byte start and length, but now panics
-  when a boundary falls inside a character instead of returning replacement
-  characters;
-* `Debug`: `{:?}` escaping follows Rust's `str` rules, so some non-printable
-  characters are escaped where they used to be printed raw;
-* input: `read_line()` and `args()` panic on invalid UTF-8, and
-  `read_file()` returns `Err` instead of a string with replacement characters;
-* casts: an integer or float cast to `bool` is now rejected with `E0605`;
-* generated C: runtime ABIs and the `HashMap` layout changed, so C projects
-  emitted by earlier releases must be regenerated with the 1.6.0 compiler.
-
-Everything else is additive: `char` is a new primitive type, the string
-methods are new names, and existing programs that do not rely on the changed
-behaviours compile unchanged. Ownership, references, `Drop` order, generics,
-traits and iterators behave as in 1.5.0.
+* `mod`, `use`, `crate` and `super` are now keywords, so code that used them as
+  identifiers must rename those bindings;
+* `pub` is enforced: inside a single module nothing changes, but an item that
+  another module or crate reaches must now be marked `pub` (or `pub(crate)`),
+  and private fields and modules became reachable only as described in
+  [Modules](23-modules.md);
+* type checking is whole-graph: a module with an error fails the build even if
+  the item is never used from the root file;
+* by-value destructuring of a `Drop`-containing enum payload is now rejected
+  with `E0509` instead of emitting code that drops the payload twice;
+* the `assert_ne!` macro is new, and there are new diagnostics for modules,
+  imports, re-exports and visibility (`E0432`, `E0433`, `E0583`, `E0761`,
+  `E0252`, `E0255`, `E0364`, `E0365`, `E0603`, `E0624`, `E0616`, `E0451`);
+* package mode is new: `lsaca run`/`build`/`check`/`emit-c` with no file argument
+  operate on the nearest `lsaca.toml`; a directory with no manifest is a usage
+  error (exit 2), and there is a new `lsaca new` command;
+* the value ABI of the runtime is unchanged from 1.6.0. Generated C projects
+  emitted by 1.6.0 remain valid in principle, but regenerate them with the 1.7.0
+  compiler so module names and package-qualified symbols match the new naming
+  rules.
 
 ## Benchmarks
 
-Numbers for the current compiler — compile time, runtime and peak memory on
-eighteen runtime workloads (including the new `string_unicode`, `hashmap_i64`
-and `hashmap_string` workloads, plus a compile-only scaling workload), compared
-with C, Rust, Python and Node — are in [Benchmarks](21-benchmarks.md).
+Numbers for the current compiler — compile time, runtime and peak memory on the
+runtime workloads (including the v1.6 `string_unicode`, `hashmap_i64` and
+`hashmap_string` additions) plus compile-only scaling workloads that now also
+cover multi-file crates and path-dependency packages, compared with C, Rust,
+Python and Node — are in [Benchmarks](21-benchmarks.md).
 
 ## What next
 
 * The language tour starts at [Getting started](01-getting-started.md).
+* Modules, files and visibility: [Modules](23-modules.md).
+* Packages, `lsaca.toml` and path dependencies: [Packages](24-packages.md).
 * The `char` type, UTF-8 strings and Unicode: [Characters and
   Unicode](22-characters-and-unicode.md).
 * User-defined generics: [Generics](17-generics.md).

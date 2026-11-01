@@ -1,26 +1,34 @@
 # Program structure
 
-This page describes the largest unit the compiler sees: a whole program. lsaca
-has no modules and no imports, so a program is exactly one source file, and the
-structure of that file is the structure of the program.
+This page describes the structure of a program: crates made of source files and
+modules, the kinds of items they contain, and the complete grammar of the
+language. Modules and packages have their own chapters —
+[Modules](23-modules.md) and [Packages](24-packages.md) — so this page only
+summarizes the structure they add.
 
-## Compilation units
+## Crates and compilation units
 
-A compilation unit is one UTF-8 file with the extension `.ls`. Everything the
-program needs must be in that file: there is no `mod`, no `use`, no include
-mechanism and no way to compile two files together. This keeps the language
-small and makes programs easy to move around, but it also means the standard
-library is the only library: the built-in types and free functions listed in
-[Standard library](15-standard-library.md) are the entire prelude.
+A **crate** is one root source file plus every file reachable from it through
+external `mod` declarations. The root file is the file named on the command
+line, or `src/main.ls` / `src/lib.ls` of a package (see
+[Packages](24-packages.md)). A `mod foo;` declaration loads `foo.ls` or
+`foo/mod.ls` from the module's directory, recursively; the rules are in
+[Modules](23-modules.md#external-modules-and-files).
 
-Whitespace is insignificant outside literals, and the file is processed from
-beginning to end by the parser. An empty file is a syntactically valid
-compilation unit, but the type checker rejects it because it has no `main`.
+A **program** is the crate graph of one package: the root crate plus every
+package in its `[dependencies]` table, compiled together into one executable. A
+single-file program is the smallest case, a root file with no external modules.
+The prelude from [Standard library](15-standard-library.md) is available in
+every module without an import.
 
-## The seven item kinds
+Whitespace is insignificant outside literals and comments. The parser processes
+each file from beginning to end. An empty file is a syntactically valid crate
+root, but a binary crate must contain `fn main` (see below).
 
-At the top level a file contains a sequence of **items**. There are exactly seven
-kinds:
+## The nine item kinds
+
+A module — the crate root or any `mod` body — contains a sequence of **items**.
+There are exactly nine kinds:
 
 | Item | Keyword | Purpose |
 | --- | --- | --- |
@@ -31,6 +39,8 @@ kinds:
 | Constant | `const` | A compile-time constant with a required type annotation. |
 | Trait | `trait` | A trait declaration: method signatures with receivers only; implemented for a user struct or enum with `impl Trait for Type`. Added in 1.5.0. |
 | Type alias | `type` | A new name for an existing type. |
+| Module | `mod` | A nested module: `mod name;` loads a file, `mod name { … }` declares it inline. Added in 1.7.0. |
+| Import | `use` | Import names from a module or a dependency crate into the current module. Added in 1.7.0. |
 
 Items may also appear **inside a block** — inside a function body, an `if`
 branch, a loop body, and so on. Such nested items are scoped to the block that
@@ -40,17 +50,20 @@ Anything else at the top level is a syntax error: expressions, `let` statements,
 `if`, `match`, `return` and so on only exist inside function bodies. There is no
 top-level executable code and no initializer hook.
 
-`pub` is accepted on top-level items, struct fields, enum variants and trait
-methods, and ignored: there is no visibility system and no modules, so
-everything in the file is visible everywhere in the file.
+`pub` and `pub(crate)` control visibility and are enforced across modules and
+crates; the default is private. Inside one module every item sees every other
+item, so visibility only starts to matter when a `mod`, a dependency crate or a
+`use` import is involved. See [Modules](23-modules.md#visibility) for the
+visibility rules, along with the `use` and `mod` syntax.
 
 ## Order does not matter
 
 Items are collected before any body is checked, so a function can call another
-function defined further down the file, a struct can contain a type defined
+function defined further down the module, a struct can contain a type defined
 later, and an `impl` block can appear before or after the `struct` it belongs to.
-The only ordering rule is the obvious one: the program's entry point must exist
-somewhere in the file.
+The same holds inside inline modules and across module files: the order of `mod`
+declarations does not matter. The only ordering rule is the obvious one: a
+binary program's entry point must exist in the crate root module.
 
 ```ls
 struct Point {
@@ -116,7 +129,7 @@ area(circle 2) = 12.566
 height = 12 m
 ```
 
-The example uses all seven item kinds, and the `impl` block appears before the
+The example uses seven of the nine item kinds, and the `impl` block appears before the
 `Point` definition is complete textually — item order does not matter. Note the
 restriction on constants: the type of a `const` must be a scalar type or
 `String`, and the initializer must be a constant expression. A struct-typed
@@ -127,8 +140,8 @@ mutability](06-variables-and-mutability.md)).
 
 ## The entry point: `main`
 
-A program must define exactly one `fn main`. The type checker enforces its
-shape:
+A binary program must define exactly one `fn main` in the root module of its
+root crate. The type checker enforces its shape:
 
 * it must exist (error `E0601` otherwise);
 * it must take no parameters (error `E0580`);
@@ -138,6 +151,12 @@ shape:
 The body is an ordinary block; the process exit status is `0` when `main`
 returns, `101` if the program panics, and whatever `exit(n)` was given if the
 program calls `exit` explicitly.
+
+`main` may not be declared in a nested module or in a dependency crate: a `fn
+main` inside a `mod` body is an ordinary function. A package whose root is
+`src/lib.ls` is a library package and has no entry point; the CLI refuses to run
+it (see [Packages](24-packages.md#package-mode-for-run-build-check-and-emit-c)).
+The `require_main` check is what makes a library checkable on its own.
 
 These three programs are rejected:
 
@@ -250,9 +269,13 @@ own locals. If it needs a value, pass it as a parameter.
 
 ## Names
 
-* Two items of any kind cannot share a name in the same scope: a `fn` and a
-  `struct` called `Point` in the same file is error `E0428`. This also applies to
+* Two items of any kind cannot share a name in the same module: a `fn` and a
+  `struct` called `Point` in one module is error `E0428`. This also applies to
   two functions with the same name and to two constants with the same name.
+* An imported name behaves like an item of the module that imported it: an
+  import that clashes with another import is error `E0252`, and one that clashes
+  with a local item is error `E0255`. See
+  [Modules](23-modules.md#import-conflicts).
 * Fields within a struct, variants within an enum, and the parameters of one
   function must also be distinct; a repeated struct field is error `E0124`.
 * A block may shadow a name from an enclosing scope (for example a nested `const
@@ -305,7 +328,7 @@ fn main() {
 
 Error:
 ```text
-error: expected an item (fn, struct, enum, impl, const, type or trait), found let
+error: expected an item (fn, struct, enum, impl, const, type, trait, mod or use), found let
   --> example-07.ls:1:1
    |
  1 | let answer = 42;
@@ -316,9 +339,12 @@ lsaca: example-07.ls: could not compile example-07.ls due to previous error(s)
 
 ## `pub` and visibility
 
-`pub` is parsed on top-level items and does nothing: with a single compilation
-unit there is nothing to export. The following is accepted and behaves exactly
-like the same program without the `pub` keywords:
+Visibility is enforced, and the default is private. `pub` makes an item visible
+anywhere in the crate graph, including from dependency crates that can name it;
+`pub(crate)` makes it visible only inside its own crate. Inside a single module
+visibility changes nothing, because every item in a module sees every other one,
+so the following program is the ordinary form written with explicit `pub`
+keywords:
 
 ```ls
 pub struct Counter {
@@ -342,8 +368,10 @@ Output:
 5
 ```
 
-`pub` is also accepted, and ignored, on struct fields and enum variants;
-neither has visibility in lsaca. Writing the keyword changes nothing:
+Struct fields are private by default: a field marked `pub` is part of the type's
+public interface, and a private field can only be named inside the module that
+declares the struct. Enum variants are not annotated with a visibility; once the
+enum itself is visible, its variants and their payloads are accessible too:
 
 ```ls
 pub struct Point {
@@ -372,34 +400,49 @@ Output:
 circle 2
 ```
 
+The parser also accepts a `pub` prefix before an `impl` block and on a trait
+method, but neither carries a visibility: impl blocks are not nameable, and trait
+methods are always public. Other restricted forms are rejected: `pub(super)` and `pub(in path)` produce
+error `E0001` ("restricted visibility is not supported; use `pub` or
+`pub(crate)`, found …"). See [Modules](23-modules.md#visibility) for the
+visibility matrix and [Packages](24-packages.md#using-a-dependency) for
+visibility across crate boundaries.
+
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 1.6.0 parser. Optional parts
+The grammar below is the authoritative EBNF of the 1.7.0 parser. Optional parts
 are written with `[...]`, repetitions with `*` and `+`, and alternatives with
 `|`. It is reproduced here for reference; the individual pages explain each
 construct in detail.
 
 ```ebnf
 program      = item* EOF ;
-item         = fnItem | structItem | enumItem | implItem | traitItem | constItem | typeItem ;
-fnItem       = [ "pub" ] "fn" IDENT genericParams? "(" params? ")" ( "->" type )? block ;
+item         = fnItem | structItem | enumItem | implItem | traitItem | constItem | typeItem
+             | modItem | useItem ;
+vis          = [ "pub" | "pub" "(" "crate" ")" ] ;
+fnItem       = vis "fn" IDENT genericParams? "(" params? ")" ( "->" type )? block ;
 genericParams= "<" genericParam ( "," genericParam )* ","? ">" ;
 genericParam = IDENT ( ":" bound ( "+" bound )* )? ;
 bound        = callableBound | pathType ;
 callableBound= "Fn" "(" typeArgs? ")" ( "->" type )? ;
 params       = param ( "," param )* ","? ;
 param        = "self" | "&" "self" | "&" "mut" "self" | IDENT ":" type ;
-structItem   = [ "pub" ] "struct" IDENT genericParams? "{" fieldDefs? "}" ;
+structItem   = vis "struct" IDENT genericParams? "{" fieldDefs? "}" ;
 fieldDefs    = fieldDef ( "," fieldDef )* ","? ;
 fieldDef     = [ "pub" ] IDENT ":" type ;
-enumItem     = [ "pub" ] "enum" IDENT genericParams? "{" variants? "}" ;
+enumItem     = vis "enum" IDENT genericParams? "{" variants? "}" ;
 variants     = variant ( "," variant )* ","? ;
 variant      = [ "pub" ] IDENT ( "(" typeArgs? ")" )? ;
-implItem     = [ "pub" ] "impl" genericParams? type ( "for" type )? "{" fnItem* "}" ;
-traitItem    = [ "pub" ] "trait" IDENT genericParams? "{" traitFnItem* "}" ;
+implItem     = vis "impl" genericParams? type ( "for" type )? "{" fnItem* "}" ;
+traitItem    = vis "trait" IDENT genericParams? "{" traitFnItem* "}" ;
 traitFnItem  = [ "pub" ] "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
-constItem    = [ "pub" ] "const" IDENT ":" type "=" expr ";" ;
-typeItem     = [ "pub" ] "type" IDENT "=" type ";" ;
+constItem    = vis "const" IDENT ":" type "=" expr ";" ;
+typeItem     = vis "type" IDENT "=" type ";" ;
+modItem      = vis "mod" IDENT ( ";" | "{" item* "}" ) ;
+useItem      = vis "use" useTree ";" ;
+useTree      = "*" | "{" useTree ( "," useTree )* ","? "}"
+             | useSegment ( "as" IDENT | "::" useTree )? ;
+useSegment   = IDENT | "crate" | "self" | "super" ;
 
 block        = "{" stmt* tail? "}" ;
 stmt         = letStmt | item | exprStmt | blockLikeStmt | ";" ;
@@ -472,7 +515,7 @@ typeArgs     = type ( "," type )* ","? ;
 A few productions deserve a warning because the parser is more permissive than
 the type checker: `methodCall` parses `::<...>` (turbofish) after the method
 name, but the type checker rejects generic methods (traits have no generic
-methods in 1.5.0); and `break expr` / `return expr` parse even where a value
+methods in 1.7.0); and `break expr` / `return expr` parse even where a value
 cannot be carried. `CHAR` is a character literal such as `'a'` or `'\u{4F60}'`;
 it is accepted wherever a literal expression or a literal pattern is accepted.
 
@@ -499,10 +542,10 @@ Output:
 small big other
 ```
 
-## Syntax added in 1.5 and 1.6
+## Syntax added in 1.5, 1.6 and 1.7
 
-The grammar above already contains the productions added for generics,
-traits and character literals. This section collects those forms, the
+The grammar above already contains the productions added for generics, traits,
+character literals, modules and imports. This section collects those forms, the
 turbofish, and the syntax restrictions that the parser and the item collector
 enforce.
 
@@ -561,7 +604,7 @@ Explicit type arguments are written with the Rust-style turbofish `::<…>`:
   `HashMap::<String, i64>::new()`;
 * a generic struct literal: `Pair::<i64> { first: 3, second: 4 }`;
 * a method call: `value.method::<i64>()` parses, but trait methods are not
-  generic in 1.6.0, so the type checker rejects the turbofish with `E0107`
+  generic in 1.7.0, so the type checker rejects the turbofish with `E0107`
   (`method get takes 0 generic arguments but 1 was supplied`).
 
 In expression position use the turbofish; in type position the arguments are
@@ -582,6 +625,68 @@ Unicode](22-characters-and-unicode.md).
 Inside an `impl` block, `Self` names the implementing type. Besides `-> Self`
 and parameter types it can construct values: `Self { field: value }` and
 `Self::new(args)`; both work in generic and non-generic impls.
+
+### Modules and files
+
+A module is declared with `mod`. The external form loads a file; the inline form
+declares the module in place. The following two-file program is one crate:
+
+```ls,tree
+--- main.ls
+mod geometry {
+    pub fn area(width: f64, height: f64) -> f64 {
+        width * height
+    }
+}
+
+mod math;
+
+use crate::math::{double, triple as times_three};
+
+fn main() {
+    println!("{}", double(21));
+    println!("{}", times_three(14));
+    println!("{}", geometry::area(2.0, 3.0));
+}
+--- math.ls
+pub fn double(value: i64) -> i64 {
+    value * 2
+}
+
+pub fn triple(value: i64) -> i64 {
+    value * 3
+}
+```
+
+Output:
+```text
+42
+42
+6
+```
+
+For `mod math;` the loader looks for `math.ls` and `math/mod.ls` next to the
+declaring file; inline modules nest and can contain items of every kind. The
+root file is the root module of the crate. See
+[Modules](23-modules.md#external-modules-and-files).
+
+### `use` declarations
+
+`use` imports names into the current module. A path may be a single name, a
+chained path, a group, or an alias, and its first segment must be `crate`,
+`self`, `super` or a dependency package name. The previous example imports
+`double` and a renamed `triple` in one group; the other forms look like this:
+`use crate::geometry::area;` (chained path), `use crate::math::*;` (a glob: it
+parses, but the resolver rejects it with `E0432`), and `pub use util::triple;`
+(a re-export). An import binds the last path segment, or its alias, in the
+current module. See [Modules](23-modules.md#imports-with-use).
+
+### Visibility
+
+Every item and every struct field is private by default; `pub` and `pub(crate)`
+widen the visibility. `pub` on an `impl` block or a trait method is accepted and
+ignored. `pub(super)` and `pub(in path)` are rejected with `E0001`. See
+[Modules](23-modules.md#visibility).
 
 ### `?` after block-like expressions
 
@@ -609,7 +714,9 @@ Err("no")
 
 ## What next
 
-* Every token and literal: [Lexical structure](03-lexical-structure.md).
+* Every token and literal, including the new keywords: [Lexical structure](03-lexical-structure.md).
+* Splitting a program across files: [Modules](23-modules.md).
+* Building a package with dependencies: [Packages](24-packages.md).
 * What the type checker knows about types: [Types](04-types.md).
 * Define your own data: [Structs, enums and impl](10-structs-enums-and-impl.md).
 * Function values and recursion: [Functions](09-functions.md).

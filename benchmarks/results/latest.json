@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-31T23:24:44+08:00",
+  "generated_at": "2026-11-01T13:25:52+08:00",
   "harness": "scripts/bench.py",
   "host": {
     "platform": "Windows-11-10.0.26300-SP0",
@@ -13,14 +13,14 @@
     "ram_gib": 15.63
   },
   "toolchains": {
-    "lsaca": "lsaca 1.6.0",
+    "lsaca": "lsaca 1.7.0",
     "lsaca_compiler": "target\\bench-tools\\lsaca.exe",
     "python": "Python 3.14.4",
     "lsaca_build_backend": "direct C compiler back end (default; --cmake available)",
     "lsaca_cmake_flag": true,
-    "lsaca_compiler_sha256": "b1489a3dec37e163",
-    "lsaca_compiler_mtime": "2026-10-31T23:03:09+08:00",
-    "repository_commit": "59d56c7",
+    "lsaca_compiler_sha256": "37554c98f102841f",
+    "lsaca_compiler_mtime": "2026-11-01T13:15:01+08:00",
+    "repository_commit": "fd3657e",
     "gcc": "gcc.EXE (Rev14, Built by MSYS2 project) 15.2.0",
     "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
     "node": "v24.14.1",
@@ -32,7 +32,7 @@
     "warmups": 1,
     "compile_repeats": 3,
     "quick": false,
-    "build_mode": "auto",
+    "build_mode": "official",
     "lsaca_build_backend": "direct C compiler back end (default; --cmake available)",
     "lsaca_cmake_flag": true,
     "official_timeout_s": 120.0,
@@ -56,7 +56,9 @@
       "string_unicode",
       "hashmap_i64",
       "hashmap_string",
-      "compile_large"
+      "compile_large",
+      "modules_compile",
+      "package_compile"
     ],
     "languages": [
       "lsaca",
@@ -66,7 +68,9 @@
       "node"
     ],
     "compile_only_programs": [
-      "compile_large"
+      "compile_large",
+      "modules_compile",
+      "package_compile"
     ],
     "child_temp_dir": "target\\bench-tmp\\tmp",
     "path_prepended": [
@@ -105,13 +109,13 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.121334,
+            "cold_s": 1.169636,
             "cached_runs_s": [
-              0.01748,
-              0.017881,
-              0.018724
+              0.018011,
+              0.016337,
+              0.016331
             ],
-            "cached_median_s": 0.017881,
+            "cached_median_s": 0.016337,
             "generated_c_bytes": 4867,
             "exe": "target\\bench-tmp\\build\\fib\\lsaca\\fib.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
@@ -119,21 +123,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.024958,
-              0.025191,
-              0.025289,
-              0.025,
-              0.025752,
-              0.031209,
-              0.029498
+              0.026451,
+              0.026647,
+              0.026143,
+              0.027719,
+              0.026147,
+              0.02368,
+              0.023913
             ],
-            "median_s": 0.025289,
-            "min_s": 0.024958,
-            "max_s": 0.031209,
+            "median_s": 0.026147,
+            "min_s": 0.02368,
+            "max_s": 0.027719,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.07,
+            "peak_mib": 4.06,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -142,32 +146,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.249501,
-              0.264393,
-              0.256685
+              0.261817,
+              0.257652,
+              0.297753
             ],
-            "median_s": 0.256685,
-            "min_s": 0.249501,
+            "median_s": 0.261817,
+            "min_s": 0.257652,
             "exe": "target\\bench-tmp\\build\\fib\\c\\fib_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\fib.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\fib\\c\\fib_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.024701,
-              0.024958,
-              0.024458,
-              0.023741,
-              0.023853,
-              0.023082,
-              0.024787
+              0.02733,
+              0.026013,
+              0.026691,
+              0.029296,
+              0.026384,
+              0.024144,
+              0.023597
             ],
-            "median_s": 0.024458,
-            "min_s": 0.023082,
-            "max_s": 0.024958,
+            "median_s": 0.026384,
+            "min_s": 0.023597,
+            "max_s": 0.029296,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.05,
+            "peak_mib": 4.03,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -176,32 +180,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.343388,
-              0.22304,
-              0.23033
+              0.613501,
+              0.2141,
+              0.215808
             ],
-            "median_s": 0.23033,
-            "min_s": 0.22304,
+            "median_s": 0.215808,
+            "min_s": 0.2141,
             "exe": "target\\bench-tmp\\build\\fib\\rust\\fib_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\fib.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\fib\\rust\\fib_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.020767,
-              0.01355,
-              0.014155,
-              0.01294,
-              0.011962,
-              0.011186,
-              0.010701
+              0.01067,
+              0.01057,
+              0.010719,
+              0.010605,
+              0.011256,
+              0.010674,
+              0.010663
             ],
-            "median_s": 0.01294,
-            "min_s": 0.010701,
-            "max_s": 0.020767,
+            "median_s": 0.01067,
+            "min_s": 0.01057,
+            "max_s": 0.011256,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.14,
+            "peak_mib": 4.11,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -214,17 +218,17 @@
           },
           "runtime": {
             "runs_s": [
-              1.001498,
-              0.983714,
-              1.016843,
-              0.892761,
-              0.812367,
-              0.804799,
-              1.171354
+              0.916709,
+              0.917774,
+              0.949982,
+              0.884513,
+              0.874593,
+              0.919861,
+              0.879046
             ],
-            "median_s": 0.983714,
-            "min_s": 0.804799,
-            "max_s": 1.171354,
+            "median_s": 0.916709,
+            "min_s": 0.874593,
+            "max_s": 0.949982,
             "warmups": 1
           },
           "memory": {
@@ -241,21 +245,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.246879,
-              0.219242,
-              0.210216,
-              0.212041,
-              0.210019,
-              0.21337,
-              0.216656
+              0.211336,
+              0.200658,
+              0.209536,
+              0.199915,
+              0.20406,
+              0.211132,
+              0.21971
             ],
-            "median_s": 0.21337,
-            "min_s": 0.210019,
-            "max_s": 0.246879,
+            "median_s": 0.209536,
+            "min_s": 0.199915,
+            "max_s": 0.21971,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 43.02,
+            "peak_mib": 42.99,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -281,13 +285,13 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.189713,
+            "cold_s": 1.135681,
             "cached_runs_s": [
-              0.022233,
-              0.02067,
-              0.019345
+              0.016181,
+              0.01556,
+              0.015451
             ],
-            "cached_median_s": 0.02067,
+            "cached_median_s": 0.01556,
             "generated_c_bytes": 3867,
             "exe": "target\\bench-tmp\\build\\loop_sum\\lsaca\\loop_sum.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
@@ -295,51 +299,17 @@
           },
           "runtime": {
             "runs_s": [
-              0.011991,
-              0.012335,
-              0.009333,
-              0.009337,
-              0.00913,
-              0.009564,
-              0.010078
+              0.007193,
+              0.008497,
+              0.007991,
+              0.008152,
+              0.007892,
+              0.008202,
+              0.007683
             ],
-            "median_s": 0.009564,
-            "min_s": 0.00913,
-            "max_s": 0.012335,
-            "warmups": 1
-          },
-          "memory": {
-            "peak_mib": 4.07,
-            "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
-            "note": null
-          }
-        },
-        "c": {
-          "compile": {
-            "kind": "native",
-            "runs_s": [
-              0.255267,
-              0.227761,
-              0.220978
-            ],
-            "median_s": 0.227761,
-            "min_s": 0.220978,
-            "exe": "target\\bench-tmp\\build\\loop_sum\\c\\loop_sum_c.exe",
-            "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\loop_sum.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\loop_sum\\c\\loop_sum_c.exe"
-          },
-          "runtime": {
-            "runs_s": [
-              0.00934,
-              0.008682,
-              0.008886,
-              0.009102,
-              0.008667,
-              0.008901,
-              0.008794
-            ],
-            "median_s": 0.008886,
-            "min_s": 0.008667,
-            "max_s": 0.00934,
+            "median_s": 0.007991,
+            "min_s": 0.007193,
+            "max_s": 0.008497,
             "warmups": 1
           },
           "memory": {
@@ -348,36 +318,70 @@
             "note": null
           }
         },
+        "c": {
+          "compile": {
+            "kind": "native",
+            "runs_s": [
+              0.222103,
+              0.207459,
+              0.211894
+            ],
+            "median_s": 0.211894,
+            "min_s": 0.207459,
+            "exe": "target\\bench-tmp\\build\\loop_sum\\c\\loop_sum_c.exe",
+            "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\loop_sum.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\loop_sum\\c\\loop_sum_c.exe"
+          },
+          "runtime": {
+            "runs_s": [
+              0.00843,
+              0.010413,
+              0.007581,
+              0.007765,
+              0.00775,
+              0.007763,
+              0.007825
+            ],
+            "median_s": 0.007765,
+            "min_s": 0.007581,
+            "max_s": 0.010413,
+            "warmups": 1
+          },
+          "memory": {
+            "peak_mib": 4.04,
+            "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
+            "note": null
+          }
+        },
         "rust": {
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.253273,
-              0.251911,
-              0.252218
+              0.220223,
+              0.203679,
+              0.204648
             ],
-            "median_s": 0.252218,
-            "min_s": 0.251911,
+            "median_s": 0.204648,
+            "min_s": 0.203679,
             "exe": "target\\bench-tmp\\build\\loop_sum\\rust\\loop_sum_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\loop_sum.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\loop_sum\\rust\\loop_sum_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.008663,
-              0.008593,
-              0.008337,
-              0.009346,
-              0.013662,
-              0.0175,
-              0.011354
+              0.00799,
+              0.008131,
+              0.007562,
+              0.007543,
+              0.007932,
+              0.008493,
+              0.008089
             ],
-            "median_s": 0.009346,
-            "min_s": 0.008337,
-            "max_s": 0.0175,
+            "median_s": 0.00799,
+            "min_s": 0.007543,
+            "max_s": 0.008493,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.16,
+            "peak_mib": 4.14,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -390,21 +394,21 @@
           },
           "runtime": {
             "runs_s": [
-              1.05089,
-              0.933863,
-              0.912246,
-              1.032763,
-              0.899379,
-              0.848168,
-              0.817119
+              0.864914,
+              0.854355,
+              0.884351,
+              0.945995,
+              1.003477,
+              0.993043,
+              0.866945
             ],
-            "median_s": 0.912246,
-            "min_s": 0.817119,
-            "max_s": 1.05089,
+            "median_s": 0.884351,
+            "min_s": 0.854355,
+            "max_s": 1.003477,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 10.96,
+            "peak_mib": 10.93,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -417,21 +421,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.108141,
-              0.117465,
-              0.110631,
-              0.109321,
-              0.110916,
-              0.109051,
-              0.106673
+              0.116473,
+              0.118341,
+              0.122777,
+              0.114857,
+              0.120556,
+              0.115318,
+              0.112001
             ],
-            "median_s": 0.109321,
-            "min_s": 0.106673,
-            "max_s": 0.117465,
+            "median_s": 0.116473,
+            "min_s": 0.112001,
+            "max_s": 0.122777,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 45.75,
+            "peak_mib": 45.69,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -458,35 +462,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.916956,
+            "cold_s": 1.033252,
             "cached_runs_s": [
-              0.015671,
-              0.014795,
-              0.013893
+              0.018345,
+              0.01618,
+              0.017037
             ],
-            "cached_median_s": 0.014795,
-            "generated_c_bytes": 4672,
+            "cached_median_s": 0.017037,
+            "generated_c_bytes": 4621,
             "exe": "target\\bench-tmp\\build\\string_build\\lsaca\\string_build.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.028007,
-              0.028074,
-              0.028566,
-              0.028617,
-              0.029413,
-              0.029293,
-              0.029381
+              0.030034,
+              0.031544,
+              0.031613,
+              0.027998,
+              0.026703,
+              0.028183,
+              0.031305
             ],
-            "median_s": 0.028617,
-            "min_s": 0.028007,
-            "max_s": 0.029413,
+            "median_s": 0.030034,
+            "min_s": 0.026703,
+            "max_s": 0.031613,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 10.47,
+            "peak_mib": 10.45,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -495,28 +499,28 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.207551,
-              0.208645,
-              0.218213
+              0.234939,
+              0.218707,
+              0.229519
             ],
-            "median_s": 0.208645,
-            "min_s": 0.207551,
+            "median_s": 0.229519,
+            "min_s": 0.218707,
             "exe": "target\\bench-tmp\\build\\string_build\\c\\string_build_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\string_build.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\string_build\\c\\string_build_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.010719,
-              0.011163,
-              0.011996,
-              0.011289,
-              0.010516,
-              0.01101,
-              0.010828
+              0.010935,
+              0.011675,
+              0.011861,
+              0.011148,
+              0.011499,
+              0.011491,
+              0.012715
             ],
-            "median_s": 0.01101,
-            "min_s": 0.010516,
-            "max_s": 0.011996,
+            "median_s": 0.011499,
+            "min_s": 0.010935,
+            "max_s": 0.012715,
             "warmups": 1
           },
           "memory": {
@@ -529,32 +533,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.248143,
-              0.22985,
-              0.250133
+              0.309935,
+              0.236908,
+              0.24663
             ],
-            "median_s": 0.248143,
-            "min_s": 0.22985,
+            "median_s": 0.24663,
+            "min_s": 0.236908,
             "exe": "target\\bench-tmp\\build\\string_build\\rust\\string_build_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\string_build.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\string_build\\rust\\string_build_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.056439,
-              0.056505,
-              0.058064,
-              0.056253,
-              0.057596,
-              0.055765,
-              0.05335
+              0.066244,
+              0.062398,
+              0.060373,
+              0.061505,
+              0.064417,
+              0.058757,
+              0.059738
             ],
-            "median_s": 0.056439,
-            "min_s": 0.05335,
-            "max_s": 0.058064,
+            "median_s": 0.061505,
+            "min_s": 0.058757,
+            "max_s": 0.066244,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 7.38,
+            "peak_mib": 7.41,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -567,21 +571,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.34747,
-              0.351553,
-              0.343807,
-              0.347113,
-              0.344582,
-              0.344024,
-              0.349221
+              0.372855,
+              0.363265,
+              0.37069,
+              0.370799,
+              0.380662,
+              0.369277,
+              0.359016
             ],
-            "median_s": 0.347113,
-            "min_s": 0.343807,
-            "max_s": 0.351553,
+            "median_s": 0.37069,
+            "min_s": 0.359016,
+            "max_s": 0.380662,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 74.07,
+            "peak_mib": 73.68,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -594,21 +598,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.177249,
-              0.168832,
-              0.173654,
-              0.171774,
-              0.176962,
-              0.162653,
-              0.164519
+              0.189647,
+              0.181898,
+              0.181069,
+              0.196508,
+              0.182378,
+              0.185882,
+              0.185491
             ],
-            "median_s": 0.171774,
-            "min_s": 0.162653,
-            "max_s": 0.177249,
+            "median_s": 0.185491,
+            "min_s": 0.181069,
+            "max_s": 0.196508,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 89.36,
+            "peak_mib": 89.58,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -634,35 +638,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.92463,
+            "cold_s": 1.02194,
             "cached_runs_s": [
-              0.015869,
-              0.013864,
-              0.013348
+              0.016798,
+              0.015722,
+              0.016135
             ],
-            "cached_median_s": 0.013864,
-            "generated_c_bytes": 8157,
+            "cached_median_s": 0.016135,
+            "generated_c_bytes": 8106,
             "exe": "target\\bench-tmp\\build\\vec_memory\\lsaca\\vec_memory.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.012273,
-              0.012505,
-              0.013877,
-              0.014109,
-              0.012703,
-              0.01237,
-              0.01292
+              0.01227,
+              0.0121,
+              0.012424,
+              0.014085,
+              0.014075,
+              0.013779,
+              0.013457
             ],
-            "median_s": 0.012703,
-            "min_s": 0.012273,
-            "max_s": 0.014109,
+            "median_s": 0.013457,
+            "min_s": 0.0121,
+            "max_s": 0.014085,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 18.83,
+            "peak_mib": 18.81,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -671,32 +675,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.205868,
-              0.202143,
-              0.207357
+              0.223718,
+              0.213653,
+              0.24215
             ],
-            "median_s": 0.205868,
-            "min_s": 0.202143,
+            "median_s": 0.223718,
+            "min_s": 0.213653,
             "exe": "target\\bench-tmp\\build\\vec_memory\\c\\vec_memory_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\vec_memory.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\vec_memory\\c\\vec_memory_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.013292,
-              0.012851,
-              0.012105,
-              0.012328,
-              0.012665,
-              0.012106,
-              0.012076
+              0.015134,
+              0.014656,
+              0.01329,
+              0.013709,
+              0.013134,
+              0.014378,
+              0.014991
             ],
-            "median_s": 0.012328,
-            "min_s": 0.012076,
-            "max_s": 0.013292,
+            "median_s": 0.014378,
+            "min_s": 0.013134,
+            "max_s": 0.015134,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 18.84,
+            "peak_mib": 18.82,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -705,32 +709,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.245224,
-              0.223548,
-              0.22578
+              0.333514,
+              0.254225,
+              0.239656
             ],
-            "median_s": 0.22578,
-            "min_s": 0.223548,
+            "median_s": 0.254225,
+            "min_s": 0.239656,
             "exe": "target\\bench-tmp\\build\\vec_memory\\rust\\vec_memory_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\vec_memory.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\vec_memory\\rust\\vec_memory_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.014393,
-              0.013662,
-              0.013031,
-              0.013417,
-              0.013782,
-              0.013998,
-              0.014013
+              0.014127,
+              0.013412,
+              0.013917,
+              0.014248,
+              0.014014,
+              0.015275,
+              0.014911
             ],
-            "median_s": 0.013782,
-            "min_s": 0.013031,
-            "max_s": 0.014393,
+            "median_s": 0.014127,
+            "min_s": 0.013412,
+            "max_s": 0.015275,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 18.93,
+            "peak_mib": 18.91,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -743,21 +747,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.415601,
-              0.421547,
-              0.424156,
-              0.427344,
-              0.422549,
-              0.425406,
-              0.414967
+              0.461203,
+              0.452156,
+              0.463199,
+              0.446384,
+              0.457659,
+              0.46468,
+              0.44932
             ],
-            "median_s": 0.422549,
-            "min_s": 0.414967,
-            "max_s": 0.427344,
+            "median_s": 0.457659,
+            "min_s": 0.446384,
+            "max_s": 0.46468,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 142.83,
+            "peak_mib": 142.75,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -770,21 +774,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.202672,
-              0.201444,
-              0.227024,
-              0.210208,
-              0.246662,
-              0.248001,
-              0.278872
+              0.204336,
+              0.203792,
+              0.190067,
+              0.198187,
+              0.200767,
+              0.199549,
+              0.216906
             ],
-            "median_s": 0.227024,
-            "min_s": 0.201444,
-            "max_s": 0.278872,
+            "median_s": 0.200767,
+            "min_s": 0.190067,
+            "max_s": 0.216906,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 121.4,
+            "peak_mib": 121.52,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -812,35 +816,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.219265,
+            "cold_s": 1.078215,
             "cached_runs_s": [
-              0.019422,
-              0.020168,
-              0.020536
+              0.019616,
+              0.018422,
+              0.019519
             ],
-            "cached_median_s": 0.020168,
-            "generated_c_bytes": 18537,
+            "cached_median_s": 0.019519,
+            "generated_c_bytes": 17874,
             "exe": "target\\bench-tmp\\build\\sort_i64\\lsaca\\sort_i64.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.03593,
-              0.033148,
-              0.032065,
-              0.036991,
-              0.03812,
-              0.0384,
-              0.038677
+              0.032337,
+              0.030301,
+              0.030621,
+              0.030151,
+              0.030269,
+              0.031571,
+              0.030549
             ],
-            "median_s": 0.036991,
-            "min_s": 0.032065,
-            "max_s": 0.038677,
+            "median_s": 0.030549,
+            "min_s": 0.030151,
+            "max_s": 0.032337,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 6.63,
+            "peak_mib": 6.59,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -849,32 +853,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.291927,
-              0.309599,
-              0.278212
+              0.241926,
+              0.231007,
+              0.246201
             ],
-            "median_s": 0.291927,
-            "min_s": 0.278212,
+            "median_s": 0.241926,
+            "min_s": 0.231007,
             "exe": "target\\bench-tmp\\build\\sort_i64\\c\\sort_i64_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\sort_i64.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\sort_i64\\c\\sort_i64_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.034707,
-              0.032459,
-              0.03384,
-              0.032204,
-              0.03756,
-              0.032243,
-              0.036287
+              0.026232,
+              0.026995,
+              0.028045,
+              0.026619,
+              0.025169,
+              0.026497,
+              0.033887
             ],
-            "median_s": 0.03384,
-            "min_s": 0.032204,
-            "max_s": 0.03756,
+            "median_s": 0.026619,
+            "min_s": 0.025169,
+            "max_s": 0.033887,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 5.11,
+            "peak_mib": 5.1,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -883,32 +887,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.330188,
-              0.324409,
-              0.314419
+              0.27928,
+              0.265925,
+              0.269658
             ],
-            "median_s": 0.324409,
-            "min_s": 0.314419,
+            "median_s": 0.269658,
+            "min_s": 0.265925,
             "exe": "target\\bench-tmp\\build\\sort_i64\\rust\\sort_i64_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\sort_i64.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\sort_i64\\rust\\sort_i64_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.031717,
-              0.029896,
-              0.031698,
-              0.031175,
-              0.034586,
-              0.033816,
-              0.033311
+              0.029085,
+              0.026314,
+              0.026314,
+              0.026291,
+              0.026273,
+              0.029548,
+              0.03155
             ],
-            "median_s": 0.031717,
-            "min_s": 0.029896,
-            "max_s": 0.034586,
+            "median_s": 0.026314,
+            "min_s": 0.026273,
+            "max_s": 0.03155,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 5.2,
+            "peak_mib": 5.18,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -921,21 +925,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.67923,
-              0.631978,
-              0.63713,
-              0.632387,
-              0.632347,
-              0.622508,
-              0.609366
+              0.596711,
+              0.613905,
+              0.546224,
+              0.548477,
+              0.547894,
+              0.542258,
+              0.538752
             ],
-            "median_s": 0.632347,
-            "min_s": 0.609366,
-            "max_s": 0.67923,
+            "median_s": 0.547894,
+            "min_s": 0.538752,
+            "max_s": 0.613905,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 21.38,
+            "peak_mib": 19.54,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -948,21 +952,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.166405,
-              0.162165,
-              0.160954,
-              0.161976,
-              0.164766,
-              0.162521,
-              0.16222
+              0.14719,
+              0.150385,
+              0.156029,
+              0.158039,
+              0.162474,
+              0.149765,
+              0.153269
             ],
-            "median_s": 0.16222,
-            "min_s": 0.160954,
-            "max_s": 0.166405,
+            "median_s": 0.153269,
+            "min_s": 0.14719,
+            "max_s": 0.162474,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 50.43,
+            "peak_mib": 50.3,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -988,65 +992,31 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.104701,
+            "cold_s": 1.056401,
             "cached_runs_s": [
-              0.019566,
-              0.018223,
-              0.018156
+              0.01768,
+              0.015999,
+              0.016147
             ],
-            "cached_median_s": 0.018223,
-            "generated_c_bytes": 15564,
+            "cached_median_s": 0.016147,
+            "generated_c_bytes": 15054,
             "exe": "target\\bench-tmp\\build\\matrix_multiply\\lsaca\\matrix_multiply.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.012216,
-              0.011905,
-              0.01241,
-              0.012565,
-              0.01244,
-              0.012477,
-              0.012458
+              0.009755,
+              0.009726,
+              0.009537,
+              0.009856,
+              0.010511,
+              0.010899,
+              0.010724
             ],
-            "median_s": 0.01244,
-            "min_s": 0.011905,
-            "max_s": 0.012565,
-            "warmups": 1
-          },
-          "memory": {
-            "peak_mib": 4.42,
-            "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
-            "note": null
-          }
-        },
-        "c": {
-          "compile": {
-            "kind": "native",
-            "runs_s": [
-              0.347269,
-              0.255992,
-              0.262769
-            ],
-            "median_s": 0.262769,
-            "min_s": 0.255992,
-            "exe": "target\\bench-tmp\\build\\matrix_multiply\\c\\matrix_multiply_c.exe",
-            "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\matrix_multiply.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\matrix_multiply\\c\\matrix_multiply_c.exe"
-          },
-          "runtime": {
-            "runs_s": [
-              0.012686,
-              0.012684,
-              0.012579,
-              0.014682,
-              0.012203,
-              0.012341,
-              0.011956
-            ],
-            "median_s": 0.012579,
-            "min_s": 0.011956,
-            "max_s": 0.014682,
+            "median_s": 0.009856,
+            "min_s": 0.009537,
+            "max_s": 0.010899,
             "warmups": 1
           },
           "memory": {
@@ -1055,36 +1025,70 @@
             "note": null
           }
         },
+        "c": {
+          "compile": {
+            "kind": "native",
+            "runs_s": [
+              0.235918,
+              0.226803,
+              0.221464
+            ],
+            "median_s": 0.226803,
+            "min_s": 0.221464,
+            "exe": "target\\bench-tmp\\build\\matrix_multiply\\c\\matrix_multiply_c.exe",
+            "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\matrix_multiply.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\matrix_multiply\\c\\matrix_multiply_c.exe"
+          },
+          "runtime": {
+            "runs_s": [
+              0.009279,
+              0.009897,
+              0.009272,
+              0.00954,
+              0.009618,
+              0.009963,
+              0.009911
+            ],
+            "median_s": 0.009618,
+            "min_s": 0.009272,
+            "max_s": 0.009963,
+            "warmups": 1
+          },
+          "memory": {
+            "peak_mib": 4.38,
+            "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
+            "note": null
+          }
+        },
         "rust": {
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.296649,
-              0.294176,
-              0.278471
+              0.24978,
+              0.241847,
+              0.252416
             ],
-            "median_s": 0.294176,
-            "min_s": 0.278471,
+            "median_s": 0.24978,
+            "min_s": 0.241847,
             "exe": "target\\bench-tmp\\build\\matrix_multiply\\rust\\matrix_multiply_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\matrix_multiply.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\matrix_multiply\\rust\\matrix_multiply_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.011997,
-              0.011996,
-              0.012064,
-              0.012753,
-              0.012305,
-              0.01158,
-              0.012105
+              0.010047,
+              0.010135,
+              0.010248,
+              0.009793,
+              0.010106,
+              0.009976,
+              0.010303
             ],
-            "median_s": 0.012064,
-            "min_s": 0.01158,
-            "max_s": 0.012753,
+            "median_s": 0.010106,
+            "min_s": 0.009793,
+            "max_s": 0.010303,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.49,
+            "peak_mib": 4.48,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1097,17 +1101,17 @@
           },
           "runtime": {
             "runs_s": [
-              1.129494,
-              1.128212,
-              1.138304,
-              1.27495,
-              1.149685,
-              1.167497,
-              1.362714
+              1.244366,
+              1.193229,
+              1.168101,
+              1.172108,
+              1.17887,
+              1.14323,
+              1.135882
             ],
-            "median_s": 1.149685,
-            "min_s": 1.128212,
-            "max_s": 1.362714,
+            "median_s": 1.172108,
+            "min_s": 1.135882,
+            "max_s": 1.244366,
             "warmups": 1
           },
           "memory": {
@@ -1124,21 +1128,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.124608,
-              0.122687,
-              0.117038,
-              0.115727,
-              0.115273,
-              0.116485,
-              0.11451
+              0.110314,
+              0.117094,
+              0.119021,
+              0.125516,
+              0.12735,
+              0.117118,
+              0.121291
             ],
-            "median_s": 0.116485,
-            "min_s": 0.11451,
-            "max_s": 0.124608,
+            "median_s": 0.119021,
+            "min_s": 0.110314,
+            "max_s": 0.12735,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 47.64,
+            "peak_mib": 47.07,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1165,13 +1169,13 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.931065,
+            "cold_s": 0.991696,
             "cached_runs_s": [
-              0.01523,
-              0.014803,
-              0.01538
+              0.016119,
+              0.01602,
+              0.015941
             ],
-            "cached_median_s": 0.01523,
+            "cached_median_s": 0.01602,
             "generated_c_bytes": 13202,
             "exe": "target\\bench-tmp\\build\\binary_trees\\lsaca\\binary_trees.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
@@ -1179,21 +1183,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.317036,
-              0.380125,
-              0.325145,
-              0.322418,
-              0.315853,
-              0.317052,
-              0.32634
+              0.336932,
+              0.322599,
+              0.324639,
+              0.33752,
+              0.315619,
+              0.331548,
+              0.331303
             ],
-            "median_s": 0.322418,
-            "min_s": 0.315853,
-            "max_s": 0.380125,
+            "median_s": 0.331303,
+            "min_s": 0.315619,
+            "max_s": 0.33752,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 52.27,
+            "peak_mib": 52.25,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1202,32 +1206,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.250057,
-              0.237624,
-              0.236622
+              0.248336,
+              0.249433,
+              0.249439
             ],
-            "median_s": 0.237624,
-            "min_s": 0.236622,
+            "median_s": 0.249433,
+            "min_s": 0.248336,
             "exe": "target\\bench-tmp\\build\\binary_trees\\c\\binary_trees_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\binary_trees.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\binary_trees\\c\\binary_trees_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.015727,
-              0.017588,
-              0.017679,
-              0.015998,
-              0.016013,
-              0.015116,
-              0.015557
+              0.018051,
+              0.016321,
+              0.015605,
+              0.016444,
+              0.01681,
+              0.015612,
+              0.015348
             ],
-            "median_s": 0.015998,
-            "min_s": 0.015116,
-            "max_s": 0.017679,
+            "median_s": 0.016321,
+            "min_s": 0.015348,
+            "max_s": 0.018051,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 7.66,
+            "peak_mib": 7.64,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1236,32 +1240,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.209377,
-              0.209027,
-              0.211267
+              0.222043,
+              0.21703,
+              0.250811
             ],
-            "median_s": 0.209377,
-            "min_s": 0.209027,
+            "median_s": 0.222043,
+            "min_s": 0.21703,
             "exe": "target\\bench-tmp\\build\\binary_trees\\rust\\binary_trees_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\binary_trees.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\binary_trees\\rust\\binary_trees_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.016593,
-              0.017406,
-              0.017115,
-              0.017616,
-              0.018277,
-              0.019931,
-              0.020293
+              0.018526,
+              0.018536,
+              0.017558,
+              0.017951,
+              0.017326,
+              0.018028,
+              0.017686
             ],
-            "median_s": 0.017616,
-            "min_s": 0.016593,
-            "max_s": 0.020293,
+            "median_s": 0.017951,
+            "min_s": 0.017326,
+            "max_s": 0.018536,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 7.7,
+            "peak_mib": 7.69,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1274,21 +1278,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.086303,
-              0.086522,
-              0.082308,
-              0.088251,
-              0.084281,
-              0.086056,
-              0.085526
+              0.091567,
+              0.087067,
+              0.090701,
+              0.09119,
+              0.089541,
+              0.09159,
+              0.086112
             ],
-            "median_s": 0.086056,
-            "min_s": 0.082308,
-            "max_s": 0.088251,
+            "median_s": 0.090701,
+            "min_s": 0.086112,
+            "max_s": 0.09159,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 21.06,
+            "peak_mib": 21.04,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1301,21 +1305,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.113062,
-              0.116463,
-              0.107432,
-              0.110275,
-              0.113515,
-              0.11073,
-              0.116364
+              0.114778,
+              0.121123,
+              0.123254,
+              0.118448,
+              0.116147,
+              0.122799,
+              0.126034
             ],
-            "median_s": 0.113062,
-            "min_s": 0.107432,
-            "max_s": 0.116463,
+            "median_s": 0.121123,
+            "min_s": 0.114778,
+            "max_s": 0.126034,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 56.39,
+            "peak_mib": 56.05,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1342,13 +1346,13 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.914608,
+            "cold_s": 1.008468,
             "cached_runs_s": [
-              0.01605,
-              0.015177,
-              0.015129
+              0.018141,
+              0.01609,
+              0.015906
             ],
-            "cached_median_s": 0.015177,
+            "cached_median_s": 0.01609,
             "generated_c_bytes": 12706,
             "exe": "target\\bench-tmp\\build\\binary_trees_refs\\lsaca\\binary_trees_refs.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
@@ -1356,21 +1360,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.026196,
-              0.027207,
-              0.026824,
-              0.024593,
-              0.024761,
-              0.027166,
-              0.02715
+              0.026375,
+              0.026316,
+              0.027065,
+              0.025934,
+              0.025154,
+              0.025048,
+              0.025436
             ],
-            "median_s": 0.026824,
-            "min_s": 0.024593,
-            "max_s": 0.027207,
+            "median_s": 0.025934,
+            "min_s": 0.025048,
+            "max_s": 0.027065,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 15.77,
+            "peak_mib": 15.74,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1379,32 +1383,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.238273,
-              0.249522,
-              0.247341
+              0.265172,
+              0.25663,
+              0.261664
             ],
-            "median_s": 0.247341,
-            "min_s": 0.238273,
+            "median_s": 0.261664,
+            "min_s": 0.25663,
             "exe": "target\\bench-tmp\\build\\binary_trees_refs\\c\\binary_trees_refs_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\binary_trees_refs.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\binary_trees_refs\\c\\binary_trees_refs_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.015795,
-              0.016174,
-              0.017823,
-              0.015893,
-              0.015379,
-              0.0162,
-              0.016054
+              0.017101,
+              0.016003,
+              0.015537,
+              0.015817,
+              0.015974,
+              0.01619,
+              0.017235
             ],
-            "median_s": 0.016054,
-            "min_s": 0.015379,
-            "max_s": 0.017823,
+            "median_s": 0.016003,
+            "min_s": 0.015537,
+            "max_s": 0.017235,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 7.66,
+            "peak_mib": 7.64,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1413,28 +1417,28 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.213818,
-              0.204955,
-              0.206857
+              0.221402,
+              0.221509,
+              0.218389
             ],
-            "median_s": 0.206857,
-            "min_s": 0.204955,
+            "median_s": 0.221402,
+            "min_s": 0.218389,
             "exe": "target\\bench-tmp\\build\\binary_trees_refs\\rust\\binary_trees_refs_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\binary_trees_refs.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\binary_trees_refs\\rust\\binary_trees_refs_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.017315,
-              0.018137,
-              0.016733,
-              0.016959,
-              0.016566,
-              0.018638,
-              0.018272
+              0.016515,
+              0.017375,
+              0.019094,
+              0.017516,
+              0.017063,
+              0.017283,
+              0.017218
             ],
-            "median_s": 0.017315,
-            "min_s": 0.016566,
-            "max_s": 0.018638,
+            "median_s": 0.017283,
+            "min_s": 0.016515,
+            "max_s": 0.019094,
             "warmups": 1
           },
           "memory": {
@@ -1451,21 +1455,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.088025,
-              0.088332,
-              0.085042,
-              0.08562,
-              0.079225,
-              0.086758,
-              0.083633
+              0.089638,
+              0.095363,
+              0.089786,
+              0.088383,
+              0.091963,
+              0.090419,
+              0.090979
             ],
-            "median_s": 0.08562,
-            "min_s": 0.079225,
-            "max_s": 0.088332,
+            "median_s": 0.090419,
+            "min_s": 0.088383,
+            "max_s": 0.095363,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 21.04,
+            "peak_mib": 21.02,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1478,21 +1482,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.113202,
-              0.113557,
-              0.109909,
-              0.114769,
-              0.115217,
-              0.111259,
-              0.111393
+              0.115367,
+              0.119004,
+              0.123799,
+              0.127849,
+              0.124682,
+              0.120621,
+              0.117604
             ],
-            "median_s": 0.113202,
-            "min_s": 0.109909,
-            "max_s": 0.115217,
+            "median_s": 0.120621,
+            "min_s": 0.115367,
+            "max_s": 0.127849,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 56.43,
+            "peak_mib": 56.34,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1519,35 +1523,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.906668,
+            "cold_s": 1.024679,
             "cached_runs_s": [
-              0.015815,
-              0.013752,
-              0.013696
+              0.01744,
+              0.015836,
+              0.015077
             ],
-            "cached_median_s": 0.013752,
-            "generated_c_bytes": 10223,
+            "cached_median_s": 0.015836,
+            "generated_c_bytes": 10121,
             "exe": "target\\bench-tmp\\build\\string_split\\lsaca\\string_split.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.015214,
-              0.016938,
-              0.016412,
-              0.015995,
-              0.016724,
-              0.015884,
-              0.015976
+              0.016058,
+              0.015915,
+              0.014952,
+              0.014777,
+              0.015618,
+              0.016323,
+              0.015866
             ],
-            "median_s": 0.015995,
-            "min_s": 0.015214,
-            "max_s": 0.016938,
+            "median_s": 0.015866,
+            "min_s": 0.014777,
+            "max_s": 0.016323,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 9.33,
+            "peak_mib": 9.31,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1556,32 +1560,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.209118,
-              0.208188,
-              0.21505
+              0.223563,
+              0.235206,
+              0.222055
             ],
-            "median_s": 0.209118,
-            "min_s": 0.208188,
+            "median_s": 0.223563,
+            "min_s": 0.222055,
             "exe": "target\\bench-tmp\\build\\string_split\\c\\string_split_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\string_split.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\string_split\\c\\string_split_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.011172,
-              0.010501,
-              0.009944,
-              0.011687,
-              0.010406,
-              0.010167,
-              0.010655
+              0.011729,
+              0.011499,
+              0.011448,
+              0.011767,
+              0.011235,
+              0.011355,
+              0.011318
             ],
-            "median_s": 0.010501,
-            "min_s": 0.009944,
-            "max_s": 0.011687,
+            "median_s": 0.011448,
+            "min_s": 0.011235,
+            "max_s": 0.011767,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.07,
+            "peak_mib": 4.05,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1590,32 +1594,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.290077,
-              0.273721,
-              0.266607
+              0.291386,
+              0.284529,
+              0.293709
             ],
-            "median_s": 0.273721,
-            "min_s": 0.266607,
+            "median_s": 0.291386,
+            "min_s": 0.284529,
             "exe": "target\\bench-tmp\\build\\string_split\\rust\\string_split_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\string_split.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\string_split\\rust\\string_split_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.01098,
-              0.010265,
-              0.010687,
-              0.010635,
-              0.010719,
-              0.011111,
-              0.010807
+              0.011866,
+              0.011384,
+              0.012134,
+              0.010891,
+              0.010974,
+              0.010501,
+              0.011601
             ],
-            "median_s": 0.010719,
-            "min_s": 0.010265,
-            "max_s": 0.011111,
+            "median_s": 0.011384,
+            "min_s": 0.010501,
+            "max_s": 0.012134,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.4,
+            "peak_mib": 4.38,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1628,21 +1632,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.062371,
-              0.058578,
-              0.058083,
-              0.055519,
-              0.057408,
-              0.057674,
-              0.055386
+              0.061019,
+              0.062243,
+              0.060796,
+              0.059059,
+              0.058261,
+              0.06061,
+              0.071839
             ],
-            "median_s": 0.057674,
-            "min_s": 0.055386,
-            "max_s": 0.062371,
+            "median_s": 0.060796,
+            "min_s": 0.058261,
+            "max_s": 0.071839,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 16.81,
+            "peak_mib": 16.79,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1655,21 +1659,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.110462,
-              0.108843,
-              0.115967,
-              0.109403,
-              0.113027,
-              0.116001,
-              0.122106
+              0.114026,
+              0.119862,
+              0.12119,
+              0.12225,
+              0.125562,
+              0.130414,
+              0.124883
             ],
-            "median_s": 0.113027,
-            "min_s": 0.108843,
-            "max_s": 0.122106,
+            "median_s": 0.12225,
+            "min_s": 0.114026,
+            "max_s": 0.130414,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 50.76,
+            "peak_mib": 51.02,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1695,65 +1699,31 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.038528,
+            "cold_s": 1.016653,
             "cached_runs_s": [
-              0.020262,
-              0.020684,
-              0.01854
+              0.018462,
+              0.015817,
+              0.016302
             ],
-            "cached_median_s": 0.020262,
-            "generated_c_bytes": 7762,
+            "cached_median_s": 0.016302,
+            "generated_c_bytes": 7609,
             "exe": "target\\bench-tmp\\build\\sieve\\lsaca\\sieve.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.06723,
-              0.046859,
-              0.033583,
-              0.031441,
-              0.032557,
-              0.032098,
-              0.031091
+              0.026086,
+              0.024167,
+              0.025457,
+              0.024505,
+              0.027542,
+              0.028939,
+              0.02856
             ],
-            "median_s": 0.032557,
-            "min_s": 0.031091,
-            "max_s": 0.06723,
-            "warmups": 1
-          },
-          "memory": {
-            "peak_mib": 18.87,
-            "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
-            "note": null
-          }
-        },
-        "c": {
-          "compile": {
-            "kind": "native",
-            "runs_s": [
-              0.322244,
-              0.234624,
-              0.234825
-            ],
-            "median_s": 0.234825,
-            "min_s": 0.234624,
-            "exe": "target\\bench-tmp\\build\\sieve\\c\\sieve_c.exe",
-            "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\sieve.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\sieve\\c\\sieve_c.exe"
-          },
-          "runtime": {
-            "runs_s": [
-              0.026992,
-              0.026841,
-              0.028266,
-              0.028048,
-              0.028669,
-              0.028348,
-              0.026534
-            ],
-            "median_s": 0.028048,
-            "min_s": 0.026534,
-            "max_s": 0.028669,
+            "median_s": 0.026086,
+            "min_s": 0.024167,
+            "max_s": 0.028939,
             "warmups": 1
           },
           "memory": {
@@ -1762,36 +1732,70 @@
             "note": null
           }
         },
+        "c": {
+          "compile": {
+            "kind": "native",
+            "runs_s": [
+              0.225319,
+              0.210846,
+              0.210853
+            ],
+            "median_s": 0.210853,
+            "min_s": 0.210846,
+            "exe": "target\\bench-tmp\\build\\sieve\\c\\sieve_c.exe",
+            "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\sieve.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\sieve\\c\\sieve_c.exe"
+          },
+          "runtime": {
+            "runs_s": [
+              0.022763,
+              0.02375,
+              0.023432,
+              0.023349,
+              0.022971,
+              0.026199,
+              0.02424
+            ],
+            "median_s": 0.023432,
+            "min_s": 0.022763,
+            "max_s": 0.026199,
+            "warmups": 1
+          },
+          "memory": {
+            "peak_mib": 18.83,
+            "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
+            "note": null
+          }
+        },
         "rust": {
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.237573,
-              0.236442,
-              0.243209
+              0.23536,
+              0.227998,
+              0.225977
             ],
-            "median_s": 0.237573,
-            "min_s": 0.236442,
+            "median_s": 0.227998,
+            "min_s": 0.225977,
             "exe": "target\\bench-tmp\\build\\sieve\\rust\\sieve_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\sieve.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\sieve\\rust\\sieve_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.028832,
-              0.028712,
-              0.029038,
-              0.025783,
-              0.026138,
-              0.026537,
-              0.025797
+              0.023741,
+              0.024,
+              0.024324,
+              0.023764,
+              0.025209,
+              0.025614,
+              0.023903
             ],
-            "median_s": 0.026537,
-            "min_s": 0.025783,
-            "max_s": 0.029038,
+            "median_s": 0.024,
+            "min_s": 0.023741,
+            "max_s": 0.025614,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 18.94,
+            "peak_mib": 18.91,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1804,21 +1808,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.47234,
-              0.458408,
-              0.467143,
-              0.453269,
-              0.462058,
-              0.506998,
-              0.472515
+              0.491949,
+              0.486713,
+              0.503482,
+              0.486064,
+              0.58093,
+              0.481461,
+              0.493168
             ],
-            "median_s": 0.467143,
-            "min_s": 0.453269,
-            "max_s": 0.506998,
+            "median_s": 0.491949,
+            "min_s": 0.481461,
+            "max_s": 0.58093,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 26.23,
+            "peak_mib": 26.2,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1831,21 +1835,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.124647,
-              0.126294,
-              0.13565,
-              0.141959,
-              0.145952,
-              0.156259,
-              0.143694
+              0.136127,
+              0.133298,
+              0.137727,
+              0.131532,
+              0.127551,
+              0.130193,
+              0.137544
             ],
-            "median_s": 0.141959,
-            "min_s": 0.124647,
-            "max_s": 0.156259,
+            "median_s": 0.133298,
+            "min_s": 0.127551,
+            "max_s": 0.137727,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 60.16,
+            "peak_mib": 60.13,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1873,13 +1877,13 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.105945,
+            "cold_s": 1.003292,
             "cached_runs_s": [
-              0.016799,
-              0.016049,
-              0.015069
+              0.018267,
+              0.015899,
+              0.01665
             ],
-            "cached_median_s": 0.016049,
+            "cached_median_s": 0.01665,
             "generated_c_bytes": 8061,
             "exe": "target\\bench-tmp\\build\\mandelbrot\\lsaca\\mandelbrot.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
@@ -1887,51 +1891,17 @@
           },
           "runtime": {
             "runs_s": [
-              0.02421,
+              0.025799,
+              0.02499,
+              0.022734,
+              0.022838,
               0.023008,
-              0.024899,
-              0.026745,
-              0.025491,
-              0.024541,
-              0.024864
+              0.023032,
+              0.022096
             ],
-            "median_s": 0.024864,
-            "min_s": 0.023008,
-            "max_s": 0.026745,
-            "warmups": 1
-          },
-          "memory": {
-            "peak_mib": 4.07,
-            "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
-            "note": null
-          }
-        },
-        "c": {
-          "compile": {
-            "kind": "native",
-            "runs_s": [
-              0.206217,
-              0.216802,
-              0.206067
-            ],
-            "median_s": 0.206217,
-            "min_s": 0.206067,
-            "exe": "target\\bench-tmp\\build\\mandelbrot\\c\\mandelbrot_c.exe",
-            "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\mandelbrot.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\mandelbrot\\c\\mandelbrot_c.exe"
-          },
-          "runtime": {
-            "runs_s": [
-              0.02403,
-              0.023397,
-              0.024925,
-              0.024419,
-              0.024254,
-              0.024122,
-              0.024328
-            ],
-            "median_s": 0.024254,
-            "min_s": 0.023397,
-            "max_s": 0.024925,
+            "median_s": 0.023008,
+            "min_s": 0.022096,
+            "max_s": 0.025799,
             "warmups": 1
           },
           "memory": {
@@ -1940,36 +1910,70 @@
             "note": null
           }
         },
+        "c": {
+          "compile": {
+            "kind": "native",
+            "runs_s": [
+              0.219415,
+              0.210177,
+              0.227709
+            ],
+            "median_s": 0.219415,
+            "min_s": 0.210177,
+            "exe": "target\\bench-tmp\\build\\mandelbrot\\c\\mandelbrot_c.exe",
+            "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\mandelbrot.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\mandelbrot\\c\\mandelbrot_c.exe"
+          },
+          "runtime": {
+            "runs_s": [
+              0.023124,
+              0.022635,
+              0.024735,
+              0.024783,
+              0.023816,
+              0.023857,
+              0.024366
+            ],
+            "median_s": 0.023857,
+            "min_s": 0.022635,
+            "max_s": 0.024783,
+            "warmups": 1
+          },
+          "memory": {
+            "peak_mib": 4.03,
+            "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
+            "note": null
+          }
+        },
         "rust": {
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.210381,
-              0.212112,
-              0.201931
+              0.221677,
+              0.213632,
+              0.209745
             ],
-            "median_s": 0.210381,
-            "min_s": 0.201931,
+            "median_s": 0.213632,
+            "min_s": 0.209745,
             "exe": "target\\bench-tmp\\build\\mandelbrot\\rust\\mandelbrot_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\mandelbrot.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\mandelbrot\\rust\\mandelbrot_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.024159,
-              0.025028,
-              0.024636,
-              0.023995,
-              0.023685,
-              0.023804,
-              0.024091
+              0.024153,
+              0.026273,
+              0.02456,
+              0.02795,
+              0.02471,
+              0.023345,
+              0.023494
             ],
-            "median_s": 0.024091,
-            "min_s": 0.023685,
-            "max_s": 0.025028,
+            "median_s": 0.02456,
+            "min_s": 0.023345,
+            "max_s": 0.02795,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.17,
+            "peak_mib": 4.13,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -1982,21 +1986,21 @@
           },
           "runtime": {
             "runs_s": [
-              2.367297,
-              2.318019,
-              2.247737,
-              2.215323,
-              2.20631,
-              2.204395,
-              2.181188
+              2.237236,
+              2.226573,
+              2.252849,
+              2.177179,
+              2.178805,
+              2.163832,
+              2.158933
             ],
-            "median_s": 2.215323,
-            "min_s": 2.181188,
-            "max_s": 2.367297,
+            "median_s": 2.178805,
+            "min_s": 2.158933,
+            "max_s": 2.252849,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 11.01,
+            "peak_mib": 11.02,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2009,21 +2013,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.12457,
-              0.122851,
-              0.124398,
-              0.127048,
-              0.132197,
-              0.127556,
-              0.128124
+              0.128686,
+              0.129376,
+              0.11667,
+              0.125011,
+              0.133076,
+              0.144887,
+              0.12391
             ],
-            "median_s": 0.127048,
-            "min_s": 0.122851,
-            "max_s": 0.132197,
+            "median_s": 0.128686,
+            "min_s": 0.11667,
+            "max_s": 0.144887,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 44.68,
+            "peak_mib": 44.63,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2050,35 +2054,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.985123,
+            "cold_s": 1.001804,
             "cached_runs_s": [
-              0.018535,
-              0.016132,
-              0.016391
+              0.018433,
+              0.017089,
+              0.016927
             ],
-            "cached_median_s": 0.016391,
-            "generated_c_bytes": 36711,
+            "cached_median_s": 0.017089,
+            "generated_c_bytes": 36609,
             "exe": "target\\bench-tmp\\build\\iterator_pipeline\\lsaca\\iterator_pipeline.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.026364,
-              0.025443,
-              0.026776,
-              0.026358,
-              0.025106,
-              0.025294,
-              0.024436
+              0.02774,
+              0.027666,
+              0.028189,
+              0.030153,
+              0.026758,
+              0.025333,
+              0.026727
             ],
-            "median_s": 0.025443,
-            "min_s": 0.024436,
-            "max_s": 0.026776,
+            "median_s": 0.027666,
+            "min_s": 0.025333,
+            "max_s": 0.030153,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 11.21,
+            "peak_mib": 11.19,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2087,32 +2091,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.269482,
-              0.217967,
-              0.211369
+              0.230104,
+              0.220658,
+              0.203827
             ],
-            "median_s": 0.217967,
-            "min_s": 0.211369,
+            "median_s": 0.220658,
+            "min_s": 0.203827,
             "exe": "target\\bench-tmp\\build\\iterator_pipeline\\c\\iterator_pipeline_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\iterator_pipeline.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\iterator_pipeline\\c\\iterator_pipeline_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.010792,
-              0.011725,
-              0.013104,
-              0.013306,
-              0.012994,
-              0.012351,
-              0.012762
+              0.011148,
+              0.010735,
+              0.010571,
+              0.010409,
+              0.010708,
+              0.010748,
+              0.01055
             ],
-            "median_s": 0.012762,
-            "min_s": 0.010792,
-            "max_s": 0.013306,
+            "median_s": 0.010708,
+            "min_s": 0.010409,
+            "max_s": 0.011148,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 11.17,
+            "peak_mib": 11.15,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2121,32 +2125,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.284793,
-              0.295634,
-              0.311939
+              0.249988,
+              0.246877,
+              0.245067
             ],
-            "median_s": 0.295634,
-            "min_s": 0.284793,
+            "median_s": 0.246877,
+            "min_s": 0.245067,
             "exe": "target\\bench-tmp\\build\\iterator_pipeline\\rust\\iterator_pipeline_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\iterator_pipeline.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\iterator_pipeline\\rust\\iterator_pipeline_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.0153,
-              0.013851,
-              0.013919,
-              0.013617,
-              0.017728,
-              0.01667,
-              0.019253
+              0.010521,
+              0.010231,
+              0.010807,
+              0.010735,
+              0.010967,
+              0.011186,
+              0.011429
             ],
-            "median_s": 0.0153,
-            "min_s": 0.013617,
-            "max_s": 0.019253,
+            "median_s": 0.010807,
+            "min_s": 0.010231,
+            "max_s": 0.011429,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 11.27,
+            "peak_mib": 11.24,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2159,21 +2163,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.223961,
-              0.227368,
-              0.228961,
-              0.213384,
-              0.218524,
-              0.20496,
-              0.218515
+              0.197991,
+              0.200791,
+              0.19778,
+              0.197646,
+              0.192864,
+              0.199095,
+              0.197268
             ],
-            "median_s": 0.218524,
-            "min_s": 0.20496,
-            "max_s": 0.228961,
+            "median_s": 0.19778,
+            "min_s": 0.192864,
+            "max_s": 0.200791,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 49.27,
+            "peak_mib": 49.22,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2186,21 +2190,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.148877,
-              0.140095,
-              0.140366,
-              0.136736,
-              0.136501,
-              0.135159,
-              0.133531
+              0.134242,
+              0.126223,
+              0.130536,
+              0.135153,
+              0.135072,
+              0.133724,
+              0.131264
             ],
-            "median_s": 0.136736,
-            "min_s": 0.133531,
-            "max_s": 0.148877,
+            "median_s": 0.133724,
+            "min_s": 0.126223,
+            "max_s": 0.135153,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 58.12,
+            "peak_mib": 58.09,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2229,35 +2233,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.032467,
+            "cold_s": 1.056972,
             "cached_runs_s": [
-              0.015131,
-              0.014961,
-              0.016187
+              0.019603,
+              0.015588,
+              0.016026
             ],
-            "cached_median_s": 0.015131,
-            "generated_c_bytes": 19515,
+            "cached_median_s": 0.016026,
+            "generated_c_bytes": 19413,
             "exe": "target\\bench-tmp\\build\\hashmap_wordcount\\lsaca\\hashmap_wordcount.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.047082,
-              0.041781,
-              0.043632,
-              0.04698,
-              0.044932,
-              0.046793,
-              0.048051
+              0.044183,
+              0.045203,
+              0.043695,
+              0.042352,
+              0.042329,
+              0.046323,
+              0.044413
             ],
-            "median_s": 0.046793,
-            "min_s": 0.041781,
-            "max_s": 0.048051,
+            "median_s": 0.044183,
+            "min_s": 0.042329,
+            "max_s": 0.046323,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.2,
+            "peak_mib": 4.18,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2266,32 +2270,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.254098,
-              0.245759,
-              0.257228
+              0.253643,
+              0.233584,
+              0.241021
             ],
-            "median_s": 0.254098,
-            "min_s": 0.245759,
+            "median_s": 0.241021,
+            "min_s": 0.233584,
             "exe": "target\\bench-tmp\\build\\hashmap_wordcount\\c\\hashmap_wordcount_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\hashmap_wordcount.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\hashmap_wordcount\\c\\hashmap_wordcount_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.024042,
-              0.021816,
-              0.022243,
-              0.022798,
-              0.024136,
-              0.02527,
-              0.023435
+              0.023329,
+              0.021597,
+              0.025525,
+              0.023835,
+              0.021572,
+              0.022225,
+              0.022021
             ],
-            "median_s": 0.023435,
-            "min_s": 0.021816,
-            "max_s": 0.02527,
+            "median_s": 0.022225,
+            "min_s": 0.021572,
+            "max_s": 0.025525,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.26,
+            "peak_mib": 4.24,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2300,32 +2304,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.434278,
-              0.422081,
-              0.413216
+              0.437812,
+              0.394695,
+              0.408439
             ],
-            "median_s": 0.422081,
-            "min_s": 0.413216,
+            "median_s": 0.408439,
+            "min_s": 0.394695,
             "exe": "target\\bench-tmp\\build\\hashmap_wordcount\\rust\\hashmap_wordcount_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\hashmap_wordcount.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\hashmap_wordcount\\rust\\hashmap_wordcount_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.043209,
-              0.046031,
-              0.045948,
-              0.043074,
-              0.04,
-              0.040949,
-              0.047591
+              0.047903,
+              0.042306,
+              0.04084,
+              0.038066,
+              0.037274,
+              0.042406,
+              0.048105
             ],
-            "median_s": 0.043209,
-            "min_s": 0.04,
-            "max_s": 0.047591,
+            "median_s": 0.042306,
+            "min_s": 0.037274,
+            "max_s": 0.048105,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.43,
+            "peak_mib": 4.65,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2338,21 +2342,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.106114,
-              0.103318,
-              0.097643,
-              0.105607,
-              0.10442,
-              0.106571,
-              0.103822
+              0.096658,
+              0.098916,
+              0.102534,
+              0.096171,
+              0.093196,
+              0.097773,
+              0.096136
             ],
-            "median_s": 0.10442,
-            "min_s": 0.097643,
-            "max_s": 0.106571,
+            "median_s": 0.096658,
+            "min_s": 0.093196,
+            "max_s": 0.102534,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 11.39,
+            "peak_mib": 11.38,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2365,21 +2369,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.132642,
-              0.125596,
-              0.132201,
-              0.121336,
-              0.125424,
-              0.124503,
-              0.171574
+              0.124614,
+              0.133388,
+              0.124243,
+              0.126577,
+              0.119079,
+              0.122165,
+              0.119992
             ],
-            "median_s": 0.125596,
-            "min_s": 0.121336,
-            "max_s": 0.171574,
+            "median_s": 0.124243,
+            "min_s": 0.119079,
+            "max_s": 0.133388,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 46.41,
+            "peak_mib": 46.46,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2410,35 +2414,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.030973,
+            "cold_s": 1.006556,
             "cached_runs_s": [
-              0.015968,
-              0.01536,
-              0.016417
+              0.018002,
+              0.016943,
+              0.016521
             ],
-            "cached_median_s": 0.015968,
-            "generated_c_bytes": 18542,
+            "cached_median_s": 0.016943,
+            "generated_c_bytes": 18389,
             "exe": "target\\bench-tmp\\build\\generic_stack\\lsaca\\generic_stack.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.014972,
-              0.013396,
-              0.013968,
-              0.012755,
-              0.012577,
-              0.012018,
-              0.012144
+              0.01406,
+              0.013658,
+              0.012623,
+              0.012922,
+              0.012749,
+              0.012666,
+              0.012986
             ],
-            "median_s": 0.012755,
-            "min_s": 0.012018,
-            "max_s": 0.014972,
+            "median_s": 0.012922,
+            "min_s": 0.012623,
+            "max_s": 0.01406,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 12.64,
+            "peak_mib": 12.59,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2447,32 +2451,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.239248,
-              0.246996,
-              0.241139
+              0.233769,
+              0.243492,
+              0.217833
             ],
-            "median_s": 0.241139,
-            "min_s": 0.239248,
+            "median_s": 0.233769,
+            "min_s": 0.217833,
             "exe": "target\\bench-tmp\\build\\generic_stack\\c\\generic_stack_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\generic_stack.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\generic_stack\\c\\generic_stack_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.013094,
-              0.012584,
-              0.012732,
-              0.012841,
-              0.012972,
-              0.012964,
-              0.012218
+              0.012624,
+              0.012235,
+              0.012345,
+              0.012457,
+              0.012413,
+              0.013096,
+              0.012908
             ],
-            "median_s": 0.012841,
-            "min_s": 0.012218,
-            "max_s": 0.013094,
+            "median_s": 0.012457,
+            "min_s": 0.012235,
+            "max_s": 0.013096,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 12.61,
+            "peak_mib": 12.59,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2481,32 +2485,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.275717,
-              0.270028,
-              0.292747
+              0.297342,
+              0.260419,
+              0.257216
             ],
-            "median_s": 0.275717,
-            "min_s": 0.270028,
+            "median_s": 0.260419,
+            "min_s": 0.257216,
             "exe": "target\\bench-tmp\\build\\generic_stack\\rust\\generic_stack_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\generic_stack.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\generic_stack\\rust\\generic_stack_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.013514,
-              0.013763,
-              0.014518,
-              0.015254,
-              0.015724,
-              0.01487,
-              0.013671
+              0.012721,
+              0.012928,
+              0.015685,
+              0.014172,
+              0.013714,
+              0.013952,
+              0.015204
             ],
-            "median_s": 0.014518,
-            "min_s": 0.013514,
-            "max_s": 0.015724,
+            "median_s": 0.013952,
+            "min_s": 0.012721,
+            "max_s": 0.015685,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 12.7,
+            "peak_mib": 12.63,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2519,17 +2523,17 @@
           },
           "runtime": {
             "runs_s": [
-              0.301325,
-              0.297402,
-              0.301288,
-              0.291008,
-              0.29383,
-              0.313978,
-              0.317705
+              0.293155,
+              0.295104,
+              0.290134,
+              0.286711,
+              0.286441,
+              0.295322,
+              0.28491
             ],
-            "median_s": 0.301288,
-            "min_s": 0.291008,
-            "max_s": 0.317705,
+            "median_s": 0.290134,
+            "min_s": 0.28491,
+            "max_s": 0.295322,
             "warmups": 1
           },
           "memory": {
@@ -2546,21 +2550,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.138992,
-              0.124094,
-              0.127562,
-              0.129647,
-              0.13896,
-              0.128193,
-              0.129227
+              0.131304,
+              0.130795,
+              0.130728,
+              0.126227,
+              0.123184,
+              0.136743,
+              0.128046
             ],
-            "median_s": 0.129227,
-            "min_s": 0.124094,
-            "max_s": 0.138992,
+            "median_s": 0.130728,
+            "min_s": 0.123184,
+            "max_s": 0.136743,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 72.32,
+            "peak_mib": 72.22,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2590,35 +2594,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.967853,
+            "cold_s": 0.997489,
             "cached_runs_s": [
-              0.01618,
-              0.016227,
-              0.016461
+              0.018114,
+              0.017744,
+              0.018503
             ],
-            "cached_median_s": 0.016227,
-            "generated_c_bytes": 17393,
+            "cached_median_s": 0.018114,
+            "generated_c_bytes": 17189,
             "exe": "target\\bench-tmp\\build\\fn_pipeline\\lsaca\\fn_pipeline.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.007352,
-              0.007466,
-              0.007647,
-              0.007868,
-              0.007868,
-              0.008479,
-              0.007488
+              0.007402,
+              0.007283,
+              0.008322,
+              0.007469,
+              0.007648,
+              0.008276,
+              0.007833
             ],
-            "median_s": 0.007647,
-            "min_s": 0.007352,
-            "max_s": 0.008479,
+            "median_s": 0.007648,
+            "min_s": 0.007283,
+            "max_s": 0.008322,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.07,
+            "peak_mib": 4.06,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2627,32 +2631,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.216518,
-              0.210537,
-              0.208389
+              0.222611,
+              0.207874,
+              0.228143
             ],
-            "median_s": 0.210537,
-            "min_s": 0.208389,
+            "median_s": 0.222611,
+            "min_s": 0.207874,
             "exe": "target\\bench-tmp\\build\\fn_pipeline\\c\\fn_pipeline_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\fn_pipeline.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\fn_pipeline\\c\\fn_pipeline_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.007318,
-              0.007338,
-              0.006981,
-              0.007188,
-              0.006994,
-              0.006904,
-              0.00729
+              0.007591,
+              0.007325,
+              0.007497,
+              0.00787,
+              0.007521,
+              0.009808,
+              0.007296
             ],
-            "median_s": 0.007188,
-            "min_s": 0.006904,
-            "max_s": 0.007338,
+            "median_s": 0.007521,
+            "min_s": 0.007296,
+            "max_s": 0.009808,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.05,
+            "peak_mib": 4.03,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2661,32 +2665,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.247752,
-              0.239041,
-              0.238818
+              0.232689,
+              0.24412,
+              0.22602
             ],
-            "median_s": 0.239041,
-            "min_s": 0.238818,
+            "median_s": 0.232689,
+            "min_s": 0.22602,
             "exe": "target\\bench-tmp\\build\\fn_pipeline\\rust\\fn_pipeline_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\fn_pipeline.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\fn_pipeline\\rust\\fn_pipeline_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.007321,
-              0.007719,
-              0.008118,
-              0.008271,
-              0.007587,
-              0.008362,
-              0.008417
+              0.007826,
+              0.007793,
+              0.007484,
+              0.007788,
+              0.008343,
+              0.008848,
+              0.008428
             ],
-            "median_s": 0.008118,
-            "min_s": 0.007321,
-            "max_s": 0.008417,
+            "median_s": 0.007826,
+            "min_s": 0.007484,
+            "max_s": 0.008848,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 4.16,
+            "peak_mib": 4.14,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2699,21 +2703,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.032435,
-              0.032525,
-              0.031174,
-              0.033563,
-              0.034362,
-              0.033111,
-              0.032118
+              0.032096,
+              0.035403,
+              0.035726,
+              0.035722,
+              0.035455,
+              0.035448,
+              0.03457
             ],
-            "median_s": 0.032525,
-            "min_s": 0.031174,
-            "max_s": 0.034362,
+            "median_s": 0.035448,
+            "min_s": 0.032096,
+            "max_s": 0.035726,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 11.07,
+            "peak_mib": 11.06,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2726,21 +2730,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.104354,
-              0.105761,
-              0.102883,
-              0.110604,
-              0.104196,
-              0.110099,
-              0.102248
+              0.110019,
+              0.107804,
+              0.107243,
+              0.11262,
+              0.109346,
+              0.10631,
+              0.105337
             ],
-            "median_s": 0.104354,
-            "min_s": 0.102248,
-            "max_s": 0.110604,
+            "median_s": 0.107804,
+            "min_s": 0.105337,
+            "max_s": 0.11262,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 40.3,
+            "peak_mib": 39.89,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2768,35 +2772,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.005548,
+            "cold_s": 0.989681,
             "cached_runs_s": [
-              0.017758,
-              0.0165,
-              0.01736
+              0.01798,
+              0.016812,
+              0.016639
             ],
-            "cached_median_s": 0.01736,
-            "generated_c_bytes": 27841,
+            "cached_median_s": 0.016812,
+            "generated_c_bytes": 27178,
             "exe": "target\\bench-tmp\\build\\string_unicode\\lsaca\\string_unicode.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.028353,
-              0.029249,
-              0.026079,
-              0.027879,
-              0.029401,
-              0.027584,
-              0.025894
+              0.028181,
+              0.027146,
+              0.026551,
+              0.029497,
+              0.027876,
+              0.026567,
+              0.028528
             ],
-            "median_s": 0.027879,
-            "min_s": 0.025894,
-            "max_s": 0.029401,
+            "median_s": 0.027876,
+            "min_s": 0.026551,
+            "max_s": 0.029497,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 5.36,
+            "peak_mib": 5.33,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2805,28 +2809,28 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.32172,
-              0.284252,
-              0.281907
+              0.28016,
+              0.279998,
+              0.292187
             ],
-            "median_s": 0.284252,
-            "min_s": 0.281907,
+            "median_s": 0.28016,
+            "min_s": 0.279998,
             "exe": "target\\bench-tmp\\build\\string_unicode\\c\\string_unicode_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\string_unicode.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\string_unicode\\c\\string_unicode_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.009863,
-              0.009685,
-              0.010189,
-              0.010014,
-              0.010031,
-              0.01038,
-              0.010001
+              0.010915,
+              0.010159,
+              0.010461,
+              0.011462,
+              0.010934,
+              0.010778,
+              0.01087
             ],
-            "median_s": 0.010014,
-            "min_s": 0.009685,
-            "max_s": 0.01038,
+            "median_s": 0.01087,
+            "min_s": 0.010159,
+            "max_s": 0.011462,
             "warmups": 1
           },
           "memory": {
@@ -2839,28 +2843,28 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.356871,
-              0.353809,
-              0.351207
+              0.370558,
+              0.363765,
+              0.366695
             ],
-            "median_s": 0.353809,
-            "min_s": 0.351207,
+            "median_s": 0.366695,
+            "min_s": 0.363765,
             "exe": "target\\bench-tmp\\build\\string_unicode\\rust\\string_unicode_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\string_unicode.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\string_unicode\\rust\\string_unicode_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.011602,
-              0.011407,
-              0.011186,
-              0.011674,
-              0.012313,
-              0.012321,
-              0.012747
+              0.012002,
+              0.011641,
+              0.011245,
+              0.011683,
+              0.012735,
+              0.011986,
+              0.012683
             ],
-            "median_s": 0.011674,
-            "min_s": 0.011186,
-            "max_s": 0.012747,
+            "median_s": 0.011986,
+            "min_s": 0.011245,
+            "max_s": 0.012735,
             "warmups": 1
           },
           "memory": {
@@ -2877,21 +2881,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.2245,
-              0.226905,
-              0.213706,
-              0.216098,
-              0.209076,
-              0.22207,
-              0.239788
+              0.233234,
+              0.221198,
+              0.226437,
+              0.236387,
+              0.225197,
+              0.232469,
+              0.223108
             ],
-            "median_s": 0.22207,
-            "min_s": 0.209076,
-            "max_s": 0.239788,
+            "median_s": 0.226437,
+            "min_s": 0.221198,
+            "max_s": 0.236387,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 26.02,
+            "peak_mib": 25.55,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2904,21 +2908,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.153822,
-              0.166823,
-              0.208891,
-              0.15464,
-              0.14858,
-              0.158256,
-              0.162505
+              0.158589,
+              0.164833,
+              0.166544,
+              0.160667,
+              0.165693,
+              0.161744,
+              0.167978
             ],
-            "median_s": 0.158256,
-            "min_s": 0.14858,
-            "max_s": 0.208891,
+            "median_s": 0.164833,
+            "min_s": 0.158589,
+            "max_s": 0.167978,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 68.24,
+            "peak_mib": 68.23,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2949,35 +2953,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.931272,
+            "cold_s": 0.98274,
             "cached_runs_s": [
-              0.017277,
-              0.017352,
-              0.016775
+              0.018036,
+              0.015964,
+              0.015687
             ],
-            "cached_median_s": 0.017277,
-            "generated_c_bytes": 22017,
+            "cached_median_s": 0.015964,
+            "generated_c_bytes": 21711,
             "exe": "target\\bench-tmp\\build\\hashmap_i64\\lsaca\\hashmap_i64.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.216965,
-              0.202829,
-              0.21044,
-              0.211268,
-              0.218933,
-              0.218002,
-              0.205133
+              0.212955,
+              0.213819,
+              0.210673,
+              0.206839,
+              0.210423,
+              0.216834,
+              0.217706
             ],
-            "median_s": 0.211268,
-            "min_s": 0.202829,
-            "max_s": 0.218933,
+            "median_s": 0.212955,
+            "min_s": 0.206839,
+            "max_s": 0.217706,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 55.49,
+            "peak_mib": 55.47,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -2986,32 +2990,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.252961,
-              0.248939,
-              0.249424
+              0.269065,
+              0.243626,
+              0.264786
             ],
-            "median_s": 0.249424,
-            "min_s": 0.248939,
+            "median_s": 0.264786,
+            "min_s": 0.243626,
             "exe": "target\\bench-tmp\\build\\hashmap_i64\\c\\hashmap_i64_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\hashmap_i64.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\hashmap_i64\\c\\hashmap_i64_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.131404,
-              0.134622,
-              0.132912,
-              0.133003,
-              0.134128,
-              0.132998,
-              0.138625
+              0.135135,
+              0.136008,
+              0.133896,
+              0.133285,
+              0.139771,
+              0.135133,
+              0.148525
             ],
-            "median_s": 0.133003,
-            "min_s": 0.131404,
-            "max_s": 0.138625,
+            "median_s": 0.135135,
+            "min_s": 0.133285,
+            "max_s": 0.148525,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 52.43,
+            "peak_mib": 52.42,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3020,32 +3024,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.453743,
-              0.442747,
-              0.447524
+              0.456115,
+              0.460598,
+              0.450554
             ],
-            "median_s": 0.447524,
-            "min_s": 0.442747,
+            "median_s": 0.456115,
+            "min_s": 0.450554,
             "exe": "target\\bench-tmp\\build\\hashmap_i64\\rust\\hashmap_i64_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\hashmap_i64.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\hashmap_i64\\rust\\hashmap_i64_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.1666,
-              0.171705,
-              0.172104,
-              0.182492,
-              0.170982,
-              0.173524,
-              0.176239
+              0.167125,
+              0.16745,
+              0.166518,
+              0.168469,
+              0.174259,
+              0.174741,
+              0.177212
             ],
-            "median_s": 0.172104,
-            "min_s": 0.1666,
-            "max_s": 0.182492,
+            "median_s": 0.168469,
+            "min_s": 0.166518,
+            "max_s": 0.177212,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 55.88,
+            "peak_mib": 55.86,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3058,21 +3062,21 @@
           },
           "runtime": {
             "runs_s": [
-              2.037802,
-              1.817905,
-              1.740547,
-              1.70508,
-              1.705478,
-              1.722294,
-              1.688519
+              1.807785,
+              1.819889,
+              1.817385,
+              1.822814,
+              1.79125,
+              1.813786,
+              1.802163
             ],
-            "median_s": 1.722294,
-            "min_s": 1.688519,
-            "max_s": 2.037802,
+            "median_s": 1.813786,
+            "min_s": 1.79125,
+            "max_s": 1.822814,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 113.38,
+            "peak_mib": 113.37,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3085,21 +3089,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.596282,
-              0.602972,
-              0.608545,
-              0.599915,
-              0.617918,
-              0.741095,
-              0.635204
+              0.591622,
+              0.586216,
+              0.584455,
+              0.584005,
+              0.61984,
+              0.595087,
+              0.596459
             ],
-            "median_s": 0.608545,
-            "min_s": 0.596282,
-            "max_s": 0.741095,
+            "median_s": 0.591622,
+            "min_s": 0.584005,
+            "max_s": 0.61984,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 102.43,
+            "peak_mib": 102.57,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3130,35 +3134,35 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 0.978928,
+            "cold_s": 1.0249,
             "cached_runs_s": [
-              0.017445,
-              0.015885,
-              0.01633
+              0.018625,
+              0.01589,
+              0.016066
             ],
-            "cached_median_s": 0.01633,
-            "generated_c_bytes": 28092,
+            "cached_median_s": 0.016066,
+            "generated_c_bytes": 27786,
             "exe": "target\\bench-tmp\\build\\hashmap_string\\lsaca\\hashmap_string.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": {
             "runs_s": [
-              0.253215,
-              0.262266,
-              0.245255,
-              0.233805,
-              0.23742,
-              0.241655,
-              0.238532
+              0.242657,
+              0.247737,
+              0.243734,
+              0.237108,
+              0.248775,
+              0.24302,
+              0.2446
             ],
-            "median_s": 0.241655,
-            "min_s": 0.233805,
-            "max_s": 0.262266,
+            "median_s": 0.243734,
+            "min_s": 0.237108,
+            "max_s": 0.248775,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 32.32,
+            "peak_mib": 32.29,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3167,32 +3171,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.24185,
-              0.252262,
-              0.239143
+              0.269328,
+              0.268018,
+              0.262532
             ],
-            "median_s": 0.24185,
-            "min_s": 0.239143,
+            "median_s": 0.268018,
+            "min_s": 0.262532,
             "exe": "target\\bench-tmp\\build\\hashmap_string\\c\\hashmap_string_c.exe",
             "command": "C:\\msys64\\ucrt64\\bin\\gcc.EXE -O2 C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\hashmap_string.c -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\hashmap_string\\c\\hashmap_string_c.exe"
           },
           "runtime": {
             "runs_s": [
-              0.323122,
-              0.195087,
-              0.163691,
-              0.165755,
-              0.162258,
-              0.167939,
-              0.162924
+              0.164836,
+              0.155508,
+              0.170827,
+              0.153423,
+              0.17393,
+              0.167157,
+              0.153784
             ],
-            "median_s": 0.165755,
-            "min_s": 0.162258,
-            "max_s": 0.323122,
+            "median_s": 0.164836,
+            "min_s": 0.153423,
+            "max_s": 0.17393,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 19.71,
+            "peak_mib": 19.7,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3201,32 +3205,32 @@
           "compile": {
             "kind": "native",
             "runs_s": [
-              0.52088,
-              0.577212,
-              0.564466
+              0.459286,
+              0.455454,
+              0.448366
             ],
-            "median_s": 0.564466,
-            "min_s": 0.52088,
+            "median_s": 0.455454,
+            "min_s": 0.448366,
             "exe": "target\\bench-tmp\\build\\hashmap_string\\rust\\hashmap_string_rust.exe",
             "command": "C:\\Users\\29954\\.cargo\\bin\\rustc.EXE -O C:\\Codes\\lsaca - 副本 (2)\\benchmarks\\programs\\hashmap_string.rs -o C:\\Codes\\lsaca - 副本 (2)\\target\\bench-tmp\\build\\hashmap_string\\rust\\hashmap_string_rust.exe"
           },
           "runtime": {
             "runs_s": [
-              0.244348,
-              0.241327,
-              0.242672,
-              0.257914,
-              0.257265,
-              0.246831,
-              0.263991
+              0.213145,
+              0.207813,
+              0.22491,
+              0.213543,
+              0.215432,
+              0.211823,
+              0.207287
             ],
-            "median_s": 0.246831,
-            "min_s": 0.241327,
-            "max_s": 0.263991,
+            "median_s": 0.213145,
+            "min_s": 0.207287,
+            "max_s": 0.22491,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 19.78,
+            "peak_mib": 19.76,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3239,21 +3243,21 @@
           },
           "runtime": {
             "runs_s": [
-              1.255816,
-              1.014692,
-              1.090791,
-              0.912119,
-              0.978189,
-              0.967129,
-              0.995865
+              0.966011,
+              0.912982,
+              0.903394,
+              0.905516,
+              0.937633,
+              0.937469,
+              0.906501
             ],
-            "median_s": 0.995865,
-            "min_s": 0.912119,
-            "max_s": 1.255816,
+            "median_s": 0.912982,
+            "min_s": 0.903394,
+            "max_s": 0.966011,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 38.01,
+            "peak_mib": 38.06,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3266,21 +3270,21 @@
           },
           "runtime": {
             "runs_s": [
-              0.374541,
-              0.370399,
-              0.407602,
-              0.390842,
-              0.367359,
-              0.353907,
-              0.343455
+              0.322519,
+              0.33394,
+              0.334979,
+              0.467434,
+              0.369724,
+              0.334526,
+              0.337683
             ],
-            "median_s": 0.370399,
-            "min_s": 0.343455,
-            "max_s": 0.407602,
+            "median_s": 0.334979,
+            "min_s": 0.322519,
+            "max_s": 0.467434,
             "warmups": 1
           },
           "memory": {
-            "peak_mib": 90.74,
+            "peak_mib": 90.72,
             "method": "psapi GetProcessMemoryInfo PeakWorkingSetSize (polling)",
             "note": null
           }
@@ -3303,16 +3307,87 @@
           "compile": {
             "kind": "lsaca-official",
             "backend": "direct C compiler back end (default; --cmake available)",
-            "cold_s": 1.832644,
+            "cold_s": 1.837226,
             "cached_runs_s": [
-              0.254586,
-              0.244237,
-              0.236623
+              0.237912,
+              0.236327,
+              0.24473
             ],
-            "cached_median_s": 0.244237,
-            "generated_c_bytes": 395372,
+            "cached_median_s": 0.237912,
+            "generated_c_bytes": 349472,
             "exe": "target\\bench-tmp\\build\\compile_large\\lsaca\\compile_large.exe",
             "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime translation units with gcc); the cached build re-uses the same cache directory and only re-links the executable",
+            "mode": "official"
+          },
+          "runtime": null,
+          "memory": null
+        }
+      }
+    },
+    "modules_compile": {
+      "expected": "checksum=547598677",
+      "description": "multi-module program: one crate root (main.ls) plus eight sibling module files, about 3,600 lines in total, with structs, enums, generics, trait impls, strings, vectors and hash maps; used to measure the multi-file build path",
+      "workload": {
+        "modules": 8,
+        "files": 9,
+        "lines": 3587
+      },
+      "compile_only": true,
+      "sources": {
+        "lsaca": "benchmarks\\programs\\modules_compile\\main.ls"
+      },
+      "languages": {
+        "lsaca": {
+          "compile": {
+            "kind": "lsaca-official",
+            "backend": "direct C compiler back end (default; --cmake available)",
+            "cold_s": 2.378555,
+            "cached_runs_s": [
+              0.198594,
+              0.191984,
+              0.201795
+            ],
+            "cached_median_s": 0.198594,
+            "generated_c_bytes": 1592482,
+            "generated_c_files": 10,
+            "exe": "target\\bench-tmp\\build\\modules_compile\\lsaca\\main.exe",
+            "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (multi-file mode: 'lsaca build -r <crate root>' where the root file's 'mod' declarations load the sibling module files); the cached build re-uses the same cache directory and only re-links the executable",
+            "mode": "official"
+          },
+          "runtime": null,
+          "memory": null
+        }
+      }
+    },
+    "package_compile": {
+      "expected": "checksum=417367897",
+      "description": "package with path dependencies: the binary package compile_app plus the library packages util_a and util_b (util_b depends on util_a), about 1,090 lines spread over thirteen files, used to measure package-mode builds",
+      "workload": {
+        "packages": 3,
+        "module_files": 10,
+        "files": 13,
+        "lines": 1088
+      },
+      "compile_only": true,
+      "sources": {
+        "lsaca": "benchmarks\\packages\\compile_app\\src\\main.ls"
+      },
+      "languages": {
+        "lsaca": {
+          "compile": {
+            "kind": "lsaca-official",
+            "backend": "direct C compiler back end (default; --cmake available)",
+            "cold_s": 1.481857,
+            "cached_runs_s": [
+              0.040989,
+              0.041755,
+              0.041786
+            ],
+            "cached_median_s": 0.041755,
+            "generated_c_bytes": 540296,
+            "generated_c_files": 7,
+            "exe": "target\\bench-tmp\\build\\package_compile\\lsaca\\compile_app.exe",
+            "note": "cold build runs one default 'lsaca build -r' with a fresh LSACA_CACHE_DIR (package mode: 'lsaca build -r' with no file argument from the package directory (the manifest is discovered upward and path dependencies are built)); the cached build re-uses the same cache directory and only re-links the executable",
             "mode": "official"
           },
           "runtime": null,

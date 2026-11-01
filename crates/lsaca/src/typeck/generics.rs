@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use super::check::Checker;
 use super::items::{EnumInfo, FnInfo, FnSig, StructInfo, sanitize_c_ident};
 use super::itype::ITy;
-use crate::ast::{EnumDecl, FnDecl, GenericParam, StructDecl, TraitRef, TypeExpr};
+use super::modules::ModuleId;
+use crate::ast::{EnumDecl, FnDecl, GenericParam, StructDecl, TraitRef, TypeExpr, Visibility};
 use crate::diag::Diagnostic;
 use crate::span::Span;
 use crate::types::SelfKind;
@@ -65,20 +66,26 @@ pub struct FnInstance {
 #[derive(Clone, Debug)]
 pub struct GStructDef {
     pub name: String,
-    pub span: Span,
     pub generics: Vec<GenericParam>,
     pub decl: StructDecl,
     pub instances: HashMap<Vec<ITy>, usize>,
+    /// Module that declares the struct.
+    pub module: ModuleId,
+    /// Prefix for the C identifiers of instances.
+    pub c_name_base: String,
 }
 
 /// A generic enum declaration.
 #[derive(Clone, Debug)]
 pub struct GEnumDef {
     pub name: String,
-    pub span: Span,
     pub generics: Vec<GenericParam>,
     pub decl: EnumDecl,
     pub instances: HashMap<Vec<ITy>, usize>,
+    /// Module that declares the enum.
+    pub module: ModuleId,
+    /// Prefix for the C identifiers of instances.
+    pub c_name_base: String,
 }
 
 /// A generic function declaration: a free function or an impl method whose
@@ -95,6 +102,8 @@ pub struct GFnDef {
     pub owner: GenericOwner,
     pub instances: HashMap<Vec<ITy>, usize>,
     pub origin: DefOrigin,
+    /// Module that declares the function (or the impl it belongs to).
+    pub module: ModuleId,
     /// Prefix for the C identifiers of instances.
     pub c_name_base: String,
     /// Display name without type arguments, e.g. "Pair::new" or
@@ -114,6 +123,8 @@ pub struct ImplMethod {
 #[derive(Clone, Debug)]
 pub struct ImplInfo {
     pub id: usize,
+    /// Module that contains the impl block.
+    pub module: ModuleId,
     pub generics: Vec<GenericParam>,
     pub self_ty: TypeExpr,
     pub trait_ref: Option<TraitRef>,
@@ -356,10 +367,11 @@ impl<'a> Checker<'a> {
             return Some(id);
         }
         let name = self.instance_display(&def.name, &args);
-        let c_name = self.instance_c_name(&def.name, &args);
+        let c_name = self.instance_c_name(&def.c_name_base, &args);
         let id = self.structs.len();
         self.structs.push(StructInfo {
             name,
+            module: def.module,
             c_name,
             generic: Some(StructInstance {
                 def_id,
@@ -417,10 +429,11 @@ impl<'a> Checker<'a> {
             return Some(id);
         }
         let name = self.instance_display(&def.name, &args);
-        let c_name = self.instance_c_name(&def.name, &args);
+        let c_name = self.instance_c_name(&def.c_name_base, &args);
         let id = self.enums.len();
         self.enums.push(EnumInfo {
             name,
+            module: def.module,
             c_name,
             generic: Some(EnumInstance {
                 def_id,
@@ -464,7 +477,9 @@ impl<'a> Checker<'a> {
         }
         let quiet = self.probe_quiet;
         self.probe_quiet = true;
-        let matched = self.infer_args_from_ty(&info.self_ty, receiver, &mut env, info.span);
+        let matched = self.with_module(info.module, |checker| {
+            checker.infer_args_from_ty(&info.self_ty, receiver, &mut env, info.span)
+        });
         self.probe_quiet = quiet;
         if !matched {
             self.infer = snapshot;
@@ -495,7 +510,9 @@ impl<'a> Checker<'a> {
             concrete_env.insert(param.name.clone(), arg.clone());
         }
         self.push_generic_env(concrete_env);
-        let concrete_self = self.resolve_ty(&info.self_ty, None);
+        let concrete_self = self.with_module(info.module, |checker| {
+            checker.resolve_ty(&info.self_ty, None)
+        });
         self.pop_generic_env();
         let matched = match concrete_self {
             Some(ty) => self.infer.unify(&ty, receiver).is_ok(),
@@ -517,7 +534,9 @@ impl<'a> Checker<'a> {
             env.insert(param.name.clone(), arg.clone());
         }
         self.push_generic_env(env);
-        let self_ty = self.resolve_ty(&info.self_ty, None);
+        let self_ty = self.with_module(info.module, |checker| {
+            checker.resolve_ty(&info.self_ty, None)
+        });
         self.pop_generic_env();
         self_ty.map(|ty| self.infer.resolve(&ty))
     }
@@ -532,6 +551,10 @@ impl<'a> Checker<'a> {
         args: &[ITy],
         self_ty: Option<&ITy>,
     ) -> Option<FnSig> {
+        // The signature belongs to the definition: resolve its types in the
+        // module that declares the function, not in the caller's module.
+        let previous_module = self.current_module;
+        self.current_module = def.module;
         let mut env = HashMap::new();
         for (param, arg) in def.generics.iter().zip(args.iter()) {
             env.insert(param.name.clone(), arg.clone());
@@ -663,6 +686,7 @@ impl<'a> Checker<'a> {
             }
         }
         self.pop_generic_env();
+        self.current_module = previous_module;
         Some(FnSig {
             params,
             ret,
@@ -722,7 +746,7 @@ impl<'a> Checker<'a> {
             );
             return None;
         }
-        self.validate_generic_bounds(&def.generics, &args, span);
+        self.validate_generic_bounds(&def.generics, &args, span, def.module);
         let self_ty = match def.owner {
             GenericOwner::InherentImpl(impl_id) | GenericOwner::TraitImpl(impl_id) => {
                 self.impl_self_ty(impl_id, &args)
@@ -766,6 +790,8 @@ impl<'a> Checker<'a> {
             name: def.name.clone(),
             display,
             c_name,
+            module: def.module,
+            vis: Visibility::Public,
             decl: def.decl.clone(),
             origin: def.origin,
             generic: Some(FnInstance {
@@ -792,7 +818,7 @@ impl<'a> Checker<'a> {
     /// Display name of a trait impl's trait with its concrete arguments.
     pub fn impl_trait_display(&mut self, info: &ImplInfo, args: &[ITy]) -> Option<String> {
         let trait_ref = info.trait_ref.as_ref()?.clone();
-        let trait_id = self.trait_by_name.get(&trait_ref.name).copied()?;
+        let trait_id = self.lookup_trait(&trait_ref.name)?;
         if trait_ref.args.is_empty() {
             return Some(trait_ref.name.clone());
         }
@@ -801,14 +827,16 @@ impl<'a> Checker<'a> {
             env.insert(param.name.clone(), arg.clone());
         }
         self.push_generic_env(env);
-        let resolved: Vec<String> = trait_ref
-            .args
-            .iter()
-            .map(|arg| match self.resolve_ty(arg, None) {
-                Some(ty) => self.describe_resolved(&ty),
-                None => "_".to_string(),
-            })
-            .collect();
+        let resolved: Vec<String> = self.with_module(info.module, |checker| {
+            trait_ref
+                .args
+                .iter()
+                .map(|arg| match checker.resolve_ty(arg, None) {
+                    Some(ty) => checker.describe_resolved(&ty),
+                    None => "_".to_string(),
+                })
+                .collect()
+        });
         self.pop_generic_env();
         let _ = trait_id;
         Some(format!("{}<{}>", trait_ref.name, resolved.join(", ")))
@@ -818,12 +846,22 @@ impl<'a> Checker<'a> {
     // Bounds
     // -----------------------------------------------------------------------
 
-    pub fn validate_generic_bounds(&mut self, generics: &[GenericParam], args: &[ITy], span: Span) {
+    pub fn validate_generic_bounds(
+        &mut self,
+        generics: &[GenericParam],
+        args: &[ITy],
+        span: Span,
+        module: ModuleId,
+    ) {
+        // Bounds are declared by the generic item: resolve them in its module.
+        let previous_module = self.current_module;
+        self.current_module = module;
         for (param, arg) in generics.iter().zip(args.iter()) {
             for bound in &param.bounds {
                 self.validate_bound(arg, bound, generics, args, span);
             }
         }
+        self.current_module = previous_module;
     }
 
     fn validate_bound(
@@ -857,7 +895,7 @@ impl<'a> Checker<'a> {
                     }
                     return;
                 }
-                let trait_id = match self.trait_by_name.get(name).copied() {
+                let trait_id = match self.lookup_trait(name) {
                     Some(id) => id,
                     None => {
                         self.error_code(
@@ -1091,7 +1129,7 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
-                if let Some(&def_id) = self.generic_struct_by_name.get(name) {
+                if let Some(def_id) = self.lookup_generic_struct(name) {
                     return self.infer_args_from_instance(
                         def_id,
                         true,
@@ -1101,7 +1139,7 @@ impl<'a> Checker<'a> {
                         report_span,
                     );
                 }
-                if let Some(&def_id) = self.generic_enum_by_name.get(name) {
+                if let Some(def_id) = self.lookup_generic_enum(name) {
                     return self.infer_args_from_instance(
                         def_id,
                         false,

@@ -1,9 +1,13 @@
 //! Diagnostics: errors and warnings with source spans, rendered in a
 //! rustc-like format.
+//!
+//! A diagnostic span is a global byte offset (see [crate::span]); rendering
+//! resolves it back to the owning source file through a
+//! [SourceLookup], so one compilation can consist of many files.
 
 use std::fmt::Write as _;
 
-use crate::span::SourceFile;
+use crate::span::{SourceFile, SourceLookup};
 
 pub use crate::span::Span;
 
@@ -93,7 +97,7 @@ impl Diagnostic {
 }
 
 /// An ordered collection of diagnostics. Front-end phases append to the same
-/// buffer so a file can report multiple independent problems in one run.
+/// buffer so a program can report multiple independent problems in one run.
 #[derive(Clone, Debug, Default)]
 pub struct Diagnostics {
     items: Vec<Diagnostic>,
@@ -165,18 +169,19 @@ impl Diagnostics {
         &self.items
     }
 
-    /// Render every diagnostic against a source file.
-    pub fn render(&self, file: &SourceFile) -> String {
+    /// Render every diagnostic against a source lookup (a single file or a
+    /// whole multi-file source map).
+    pub fn render(&self, sources: &(impl SourceLookup + ?Sized)) -> String {
         let mut out = String::new();
         for diagnostic in &self.items {
-            render_diagnostic(&mut out, file, diagnostic);
+            render_diagnostic(&mut out, sources, diagnostic);
         }
         out
     }
 
-    /// Render and print every diagnostic to stderr.
-    pub fn print(&self, file: &SourceFile, mut writer: impl std::io::Write) {
-        let text = self.render(file);
+    /// Render and print every diagnostic to a writer.
+    pub fn print(&self, sources: &(impl SourceLookup + ?Sized), mut writer: impl std::io::Write) {
+        let text = self.render(sources);
         let _ = writer.write_all(text.as_bytes());
     }
 }
@@ -191,9 +196,20 @@ pub fn sort_and_dedup(diagnostics: &mut Diagnostics) {
         .dedup_by(|a, b| a.message == b.message && a.span == b.span);
 }
 
+/// Resolve the file owning a span, falling back to the primary file so that
+/// diagnostics with synthetic spans still render somewhere sensible.
+fn resolve_file<S: SourceLookup + ?Sized>(sources: &S, span: Span) -> Option<&SourceFile> {
+    sources
+        .file_of_span(span)
+        .or_else(|| sources.primary_file())
+}
+
 /// Render one diagnostic, including a caret underline for the primary span.
-pub fn render_diagnostic(out: &mut String, file: &SourceFile, diagnostic: &Diagnostic) {
-    let (line, column) = file.line_col(diagnostic.span.start);
+pub fn render_diagnostic<S: SourceLookup + ?Sized>(
+    out: &mut String,
+    sources: &S,
+    diagnostic: &Diagnostic,
+) {
     match diagnostic.code {
         Some(code) => {
             let _ = writeln!(
@@ -214,6 +230,20 @@ pub fn render_diagnostic(out: &mut String, file: &SourceFile, diagnostic: &Diagn
         }
     }
 
+    let Some(file) = resolve_file(sources, diagnostic.span) else {
+        let _ = writeln!(out, " --> <unknown source location>");
+        for note in &diagnostic.notes {
+            let _ = writeln!(out, " = note: {}", note);
+        }
+        let _ = writeln!(out);
+        return;
+    };
+
+    // All positions in the renderer are LOCAL to the resolved file: spans are
+    // converted once here, everything below works with file-local offsets.
+    let span = file.local_span(diagnostic.span);
+    let (line, column) = file.line_col(span.start);
+
     let line_text = file.line_text(line);
     let gutter_width = format!("{}", line).len();
     let _ = writeln!(
@@ -229,8 +259,8 @@ pub fn render_diagnostic(out: &mut String, file: &SourceFile, diagnostic: &Diagn
 
     // Caret underline for the primary span, clipped to the displayed line.
     let line_span = file.line_span(line);
-    let span_start = diagnostic.span.start.max(line_span.start);
-    let span_end = diagnostic.span.end.min(line_span.end).max(span_start);
+    let span_start = span.start.max(line_span.start);
+    let span_end = span.end.min(line_span.end).max(span_start);
     let prefix_chars = file
         .text()
         .get(line_span.start as usize..span_start as usize)
@@ -282,19 +312,23 @@ pub fn render_diagnostic(out: &mut String, file: &SourceFile, diagnostic: &Diagn
     );
 
     for label in &diagnostic.labels {
-        if let Some(message) = &label.message {
-            let (l_line, l_col) = file.line_col(label.span.start);
-            let _ = writeln!(
-                out,
-                "{:width$} = note: {}:{}:{}: {}",
-                "",
-                file.name(),
-                l_line,
-                l_col,
-                message,
-                width = gutter_width + 1
-            );
-        }
+        let Some(message) = &label.message else {
+            continue;
+        };
+        // Labels may point at a different file than the primary span.
+        let label_file = resolve_file(sources, label.span).unwrap_or(file);
+        let label_span = label_file.local_span(label.span);
+        let (l_line, l_col) = label_file.line_col(label_span.start);
+        let _ = writeln!(
+            out,
+            "{:width$} = note: {}:{}:{}: {}",
+            "",
+            label_file.name(),
+            l_line,
+            l_col,
+            message,
+            width = gutter_width + 1
+        );
     }
     for note in &diagnostic.notes {
         let _ = writeln!(
@@ -309,10 +343,10 @@ pub fn render_diagnostic(out: &mut String, file: &SourceFile, diagnostic: &Diagn
 }
 
 /// Convenience: render a batch of raw diagnostics for tests and the CLI.
-pub fn render_all(file: &SourceFile, diagnostics: &[Diagnostic]) -> String {
+pub fn render_all<S: SourceLookup + ?Sized>(sources: &S, diagnostics: &[Diagnostic]) -> String {
     let mut out = String::new();
     for diagnostic in diagnostics {
-        render_diagnostic(&mut out, file, diagnostic);
+        render_diagnostic(&mut out, sources, diagnostic);
     }
     out
 }
@@ -320,6 +354,7 @@ pub fn render_all(file: &SourceFile, diagnostics: &[Diagnostic]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::span::SourceMap;
 
     #[test]
     fn renders_caret() {
@@ -363,5 +398,37 @@ mod tests {
         diagnostics.warning("b", Span::empty(1));
         assert!(diagnostics.has_errors());
         assert_eq!(diagnostics.error_count(), 1);
+    }
+
+    #[test]
+    fn renders_diagnostics_from_several_files() {
+        let mut map = SourceMap::new();
+        map.add_file("src/main.ls", "mod helper;\nfn main() {}\n");
+        let helper_base = map.file(0).end() + 1;
+        map.add_file("src/helper.ls", "pub fn helper() {}\n");
+        let helper_span = Span::new(helper_base + 3, helper_base + 4);
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.push(
+            Diagnostic::error("type mismatch", helper_span)
+                .with_code("E0308")
+                .with_label(Span::new(0, 1), "first defined here"),
+        );
+        let rendered = diagnostics.render(&map);
+        assert!(rendered.contains("error[E0308]: type mismatch"));
+        assert!(rendered.contains("--> src/helper.ls:1:4"));
+        assert!(rendered.contains("= note: src/main.ls:1:1: first defined here"));
+    }
+
+    #[test]
+    fn unknown_spans_render_without_a_file() {
+        let map = SourceMap::new();
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.push(
+            Diagnostic::error("manifest error", Span::empty(0)).with_note("check lsaca.toml"),
+        );
+        let rendered = diagnostics.render(&map);
+        assert!(rendered.contains("manifest error"));
+        assert!(rendered.contains("<unknown source location>"));
+        assert!(rendered.contains("check lsaca.toml"));
     }
 }

@@ -12,8 +12,13 @@ use crate::typeck::check::Checker;
 use crate::typeck::items::{TypeKey, closest_name};
 use crate::typeck::iterators::is_iterator_sugar_name;
 use crate::typeck::itype::{ITy, VarKind};
+use crate::typeck::modules::{DefRef, ModuleId};
 use crate::typeck::tree::{TExpr, TExprKind, TFormatPart, TFormatPartKind, TMacroCall};
 use crate::types::{IntTy, SelfKind};
+
+/// Maximum number of path segments resolved by one call path. Module paths may
+/// be arbitrarily deep, so this is only an anti-DoS guard.
+const MAX_CALL_PATH_SEGMENTS: usize = 256;
 
 impl<'a> Checker<'a> {
     pub fn check_call(
@@ -80,7 +85,7 @@ impl<'a> Checker<'a> {
         if segments.len() == 1 {
             let name = segments[0].name.clone();
             if !segments[0].generics.is_empty() {
-                if let Some(def_id) = self.generic_fn_by_name.get(&name).copied() {
+                if let Some(def_id) = self.lookup_generic_fn(&name) {
                     let explicit = segments[0].generics.clone();
                     return self.check_generic_free_call(def_id, &explicit, args, span, hint);
                 }
@@ -103,14 +108,14 @@ impl<'a> Checker<'a> {
                 "Err" => return self.check_result_err_ctor(args, span, hint),
                 _ => {}
             }
-            if self.const_by_name.contains_key(&name) {
+            if self.lookup_const(&name).is_some() {
                 let callee = self.check_path_value(path, None, path.span);
                 return self.check_call_value(callee, args, span, hint);
             }
-            if let Some(fn_id) = self.fn_by_name.get(&name).copied() {
+            if let Some(fn_id) = self.lookup_fn(&name) {
                 return self.check_direct_call(fn_id, None, args, span, hint);
             }
-            if let Some(def_id) = self.generic_fn_by_name.get(&name).copied() {
+            if let Some(def_id) = self.lookup_generic_fn(&name) {
                 return self.check_generic_free_call(def_id, &[], args, span, hint);
             }
             if builtin_fn(&name).is_some() {
@@ -128,6 +133,59 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
+        if segments.len() > MAX_CALL_PATH_SEGMENTS {
+            self.error_code(
+                format!("path has more than {} segments", MAX_CALL_PATH_SEGMENTS),
+                path.span,
+                "E0001",
+            );
+            for arg in args {
+                let _ = self.check_expr(arg, None);
+            }
+            return self.never_expr(span);
+        }
+        // Uniform path resolution: the leading segments may name a module (or
+        // start with crate/self/super or a dependency crate), in which case the
+        // call is resolved inside that module.
+        let prefix_len = segments.len() - 1;
+        if let Some((module, consumed)) = self.resolve_path_prefix(path, prefix_len, false)
+            && consumed > 0
+        {
+            // The prefix resolved quietly so that associated-item syntax
+            // keeps working, but every module it walked must be visible.
+            if !self.check_module_steps_visible(path, consumed) {
+                for arg in args {
+                    let _ = self.check_expr(arg, None);
+                }
+                return self.never_expr(span);
+            }
+            if consumed == prefix_len {
+                let segment = path.segments[prefix_len].clone();
+                return self.check_module_item_call(module, &segment, args, span, hint);
+            }
+            if consumed + 2 == segments.len() {
+                let rest = ast::PathExpr {
+                    segments: path.segments[consumed..].to_vec(),
+                    span: path.span,
+                };
+                return self.with_resolved_module(module, |checker| {
+                    checker.check_call_path(&rest, args, span, hint)
+                });
+            }
+            let module_path = self.module_path_string(module);
+            self.error_code(
+                format!(
+                    "could not find '{}' in '{}'",
+                    segments[consumed].name, module_path
+                ),
+                segments[0].span,
+                "E0433",
+            );
+            for arg in args {
+                let _ = self.check_expr(arg, None);
+            }
+            return self.never_expr(span);
+        }
         if segments.len() == 2 {
             let type_name = segments[0].name.clone();
             let item = segments[1].name.clone();
@@ -137,11 +195,11 @@ impl<'a> Checker<'a> {
             {
                 return expr;
             }
-            if self.generic_enum_by_name.contains_key(&type_name) {
+            if self.lookup_generic_enum(&type_name).is_some() {
                 return self
                     .check_generic_enum_call(&type_name, &generics, &item, args, span, hint);
             }
-            if self.generic_struct_by_name.contains_key(&type_name) {
+            if self.lookup_generic_struct(&type_name).is_some() {
                 return self
                     .check_generic_assoc_call(&type_name, &generics, &item, args, span, hint);
             }
@@ -210,6 +268,18 @@ impl<'a> Checker<'a> {
             }
             if let Some(owner) = self.lookup_type_key(&type_name, segments[0].span) {
                 if let Some(fn_id) = self.methods.get(&(owner, item.clone())).copied() {
+                    if !self.method_visible(fn_id) {
+                        let owner_name = self.type_name(owner);
+                        self.error_code(
+                            format!("associated function {}::{} is private", owner_name, item),
+                            span,
+                            "E0624",
+                        );
+                        for arg in args {
+                            let _ = self.check_expr(arg, None);
+                        }
+                        return self.never_expr(span);
+                    }
                     if self.fns[fn_id].is_method() {
                         let owner_name = self.type_name(owner);
                         self.error_code(
@@ -255,10 +325,96 @@ impl<'a> Checker<'a> {
             }
             return self.never_expr(span);
         }
+        let first = &segments[0];
         self.error_code(
-            "paths with more than two segments are not supported".to_string(),
-            path.span,
-            "E0001",
+            format!("cannot find module '{}' in this scope", first.name),
+            first.span,
+            "E0433",
+        );
+        for arg in args {
+            let _ = self.check_expr(arg, None);
+        }
+        self.never_expr(span)
+    }
+
+    /// Resolve a module-qualified call such as <mod>util::math::double</mod>.
+    pub fn check_module_item_call(
+        &mut self,
+        module: ModuleId,
+        segment: &ast::PathSegment,
+        args: &[ast::Expr],
+        span: Span,
+        hint: Option<&ITy>,
+    ) -> TExpr {
+        let name = segment.name.clone();
+        let generics = segment.generics.clone();
+        if let Some(binding) = self.lookup_value_in(module, &name) {
+            if !self.check_binding_visible(&binding, segment.span) {
+                for arg in args {
+                    let _ = self.check_expr(arg, None);
+                }
+                return self.never_expr(span);
+            }
+            match binding.def {
+                DefRef::Fn(fn_id) => {
+                    if !generics.is_empty() {
+                        self.error_code(
+                            "generic arguments are not allowed here".to_string(),
+                            segment.span,
+                            "E0107",
+                        );
+                    }
+                    return self.check_direct_call(fn_id, None, args, span, hint);
+                }
+                DefRef::GenericFn(def_id) => {
+                    return self.check_generic_free_call(def_id, &generics, args, span, hint);
+                }
+                DefRef::Const(id) => {
+                    if !generics.is_empty() {
+                        self.error_code(
+                            "generic arguments are not allowed here".to_string(),
+                            segment.span,
+                            "E0107",
+                        );
+                    }
+                    self.ensure_const(id);
+                    if let Some((ty, _)) = self.const_value(id) {
+                        let ity = ITy::from_ty(&ty);
+                        let callee =
+                            TExpr::new(ity, TExprKind::ConstRef { const_id: id }, segment.span);
+                        return self.check_call_value(callee, args, span, hint);
+                    }
+                    for arg in args {
+                        let _ = self.check_expr(arg, None);
+                    }
+                    return self.never_expr(span);
+                }
+                other => {
+                    self.error_code(
+                        format!("expected a value, found {}", other.kind_name()),
+                        span,
+                        "E0423",
+                    );
+                    for arg in args {
+                        let _ = self.check_expr(arg, None);
+                    }
+                    return self.never_expr(span);
+                }
+            }
+        }
+        let mut candidates: Vec<String> = self.modules[module].values.keys().cloned().collect();
+        candidates.sort();
+        candidates.retain(|candidate| !candidate.starts_with("__lsaca_"));
+        let refs: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.as_str())
+            .collect();
+        let suggestion = closest_name(&name, &refs);
+        self.error_suggest(
+            format!("cannot find function {} in this scope", name),
+            suggestion,
+            span,
+            "E0425",
         );
         for arg in args {
             let _ = self.check_expr(arg, None);
@@ -950,6 +1106,18 @@ impl<'a> Checker<'a> {
         if let Some(owner) = owner
             && let Some(fn_id) = self.methods.get(&(owner, method.to_string())).copied()
         {
+            if !self.method_visible(fn_id) {
+                let type_name = self.type_name(owner);
+                self.error_code(
+                    format!("method {}::{} is private", type_name, method),
+                    method_span,
+                    "E0624",
+                );
+                for arg in args {
+                    let _ = self.check_expr(arg, None);
+                }
+                return self.never_expr(span);
+            }
             if self.fns[fn_id].self_kind.is_none() {
                 let type_name = self.type_name(owner);
                 self.error_code(
@@ -1409,6 +1577,76 @@ impl<'a> Checker<'a> {
                     TExprKind::Macro(TMacroCall {
                         kind: HMacroKind::AssertEq,
                         parts: Vec::new(),
+                        args,
+                    }),
+                    span,
+                )
+            }
+            "assert_ne" => {
+                // Rust's assert_ne!: two operands, optionally followed by a
+                // format string and its arguments for the custom failure
+                // message. A missing operand is an arity error; extra trailing
+                // expressions are checked as format arguments.
+                if m.args.len() < 2 {
+                    self.error_code(
+                        format!(
+                            "assert_ne! takes 2 arguments but {} were supplied",
+                            m.args.len()
+                        ),
+                        span,
+                        "E0061",
+                    );
+                }
+                let mut args = Vec::new();
+                let operand_count = m.args.len().min(2);
+                let mut first_ty = self.infer.fresh_var();
+                for (index, arg) in m.args.iter().take(operand_count).enumerate() {
+                    let hint = if index == 0 {
+                        None
+                    } else {
+                        Some(first_ty.clone())
+                    };
+                    let value = self.check_expr(arg, hint.as_ref());
+                    if index == 0 {
+                        first_ty = value.ty.clone();
+                    } else if !self.unify_quiet(&first_ty, &value.ty) {
+                        let resolved_first = self.infer.resolve(&first_ty);
+                        let resolved_value = self.infer.resolve(&value.ty);
+                        self.report_mismatch(&resolved_first, &resolved_value, arg.span);
+                    }
+                    args.push(value);
+                }
+                if operand_count == 2 {
+                    let resolved_first = self.infer.resolve(&first_ty);
+                    if !self.equality_supported(&resolved_first) {
+                        let described = self.describe_resolved(&resolved_first);
+                        self.error_code(
+                            format!(
+                                "assert_ne! requires a type that supports !=, found {}",
+                                described
+                            ),
+                            span,
+                            "E0001",
+                        );
+                    }
+                }
+                let parts = if m.args.len() > 2 {
+                    let format_call = ast::MacroCall {
+                        name: m.name.clone(),
+                        name_span: m.name_span,
+                        args: m.args[2..].to_vec(),
+                        span: m.args[2].span,
+                    };
+                    self.check_format_parts(&format_call, span)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                TExpr::new(
+                    ITy::unit(),
+                    TExprKind::Macro(TMacroCall {
+                        kind: HMacroKind::AssertNe,
+                        parts,
                         args,
                     }),
                     span,

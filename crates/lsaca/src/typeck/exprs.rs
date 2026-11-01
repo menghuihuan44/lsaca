@@ -306,7 +306,7 @@ impl<'a> Checker<'a> {
             if let Some((impl_id, impl_args)) = self.find_trait_impl(&iter_ty, "Iterator") {
                 self.check_impl_coherence(impl_id, span);
                 let info = self.impls[impl_id].clone();
-                self.validate_generic_bounds(&info.generics, &impl_args, span);
+                self.validate_generic_bounds(&info.generics, &impl_args, span, info.module);
                 if let Some(trait_args) = self.trait_impl_args(impl_id, &impl_args)
                     && let Some(first) = trait_args.first().cloned()
                 {
@@ -963,6 +963,13 @@ impl<'a> Checker<'a> {
                 .position(|(name, _, _)| *name == field.name);
             match index {
                 Some(index) => {
+                    if !self.field_visible(struct_id, index) {
+                        self.error_code(
+                            format!("field {} of struct {} is private", field.name, struct_name),
+                            field.name_span,
+                            "E0451",
+                        );
+                    }
                     let expected = struct_fields[index].2.clone();
                     let value = self.check_expr(&field.value, Some(&expected));
                     let value = self.coerce_to(value, &expected, field.value.span);
@@ -1017,19 +1024,48 @@ impl<'a> Checker<'a> {
         hint: Option<&ITy>,
     ) -> Option<usize> {
         let span = path.span;
-        let (name, explicit) = if path.segments.len() == 1 {
-            (
-                path.segments[0].name.clone(),
-                path.segments[0].generics.clone(),
-            )
-        } else {
-            self.error_code(
-                "struct literals must use a single struct name".to_string(),
-                span,
-                "E0422",
-            );
-            return None;
-        };
+        if path.segments.len() > 1 {
+            // Uniform path resolution: the leading segments may name a module.
+            let last = path.segments.len() - 1;
+            let name = path.segments[last].name.clone();
+            let explicit = path.segments[last].generics.clone();
+            match self.resolve_path_prefix(path, last, true) {
+                Some((module, consumed)) if consumed > 0 && consumed == last => {
+                    if !self.check_type_visible_in(module, &name, path.span) {
+                        return None;
+                    }
+                    return self.with_resolved_module(module, |checker| {
+                        checker.resolve_struct_path_named(&name, &explicit, hint, span)
+                    });
+                }
+                Some((module, consumed)) => {
+                    let module_path = self.module_path_string(module);
+                    self.error_code(
+                        format!(
+                            "could not find '{}' in '{}'",
+                            path.segments[consumed].name, module_path
+                        ),
+                        span,
+                        "E0433",
+                    );
+                    return None;
+                }
+                None => return None,
+            }
+        }
+        let name = path.segments[0].name.clone();
+        let explicit = path.segments[0].generics.clone();
+        self.resolve_struct_path_named(&name, &explicit, hint, span)
+    }
+
+    /// Resolve a struct literal path whose type name is already isolated.
+    fn resolve_struct_path_named(
+        &mut self,
+        name: &str,
+        explicit: &[ast::TypeExpr],
+        hint: Option<&ITy>,
+        span: Span,
+    ) -> Option<usize> {
         if name == "Self" {
             // Generic impl methods keep the concrete self type in the generic
             // environment, so consult that before the concrete methods map.
@@ -1069,11 +1105,11 @@ impl<'a> Checker<'a> {
         }
         // A generic struct literal is instantiated from turbofish arguments or
         // from the expected type; otherwise its arguments cannot be known.
-        if self.generic_struct_by_name.contains_key(&name) {
+        if self.lookup_generic_struct(name).is_some() {
             let instance = if !explicit.is_empty() {
-                self.resolve_generic_instance(&name, &explicit, span)
+                self.resolve_generic_instance(name, explicit, span)
             } else {
-                self.hinted_instance_of(&name, hint)
+                self.hinted_instance_of(name, hint)
             };
             return match instance {
                 Some(ITy::Struct(struct_id)) => Some(struct_id),
@@ -1091,10 +1127,10 @@ impl<'a> Checker<'a> {
                 }
             };
         }
-        if let Some(id) = self.struct_by_name.get(&name).copied() {
+        if let Some(id) = self.lookup_struct(name) {
             return Some(id);
         }
-        if self.enum_by_name.contains_key(&name) {
+        if self.lookup_enum(name).is_some() {
             self.error_code(
                 format!("expected a struct literal, found enum {}", name),
                 span,
@@ -1102,7 +1138,7 @@ impl<'a> Checker<'a> {
             );
             return None;
         }
-        let suggestion = self.suggest_type_name(&name);
+        let suggestion = self.suggest_type_name(name);
         self.error_suggest(
             format!("cannot find struct {} in this scope", name),
             suggestion,
@@ -1116,7 +1152,7 @@ impl<'a> Checker<'a> {
         &mut self,
         base: &ast::Expr,
         name: &str,
-        _name_span: Span,
+        name_span: Span,
         span: Span,
         hint: Option<&ITy>,
     ) -> TExpr {
@@ -1129,6 +1165,14 @@ impl<'a> Checker<'a> {
                 self.ensure_struct_fields(id);
                 let fields = self.struct_fields(id);
                 if let Some(index) = fields.iter().position(|(field, _, _)| field == name) {
+                    if !self.field_visible(id, index) {
+                        let struct_name = self.struct_name(id);
+                        self.error_code(
+                            format!("field {} of struct {} is private", name, struct_name),
+                            name_span,
+                            "E0616",
+                        );
+                    }
                     let field_ty = fields[index].2.clone();
                     self.apply_hint(&field_ty, hint);
                     return TExpr::new(

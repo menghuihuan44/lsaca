@@ -1,0 +1,6 @@
+[package]
+name = "cross_crate_ok"
+version = "0.1.0"
+
+[dependencies]
+pubcrate_lib = { path = "../pubcrate_lib" }

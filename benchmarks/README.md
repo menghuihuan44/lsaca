@@ -5,8 +5,10 @@ This directory holds the benchmark programs and the measurement harness used for
 
 The goal is a *small* but honest comparison: the same workloads implemented
 idiomatically in lsaca, C, Rust, Python and Node.js, with every run validated against an
-expected checksum so no language can "win" by doing less work. One generated
-compile-only workload measures how the lsaca build scales with source size.
+expected checksum so no language can "win" by doing less work. Three compile-only
+workloads measure how the lsaca build scales with source size and project layout: a
+generated 4,511-line source, a nine-file multi-module program, and a thirteen-file project
+whose binary package depends on two library packages through path dependencies.
 
 ## Layout
 
@@ -21,6 +23,12 @@ compile-only workload measures how the lsaca build scales with source size.
                            hashmap_string
         compile_large.ls   generated 4,511-line lsaca source (compile-only workload)
         gen_compile_large.py  stdlib-only generator for compile_large.ls
+        modules_compile/   compile-only multi-module program: main.ls plus eight
+                           sibling module files (about 3,600 lines)
+      packages/            compile-only package project: the binary package compile_app
+                           plus the library packages util_a and util_b (util_b depends
+                           on util_a), thirteen files and about 1,100 lines in total,
+                           including three lsaca.toml manifests
       results/
         latest.json        raw measurement data (machine + toolchains + timings)
         latest.md          generated markdown tables (a subset of the JSON)
@@ -39,9 +47,10 @@ Then run the suite from the repository root:
 
     python scripts/bench.py
 
-That takes a few minutes on a modern laptop (the published 1.6 run took about three and
-a half minutes for nineteen programs, eighteen of them executed with 7 runs each, plus the
-peak-memory runs) and writes:
+That takes a few minutes on a modern laptop. The suite has twenty-one programs: eighteen
+are executed with 7 runs each plus the peak-memory runs, and three are compile-only. The
+published 1.6 run took about three and a half minutes for its nineteen programs, eighteen
+of them executed. The run writes:
 
 - benchmarks/results/latest.json  (raw data)
 - benchmarks/results/latest.md    (tables)
@@ -84,11 +93,14 @@ fails; fallback results are labelled in the JSON and in the markdown tables.
 | hashmap_i64 | hash map with integer keys | 1,000,000 inserts, 1,000,000 present lookups, 1,000,000 absent lookups and 100,000 deletions; checksum is the folded value sum, final length and hit count | checksum=821060469,900000,1000000 |
 | hashmap_string | hash map with String keys | 200,000 distinct generated String keys, 200,000 present lookups, 200,000 absent lookups (folding the absent key bytes) and 20,000 deletions; checksum is the folded value sum, final length and hit count | checksum=794025725,180000,200000 |
 | compile_large | lsaca build-time scaling (compile-only) | generated 4,511-line lsaca source with 450 functions; built but not executed | checksum=14655037 (not run by the harness) |
+| modules_compile | lsaca multi-file build scaling (compile-only) | one crate root (main.ls) plus eight sibling module files, about 3,600 lines covering structs, enums, generics, trait impls, strings, vectors and hash maps; built but not executed | checksum=547598677 (not run by the harness) |
+| package_compile | lsaca package-mode build scaling (compile-only) | a thirteen-file, three-package project: the binary package compile_app plus the library packages util_a and util_b, where util_b depends on util_a through a path dependency; built but not executed | checksum=417367897 (not run by the harness) |
 
 Each executed program prints exactly one line (checksum=...) and exits with code 0. The
 harness fails the whole run on any mismatch or non-zero exit, so a typo in one
-implementation cannot silently skew the tables. compile_large is the exception: it is
-built but never executed, because its purpose is to measure build time.
+implementation cannot silently skew the tables. The compile-only workloads (compile_large,
+modules_compile and package_compile) are the exception: they are built but never executed,
+because their purpose is to measure build time for different source and project layouts.
 
 sort_i64 uses the same deterministic LCG (16807 * state % 2147483647, seed 12345) in
 every language, and the other workloads use fixed integer formulas, so all five

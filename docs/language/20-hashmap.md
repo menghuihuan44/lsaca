@@ -379,7 +379,7 @@ lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
 
 ## No for-loop iteration
 
-A `HashMap` cannot be iterated with `for` in 1.6.0: it does not implement
+A `HashMap` cannot be iterated with `for` in 1.7.0: it does not implement
 `Iterator<T>`. Use `keys()` or `values()` and iterate the resulting vector:
 
 ```ls,compile-fail
@@ -405,7 +405,7 @@ error[E0277]: cannot iterate over a value of type HashMap<i64, i64>; for loops r
 lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
-## Known limitations in 1.6.0
+## Known limitations in 1.7.0
 
 * Key types are limited to `i64`, `u64`, `bool`, `String` and `char`; user
   structs, enums and other types cannot be keys.
@@ -438,7 +438,7 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 * `insert`, `remove` and `clear` need a mutable binding.
 * `==` compares contents, ignoring insertion order; `{}` and `{:?}` print the
   entries in slot order.
-* There is no `for`-loop iteration over a map in 1.6.0.
+* There is no `for`-loop iteration over a map in 1.7.0.
 
 ## What next
 

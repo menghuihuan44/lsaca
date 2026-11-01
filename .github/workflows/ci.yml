@@ -129,6 +129,43 @@ jobs:
       - name: Run the workspace tests
         run: cargo test --workspace
 
+      # End-to-end module and package workflow: scaffold a project, build and
+      # run it through the package manager path (lsaca.toml discovery), compile
+      # a multi-file crate and a package with a path dependency, and check that
+      # visibility errors are still reported across files.
+      - name: Smoke test modules and packages (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo build --release -p lsaca-cli
+          LSACA_BIN="$PWD/target/release/lsaca"
+          WORK="$RUNNER_TEMP/lsaca-package-smoke"
+          rm -rf "$WORK"
+          "$LSACA_BIN" new "$WORK"
+          (cd "$WORK" && "$LSACA_BIN" run) | tee run.txt | grep -F "Hello, world!"
+          (cd "$WORK" && "$LSACA_BIN" check)
+          test -f "$WORK/lsaca.toml"
+          test -f "$WORK/src/main.ls"
+
+          MOD="$RUNNER_TEMP/lsaca-module-smoke"
+          rm -rf "$MOD"
+          mkdir -p "$MOD"
+          printf 'mod math;\nuse math::{add, multiply as mul};\n\nfn main() {\n    println!("{} {}", add(2, 3), mul(5, 4));\n}\n' > "$MOD/main.ls"
+          printf 'pub fn add(left: i64, right: i64) -> i64 {\n    left + right\n}\n\npub fn multiply(left: i64, right: i64) -> i64 {\n    left * right\n}\n' > "$MOD/math.ls"
+          "$LSACA_BIN" check "$MOD/main.ls"
+          "$LSACA_BIN" run "$MOD/main.ls" | grep -F "5 20"
+
+          LIB="$RUNNER_TEMP/lsaca-dep-lib"
+          APP="$RUNNER_TEMP/lsaca-dep-app"
+          rm -rf "$LIB" "$APP"
+          mkdir -p "$LIB/src" "$APP/src"
+          printf '[package]\nname = "dep_lib"\nversion = "0.1.0"\n' > "$LIB/lsaca.toml"
+          printf 'pub fn greeting() -> String {\n    String::from("hello from a dependency")\n}\n' > "$LIB/src/lib.ls"
+          printf '[package]\nname = "dep_app"\nversion = "0.1.0"\n\n[dependencies]\ndep_lib = { path = "../lsaca-dep-lib" }\n' > "$APP/lsaca.toml"
+          printf 'use dep_lib::greeting;\n\nfn main() {\n    println!("{}", greeting());\n}\n' > "$APP/src/main.ls"
+          (cd "$APP" && "$LSACA_BIN" run) | grep -F "hello from a dependency"
+          (cd "$APP" && "$LSACA_BIN" check)
+
   docs:
     name: Rustdoc
     runs-on: ubuntu-latest
