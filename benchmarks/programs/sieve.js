@@ -1,20 +1,27 @@
-// sieve: count primes below 2,000,000 with a flat Float64Array of i64-sized
+// sieve: count primes below a limit with a flat array of i64-sized integer
 // flags (0 = still prime). The flag representation is the same in every
 // language.
-const LIMIT = 2000000;
+// Optional argument: limit (default 2,000,000, the medium scale).
+'use strict';
 
-function main() {
-  const flags = new Float64Array(LIMIT + 1);
-  let primes = 0;
-  for (let i = 2; i <= LIMIT; i++) {
-    if (flags[i] === 0) {
-      primes++;
-      for (let j = i * i; j <= LIMIT; j += i) {
-        flags[j] = 1;
-      }
-    }
+function argInt(args, index, fallback) {
+  if (index < args.length) {
+    return Number.parseInt(args[index], 10);
   }
-  console.log(`checksum=${primes}`);
+  return fallback;
 }
 
-main();
+const limit = argInt(process.argv.slice(2), 0, 2000000);
+const flags = new Array(limit + 1).fill(0);
+let primes = 0;
+for (let i = 2; i <= limit; i++) {
+  if (flags[i] === 0) {
+    primes += 1;
+    let j = i * i;
+    while (j <= limit) {
+      flags[j] = 1;
+      j += i;
+    }
+  }
+}
+console.log('checksum=' + primes);

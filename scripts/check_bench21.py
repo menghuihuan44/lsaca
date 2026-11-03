@@ -234,7 +234,13 @@ def main():
             checker.failures.append("latest.md runtime table: missing row " + language_label)
             continue
         for name, cell in zip(runtime_programs, row):
-            runtime = data["programs"][name]["languages"][language_key]["runtime"]
+            languages = data["programs"][name]["languages"]
+            if language_key not in languages:
+                # Alternative-implementation workloads are only built in the
+                # languages they compare; the tables show n/a for the rest.
+                checker.equal(cell, "n/a", "latest.md runtime " + language_label + " / " + name)
+                continue
+            runtime = languages[language_key]["runtime"]
             expected = fmt_ms(runtime["median_s"]) + " (" + fmt_ms(runtime["min_s"]) + ")"
             checker.equal(cell, expected, "latest.md runtime " + language_label + " / " + name)
 
@@ -245,7 +251,11 @@ def main():
             checker.failures.append("latest.md memory table: missing row " + language_label)
             continue
         for name, cell in zip(runtime_programs, row):
-            peak = data["programs"][name]["languages"][language_key]["memory"]["peak_mib"]
+            languages = data["programs"][name]["languages"]
+            if language_key not in languages:
+                checker.equal(cell, "n/a", "latest.md memory " + language_label + " / " + name)
+                continue
+            peak = languages[language_key]["memory"]["peak_mib"]
             checker.equal(cell, fmt_fixed(peak, 1), "latest.md memory " + language_label + " / " + name)
 
     # Ratio table on the page must be recomputable from latest.json medians.
@@ -254,7 +264,11 @@ def main():
     else:
         c_median = {}
         for name in runtime_programs:
-            c_median[name] = data["programs"][name]["languages"]["c"]["runtime"]["median_s"]
+            languages = data["programs"][name]["languages"]
+            if "c" not in languages:
+                checker.failures.append("ratio table: missing C runtime data for " + name)
+                continue
+            c_median[name] = languages["c"]["runtime"]["median_s"]
         ratio_rows = {row[0]: row[1:] for row in page_ratio["rows"]}
         for language_label in ("lsaca", "Rust", "Python 3", "Node.js"):
             row = ratio_rows.get(language_label)
@@ -263,7 +277,13 @@ def main():
                 continue
             language_key = RATIO_KEY[language_label]
             for name, cell in zip(runtime_programs, row):
-                median = data["programs"][name]["languages"][language_key]["runtime"]["median_s"]
+                if name not in c_median:
+                    continue
+                languages = data["programs"][name]["languages"]
+                if language_key not in languages:
+                    checker.equal(cell, "n/a", "ratio " + language_label + " / " + name)
+                    continue
+                median = languages[language_key]["runtime"]["median_s"]
                 expected = "{0:.2f}x".format(median / c_median[name])
                 checker.equal(cell, expected, "ratio " + language_label + " / " + name)
 
@@ -284,10 +304,17 @@ def main():
             checker.equal(row[4], "n/a", "gcc column " + name)
             checker.equal(row[5], "n/a", "rustc column " + name)
         else:
-            gcc_compile = data["programs"][name]["languages"]["c"]["compile"]
-            rust_compile = data["programs"][name]["languages"]["rust"]["compile"]
-            checker.equal(row[4], fmt_fixed(gcc_compile["median_s"], 3), "gcc compile " + name)
-            checker.equal(row[5], fmt_fixed(rust_compile["median_s"], 3), "rustc compile " + name)
+            languages = data["programs"][name]["languages"]
+            if "c" not in languages:
+                checker.failures.append("latest.md compile table: missing C data for " + name)
+            else:
+                gcc_compile = languages["c"]["compile"]
+                checker.equal(row[4], fmt_fixed(gcc_compile["median_s"], 3), "gcc compile " + name)
+            if "rust" not in languages:
+                checker.equal(row[5], "n/a", "rustc column " + name)
+            else:
+                rust_compile = languages["rust"]["compile"]
+                checker.equal(row[5], fmt_fixed(rust_compile["median_s"], 3), "rustc compile " + name)
         checker.equal(row[6], "n/a", "python compile " + name)
         checker.equal(row[7], "n/a", "node compile " + name)
 

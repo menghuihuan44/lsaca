@@ -5,8 +5,9 @@ use crate::codegen::c_writer::CWriter;
 use crate::codegen::helpers::{compound_types, managed_types};
 use crate::codegen::ops;
 use crate::codegen::types::{
-    EMPTY_STRUCT_FIELD, FN_ENV_FIELD, OPTION_SOME_MEMBER, RESULT_ERR_MEMBER, RESULT_OK_MEMBER,
-    TypeNames, TypeRegistry, UNION_FIELD, field_cname, positional_field, variant_member,
+    DYN_DATA_FIELD, DYN_VTABLE_FIELD, EMPTY_STRUCT_FIELD, FN_ENV_FIELD, OPTION_SOME_MEMBER,
+    RESULT_ERR_MEMBER, RESULT_OK_MEMBER, TypeNames, TypeRegistry, UNION_FIELD, field_cname,
+    positional_field, variant_member,
 };
 use crate::codegen::util;
 use crate::hir;
@@ -255,6 +256,37 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
         Ty::Rc(_) => {
             w.line(format!("return ({})ls_retain(v);", c_ty));
         }
+        Ty::Box(inner) if inner.is_dyn() => {
+            // Copying a Box<dyn> boxes a fresh concrete value produced by the
+            // vtable clone slot: the fat value itself is never shared.
+            let dyn_ty = names.ctype(inner);
+            w.line(format!("{} out = NULL;", c_ty));
+            w.line("if (v != NULL) {");
+            w.indent();
+            w.line(format!(
+                "{dyn_ty} fat = ({dyn_ty}){{ .{data} = NULL, .{vtable} = v->payload.{vtable} }};",
+                dyn_ty = dyn_ty,
+                data = DYN_DATA_FIELD,
+                vtable = DYN_VTABLE_FIELD
+            ));
+            w.line(format!(
+                "if (v->payload.{data} != NULL && v->payload.{vtable} != NULL) {{",
+                data = DYN_DATA_FIELD,
+                vtable = DYN_VTABLE_FIELD
+            ));
+            w.indent();
+            w.line(format!(
+                "fat.{data} = v->payload.{vtable}->clone(v->payload.{data});",
+                data = DYN_DATA_FIELD,
+                vtable = DYN_VTABLE_FIELD
+            ));
+            w.dedent();
+            w.line("}");
+            w.line(format!("out = lsaca_box_new_{}(fat);", names.mangle(inner)));
+            w.dedent();
+            w.line("}");
+            w.line("return out;");
+        }
         Ty::Box(inner) => {
             // Copying a box deep-copies the payload: boxes own their value.
             w.line(format!(
@@ -452,6 +484,61 @@ fn emit_release_value(
     }
 }
 
+/// Release the payload of an Rc/Box cell. A trait object payload owns its
+/// concrete allocation through the vtable drop slot, so the cell releases it
+/// there instead of releasing the fat value itself.
+fn emit_payload_release(
+    w: &mut CWriter,
+    program: &hir::Program,
+    names: &TypeNames,
+    inner: &Ty,
+    payload: &str,
+) {
+    if inner.is_dyn() {
+        w.line(format!(
+            "if ({payload}.{data} != NULL && {payload}.{vtable} != NULL) {{",
+            payload = payload,
+            data = DYN_DATA_FIELD,
+            vtable = DYN_VTABLE_FIELD
+        ));
+        w.indent();
+        w.line(format!(
+            "{payload}.{vtable}->drop({payload}.{data});",
+            payload = payload,
+            data = DYN_DATA_FIELD,
+            vtable = DYN_VTABLE_FIELD
+        ));
+        w.dedent();
+        w.line("}");
+        return;
+    }
+    emit_release_value(w, program, names, inner, payload);
+}
+
+/// Trace the payload of an Rc/Box cell. A trait object payload asks the vtable
+/// trace slot to visit the concrete allocation.
+fn emit_payload_trace(w: &mut CWriter, names: &TypeNames, inner: &Ty, payload: &str) {
+    if inner.is_dyn() {
+        w.line(format!(
+            "if ({payload}.{data} != NULL && {payload}.{vtable} != NULL) {{",
+            payload = payload,
+            data = DYN_DATA_FIELD,
+            vtable = DYN_VTABLE_FIELD
+        ));
+        w.indent();
+        w.line(format!(
+            "{payload}.{vtable}->trace({payload}.{data}, visit);",
+            payload = payload,
+            data = DYN_DATA_FIELD,
+            vtable = DYN_VTABLE_FIELD
+        ));
+        w.dedent();
+        w.line("}");
+        return;
+    }
+    emit_trace_slot(w, names, inner, payload);
+}
+
 // ---------------------------------------------------------------------------
 // debug
 // ---------------------------------------------------------------------------
@@ -616,6 +703,40 @@ fn emit_debug_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, t
         Ty::Box(inner) => {
             // Like Rust, formatting a box formats the value inside it.
             emit_debug_append(w, names, inner, "v->payload");
+        }
+        Ty::Slice(elem) => {
+            w.line("size_t i;");
+            push_cstr(w, "[");
+            w.line("for (i = 0; i < v.len; i += 1) {");
+            w.indent();
+            w.line("if (i > 0) {");
+            w.indent();
+            w.line("acc = ls_format_push_cstr(acc, \", \");");
+            w.dedent();
+            w.line("}");
+            emit_debug_append(w, names, elem, "v.data[i]");
+            w.dedent();
+            w.line("}");
+            push_cstr(w, "]");
+        }
+        Ty::Str => {
+            w.line("LsString* text = ls_str_from_parts((const char*)v.data, v.len);");
+            w.line("acc = ls_fmt_debug_string(acc, text);");
+            w.line("ls_release((void*)text);");
+        }
+        Ty::Dyn(_) => {
+            w.line(format!("if (v.{} != NULL) {{", DYN_VTABLE_FIELD));
+            w.indent();
+            w.line(format!(
+                "acc = v.{}->debug(acc, v.{});",
+                DYN_VTABLE_FIELD, DYN_DATA_FIELD
+            ));
+            w.dedent();
+            w.line("} else {");
+            w.indent();
+            w.line("(void)v;");
+            w.dedent();
+            w.line("}");
         }
         _ => {
             w.line("(void)v;");
@@ -791,6 +912,30 @@ fn emit_eq_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
                 ops::eq_expr(names, inner, "a->payload", "b->payload")
             ));
         }
+        Ty::Str => {
+            w.line("return a.len == b.len && (a.len == 0 || memcmp((const void*)a.data, (const void*)b.data, a.len) == 0);");
+        }
+        Ty::Slice(elem) => {
+            w.line("size_t i;");
+            w.line("if (a.len != b.len) {");
+            w.indent();
+            w.line("return false;");
+            w.dedent();
+            w.line("}");
+            w.line("for (i = 0; i < a.len; i += 1) {");
+            w.indent();
+            emit_eq_check(w, names, elem, "a.data[i]", "b.data[i]");
+            w.dedent();
+            w.line("}");
+            w.line("return true;");
+        }
+        Ty::Dyn(_) => {
+            // Trait objects do not implement equality; the checker rejects it
+            // and the helper is only emitted for completeness.
+            w.line("(void)a;");
+            w.line("(void)b;");
+            w.line("return true;");
+        }
         _ => {
             w.line("(void)a;");
             w.line("(void)b;");
@@ -811,6 +956,11 @@ fn traceable(ty: &Ty) -> bool {
         // allocation of its own, so the cycle collector must not follow it.
         Ty::Ref { .. } => false,
         Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::String => false,
+        // A slice or str value is a borrowed view and owns no allocation.
+        Ty::Slice(_) | Ty::Str => false,
+        // A trait object value is a fat value: its data pointer is owned by
+        // the cell that holds it, which traces itself.
+        Ty::Dyn(_) => true,
         _ => true,
     }
 }
@@ -836,6 +986,19 @@ pub(crate) fn emit_trace_slot(w: &mut CWriter, names: &TypeNames, ty: &Ty, slot:
         // Borrowed references do not participate in cycle tracing.
         Ty::Ref { .. } => {}
         Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::String => {}
+        Ty::Slice(_) | Ty::Str => {}
+        Ty::Dyn(_) => {
+            w.line(format!(
+                "if ({slot}.{data} != NULL && {slot}.{vtable} != NULL) {{",
+                slot = slot,
+                data = DYN_DATA_FIELD,
+                vtable = DYN_VTABLE_FIELD
+            ));
+            w.indent();
+            w.line(format!("visit({}.{});", slot, DYN_DATA_FIELD));
+            w.dedent();
+            w.line("}");
+        }
         _ => {
             w.line(format!(
                 "lsaca_trace_{}(&{}, visit);",
@@ -976,6 +1139,23 @@ fn emit_trace(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &T
             w.dedent();
             w.line("}");
         }
+        Ty::Dyn(_) => {
+            w.line(format!(
+                "if (value->{data} != NULL && value->{vtable} != NULL) {{",
+                data = DYN_DATA_FIELD,
+                vtable = DYN_VTABLE_FIELD
+            ));
+            w.indent();
+            w.line(format!(
+                "value->{vtable}->trace(value->{data}, visit);",
+                data = DYN_DATA_FIELD,
+                vtable = DYN_VTABLE_FIELD
+            ));
+            w.dedent();
+            w.line("}");
+        }
+        // Slices, str and borrowed views own no allocation to trace.
+        Ty::Slice(_) | Ty::Str => {}
         _ => {}
     }
     w.line("(void)visit;");
@@ -1026,7 +1206,7 @@ fn emit_rc_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, i
         suffix, cell_ptr, inner_ty
     ));
     w.indent();
-    emit_release_value(w, program, names, inner, "self->payload");
+    emit_payload_release(w, program, names, inner, "self->payload");
     w.line("self->payload = value;");
     w.dedent();
     w.line("}");
@@ -1035,7 +1215,7 @@ fn emit_rc_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, i
     w.line(format!("void lsaca_rc_drop_{}(void* payload) {{", suffix));
     w.indent();
     w.line(format!("{} self = ({})payload;", cell_ptr, cell_ptr));
-    emit_release_value(w, program, names, inner, "self->payload");
+    emit_payload_release(w, program, names, inner, "self->payload");
     w.line("(void)self;");
     w.dedent();
     w.line("}");
@@ -1048,7 +1228,7 @@ fn emit_rc_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, i
     w.indent();
     w.line(format!("const {}* self = (const {}*)payload;", cell, cell));
     w.line("(void)self;");
-    emit_trace_slot(w, names, inner, "self->payload");
+    emit_payload_trace(w, names, inner, "self->payload");
     w.line("(void)visit;");
     w.dedent();
     w.line("}");
@@ -1097,7 +1277,7 @@ fn emit_box_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, 
         suffix, cell_ptr, inner_ty
     ));
     w.indent();
-    emit_release_value(w, program, names, inner, "self->payload");
+    emit_payload_release(w, program, names, inner, "self->payload");
     w.line("self->payload = value;");
     w.dedent();
     w.line("}");
@@ -1106,7 +1286,7 @@ fn emit_box_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, 
     w.line(format!("void lsaca_box_drop_{}(void* payload) {{", suffix));
     w.indent();
     w.line(format!("{} self = ({})payload;", cell_ptr, cell_ptr));
-    emit_release_value(w, program, names, inner, "self->payload");
+    emit_payload_release(w, program, names, inner, "self->payload");
     w.line("(void)self;");
     w.dedent();
     w.line("}");
@@ -1119,7 +1299,7 @@ fn emit_box_helpers(w: &mut CWriter, program: &hir::Program, names: &TypeNames, 
     w.indent();
     w.line(format!("const {}* self = (const {}*)payload;", cell, cell));
     w.line("(void)self;");
-    emit_trace_slot(w, names, inner, "self->payload");
+    emit_payload_trace(w, names, inner, "self->payload");
     w.line("(void)visit;");
     w.dedent();
     w.line("}");

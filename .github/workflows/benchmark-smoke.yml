@@ -5,6 +5,10 @@
 # and runs both implementations, but it never invokes cargo itself, so the
 # workflow builds the CLI first.
 #
+# scripts/bench_checks.py runs the small functional/property check programs
+# under benchmarks/programs/checks/ (closed forms, sort invariants, data-scale
+# checksums) and needs the same compiler and C toolchain.
+#
 # The harness is kept optional: if scripts/bench.py is missing the workflow
 # skips gracefully instead of failing every week.
 #
@@ -49,6 +53,21 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: benchmark-smoke
+      - name: Build the release compiler
+        run: cargo build --release -p lsaca-cli
+
+      # The check programs cover the small functional/property suite: exact
+      # closed-form results, sort invariants, implementation equivalence and
+      # the argument-driven small/medium/large scale checksums.
+      - name: Run the benchmark check programs
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/bench_checks.py ]; then
+            echo "scripts/bench_checks.py is not present yet; skipping the check programs."
+            exit 0
+          fi
+          python scripts/bench_checks.py --debug --warnings-as-errors
+
       - name: Run the quick benchmark
         run: |
           set -euo pipefail
@@ -58,5 +77,4 @@ jobs:
           fi
           # The harness runs target/release/lsaca and expects it to exist; it does
           # not build the compiler itself.
-          cargo build --release -p lsaca-cli
           python scripts/bench.py --quick

@@ -117,7 +117,7 @@ error: expected '}', found )
  1 | struct Meters(i64);
    |                  ^
 
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod or use), found )
+error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found )
   --> example-04.ls:1:18
    |
  1 | struct Meters(i64);
@@ -159,19 +159,19 @@ error: expected ';' after let statement, found identifier base
  8 |     let shifted = Point { x: 3, ..base };
    |                                   ^^^^
 
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod or use), found ;
+error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found ;
   --> example-05.ls:8:41
    |
  8 |     let shifted = Point { x: 3, ..base };
    |                                         ^
 
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod or use), found identifier println
+error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found identifier println
   --> example-05.ls:9:5
    |
  9 |     println!("{}", shifted.x);
    |     ^^^^^^^
 
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod or use), found }
+error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found }
    --> example-05.ls:10:1
     |
  10 | }

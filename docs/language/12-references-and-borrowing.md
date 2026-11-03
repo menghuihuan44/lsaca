@@ -30,7 +30,7 @@ not keep its referent alive on its own, and the compiler only accepts a borrow w
 owner provably outlives its last use. There are no lifetime annotations — a borrow ends at
 the last point where the reference is used — and the checker is conservative inside a
 single expression (two mutable borrows there are rejected even when Rust would accept
-them; see [Known limitations](#known-limitations-in-version-170)). Since 1.4 the ownership
+them; see [Known limitations](#known-limitations-in-version-200)). Since 1.4 the ownership
 and move checks (E0382, E0507, E0505) run alongside the reference checks, so moving a
 value while a borrow of it is live is rejected too.
 
@@ -387,7 +387,7 @@ fn main() {
 
 Error:
 ```text
-error[E0614]: type Box<{integer}> cannot be dereferenced
+error[E0614]: type Box<i64> cannot be dereferenced
   --> example-15.ls:3:20
    |
  3 |     println!("{}", *boxed);
@@ -904,6 +904,14 @@ References are converted automatically in these directions:
 | `&mut T` | `&T` | calls, returns, `let` annotations, struct/tuple/vector literals |
 | `&Rc<T>` | `&T` | same positions |
 | `&Box<T>` | `&T` | same positions |
+| `&Vec<T>` | `&[T]` | since 2.0: same positions |
+| `&mut Vec<T>` | `&mut [T]` | since 2.0: same positions |
+| `&String` | `&str` | since 2.0: same positions |
+| `&mut String` | `&mut str` | since 2.0: same positions |
+| `&T` | `&dyn Trait` | since 2.0: same positions, when `T` implements `Trait` |
+| `&mut T` | `&mut dyn Trait` | since 2.0: same positions, when `T` implements `Trait` |
+| `Box<T>` | `Box<dyn Trait>` | since 2.0: same positions, when `T` implements `Trait` |
+| `Rc<T>` | `Rc<dyn Trait>` | since 2.0: same positions, when `T` implements `Trait` |
 
 ```ls
 fn read(value: &i64) -> i64 { *value }
@@ -923,9 +931,12 @@ Output:
 9
 ```
 
-There are no other implicit conversions: an owned `String` does not coerce to a string
-slice (there is no `&str` type), and a `Vec<i64>` value cannot be passed where
-`&Vec<i64>` is expected without writing `&`.
+There are no other implicit conversions: an owned `String` does not coerce to a
+`&str` on its own, and a `Vec<i64>` value cannot be passed where `&Vec<i64>`
+is expected without writing `&`. The 2.0 slice and trait-object conversions all
+start from a reference (or wrap an owned `Box`/`Rc` into a trait object);
+writing `&` is still always required to borrow an owned value. See [Slices and
+str](26-slices-and-str.md) and [Trait objects](25-trait-objects.md).
 
 ## Method receivers
 
@@ -1268,7 +1279,7 @@ error[E0498]: references cannot be captured by closures
 lsaca: example-45.ls: could not compile example-45.ls due to previous error(s)
 ```
 
-Mutable references to owned heap types are supported in version 1.7.0: a
+Mutable references to owned heap types are supported in version 2.0.0: a
 `&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>` can be a parameter, a
 local binding or a return value, and the callee mutates the payload in place:
 
@@ -1477,7 +1488,7 @@ stays alive.
 Errors without a code (parser level): `reference patterns are not supported; match a
 reference scrutinee directly, bindings become references`.
 
-## Known limitations in version 1.7.0
+## Known limitations in version 2.0.0
 
 Version 1.3.0 introduced references, 1.4.0 added ownership and moves on top of
 them, and 1.5.0 added `==` between references. The current restrictions are:
@@ -1529,7 +1540,7 @@ them, and 1.5.0 added `==` between references. The current restrictions are:
 - References cannot be stored in aggregates or captured by closures; they can be
   compared with `==` since 1.5.0 (the comparison reads the pointed-to values).
   Mutable references to `String`, `Vec`, `Rc` and `Box` *are* allowed as
-  parameters, locals and return values in version 1.7.0.
+  parameters, locals and return values in version 2.0.0.
 
 ## What next
 

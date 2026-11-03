@@ -14,7 +14,7 @@ use crate::typeck::check::Checker;
 use crate::typeck::generics::ImplInfo;
 use crate::typeck::items::TypeKey;
 use crate::typeck::itype::ITy;
-use crate::typeck::modules::ModuleId;
+use crate::typeck::modules::{BuiltinTypeKind, DefRef, ModuleId};
 use crate::typeck::tree::{TExpr, TExprKind};
 use crate::types::SelfKind;
 
@@ -92,21 +92,26 @@ impl<'a> Checker<'a> {
         span: Span,
         module: ModuleId,
     ) -> (HashMap<String, ITy>, Vec<TExpr>, bool) {
-        let previous_module = self.current_module;
-        self.current_module = module;
-        let result = self.infer_callable_args_inner(generics, params, args, span);
-        self.current_module = previous_module;
-        result
+        self.infer_callable_args_inner(generics, params, args, span, module)
     }
 
-    /// [Self::infer_callable_args] with the callee's module already in scope.
+    /// [Self::infer_callable_args] with the callee's module in scope only while
+    /// the declared parameter types are resolved to expression hints.
+    ///
+    /// The argument expressions belong to the call site, so they are checked in
+    /// the caller's module. Resolving them in the callee's module made names
+    /// from the caller invisible (for example a struct literal or a local
+    /// function passed to `Box::new`), even though the callee lives in the
+    /// standard library.
     fn infer_callable_args_inner(
         &mut self,
         generics: &[ast::GenericParam],
         params: &[ast::Param],
         args: &[ast::Expr],
         span: Span,
+        module: ModuleId,
     ) -> (HashMap<String, ITy>, Vec<TExpr>, bool) {
+        let caller_module = self.current_module;
         let mut env = HashMap::new();
         for param in generics {
             env.insert(param.name.clone(), self.infer.fresh_var());
@@ -130,22 +135,36 @@ impl<'a> Checker<'a> {
         // The generic parameters are in scope while the parameter types are
         // resolved to hints: a parameter type such as `T` must resolve to the
         // inference variable bound in `env` instead of leaking an E0412 at the
-        // declaration site.
-        let mut ok = true;
-        self.push_generic_env(env.clone());
-        for (arg, param) in args.iter().zip(params.iter()) {
+        // declaration site. All hints are resolved first, in the callee's
+        // module, before any argument expression is checked.
+        let mut hints = Vec::with_capacity(args.len());
+        for param in params {
+            self.current_module = module;
+            self.push_generic_env(env.clone());
             let bound_hint = self.callable_bound_hint(generics, &param.ty, &env);
             let hint = match bound_hint {
                 Some(hint) => Some(hint),
                 None => self.resolve_param_hint(&param.ty),
             };
+            self.pop_generic_env();
+            self.current_module = caller_module;
+            hints.push(hint);
+        }
+        let mut ok = true;
+        for ((arg, param), hint) in args.iter().zip(params.iter()).zip(hints.iter()) {
+            // Check the argument at the call site.
             let arg_expr = self.check_expr(arg, hint.as_ref());
+            // Infer the generic arguments from the value shape against the
+            // parameter type, which is written in the callee's module.
+            self.current_module = module;
+            self.push_generic_env(env.clone());
             if !self.infer_args_from_ty(&param.ty, &arg_expr.ty, &mut env, arg.span) {
                 ok = false;
             }
+            self.pop_generic_env();
+            self.current_module = caller_module;
             checked.push(arg_expr);
         }
-        self.pop_generic_env();
         (env, checked, ok)
     }
 
@@ -232,6 +251,169 @@ impl<'a> Checker<'a> {
             let _ = self.check_expr(arg, None);
         }
         self.never_expr(span)
+    }
+
+    /// Builtin marker kind for a bare type name used as a static receiver.
+    ///
+    /// Standard-library marker declarations (`pub struct Vec<T> { internal: () }`)
+    /// register as [DefRef::BuiltinType], so `Vec::new()` does not reach the
+    /// ordinary associated-function dispatch. The legacy builtin constructor
+    /// table is only a fallback for names no standard-library impl provides.
+    pub fn builtin_marker_kind(&self, type_name: &str) -> Option<BuiltinTypeKind> {
+        match self
+            .lookup_type_scoped(type_name)
+            .map(|binding| binding.def)
+        {
+            Some(DefRef::BuiltinType(kind)) => Some(kind),
+            Some(_) => None,
+            None => BuiltinTypeKind::from_name(type_name),
+        }
+    }
+
+    /// Whether a resolved type has the shape of a builtin marker instantiation.
+    fn marker_shape_matches(kind: BuiltinTypeKind, ty: &ITy) -> bool {
+        matches!(
+            (kind, ty),
+            (BuiltinTypeKind::Vec, ITy::Vec(_))
+                | (BuiltinTypeKind::String, ITy::String)
+                | (BuiltinTypeKind::Option, ITy::Option(_))
+                | (BuiltinTypeKind::Result, ITy::Result(_, _))
+                | (BuiltinTypeKind::Rc, ITy::Rc(_))
+                | (BuiltinTypeKind::Box, ITy::Box(_))
+                | (BuiltinTypeKind::HashMap, ITy::HashMap(_, _))
+                | (BuiltinTypeKind::Char, ITy::Char)
+        )
+    }
+
+    /// Whether the generic argument of a builtin marker shape is an unsized
+    /// type (`Box<dyn Trait>`, `Rc<str>`). Such a hint must not drive generic
+    /// argument inference: the value is produced by a slice/trait-object
+    /// coercion, not by the generic constructor itself.
+    fn marker_argument_is_unsized(kind: BuiltinTypeKind, ty: &ITy) -> bool {
+        match (kind, ty) {
+            (_, ITy::Vec(inner))
+            | (_, ITy::Rc(inner))
+            | (_, ITy::Box(inner))
+            | (_, ITy::Option(inner)) => inner.is_unsized(),
+            (_, ITy::Result(ok, err)) | (_, ITy::HashMap(ok, err)) => {
+                ok.is_unsized() || err.is_unsized()
+            }
+            _ => false,
+        }
+    }
+
+    /// The concrete builtin marker instance a static receiver names, when it can
+    /// be determined without checking the arguments (turbofish or expected type).
+    fn marker_owner_instance(
+        &mut self,
+        kind: BuiltinTypeKind,
+        explicit: &[ast::TypeExpr],
+        hint: Option<&ITy>,
+        span: Span,
+    ) -> Option<ITy> {
+        if !explicit.is_empty() {
+            let args = self.resolve_concrete_type_args(explicit, span)?;
+            return kind.resolve(&args);
+        }
+        if let Some(hint) = hint {
+            let hint_ty = self.infer.resolve(hint);
+            if !self.contains_unresolved(&hint_ty)
+                && Self::marker_shape_matches(kind, &hint_ty)
+                && !Self::marker_argument_is_unsized(kind, &hint_ty)
+            {
+                return Some(hint_ty);
+            }
+        }
+        if kind.arity() == 0 {
+            return kind.resolve(&[]);
+        }
+        None
+    }
+
+    /// Resolve `Vec::new()`, `String::from`, `HashMap::new()` and friends
+    /// through the standard-library impl tables before the legacy builtin
+    /// constructor table.
+    ///
+    /// Returns `None` when no impl provides the item (the caller then keeps the
+    /// legacy builtin behaviour). Once an impl exists, its errors are reported
+    /// instead of silently falling back.
+    pub fn check_builtin_assoc_impl_call(
+        &mut self,
+        type_name: &str,
+        explicit: &[ast::TypeExpr],
+        item: &str,
+        args: &[ast::Expr],
+        span: Span,
+        hint: Option<&ITy>,
+    ) -> Option<TExpr> {
+        let kind = self.builtin_marker_kind(type_name)?;
+        let candidates = self.assoc_candidates(type_name, item);
+        if candidates.is_empty() {
+            return None;
+        }
+        let errors_before = self.diagnostics.error_count();
+        if let Some(owner) = self.marker_owner_instance(kind, explicit, hint, span) {
+            if let Some(fn_id) = self.dispatch_associated_fn(&owner, item, span) {
+                return Some(self.check_direct_call(fn_id, None, args, span, hint));
+            }
+            // A found-but-invalid associated function must surface its errors
+            // instead of falling back to the legacy constructor.
+            if self.diagnostics.error_count() > errors_before {
+                return Some(self.check_plain_args(args, span));
+            }
+            return None;
+        }
+        if self.diagnostics.error_count() > errors_before {
+            return Some(self.check_plain_args(args, span));
+        }
+        if !explicit.is_empty() {
+            // Wrong-arity turbofish keeps the legacy diagnostics.
+            return None;
+        }
+        if candidates.len() > 1 {
+            self.error_code(
+                "multiple applicable items in scope".to_string(),
+                span,
+                "E0034",
+            );
+            return Some(self.check_plain_args(args, span));
+        }
+        let (impl_id, gfn_id) = candidates[0];
+        let info = self.impls.get(impl_id)?.clone();
+        let gfn = self.generic_fns.get(gfn_id)?.clone();
+        let (env, checked, ok) =
+            self.infer_callable_args(&info.generics, &gfn.decl.params, args, span, info.module);
+        let mut resolved_args = Vec::with_capacity(info.generics.len());
+        for param in &info.generics {
+            match env.get(&param.name) {
+                Some(ty) => resolved_args.push(self.infer.resolve(ty)),
+                None => {
+                    let var = self.infer.fresh_var();
+                    resolved_args.push(var);
+                }
+            }
+        }
+        let mut concrete = Vec::with_capacity(resolved_args.len());
+        let mut all_concrete = true;
+        for ty in &resolved_args {
+            match self.normalize_instance_arg(ty) {
+                Some(normalized) => concrete.push(normalized),
+                None => {
+                    all_concrete = false;
+                    break;
+                }
+            }
+        }
+        let fn_id = if all_concrete {
+            self.validate_generic_bounds(&info.generics, &concrete, span, info.module);
+            self.instantiate_generic_fn(gfn_id, concrete, span)
+        } else {
+            self.instantiate_generic_fn_deferred(gfn_id, resolved_args, span)
+        };
+        let Some(fn_id) = fn_id else {
+            return Some(self.never_expr(span));
+        };
+        Some(self.finish_generic_call(fn_id, None, checked, ok, span, hint))
     }
 
     /// Resolve a call to a free generic function, with or without turbofish.

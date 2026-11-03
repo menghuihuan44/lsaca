@@ -33,7 +33,9 @@ fn sum_tree(tree: &Option<Box<Node>>) -> i64 {
 }
 
 fn main() {
-    let depth: i64 = 16;
+    // Optional argument: tree depth; the default is the medium scale.
+    let all = args();
+    let depth: i64 = if all.len() > 0 { all[0].clone().parse_i64().unwrap() } else { 16 };
     let tree = build(depth, 0);
     let total = sum_tree(&tree);
     println!("checksum={}", total);

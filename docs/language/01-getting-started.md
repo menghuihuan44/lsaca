@@ -36,7 +36,7 @@ cargo build --release
 Expected output:
 
 ```text
-lsaca 1.7.0
+lsaca 2.0.0
 ```
 
 The compiler is a single binary at `target/release/lsaca` (`lsaca.exe` on
@@ -101,7 +101,7 @@ without lsaca.
 ## A slightly larger tour
 
 The following program uses a struct, an `impl` block, a `Box<T>`, an `Rc<T>`
-cell, the `?` operator and a format specifier, all verified to work in 1.7.0:
+cell, the `?` operator and a format specifier, all verified to work in 2.0.0:
 
 ```ls
 struct Point {
@@ -370,10 +370,10 @@ package but finds no manifest exits with code `2` and
 `lsaca: no lsaca.toml found in this directory or any parent directory`;
 `lsaca new` is the only command that always needs an explicit directory.
 
-The complete help text of version 1.7.0:
+The complete help text of version 2.0.0:
 
 ```console
-lsaca 1.7.0 - a small statically typed language with an ORC memory model
+lsaca 2.0.0 - a small statically typed language with an ORC memory model
 
 USAGE:
     lsaca <COMMAND> [OPTIONS] [FILE.ls]

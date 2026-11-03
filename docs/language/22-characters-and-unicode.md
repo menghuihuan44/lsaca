@@ -677,7 +677,7 @@ replacing bad bytes with U+FFFD.
 `read_line()` returns `Option<String>`: `None` at end of input, and
 `Some(line)` for a line with the line terminator removed. If the bytes read
 are not valid UTF-8, the whole program panics at the call site; there is no
-lossy variant in 1.7.0. `read_file` is the non-panicking form: it returns
+lossy variant in 2.0.0. `read_file` is the non-panicking form: it returns
 `Result<String, String>`, and a file whose bytes are not valid UTF-8 becomes
 `Err("stream did not contain valid UTF-8")`. `args()` panics if any argument
 is not valid UTF-8.
@@ -730,18 +730,23 @@ The printed order of a `HashMap` is not specified; the map prints its slots
 in the order the implementation stores them, which is deterministic for a given
 sequence of operations but is not an insertion order and is not a language
 guarantee. Content equality (`==`) ignores insertion order. The map is not
-iterable with `for` in 1.7.0; use `keys()` or `values()` first. See
-[HashMap](20-hashmap.md) for the implementation and hashing notes.
+iterable with `for` in 1.7.0 (unchanged in 2.0.0); use `keys()` or `values()`
+first. See [HashMap](20-hashmap.md) for the implementation and hashing notes.
 
 ## Differences from Rust
 
 The character support follows Rust closely but stays inside lsaca's design:
 
-* `char` has no methods. Rust's `char::is_alphabetic`, `is_whitespace`,
-  `to_digit`, `is_ascii` and friends do not exist; case mapping and trimming
-  are `String` methods.
-* There are no character ranges or slices: `'a'..='z'` is not a range, and
-  strings cannot be indexed with characters.
+* `char` has no methods. Version 2.0 puts the classification helpers in a
+  `std::char` module as free functions (`is_alphabetic(c)`, `is_whitespace(c)`,
+  `to_digit(c, radix)`, `is_ascii(c)` and friends, see [char](../stdlib/char.md))
+  instead of Rust's inherent methods; case mapping and trimming remain `String`
+  methods.
+* There are no character ranges: `'a'..='z'` is not a range, and a string
+  cannot be indexed with a character count. Version 2.0 adds *byte* slice
+  expressions over strings (`&text[1..4]`, see [Slices and
+  str](26-slices-and-str.md)), which split on UTF-8 character boundaries and
+  panic if a boundary is not respected.
 * `chars()` returns an eager `Vec<char>`, not a lazy iterator. A `Vec<char>`
   can be used with the iterator adapters, but every call allocates.
 * A `char` is a Unicode scalar value, not a grapheme cluster: an `"é"` typed
@@ -753,18 +758,20 @@ The character support follows Rust closely but stays inside lsaca's design:
   `char::from_u32` or `u32::from(char)` trait machinery, and only `u8` may
   be cast to `char`.
 * The byte-oriented `String` API is unchanged from 1.5.0: `len`, `find` and
-  `substring` use bytes, and `s[0]` is still rejected with E0608.
+  `substring` use bytes, and `s[0]` is still rejected with E0608 (2.0 adds
+  byte-range slicing `&s[0..1]`, but there is still no `char` indexing).
 
-## Known limitations in 1.7.0
+## Known limitations in 2.0.0
 
-* No character classification (alphabetic, numeric, whitespace) methods on
-  `char`; Unicode property tables are only used internally by case mapping and
-  trimming.
+* No character classification *methods* on `char`; the 2.0 plan puts the
+  classification functions in `std::char` ([char](../stdlib/char.md)), and until
+  that module lands the Unicode property tables are only used internally by case
+  mapping and trimming.
 * No grapheme cluster or normalization support; operators work on scalar
   values.
 * No locale-aware collation: comparisons and sorting use code point order.
-* `substring` panics instead of returning an `Option`; a panic cannot be
-  caught in 1.7.0.
+* `substring` panics instead of returning an `Option` (so does out-of-range
+  byte-range slicing); a panic cannot be caught in 2.0.0.
 * Invalid UTF-8 on stdin or in arguments panics rather than returning an error.
 * `chars()` allocates a `Vec`; there is no borrowing character iterator.
 * `HashMap` iteration is still not available; keys with either `String` or
@@ -773,7 +780,7 @@ The character support follows Rust closely but stays inside lsaca's design:
 * Formatting a character ignores East Asian display width; a character counts
   as one column for width and alignment.
 
-See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-170)
+See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-200)
 for the complete list.
 
 ## Summary
@@ -800,5 +807,8 @@ for the complete list.
 * [Standard library](15-standard-library.md) - complete `String` method tables
   and formatting rules.
 * [HashMap](20-hashmap.md) - the builtin map, including `char` keys.
+* [char](../stdlib/char.md) - the `std::char` classification module (the ASCII
+  methods are implemented; the Unicode helpers are not implemented in 2.0.0 and
+  are planned for a later release).
 * [Roadmap and differences from Rust](16-roadmap.md) - the full set of
-  limitations in 1.7.0.
+  limitations in 2.0.0.

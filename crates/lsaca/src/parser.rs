@@ -533,6 +533,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwTrait
                     | TokenKind::KwMod
                     | TokenKind::KwUse
+                    | TokenKind::KwExtern
             ),
             None => false,
         }
@@ -626,7 +627,8 @@ impl<'a> Parser<'a> {
     fn parse_item(&mut self) -> Option<Item> {
         let vis = self.parse_visibility();
         match self.peek_kind() {
-            TokenKind::KwFn => Some(Item::Fn(self.parse_fn_decl(None, vis))),
+            TokenKind::KwFn => Some(Item::Fn(self.parse_fn_decl(None, vis, false))),
+            TokenKind::KwExtern => Some(Item::Fn(self.parse_extern_fn(vis))),
             TokenKind::KwStruct => Some(Item::Struct(self.parse_struct_decl(vis))),
             TokenKind::KwEnum => Some(Item::Enum(self.parse_enum_decl(vis))),
             TokenKind::KwImpl => Some(Item::Impl(self.parse_impl_block())),
@@ -647,7 +649,7 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.error(
                     format!(
-                        "expected an item (fn, struct, enum, impl, const, type, trait, mod or use), found {}",
+                        "expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found {}",
                         found
                     ),
                     span,
@@ -931,7 +933,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_fn_decl(&mut self, impl_ty: Option<&TypeExpr>, vis: Visibility) -> FnDecl {
+    fn parse_fn_decl(
+        &mut self,
+        impl_ty: Option<&TypeExpr>,
+        vis: Visibility,
+        is_extern: bool,
+    ) -> FnDecl {
         let fn_token = self.expect(TokenKind::KwFn, "fn");
         let start = fn_token
             .map(|token| token.span)
@@ -948,14 +955,18 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let body = if self.at(TokenKind::LBrace) {
-            self.parse_block()
+        let body = if is_extern {
+            // An extern function is an intrinsic declaration: it ends with a
+            // semicolon and has no body.
+            self.parse_extern_fn_terminator()
+        } else if self.at(TokenKind::LBrace) {
+            Some(self.parse_block())
         } else {
             let span = self.span();
             self.error("expected function body", span);
-            Block::empty(Span::empty(span.start))
+            Some(Block::empty(Span::empty(span.start)))
         };
-        let body_span = body.span;
+        let end = self.prev_span();
         FnDecl {
             name,
             name_span,
@@ -964,9 +975,72 @@ impl<'a> Parser<'a> {
             params,
             ret,
             body,
+            is_extern,
             self_kind,
-            span: start.join(body_span),
+            span: start.join(end),
         }
+    }
+
+    /// Parse an extern fn declaration, the intrinsic declaration form:
+    /// `extern fn __name(params) -> T;`.
+    ///
+    /// Extern functions are declarations of runtime-provided functions: they
+    /// have no body and are only legal in the standard library, which the type
+    /// checker enforces. The declarator grammar is otherwise the grammar of a
+    /// free function, including visibility and generic parameters.
+    fn parse_extern_fn(&mut self, vis: Visibility) -> FnDecl {
+        let extern_token = self.expect(TokenKind::KwExtern, "'extern'");
+        let extern_span = extern_token
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.span());
+        if !self.at(TokenKind::KwFn) {
+            let span = self.span();
+            let found = self.peek_kind().describe();
+            self.error(
+                format!("expected 'fn' after 'extern', found {}", found),
+                span,
+            );
+            self.synchronize_item();
+            let end = self.prev_span();
+            return FnDecl {
+                name: "<error>".to_string(),
+                name_span: span,
+                vis,
+                generics: Vec::new(),
+                params: Vec::new(),
+                ret: None,
+                body: None,
+                is_extern: true,
+                self_kind: None,
+                span: extern_span.join(end),
+            };
+        }
+        let mut decl = self.parse_fn_decl(None, vis, true);
+        decl.span = extern_span.join(decl.span);
+        decl
+    }
+
+    /// Parse the terminating semicolon of an extern function declaration.
+    ///
+    /// A written body is a syntax restriction: extern functions are implemented
+    /// by the compiler or the runtime. The block is skipped so that parsing
+    /// continues, and the declaration itself is kept with body None.
+    fn parse_extern_fn_terminator(&mut self) -> Option<Block> {
+        if self.at(TokenKind::LBrace) {
+            let span = self.span();
+            self.error_coded(
+                E_SYNTAX,
+                "extern functions have no body; end the declaration with ';'",
+                span,
+            );
+            let _ = self.parse_block();
+            return None;
+        }
+        if self.eat(TokenKind::Semi).is_none() {
+            let span = self.span();
+            self.error("expected ';' after extern function declaration", span);
+        }
+        None
     }
 
     fn parse_params(&mut self, impl_ty: Option<&TypeExpr>) -> (Vec<Param>, Option<SelfKind>) {
@@ -1197,7 +1271,7 @@ impl<'a> Parser<'a> {
             let before = self.pos;
             let method_vis = self.parse_visibility();
             if self.at(TokenKind::KwFn) {
-                fns.push(self.parse_fn_decl(Some(&ty), method_vis));
+                fns.push(self.parse_fn_decl(Some(&ty), method_vis, false));
             } else {
                 let span = self.span();
                 self.error(
@@ -1431,18 +1505,17 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if self.at(TokenKind::LBrace) {
-            let span = self.span();
-            self.error_coded(
-                E_SYNTAX,
-                "default method bodies are not supported; end the signature with ';' and write the body in each impl block",
-                span,
-            );
-            let _ = self.parse_block();
-        } else if self.eat(TokenKind::Semi).is_none() {
-            let span = self.span();
-            self.error("expected ';' after trait method signature", span);
-        }
+        // A method with a body is a default method that implementing types
+        // inherit; a method ending in ';' is required.
+        let body = if self.at(TokenKind::LBrace) {
+            Some(self.parse_block())
+        } else {
+            if self.eat(TokenKind::Semi).is_none() {
+                let span = self.span();
+                self.error("expected ';' after trait method signature", span);
+            }
+            None
+        };
         let end = self.prev_span();
         TraitMethod {
             name,
@@ -1450,6 +1523,7 @@ impl<'a> Parser<'a> {
             params,
             ret,
             self_kind,
+            body,
             span: start.join(end),
         }
     }
@@ -1629,6 +1703,60 @@ impl<'a> Parser<'a> {
                 mutable,
                 inner: Box::new(self.parse_type()),
                 span: amp.span,
+            };
+        }
+        // A dynamically dispatched trait object: `dyn Trait` or
+        // `dyn Trait<Args>`.
+        if self.at(TokenKind::KwDyn) {
+            let dyn_token = self.bump();
+            let (name, name_span) = self.expect_ident("trait name after 'dyn'");
+            let args = if self.at(TokenKind::Lt) {
+                self.parse_type_args()
+            } else {
+                Vec::new()
+            };
+            let span = if args.is_empty() {
+                dyn_token.span.join(name_span)
+            } else {
+                dyn_token.span.join(self.prev_span())
+            };
+            return TypeExpr::Dyn(TraitRef {
+                name,
+                name_span,
+                args,
+                span,
+            });
+        }
+        // A slice type: `[T]`. Arrays are not part of the language, so a
+        // written `[T; N]` is reported as a syntax restriction.
+        if self.at(TokenKind::LBracket) {
+            let lb = self.bump();
+            let elem = self.parse_type();
+            if self.at(TokenKind::Semi) {
+                let span = self.span();
+                self.error_coded(
+                    E_SYNTAX,
+                    "array types are not supported; use Vec<T> for an owned array or [T] for a slice",
+                    span,
+                );
+                self.bump();
+                let _ = self.parse_expr();
+                let rb = self
+                    .expect(TokenKind::RBracket, "']' after array type")
+                    .map(|token| token.span)
+                    .unwrap_or_else(|| self.prev_span());
+                return TypeExpr::Slice {
+                    elem: Box::new(elem),
+                    span: lb.span.join(rb),
+                };
+            }
+            let rb = self
+                .expect(TokenKind::RBracket, "']' after slice element type")
+                .map(|token| token.span)
+                .unwrap_or_else(|| self.prev_span());
+            return TypeExpr::Slice {
+                elem: Box::new(elem),
+                span: lb.span.join(rb),
             };
         }
         if self.at(TokenKind::KwFn) {
@@ -2641,20 +2769,74 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let saved = self.allow_struct_literal;
                 self.allow_struct_literal = true;
-                let index = self.parse_expr();
+                // Slicing shares the postfix bracket position with indexing.
+                // A written range operator marks a slice: base[start..end],
+                // base[start..=end], base[..end], base[start..] and base[..].
+                // Any other bracketed expression is plain indexing.
+                let mut start_expr = None;
+                let mut is_slice = false;
+                let mut inclusive = false;
+                if self.at(TokenKind::DotDot) {
+                    self.bump();
+                    is_slice = true;
+                } else if self.at(TokenKind::DotDotEq) {
+                    self.bump();
+                    is_slice = true;
+                    inclusive = true;
+                } else {
+                    start_expr = Some(Box::new(self.parse_expr()));
+                    if self.at(TokenKind::DotDot) {
+                        self.bump();
+                        is_slice = true;
+                    } else if self.at(TokenKind::DotDotEq) {
+                        self.bump();
+                        is_slice = true;
+                        inclusive = true;
+                    }
+                }
+                let mut end_expr = None;
+                if is_slice && !self.at(TokenKind::RBracket) && !self.at_eof() {
+                    end_expr = Some(Box::new(self.parse_expr()));
+                }
                 self.allow_struct_literal = saved;
                 let rb = self
-                    .expect(TokenKind::RBracket, "']' after index")
+                    .expect(
+                        TokenKind::RBracket,
+                        if is_slice {
+                            "']' after slice expression"
+                        } else {
+                            "']' after index"
+                        },
+                    )
                     .map(|token| token.span)
                     .unwrap_or_else(|| self.prev_span());
                 let span = expr.span.join(rb);
-                expr = Expr::new(
-                    ExprKind::Index {
-                        base: Box::new(expr),
-                        index: Box::new(index),
-                    },
-                    span,
-                );
+                if is_slice {
+                    if inclusive && end_expr.is_none() {
+                        self.error_coded(E_SYNTAX, "a '..=' slice range needs an end bound", span);
+                    }
+                    expr = Expr::new(
+                        ExprKind::Slice {
+                            base: Box::new(expr),
+                            start: start_expr,
+                            end: end_expr,
+                            inclusive,
+                        },
+                        span,
+                    );
+                } else {
+                    let index = match start_expr {
+                        Some(index) => index,
+                        None => Box::new(self.error_expr()),
+                    };
+                    expr = Expr::new(
+                        ExprKind::Index {
+                            base: Box::new(expr),
+                            index,
+                        },
+                        span,
+                    );
+                }
             } else if self.at(TokenKind::Question) {
                 // Postfix try operator. It is the lowest-precedence postfix, so it
                 // chains with calls and fields: f()?.field?.method().
@@ -3443,6 +3625,9 @@ impl<'a> AstNode<'a> {
                         if let Some(ret) = &method.ret {
                             stack.push((AstNode::Type(ret), depth));
                         }
+                        if let Some(body) = &method.body {
+                            stack.push((AstNode::Block(body), depth));
+                        }
                     }
                 }
                 Item::Mod(decl) => {
@@ -3462,7 +3647,9 @@ impl<'a> AstNode<'a> {
                 if let Some(ret) = &decl.ret {
                     stack.push((AstNode::Type(ret), depth));
                 }
-                stack.push((AstNode::Block(&decl.body), depth));
+                if let Some(body) = &decl.body {
+                    stack.push((AstNode::Block(body), depth));
+                }
             }
             AstNode::Block(block) => {
                 for stmt in &block.stmts {
@@ -3531,6 +3718,17 @@ impl<'a> AstNode<'a> {
                 ExprKind::Index { base, index } => {
                     stack.push((AstNode::Expr(base), depth));
                     stack.push((AstNode::Expr(index), depth));
+                }
+                ExprKind::Slice {
+                    base, start, end, ..
+                } => {
+                    stack.push((AstNode::Expr(base), depth));
+                    if let Some(start) = start {
+                        stack.push((AstNode::Expr(start), depth));
+                    }
+                    if let Some(end) = end {
+                        stack.push((AstNode::Expr(end), depth));
+                    }
                 }
                 ExprKind::If(if_expr) => {
                     stack.push((AstNode::Expr(&if_expr.cond), depth));
@@ -3655,6 +3853,12 @@ impl<'a> AstNode<'a> {
                     stack.push((AstNode::Type(ret), depth));
                 }
                 TypeExpr::Ref { inner, .. } => stack.push((AstNode::Type(inner), depth)),
+                TypeExpr::Dyn(trait_ref) => {
+                    for arg in &trait_ref.args {
+                        stack.push((AstNode::Type(arg), depth));
+                    }
+                }
+                TypeExpr::Slice { elem, .. } => stack.push((AstNode::Type(elem), depth)),
             },
         }
     }
@@ -3782,13 +3986,18 @@ mod tests {
         fn_named(program, "main")
     }
 
+    /// The body block of a parsed function. Every non-extern function in a
+    /// parser test has one; extern declarations have no body by design.
+    fn fn_body(decl: &FnDecl) -> &Block {
+        decl.body.as_ref().expect("expected a function body")
+    }
+
     fn main_stmts(program: &Program) -> &[Stmt] {
-        &main_fn(program).body.stmts
+        &fn_body(main_fn(program)).stmts
     }
 
     fn main_tail(program: &Program) -> &Expr {
-        main_fn(program)
-            .body
+        fn_body(main_fn(program))
             .tail
             .as_deref()
             .expect("expected a tail expression")
@@ -3850,8 +4059,8 @@ mod tests {
         assert!(main.params.is_empty());
         assert!(main.ret.is_none());
         assert!(main.self_kind.is_none());
-        assert_eq!(main.body.stmts.len(), 1);
-        let expr = stmt_expr(&main.body.stmts[0]);
+        assert_eq!(fn_body(main).stmts.len(), 1);
+        let expr = stmt_expr(&fn_body(main).stmts[0]);
         match &expr.kind {
             ExprKind::Macro(call) => {
                 assert_eq!(call.name, "println");
@@ -3877,8 +4086,7 @@ mod tests {
             }
             other => panic!("expected an i64 return type, got {:?}", other),
         }
-        let tail = add
-            .body
+        let tail = fn_body(add)
             .tail
             .as_deref()
             .expect("expected a tail expression");
@@ -3890,8 +4098,8 @@ mod tests {
         let program = parse_ok("fn noop() {}");
         let noop = fn_named(&program, "noop");
         assert!(noop.ret.is_none());
-        assert!(noop.body.stmts.is_empty());
-        assert!(noop.body.tail.is_none());
+        assert!(fn_body(noop).stmts.is_empty());
+        assert!(fn_body(noop).tail.is_none());
     }
 
     #[test]
@@ -4283,20 +4491,15 @@ pub trait Shape<T> {
     }
 
     #[test]
-    fn rejects_default_trait_method_body() {
-        let source = "trait Shape { fn area(&self) -> i64 { 1 } }";
+    fn parses_trait_method_default_body() {
+        // A method with a body is a default method: implementations may omit
+        // it. A method ending in ';' is required.
+        let source = "trait Shape { fn area(&self) -> i64 { 1 } fn name(&self) -> i64; }";
         let (program, diagnostics) = parse_source(source);
         assert!(
+            !diagnostics.has_errors(),
+            "unexpected parse errors: {:?}",
             messages(&diagnostics)
-                .iter()
-                .any(|message| message.contains("default method bodies are not supported")),
-            "expected a default body diagnostic, got {:?}",
-            messages(&diagnostics)
-        );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == Some("E0001"))
         );
         let trait_decl = program
             .items
@@ -4306,7 +4509,13 @@ pub trait Shape<T> {
                 _ => None,
             })
             .expect("expected a trait declaration");
-        assert_eq!(trait_decl.methods.len(), 1);
+        assert_eq!(trait_decl.methods.len(), 2);
+        let default = trait_decl.methods[0]
+            .body
+            .as_ref()
+            .expect("expected a default method body");
+        assert_eq!(default.tail.as_deref().map(as_int), Some(1));
+        assert!(trait_decl.methods[1].body.is_none());
     }
 
     #[test]
@@ -4404,7 +4613,6 @@ pub trait Shape<T> {
         let sources = [
             "trait A: B { fn run(&self); }",
             "trait Shape { fn convert<T>(&self, value: T); }",
-            "trait Shape { fn area(&self) -> i64 { 1 } }",
             "trait Shape { fn area(width: i64) -> i64; }",
             "type Pair<T> = Vec<T>;",
         ];
@@ -4551,8 +4759,7 @@ fn pick_let(flag: bool) -> i64 {
         let program = parse_ok(source);
         for name in ["pick_if", "pick_match"] {
             let function = fn_named(&program, name);
-            let tail = function
-                .body
+            let tail = fn_body(function)
                 .tail
                 .as_ref()
                 .unwrap_or_else(|| panic!("expected a tail expression in {}", name));
@@ -4564,7 +4771,7 @@ fn pick_let(flag: bool) -> i64 {
         }
         let function = fn_named(&program, "pick_let");
         let mut inits = Vec::new();
-        for stmt in &function.body.stmts {
+        for stmt in &fn_body(function).stmts {
             if let Stmt::Let(let_stmt) = stmt
                 && let Some(init) = &let_stmt.init
             {
@@ -4580,7 +4787,7 @@ fn pick_let(flag: bool) -> i64 {
     fn for_patterns_allow_mut_bindings() {
         let source = "fn main() { for mut value in values { value = 1; } }";
         let program = parse_ok(source);
-        let body = &fn_named(&program, "main").body;
+        let body = fn_body(fn_named(&program, "main"));
         let for_expr = body
             .tail
             .as_deref()
@@ -4628,8 +4835,7 @@ fn pick_let(flag: bool) -> i64 {
             Some(TypeExpr::Path { name, .. }) => assert_eq!(name, "Self"),
             other => panic!("expected a Self return type, got {:?}", other),
         }
-        match &implementation.fns[0]
-            .body
+        match &fn_body(&implementation.fns[0])
             .tail
             .as_deref()
             .expect("tail")
@@ -4942,7 +5148,7 @@ fn pick_let(flag: bool) -> i64 {
         assert!(errors[0].contains("reference patterns are not supported"));
 
         let function = fn_named(&program, "f");
-        match &function.body.tail.as_deref().expect("tail").kind {
+        match &fn_body(function).tail.as_deref().expect("tail").kind {
             ExprKind::Match(match_expr) => {
                 assert_eq!(match_expr.arms.len(), 2);
                 assert_eq!(as_int(&match_expr.arms[0].body), 1);
@@ -4991,8 +5197,7 @@ impl Point {
             other => panic!("expected a mutable reference return type, got {:?}", other),
         }
 
-        match &implementation.fns[0]
-            .body
+        match &fn_body(&implementation.fns[0])
             .tail
             .as_deref()
             .expect("tail")
@@ -5010,8 +5215,7 @@ impl Point {
             },
             other => panic!("expected a reference expression, got {:?}", other),
         }
-        match &implementation.fns[1]
-            .body
+        match &fn_body(&implementation.fns[1])
             .tail
             .as_deref()
             .expect("tail")
@@ -5062,8 +5266,8 @@ impl Point {
             function.ret.as_ref().map(TypeExpr::describe),
             Some("&i64".to_string())
         );
-        assert_eq!(function.body.stmts.len(), 1);
-        match &stmt_expr(&function.body.stmts[0]).kind {
+        assert_eq!(fn_body(function).stmts.len(), 1);
+        match &stmt_expr(&fn_body(function).stmts[0]).kind {
             ExprKind::Return(Some(value)) => {
                 assert!(matches!(&value.kind, ExprKind::Ref { mutable: false, .. }));
             }
@@ -5112,7 +5316,7 @@ impl Point {
             Some(TypeExpr::Path { name, .. }) => assert_eq!(name, "Pair"),
             other => panic!("expected a Pair return type, got {:?}", other),
         }
-        match &pair.body.tail.as_deref().expect("tail").kind {
+        match &fn_body(pair).tail.as_deref().expect("tail").kind {
             ExprKind::Tuple(elements) => assert_eq!(elements.len(), 2),
             other => panic!("expected a tuple, got {:?}", other),
         }
@@ -6365,7 +6569,7 @@ fn main() {
         // following parenthesized expression is a new statement or tail, not a
         // call of the for/match expression (repro from tests/programs/tuples.ls).
         let program = parse_ok("fn f() { for v in xs { } (1, 2) }");
-        let body = &fn_named(&program, "f").body;
+        let body = fn_body(fn_named(&program, "f"));
         assert_eq!(body.stmts.len(), 1);
         match &body.stmts[0] {
             Stmt::Expr(expr) => assert!(matches!(&expr.kind, ExprKind::For { .. })),
@@ -6384,7 +6588,7 @@ fn main() {
         }
 
         let program = parse_ok("fn g() { match 1 { _ => 2 } (3, 4) }");
-        let body = &fn_named(&program, "g").body;
+        let body = fn_body(fn_named(&program, "g"));
         assert_eq!(body.stmts.len(), 1);
         match &body.stmts[0] {
             Stmt::Expr(expr) => assert!(matches!(&expr.kind, ExprKind::Match(_))),
@@ -6422,7 +6626,7 @@ fn main() {
         }
 
         let program = parse_ok("fn main() { { let value = 1; } }");
-        let body = &fn_named(&program, "main").body;
+        let body = fn_body(fn_named(&program, "main"));
         assert!(body.stmts.is_empty());
         match &body.tail {
             Some(tail) => match &tail.kind {
@@ -6451,7 +6655,7 @@ fn main() {
         // A block expression followed by '(' starts a new statement instead of
         // taking a call postfix.
         let program = parse_ok("fn h() { { 1; } (2, 3) }");
-        let body = &fn_named(&program, "h").body;
+        let body = fn_body(fn_named(&program, "h"));
         assert_eq!(body.stmts.len(), 1);
         assert!(
             matches!(&body.stmts[0], Stmt::Expr(expr) if matches!(&expr.kind, ExprKind::Block(_)))
@@ -6653,7 +6857,7 @@ impl Counter {
             .iter()
             .find(|function| function.name == "new")
             .expect("new method");
-        match new_fn.body.tail.as_deref().map(|expr| &expr.kind) {
+        match fn_body(new_fn).tail.as_deref().map(|expr| &expr.kind) {
             Some(ExprKind::StructLit { path, fields }) => {
                 assert_eq!(path.display_name(), "Self");
                 assert_eq!(fields.len(), 1);
@@ -6667,7 +6871,7 @@ impl Counter {
             .iter()
             .find(|function| function.name == "bump")
             .expect("bump method");
-        match bump.body.tail.as_deref().map(|expr| &expr.kind) {
+        match fn_body(bump).tail.as_deref().map(|expr| &expr.kind) {
             Some(ExprKind::Call { callee, args }) => {
                 assert_eq!(as_path_name(callee), "Self::new");
                 assert_eq!(args.len(), 1);
@@ -6708,7 +6912,7 @@ impl Counter {
 }"#;
         let program = parse_ok(source);
         let helper = fn_named(&program, "helper");
-        match helper.body.tail.as_deref().map(|expr| &expr.kind) {
+        match fn_body(helper).tail.as_deref().map(|expr| &expr.kind) {
             Some(ExprKind::Loop { body }) => {
                 assert_eq!(body.stmts.len(), 2);
                 match &stmt_expr(&body.stmts[0]).kind {
@@ -6735,9 +6939,10 @@ impl Counter {
             &source[main.span.start as usize..main.span.end as usize],
             source
         );
-        let block_text = &source[main.body.span.start as usize..main.body.span.end as usize];
+        let block_text =
+            &source[fn_body(main).span.start as usize..fn_body(main).span.end as usize];
         assert_eq!(block_text, "{ let x = 1; }");
-        match &main.body.stmts[0] {
+        match &fn_body(main).stmts[0] {
             Stmt::Let(statement) => {
                 assert_eq!(
                     &source[statement.span.start as usize..statement.span.end as usize],
@@ -7154,5 +7359,353 @@ impl Counter {
         }
         source.push_str("true; }");
         assert_rejected_as_too_deep(&source);
+    }
+
+    #[test]
+    fn parses_extern_fn_declarations() {
+        let source = r#"
+pub extern fn __vec_len<T>(v: &Vec<T>) -> i64;
+extern fn __str_new(capacity: i64) -> i64;
+"#;
+        let program = parse_ok(source);
+        assert_eq!(program.items.len(), 2);
+
+        let vec_len = fn_named(&program, "__vec_len");
+        assert!(vec_len.is_extern);
+        assert!(vec_len.body.is_none());
+        assert!(matches!(vec_len.vis, Visibility::Public));
+        assert_eq!(vec_len.generics.len(), 1);
+        assert_eq!(vec_len.generics[0].name, "T");
+        assert_eq!(vec_len.params.len(), 1);
+        assert_eq!(vec_len.params[0].name, "v");
+        assert!(matches!(
+            &vec_len.params[0].ty,
+            TypeExpr::Ref { mutable: false, .. }
+        ));
+        match &vec_len.ret {
+            Some(TypeExpr::Path { name, .. }) => assert_eq!(name, "i64"),
+            other => panic!("expected an i64 return type, got {:?}", other),
+        }
+        // The declaration span starts at the `extern` keyword, before the
+        // function name; visibility is not part of the declaration span.
+        let extern_at = source
+            .find("extern fn __vec_len")
+            .expect("extern declaration");
+        assert_eq!(vec_len.span.start as usize, extern_at);
+        assert!(vec_len.span.start < vec_len.name_span.start);
+
+        let str_new = fn_named(&program, "__str_new");
+        assert!(str_new.is_extern);
+        assert!(str_new.body.is_none());
+        assert!(matches!(str_new.vis, Visibility::Private));
+        assert!(str_new.generics.is_empty());
+        assert_eq!(str_new.params.len(), 1);
+        assert_eq!(str_new.params[0].name, "capacity");
+    }
+
+    #[test]
+    fn rejects_extern_fn_with_body() {
+        let source = "extern fn bad() -> i64 { 1 }";
+        let (program, diagnostics) = parse_source(source);
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("extern functions have no body")),
+            "expected an extern body diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+        let bad = fn_named(&program, "bad");
+        assert!(bad.is_extern);
+        assert!(bad.body.is_none());
+    }
+
+    #[test]
+    fn reports_missing_semicolon_after_extern_fn() {
+        let (_, diagnostics) = parse_source("extern fn missing() -> i64");
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("expected ';' after extern function declaration")),
+            "expected a missing semicolon diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn parses_dyn_types() {
+        let source = r#"
+trait Shape {
+    fn area(&self) -> i64;
+}
+struct Holder {
+    boxed: Box<dyn Shape>,
+    borrowed: &dyn Shape,
+    iter: Rc<dyn Iterator<i64>>,
+}
+fn takes(value: &mut dyn Shape) -> Box<dyn Shape> {
+    value
+}
+"#;
+        let program = parse_ok(source);
+        let holder = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(decl) if decl.name == "Holder" => Some(decl),
+                _ => None,
+            })
+            .expect("expected the Holder struct");
+        assert_eq!(holder.fields.len(), 3);
+        match &holder.fields[0].ty {
+            TypeExpr::Path { name, generics, .. } => {
+                assert_eq!(name, "Box");
+                assert_eq!(generics.len(), 1);
+                match &generics[0] {
+                    TypeExpr::Dyn(trait_ref) => {
+                        assert_eq!(trait_ref.name, "Shape");
+                        assert!(trait_ref.args.is_empty());
+                    }
+                    other => panic!("expected a dyn Shape argument, got {:?}", other),
+                }
+            }
+            other => panic!("expected a Box type, got {:?}", other),
+        }
+        match &holder.fields[1].ty {
+            TypeExpr::Ref { mutable, inner, .. } => {
+                assert!(!mutable);
+                match inner.as_ref() {
+                    TypeExpr::Dyn(trait_ref) => assert_eq!(trait_ref.name, "Shape"),
+                    other => panic!("expected a dyn Shape, got {:?}", other),
+                }
+            }
+            other => panic!("expected a reference, got {:?}", other),
+        }
+        match &holder.fields[2].ty {
+            TypeExpr::Path { name, generics, .. } => {
+                assert_eq!(name, "Rc");
+                match generics.as_slice() {
+                    [TypeExpr::Dyn(trait_ref)] => {
+                        assert_eq!(trait_ref.name, "Iterator");
+                        assert_eq!(trait_ref.args.len(), 1);
+                        assert!(matches!(
+                            &trait_ref.args[0],
+                            TypeExpr::Path { name, .. } if name == "i64"
+                        ));
+                    }
+                    other => panic!("expected Rc<dyn Iterator<i64>>, got {:?}", other),
+                }
+            }
+            other => panic!("expected an Rc type, got {:?}", other),
+        }
+
+        let takes = fn_named(&program, "takes");
+        match &takes.params[0].ty {
+            TypeExpr::Ref { mutable, inner, .. } => {
+                assert!(mutable);
+                assert!(matches!(inner.as_ref(), TypeExpr::Dyn(_)));
+            }
+            other => panic!("expected a mutable reference, got {:?}", other),
+        }
+        match &takes.ret {
+            Some(TypeExpr::Path { name, generics, .. }) => {
+                assert_eq!(name, "Box");
+                assert!(matches!(&generics[0], TypeExpr::Dyn(_)));
+            }
+            other => panic!("expected a Box return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_slice_types() {
+        let source = r#"
+struct Parts {
+    bytes: [u8],
+    shared: &[i64],
+    boxed: Box<[u8]>,
+    nested: [[i64]],
+}
+fn view(items: &[i64], boxed: Box<[i64]>) -> [i64] {
+    items
+}
+"#;
+        let program = parse_ok(source);
+        let parts = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(decl) if decl.name == "Parts" => Some(decl),
+                _ => None,
+            })
+            .expect("expected the Parts struct");
+        assert_eq!(parts.fields.len(), 4);
+        match &parts.fields[0].ty {
+            TypeExpr::Slice { elem, .. } => {
+                assert!(matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "u8"))
+            }
+            other => panic!("expected a slice type, got {:?}", other),
+        }
+        match &parts.fields[1].ty {
+            TypeExpr::Ref { inner, .. } => {
+                assert!(matches!(inner.as_ref(), TypeExpr::Slice { .. }));
+            }
+            other => panic!("expected a shared slice type, got {:?}", other),
+        }
+        match &parts.fields[2].ty {
+            TypeExpr::Path { name, generics, .. } => {
+                assert_eq!(name, "Box");
+                assert!(matches!(
+                    &generics[0],
+                    TypeExpr::Slice { elem, .. }
+                        if matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "u8")
+                ));
+            }
+            other => panic!("expected a Box type, got {:?}", other),
+        }
+        match &parts.fields[3].ty {
+            TypeExpr::Slice { elem, .. } => match elem.as_ref() {
+                TypeExpr::Slice { elem, .. } => {
+                    assert!(matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "i64"));
+                }
+                other => panic!("expected a nested slice, got {:?}", other),
+            },
+            other => panic!("expected a nested slice type, got {:?}", other),
+        }
+
+        let view = fn_named(&program, "view");
+        assert!(matches!(&view.params[0].ty, TypeExpr::Ref { .. }));
+        assert!(matches!(
+            &view.params[1].ty,
+            TypeExpr::Path { name, .. } if name == "Box"
+        ));
+        match &view.ret {
+            Some(TypeExpr::Slice { elem, .. }) => {
+                assert!(matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "i64"))
+            }
+            other => panic!("expected a slice return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_array_types() {
+        let source = "fn main() { let digits: [i64; 3] = x; }\nstruct Blob { data: [u8; 4] }\n";
+        let (program, diagnostics) = parse_source(source);
+        let errors = messages(&diagnostics);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("array types are not supported")),
+            "expected an array type diagnostic, got {:?}",
+            errors
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+        // Recovery: the item after the rejected array type still parses.
+        assert!(program.items.iter().any(|item| matches!(
+            item,
+            Item::Struct(decl) if decl.name == "Blob"
+        )));
+    }
+
+    #[test]
+    fn parses_slice_expressions() {
+        let source = r#"fn main() {
+    let a = &items[1..2];
+    let b = &items[1..=2];
+    let c = &items[..2];
+    let d = &items[1..];
+    let e = &items[..];
+    let f = items[3];
+}"#;
+        let program = parse_ok(source);
+        let stmts = main_stmts(&program);
+        assert_eq!(stmts.len(), 6);
+
+        fn ref_slice(stmt: &Stmt) -> &Expr {
+            match &let_init(stmt).kind {
+                ExprKind::Ref { expr, .. } => match &expr.kind {
+                    ExprKind::Slice { .. } => expr,
+                    other => panic!("expected a slice expression, got {:?}", other),
+                },
+                other => panic!("expected a reference, got {:?}", other),
+            }
+        }
+
+        match &ref_slice(&stmts[0]).kind {
+            ExprKind::Slice {
+                base,
+                start,
+                end,
+                inclusive,
+            } => {
+                assert_eq!(as_path_name(base), "items");
+                assert_eq!(start.as_deref().map(as_int), Some(1));
+                assert_eq!(end.as_deref().map(as_int), Some(2));
+                assert!(!inclusive);
+            }
+            other => panic!("expected a slice expression, got {:?}", other),
+        }
+        match &ref_slice(&stmts[1]).kind {
+            ExprKind::Slice {
+                start,
+                end,
+                inclusive,
+                ..
+            } => {
+                assert_eq!(start.as_deref().map(as_int), Some(1));
+                assert_eq!(end.as_deref().map(as_int), Some(2));
+                assert!(inclusive);
+            }
+            other => panic!("expected a slice expression, got {:?}", other),
+        }
+        match &ref_slice(&stmts[2]).kind {
+            ExprKind::Slice { start, end, .. } => {
+                assert!(start.is_none());
+                assert_eq!(end.as_deref().map(as_int), Some(2));
+            }
+            other => panic!("expected a slice expression, got {:?}", other),
+        }
+        match &ref_slice(&stmts[3]).kind {
+            ExprKind::Slice { start, end, .. } => {
+                assert_eq!(start.as_deref().map(as_int), Some(1));
+                assert!(end.is_none());
+            }
+            other => panic!("expected a slice expression, got {:?}", other),
+        }
+        match &ref_slice(&stmts[4]).kind {
+            ExprKind::Slice { start, end, .. } => {
+                assert!(start.is_none());
+                assert!(end.is_none());
+            }
+            other => panic!("expected a slice expression, got {:?}", other),
+        }
+        match &let_init(&stmts[5]).kind {
+            ExprKind::Index { base, index } => {
+                assert_eq!(as_path_name(base), "items");
+                assert_eq!(as_int(index), 3);
+            }
+            other => panic!("expected an index expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_ranges_outside_index_and_for() {
+        for source in [
+            "fn main() { let r = 0..10; }",
+            "fn main() { let r = 0..=10; }",
+        ] {
+            let (_, diagnostics) = parse_source(source);
+            assert!(
+                diagnostics.has_errors(),
+                "expected a range diagnostic for {source:?}"
+            );
+        }
     }
 }

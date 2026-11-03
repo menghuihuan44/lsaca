@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -58,6 +59,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# The independent reference implementations live next to this script.
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+import oracles  # noqa: E402  (sibling module; path configured above)
+
 # ---------------------------------------------------------------------------
 # Workloads
 # ---------------------------------------------------------------------------
@@ -67,6 +75,22 @@ PROGRAMS = {
         "expected": "checksum=8320400",
         "description": "recursive fibonacci(30), called 10 times, checksummed",
         "workload": {"n": 30, "repetitions": 10},
+    },
+    "fib_iter": {
+        "expected": "checksum=8320400",
+        "description": "iterative fibonacci(30) with two rolling values, called 10 times; "
+                       "alternative implementation with the same checksum as fib",
+        "workload": {"n": 30, "repetitions": 10, "algorithm": "iterative"},
+        "languages": ["lsaca", "c"],
+        "alternative": True,
+    },
+    "fib_memo": {
+        "expected": "checksum=8320400",
+        "description": "recursive fibonacci(30) with a memo table, called 10 times; "
+                       "alternative implementation with the same checksum as fib",
+        "workload": {"n": 30, "repetitions": 10, "algorithm": "memoised recursion"},
+        "languages": ["lsaca", "c"],
+        "alternative": True,
     },
     "loop_sum": {
         "expected": "checksum=32000004000000",
@@ -89,6 +113,15 @@ PROGRAMS = {
         "description": "sort 200,000 pseudo-random i64 values with an iterative quicksort "
                        "written in the language; checksum is first,last,sum",
         "workload": {"n": 200000, "algorithm": "iterative quicksort, middle pivot", "seed": 12345},
+    },
+    "sort_insertion": {
+        "expected": "checksum=91125,2140623151,1054904362226",
+        "description": "insertion sort over the same 1,000 pseudo-random i64 values as "
+                       "sort_i64; alternative implementation for small inputs, checksum is "
+                       "first,last,sum",
+        "workload": {"n": 1000, "algorithm": "insertion sort", "seed": 12345},
+        "languages": ["lsaca", "c"],
+        "alternative": True,
     },
     "matrix_multiply": {
         "expected": "checksum=1018924712000",
@@ -142,6 +175,15 @@ PROGRAMS = {
                        "(order-independent)",
         "workload": {"tokens": 200000, "alphabet": 4096, "key_type": "String",
                      "value_type": "i64"},
+    },
+    "array_wordcount": {
+        "expected": "checksum=9766208,4096,49",
+        "description": "count the same 200,000 deterministic words as hashmap_wordcount "
+                       "in a flat indexed array of 4,096 counters instead of a hash map; "
+                       "alternative implementation, same checksum",
+        "workload": {"tokens": 200000, "alphabet": 4096, "storage": "flat indexed array"},
+        "languages": ["lsaca", "c"],
+        "alternative": True,
     },
     "generic_stack": {
         "expected": "checksum=499999500000,5900",
@@ -220,6 +262,13 @@ PROGRAMS = {
         "project_kind": "package",
     },
 }
+
+# Attach the small/medium/large scale matrix to every workload that has one.
+for _program, _spec in PROGRAMS.items():
+    _scale_matrix = oracles.SCALES.get(_program)
+    if _scale_matrix:
+        _spec["scales"] = {name: dict(entry) for name, entry in _scale_matrix.items()}
+del _program, _spec, _scale_matrix
 
 LANGUAGES = ["lsaca", "c", "rust", "python", "node"]
 
@@ -856,6 +905,35 @@ def _posix_peak_memory(cmd, env, cwd):
 # ---------------------------------------------------------------------------
 
 
+def summarize_runs(times):
+    """Distribution summary for a list of measured run times (seconds)."""
+    if not times:
+        return {
+            "mean_s": None,
+            "stdev_s": None,
+            "ci95_s": None,
+            "outliers_s": [],
+            "outlier_count": 0,
+        }
+    values = [float(value) for value in times]
+    mean = statistics.fmean(values)
+    stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+    median = statistics.median(values)
+    mad = statistics.median([abs(value - median) for value in values])
+    if mad > 0.0:
+        outliers = [value for value in values if abs(value - median) > 3.0 * mad]
+    else:
+        outliers = []
+    ci95 = 1.96 * stdev / math.sqrt(len(values)) if len(values) > 1 else 0.0
+    return {
+        "mean_s": round(mean, 6),
+        "stdev_s": round(stdev, 6),
+        "ci95_s": round(ci95, 6),
+        "outliers_s": [round(value, 6) for value in outliers],
+        "outlier_count": len(outliers),
+    }
+
+
 class Harness:
     def __init__(self, args):
         self.args = args
@@ -886,6 +964,12 @@ class Harness:
         self.languages = (
             [l for l in LANGUAGES if l in args.languages] if args.languages else list(LANGUAGES)
         )
+        self.scale_names = [
+            name for name in oracles.SCALE_NAMES if not args.scales or name in args.scales
+        ]
+        self.scale_runs = max(1, args.scale_runs)
+        if args.quick:
+            self.scale_runs = min(self.scale_runs, 2)
         # Fresh scratch area for this run (build outputs, caches).
         shutil.rmtree(self.tmp_root / "build", ignore_errors=True)
         shutil.rmtree(self.tmp_root / "cache", ignore_errors=True)
@@ -1135,17 +1219,28 @@ class Harness:
         )
 
     def build_project_official(self, program, spec, outdir):
-        cache = self.fresh_cache_dir(program + "-official-cold")
-        env = dict(self.env)
-        env["LSACA_CACHE_DIR"] = str(cache)
         outdir.mkdir(parents=True, exist_ok=True)
         cmd, cwd = self.project_build_command(spec, outdir)
-        proc, cold_s = timed_run(cmd, env, cwd=cwd, timeout=self.args.official_timeout)
-        if proc.returncode != 0:
-            raise HarnessError(
-                "official lsaca build failed for %s (exit %s):\n%s"
-                % (program, proc.returncode, describe_failure(proc))
+        # A cold build starts from an empty LSACA_CACHE_DIR, so every repeat
+        # pays the full pipeline (emit the C project, compile it and the
+        # runtime, link). Repeat it to report a median and a spread.
+        cold = []
+        cache = None
+        for repeat in range(self.compile_repeats):
+            cache = self.fresh_cache_dir(
+                "%s-official-cold-%d" % (program, repeat + 1)
             )
+            env = dict(self.env)
+            env["LSACA_CACHE_DIR"] = str(cache)
+            proc, cold_s = timed_run(cmd, env, cwd=cwd, timeout=self.args.official_timeout)
+            if proc.returncode != 0:
+                raise HarnessError(
+                    "official lsaca build failed for %s (exit %s):\n%s"
+                    % (program, proc.returncode, describe_failure(proc))
+                )
+            cold.append(round(cold_s, 6))
+        env = dict(self.env)
+        env["LSACA_CACHE_DIR"] = str(cache)
         exe = self.find_project_exe(program, spec, outdir)
         if exe is None:
             raise HarnessError(
@@ -1182,13 +1277,20 @@ class Harness:
         return {
             "kind": "lsaca-official",
             "backend": self.default_backend,
-            "cold_s": round(cold_s, 6),
+            "cold_runs_s": cold,
+            "cold_s": round(statistics.median(cold), 6),
+            "cold_median_s": round(statistics.median(cold), 6),
+            "cold_min_s": round(min(cold), 6),
+            "cold_max_s": round(max(cold), 6),
             "cached_runs_s": cached,
             "cached_median_s": round(statistics.median(cached), 6) if cached else None,
+            "cached_min_s": round(min(cached), 6) if cached else None,
+            "cached_max_s": round(max(cached), 6) if cached else None,
             "generated_c_bytes": generated_c_bytes,
             "generated_c_files": len(generated_files) or None,
             "exe": rel_path(exe, self.root),
-            "note": "cold build runs one default 'lsaca build -r' with a fresh "
+            "note": "cold build runs the default 'lsaca build -r' once per "
+                    "compile_repeats repeat, each time with a fresh "
                     "LSACA_CACHE_DIR (%s); the cached build re-uses the same cache "
                     "directory and only re-links the executable" % layout,
         }
@@ -1198,17 +1300,27 @@ class Harness:
         return self._fallback_build(program, outdir, emit_args, cwd)
 
     def build_lsaca_official(self, program, src, outdir):
-        cache = self.fresh_cache_dir(program + "-official-cold")
-        env = dict(self.env)
-        env["LSACA_CACHE_DIR"] = str(cache)
         outdir.mkdir(parents=True, exist_ok=True)
         cmd = [self.compiler, "build", "-r", str(src), "-o", str(outdir)]
-        proc, cold_s = timed_run(cmd, env, cwd=self.root, timeout=self.args.official_timeout)
-        if proc.returncode != 0:
-            raise HarnessError(
-                "official lsaca build failed for %s (exit %s):\n%s"
-                % (program, proc.returncode, describe_failure(proc))
+        # Cold repeats each start from an empty LSACA_CACHE_DIR so the recorded
+        # spread covers the full emit/compile/link pipeline.
+        cold = []
+        cache = None
+        for repeat in range(self.compile_repeats):
+            cache = self.fresh_cache_dir(
+                "%s-official-cold-%d" % (program, repeat + 1)
             )
+            env = dict(self.env)
+            env["LSACA_CACHE_DIR"] = str(cache)
+            proc, cold_s = timed_run(cmd, env, cwd=self.root, timeout=self.args.official_timeout)
+            if proc.returncode != 0:
+                raise HarnessError(
+                    "official lsaca build failed for %s (exit %s):\n%s"
+                    % (program, proc.returncode, describe_failure(proc))
+                )
+            cold.append(round(cold_s, 6))
+        env = dict(self.env)
+        env["LSACA_CACHE_DIR"] = str(cache)
         exe = self.find_built_exe(outdir, program)
         if exe is None:
             raise HarnessError(
@@ -1233,12 +1345,19 @@ class Harness:
         return {
             "kind": "lsaca-official",
             "backend": self.default_backend,
-            "cold_s": round(cold_s, 6),
+            "cold_runs_s": cold,
+            "cold_s": round(statistics.median(cold), 6),
+            "cold_median_s": round(statistics.median(cold), 6),
+            "cold_min_s": round(min(cold), 6),
+            "cold_max_s": round(max(cold), 6),
             "cached_runs_s": cached,
             "cached_median_s": round(statistics.median(cached), 6) if cached else None,
+            "cached_min_s": round(min(cached), 6) if cached else None,
+            "cached_max_s": round(max(cached), 6) if cached else None,
             "generated_c_bytes": generated_c_bytes,
             "exe": rel_path(exe, self.root),
-            "note": "cold build runs one default 'lsaca build -r' with a fresh "
+            "note": "cold build runs the default 'lsaca build -r' once per "
+                    "compile_repeats repeat, each time with a fresh "
                     "LSACA_CACHE_DIR (emit the generated C, compile it and the cached runtime "
                     "translation units with gcc); the cached build re-uses the same cache "
                     "directory and only re-links the executable",
@@ -1305,8 +1424,14 @@ class Harness:
             "emit_c_runs_s": emit_runs,
             "gcc_runs_s": gcc_runs,
             "emit_c_median_s": round(statistics.median(emit_runs), 6),
+            "emit_c_min_s": round(min(emit_runs), 6),
+            "emit_c_max_s": round(max(emit_runs), 6),
             "gcc_median_s": round(statistics.median(gcc_runs), 6),
+            "gcc_min_s": round(min(gcc_runs), 6),
+            "gcc_max_s": round(max(gcc_runs), 6),
             "total_s": round(statistics.median(emit_runs) + statistics.median(gcc_runs), 6),
+            "generated_c_bytes": sum(path.stat().st_size for path in generated_c),
+            "generated_c_files": len(generated_c),
             "exe": rel_path(exe, self.root),
             "note": "fallback: lsaca emit-c -r (release: wrapping arithmetic, same "
                     "optimizations as the default build) plus a direct gcc -O2 -DNDEBUG compile "
@@ -1338,6 +1463,7 @@ class Harness:
             "runs_s": runs,
             "median_s": round(statistics.median(runs), 6),
             "min_s": round(min(runs), 6),
+            "max_s": round(max(runs), 6),
             "exe": rel_path(exe, self.root),
             "command": " ".join(str(part) for part in cmd),
         }
@@ -1364,22 +1490,28 @@ class Harness:
                 % (program, language, phase, expected, got, describe_failure(proc, 800))
             )
 
-    def measure_runtime(self, language, program, cmd, expected):
-        for _ in range(self.args.warmups):
+    def measure_runtime(
+        self, language, program, cmd, expected, runs=None, warmups=None, phase="runtime"
+    ):
+        runs = self.args.runs if runs is None else runs
+        warmups = self.args.warmups if warmups is None else warmups
+        for _ in range(warmups):
             proc, _ = timed_run(cmd, self.env, cwd=self.root, timeout=self.args.run_timeout)
             self.validate_output(proc, expected, language, program, "warm-up")
         times = []
-        for _ in range(self.args.runs):
+        for _ in range(runs):
             proc, elapsed = timed_run(cmd, self.env, cwd=self.root, timeout=self.args.run_timeout)
-            self.validate_output(proc, expected, language, program, "runtime")
+            self.validate_output(proc, expected, language, program, phase)
             times.append(elapsed)
-        return {
+        summary = {
             "runs_s": [round(value, 6) for value in times],
             "median_s": round(statistics.median(times), 6),
             "min_s": round(min(times), 6),
             "max_s": round(max(times), 6),
-            "warmups": self.args.warmups,
+            "warmups": warmups,
         }
+        summary.update(summarize_runs(times))
+        return summary
 
     def measure_memory(self, language, program, cmd, expected):
         result = peak_memory_run(cmd, self.env, self.root)
@@ -1395,6 +1527,46 @@ class Harness:
             "method": result.get("method"),
             "note": result.get("note"),
         }
+
+    # -- independent oracles and data scales ------------------------------
+
+    def verify_oracles(self):
+        """Compare the expected checksums with scripts/oracles.py."""
+        checked = [program for program in self.programs if program in oracles.oracle_programs()]
+        report = {
+            "module": "scripts/oracles.py",
+            "programs": [],
+            "scales": {},
+            "mismatches": [],
+        }
+        for program in checked:
+            report["programs"].append(program)
+            expected = oracles.expected(program)
+            if program in oracles.SCALES:
+                report["scales"][program] = oracles.expected_scales(program)
+            suite_expected = PROGRAMS[program]["expected"]
+            if expected != suite_expected:
+                report["mismatches"].append(
+                    "%s: oracle gives %r, the suite expects %r"
+                    % (program, expected, suite_expected)
+                )
+        if report["mismatches"]:
+            raise HarnessError(
+                "independent oracle mismatch: " + "; ".join(report["mismatches"])
+            )
+        return report
+
+    @staticmethod
+    def scale_entry(entry, scale_name, scale_spec, expected_by_scale):
+        return entry["scales"].setdefault(
+            scale_name,
+            {
+                "args": list(scale_spec["args"]),
+                "workload": scale_spec.get("workload"),
+                "expected": expected_by_scale.get(scale_name),
+                "languages": {},
+            },
+        )
 
     # -- main loop --------------------------------------------------------
 
@@ -1417,6 +1589,8 @@ class Harness:
                 "memory": not self.args.no_memory,
                 "programs": self.programs,
                 "languages": self.languages,
+                "scales": self.scale_names,
+                "scale_runs": self.scale_runs,
                 "compile_only_programs": [
                     program for program in self.programs if PROGRAMS[program].get("compile_only")
                 ],
@@ -1452,6 +1626,11 @@ class Harness:
             program_languages[program] = languages
         total = sum(len(languages) for languages in program_languages.values())
         done = 0
+        # Verify every expected checksum against the independent reference
+        # implementations before running anything (scripts/oracles.py).
+        oracle_report = self.verify_oracles()
+        results["oracle_verification"] = oracle_report
+        scale_expected = oracle_report["scales"]
         for program in self.programs:
             spec = PROGRAMS[program]
             compile_only = bool(spec.get("compile_only"))
@@ -1470,6 +1649,7 @@ class Harness:
                     language: rel_path(self.src_path(program, language), self.root)
                     for language in program_languages[program]
                 }
+            scales = spec.get("scales") or {}
             entry = {
                 "expected": spec["expected"],
                 "description": spec["description"],
@@ -1478,12 +1658,22 @@ class Harness:
                 "sources": sources,
                 "languages": {},
             }
+            if scales and not compile_only:
+                entry["scales"] = {}
             for language in program_languages[program]:
                 done += 1
                 if not self.available(language):
                     reason = self.unavailable_reason(language)
                     self.warnings.append("%s/%s skipped: %s" % (program, language, reason))
                     entry["languages"][language] = {"skipped": reason}
+                    if scales:
+                        for scale_name, scale_spec in scales.items():
+                            if scale_name not in self.scale_names:
+                                continue
+                            scale_entry = self.scale_entry(
+                                entry, scale_name, scale_spec, scale_expected.get(program, {})
+                            )
+                            scale_entry["languages"][language] = {"skipped": reason}
                     continue
                 outdir = self.build_dir(program, language)
                 if is_project:
@@ -1507,6 +1697,15 @@ class Harness:
                             "exe": None,
                             "note": "interpreted language: no ahead-of-time compile step",
                         }
+                # Record artifact sizes for the results tables.
+                if compile_record.get("exe"):
+                    exe_path = self.root / compile_record["exe"]
+                    if exe_path.is_file():
+                        compile_record["exe_bytes"] = exe_path.stat().st_size
+                elif language in ("python", "node"):
+                    source_path = self.src_path(program, language)
+                    if source_path.is_file():
+                        compile_record["source_bytes"] = source_path.stat().st_size
                 if compile_only:
                     entry["languages"][language] = {
                         "compile": compile_record,
@@ -1548,6 +1747,53 @@ class Harness:
                         else "n/a",
                     )
                 )
+                if scales:
+                    for scale_name in self.scale_names:
+                        scale_spec = scales.get(scale_name)
+                        if scale_spec is None:
+                            continue
+                        scale_entry = self.scale_entry(
+                            entry, scale_name, scale_spec, scale_expected.get(program, {})
+                        )
+                        scale_args = [str(value) for value in scale_spec["args"]]
+                        if not scale_args:
+                            scale_entry["languages"][language] = {
+                                "runtime": dict(runtime),
+                                "memory": memory,
+                                "note": "same configuration as the primary measurement "
+                                        "(default arguments)",
+                            }
+                            continue
+                        scale_cmd = command + scale_args
+                        scale_runtime = self.measure_runtime(
+                            language,
+                            program,
+                            scale_cmd,
+                            scale_entry["expected"],
+                            runs=self.scale_runs,
+                            warmups=0,
+                            phase="scale " + scale_name,
+                        )
+                        scale_memory = None
+                        if not self.args.no_memory:
+                            scale_memory = self.measure_memory(
+                                language, program, scale_cmd, scale_entry["expected"]
+                            )
+                        scale_entry["languages"][language] = {
+                            "runtime": scale_runtime,
+                            "memory": scale_memory,
+                        }
+                        eprint(
+                            "[%d/%d] %-12s %-6s  scale=%-6s median=%9.2f ms"
+                            % (
+                                done,
+                                total,
+                                program,
+                                language,
+                                scale_name,
+                                scale_runtime["median_s"] * 1000.0,
+                            )
+                        )
             results["programs"][program] = entry
         results["lsaca_build"]["mode"] = self.lsaca_mode
         results["lsaca_build"]["official_attempt_error"] = (
@@ -1594,6 +1840,57 @@ def fmt_memory(record):
     if not record or record.get("peak_mib") is None:
         return "n/a"
     return "%.1f" % record["peak_mib"]
+
+
+def fmt_bytes(value):
+    if value is None:
+        return "n/a"
+    return "{:,}".format(int(value))
+
+
+def render_scale_table(results):
+    """Rows for the runtime-by-data-scale table, plus the language columns."""
+    languages = [l for l in LANGUAGES if l in results["settings"]["languages"]]
+    rows = []
+    for program in results["programs"]:
+        entry = results["programs"][program]
+        scales = entry.get("scales") or {}
+        for scale_name in results["settings"].get("scales") or []:
+            scale = scales.get(scale_name)
+            if not scale:
+                continue
+            cells = [program, scale_name]
+            for language in languages:
+                record = (scale.get("languages") or {}).get(language) or {}
+                cells.append(fmt_runtime(record.get("runtime")))
+            rows.append("| " + " | ".join(cells) + " |")
+    return rows, languages
+
+
+def render_artifact_table(results):
+    table = [
+        "| program | lsaca executable (bytes) | lsaca generated C (bytes) | "
+        "C executable (bytes) | Rust executable (bytes) |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for program in results["programs"]:
+        entry = results["programs"][program]
+        languages = entry.get("languages") or {}
+        lsaca_compile = (languages.get("lsaca") or {}).get("compile") or {}
+        c_compile = (languages.get("c") or {}).get("compile") or {}
+        rust_compile = (languages.get("rust") or {}).get("compile") or {}
+        label = program
+        if entry.get("compile_only"):
+            label = program + " (compile-only)"
+        cells = [
+            label,
+            fmt_bytes(lsaca_compile.get("exe_bytes")),
+            fmt_bytes(lsaca_compile.get("generated_c_bytes")),
+            fmt_bytes(c_compile.get("exe_bytes")),
+            fmt_bytes(rust_compile.get("exe_bytes")),
+        ]
+        table.append("| " + " | ".join(cells) + " |")
+    return table
 
 
 def render_markdown(results):
@@ -1675,13 +1972,16 @@ def render_markdown(results):
     lines.append("")
     if results["lsaca_build"].get("mode") == "official":
         lines.append(
-            "> lsaca cold build: one default `lsaca build -r` from a fresh LSACA_CACHE_DIR. "
+            "> lsaca cold build: the default `lsaca build -r`, repeated --compile-repeats "
+            "times (default 3), each repeat starting from a fresh LSACA_CACHE_DIR. "
             "Since 1.2 the default build back end is the compiler's built-in direct C compiler "
             "back end: it emits the generated C and compiles it together with the cached runtime "
             "translation units using gcc. The cached build repeats the command against the same "
             "cache directory (the runtime objects and the content-addressed project are reused, "
             "so it mostly just re-links). The compiler still supports the older CMake + Ninja "
-            "path via `lsaca build -r --cmake`; the harness does not measure it by default."
+            "path via `lsaca build -r --cmake`; the harness does not measure it by default. "
+            "Cold and cached compile times are medians of --compile-repeats runs (default 3); "
+            "latest.json stores every run plus the minimum and maximum."
         )
         lines.append("")
     if results["lsaca_build"].get("mode") == "fallback":
@@ -1739,6 +2039,48 @@ def render_markdown(results):
                 cells.append(fmt_memory(record.get("memory")))
             lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
+    scale_rows, scale_languages = render_scale_table(results)
+    if scale_rows:
+        lines.append("## Runtime by data scale (median (min), milliseconds; lower is better)")
+        lines.append("")
+        lines.append(
+            "| program | scale | "
+            + " | ".join(LANGUAGE_LABELS[language] for language in scale_languages)
+            + " |"
+        )
+        lines.append(
+            "| --- | --- | " + " | ".join("---:" for _ in scale_languages) + " |"
+        )
+        lines.extend(scale_rows)
+        lines.append("")
+        lines.append(
+            "> The medium scale reuses the primary measurement above (default "
+            "arguments); the small and large scales pass explicit arguments, listed "
+            "under Data scales below."
+        )
+        lines.append("")
+    lines.append("## Artifact sizes (bytes)")
+    lines.append("")
+    lines.extend(render_artifact_table(results))
+    lines.append("")
+    oracle = results.get("oracle_verification") or {}
+    if oracle.get("programs"):
+        oracle_scale_lines = sum(
+            len(scale_lines) for scale_lines in oracle.get("scales", {}).values()
+        )
+        lines.append("## Independent oracles")
+        lines.append("")
+        lines.append(
+            "> scripts/oracles.py reimplements every executed workload and recomputes "
+            "its checksum line without running lsaca: %d program checksums and %d "
+            "data-scale checksums agree with the expected output (mismatches: %d)."
+            % (
+                len(oracle["programs"]),
+                oracle_scale_lines,
+                len(oracle.get("mismatches") or []),
+            )
+        )
+        lines.append("")
     lines.append("## Workloads")
     lines.append("")
     for program in programs:
@@ -1754,6 +2096,27 @@ def render_markdown(results):
                 % (program, spec["description"], spec["expected"])
             )
     lines.append("")
+    scale_programs = [
+        program for program in programs if results["programs"][program].get("scales")
+    ]
+    if scale_programs:
+        lines.append("## Data scales")
+        lines.append("")
+        for program in scale_programs:
+            scale_matrix = results["programs"][program]["scales"]
+            parts = []
+            for scale_name in results["settings"].get("scales") or []:
+                scale = scale_matrix.get(scale_name)
+                if not scale:
+                    continue
+                args_text = (
+                    " ".join(str(value) for value in scale.get("args") or []) or "(default)"
+                )
+                parts.append(
+                    "%s: args %s -> %s" % (scale_name, args_text, scale.get("expected"))
+                )
+            lines.append("- %s: %s" % (program, "; ".join(parts)))
+        lines.append("")
     if results.get("warnings"):
         lines.append("## Warnings")
         lines.append("")
@@ -1812,6 +2175,26 @@ def parse_args(argv):
         "--languages", default=None, help="comma separated subset of: " + ",".join(LANGUAGES)
     )
     parser.add_argument(
+        "--scale",
+        dest="scales",
+        default=None,
+        help="comma separated subset of the data scales: "
+        + ",".join(oracles.SCALE_NAMES)
+        + " (default: every scale a workload defines)",
+    )
+    parser.add_argument(
+        "--scale-runs",
+        type=int,
+        default=3,
+        help="measured runtime runs per small/large data scale",
+    )
+    parser.add_argument(
+        "--list-scales",
+        action=
+        "store_true",
+        help="list the small/medium/large scale matrix and exit",
+    )
+    parser.add_argument(
         "--json",
         default=None,
         help="raw results JSON path (default benchmarks/results/latest.json)",
@@ -1826,12 +2209,20 @@ def parse_args(argv):
     if args.quick:
         args.runs = min(args.runs, 3)
         args.compile_repeats = 1
+        args.scale_runs = min(args.scale_runs, 2)
     if args.runs < 1:
         parser.error("--runs must be >= 1")
     if args.warmups < 0:
         parser.error("--warmups must be >= 0")
     if args.compile_repeats < 1:
         parser.error("--compile-repeats must be >= 1")
+    if args.scale_runs < 1:
+        parser.error("--scale-runs must be >= 1")
+    if args.scales:
+        args.scales = [item.strip() for item in args.scales.split(",") if item.strip()]
+        unknown = [item for item in args.scales if item not in oracles.SCALE_NAMES]
+        if unknown:
+            parser.error("unknown scale(s): %s" % ", ".join(unknown))
     if args.programs:
         args.programs = [item.strip() for item in args.programs.split(",") if item.strip()]
         unknown = [item for item in args.programs if item not in PROGRAMS]
@@ -1853,6 +2244,27 @@ def main(argv=None):
         compile_only = [name for name, spec in PROGRAMS.items() if spec.get("compile_only")]
         if compile_only:
             print("compile-only: " + ", ".join(compile_only))
+        scalable = [name for name, spec in PROGRAMS.items() if spec.get("scales")]
+        if scalable:
+            print("scalable: " + ", ".join(scalable))
+        alternatives = [name for name, spec in PROGRAMS.items() if spec.get("alternative")]
+        if alternatives:
+            print("alternative implementations: " + ", ".join(alternatives))
+        return 0
+    if args.list_scales:
+        for program, scale_specs in oracles.SCALES.items():
+            if program not in PROGRAMS:
+                continue
+            expected_lines = oracles.expected_scales(program)
+            for scale_name in oracles.SCALE_NAMES:
+                if scale_name not in scale_specs:
+                    continue
+                spec = scale_specs[scale_name]
+                args_text = " ".join(str(value) for value in spec["args"]) or "(default)"
+                print(
+                    "%-18s %-6s args=%-20s expected=%s"
+                    % (program, scale_name, args_text, expected_lines[scale_name])
+                )
         return 0
     root = Path(args.root).resolve() if args.root else REPO_ROOT
     if not (root / "benchmarks" / "programs").is_dir():

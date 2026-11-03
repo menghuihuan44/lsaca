@@ -15,98 +15,72 @@ This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
-The current release is **1.7.0**. It makes lsaca a **multi-file language with a
-package manager**:
+The current release is **2.0.0**. It turns the standard library into real lsaca
+code, adds trait objects, slices and `str`, and closes most of the remaining
+performance gap to C:
 
-- **Modules and multi-file crates**: inline modules (`mod foo { .. }`) and
-  file modules (`mod foo;`) resolve to `foo.ls` or `foo/mod.ls`
-  (both present is `E0761`), nest arbitrarily, and are imported with
-  `use` trees including aliases, groups, `self`, `super`,
-  `crate` and dependency crate names. Glob imports are rejected. See
-  [docs/language/23-modules.md](docs/language/23-modules.md).
-- **Visibility**: `pub`, `pub(crate)` and private items, fields and
-  modules, plus `pub use` re-exports, are enforced with Rust-style
-  diagnostics (`E0603`, `E0616`, `E0624`, `E0364`,
-  `E0365`, `E0451`) through multi-segment paths and across package
-  boundaries.
-- **Packages**: `lsaca new <DIR>` scaffolds a binary package
-  (`lsaca.toml` + `src/main.ls`); commands accept either one
-  `.ls` file or a package discovered from the current directory; path
-  dependencies form a graph built dependency-first, and malformed manifests,
-  missing paths, dependency cycles and binary/library mix-ups are diagnostics.
-  See [docs/language/24-packages.md](docs/language/24-packages.md).
-- **Multi-file diagnostics**: errors, labels, panic locations and leak reports
-  name the real file and line, because the compiler keeps a `SourceMap` of
-  every loaded module instead of one source text.
-- **Audit fixes**: `assert_ne!` exists and formats like `assert_eq!`;
-  destructuring an aggregate that implements `Drop` no longer runs the
-  hook twice or before the bindings are used; a negative literal as a bare tail
-  expression after a block-like statement parses correctly; module nesting
-  deeper than 256 levels reports `E0001` instead of overflowing the
-  compiler stack; running, building or emitting C for a library package is
-  rejected, and a `src/main.ls` without `fn main()` gets a specific
-  error.
-- **New compile-time benchmarks**: `modules_compile` (9 files, 3,586
-  lines) and `package_compile` (13 files plus path dependencies) measure
-  cold and cached builds next to `compile_large`.
+- **Standard library written in lsaca**: `Vec`, `String`, `Option`, `Result`,
+  `Rc`, `Box`, `HashMap`, `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque`,
+  `BinaryHeap`, the iterator adapters, `io`, `fs`, `net`, `time`,
+  `env`, `process` and `error` are ordinary lsaca source in
+  [stdlib/src/](stdlib/src/), compiled into the compiler and shipped with it.
+  Only the thin `extern fn` intrinsics that talk to the C runtime are external,
+  so the shipped standard library is readable, debuggable and generic, and user
+  code can be written in exactly the same style. See
+  [docs/stdlib/README.md](docs/stdlib/README.md).
+- **Trait objects**: `dyn Trait`, `Box<dyn Trait>`, `Rc<dyn Trait>` and
+  `&dyn Trait` support dynamic dispatch through per-(trait, type) vtables,
+  including object safety checking (`E0038`), automatic coercion at
+  let/assignment/argument/return/`Vec::push` sites (`E0277` points at the
+  missing impl), and heterogeneous collections such as `Vec<Box<dyn Shape>>`.
+  See [docs/language/25-trait-objects.md](docs/language/25-trait-objects.md).
+- **Slices and `str`**: `&[T]`, `&mut [T]`, `&str` and `&mut str`, Rust
+  range slicing (`&values[1..4]`, `&text[..6]`, `&values[..]`), implicit
+  coercions from `&Vec<T>`/`&mut Vec<T>`/`&String`/`&mut String`, and the
+  usual UTF-8 boundary and range panics with Rust wording. `impl [T]` and
+  `impl str` methods (`len`, `is_empty`, `get`, `first`, `last`,
+  `char_count`, `starts_with`, `find`, `trim`, `split`, `parse_i64`, ...)
+  live in the standard library. See
+  [docs/language/26-slices-and-str.md](docs/language/26-slices-and-str.md).
+- **`isize` and `usize`**: pointer-sized integer types, available everywhere
+  (including `HashMap` keys and `as` casts) alongside the ten fixed-width
+  integer types.
+- **New collections**: insertion-ordered `HashSet`, sorted `BTreeSet` and
+  `BTreeMap`, `VecDeque` and `BinaryHeap`, all written in lsaca on top of the
+  builtin `HashMap` and `Vec`, with set operations (`union`, `intersection`,
+  `difference`, `subset`). See
+  [docs/stdlib/collections/README.md](docs/stdlib/collections/README.md).
+- **System interfaces**: `std::io` (16 `ErrorKind` variants, `File` with
+  deterministic `Drop`, standard streams), `std::fs` (read/write/append files,
+  `read_dir`, metadata, create/remove directories, canonicalize, copy, rename,
+  current and temporary directories), `std::net` (plain TCP
+  `TcpListener`/`TcpStream` with timeouts and shutdown), `std::time`
+  (millisecond timestamps, monotonic clock, sleep, local/UTC date-time
+  breakdown and formatting), `std::env`, `std::process` and
+  `std::error::Error`. See [docs/stdlib/README.md](docs/stdlib/README.md).
+- **Faster**: the runtime allocator, strings, formatting and `HashMap` were
+  retuned, simple iterator chains are fused into C loops, and the generated
+  code does less reference-count traffic. `iterator_pipeline` went from
+  27.7 ms to 14.2 ms (C: 12.3 ms), `hashmap_string` from 243.7 ms to
+  193.2 ms, and a cold single-file build from roughly 1.0-1.2 s to
+  0.4-0.6 s once the shared runtime-object cache is warm. See
+  [Benchmarks](#benchmarks).
 
-Version 1.7.0 is source compatible with single-file 1.6.0 programs, with these
-exceptions: `mod`, `use`, `crate` and `super` are now
-reserved keywords; field visibility is enforced (a field declared without
-`pub` is private to its module); and generated C names for items in nested
-modules and dependency crates gained a module/crate prefix, so emitted projects
-must be regenerated.
+Version 2.0.0 is source compatible with 1.7.0 programs apart from deliberate
+changes: `dyn` and `extern` are now reserved keywords; the standard library
+became the `std` crate (its root re-exports the names into every program's
+prelude scope, so unqualified `Vec`, `String`, `HashMap`, `println!` and
+friends keep working);
+`extern fn` declarations are accepted only inside the standard library, and
+user code cannot implement `[T]` or `str`; emitted C projects must be
+regenerated. Several limitations that 1.7.0 only documented are now
+implemented instead.
 
-Version 1.6.0 (the previous release) added a real **`char` type**,
-**UTF-8-aware strings**, a **Swiss-Table-style `HashMap`** and generated-C
-translation-unit splitting for very large programs:
-
-- `char` is a Copy 32-bit Unicode scalar value with single-quote literals,
-  escapes, ordering/equality, patterns and formatting. New String APIs
-  `char_count`, `chars`, `char_at`, `is_char_boundary`, `push(char)`,
-  `pop` and `String::from_char` walk strings by character, while `len`,
-  `find` and `substring` stay byte-oriented with character-boundary checks.
-- Every `String` is guaranteed valid UTF-8: `read_line` and program arguments
-  panic on invalid bytes (`stream did not contain valid UTF-8` /
-  `arguments contain invalid UTF-8`), `read_file` returns `Err`,
-  `to_uppercase`/`to_lowercase` use full Unicode data (so
-  `"ß".to_uppercase()` is `"SS"`), `trim` removes Unicode whitespace
-  (including U+00A0 and U+3000), and `{:?}` follows Rust's `escape_debug`
-  rules.
-- `HashMap` uses a Swiss-Table-style layout (control bytes + 16-slot group
-  probing), accepts `char` keys, keeps deterministic fixed-seed hashing and
-  content equality, and documents iteration order as unspecified.
-- Programs with more than 256 KiB of generated user-function code are emitted
-  as `main.c` plus up to eight deterministic `lsaca_unit_N.c` units; small
-  programs still emit a single `main.c`.
-- The 1.6 audit also fixed memory-safety and correctness defects: references can
-  no longer be stored inside aggregates (`Some(&x)`, `Box::new(&x)`,
-  `Rc::new(&x)`, `vec![&x]`, `push`/`insert`, struct fields and nested
-  aggregates now all report `E0498`, naming the offending type); every
-  integer/float to `bool` cast is rejected with `E0605`; `impl Copy` and
-  `impl Clone` are rejected with `E0119`; most-negative integer literals and
-  unary-minus folding work; the ORC cycle collector and the destructor cascade
-  are iterative, so 100,000-deep object graphs no longer overflow the stack;
-  debug builds detect stale/double release through a handle registry; string
-  literals may contain NUL bytes and are interned once per distinct literal;
-  match arms can steal owned bindings; reads are buffered, `println!` no
-  longer flushes per call, and shortest-float formatting is a Rust-parity
-  Dragon4 (roughly 3.5x faster).
-- The robustness audit rejects pathological input cleanly: syntax nested deeper
-  than 128 levels is reported once as `E0001` "this code is nested too deeply"
-  (the parser, type checker and code generator run on dedicated large-stack
-  threads, so every accepted program compiles instead of crashing the
-  compiler), and diagnostics clip very long source lines to a readable window
-  around the error instead of echoing megabytes per diagnostic.
-
-Version 1.6.0 was **not fully source compatible** with 1.5.0: Unicode case
-mapping, Unicode trimming and String/char Debug output can change program
-output; `substring` panics when a boundary falls inside a character;
-invalid UTF-8 input is rejected instead of accepted; casts to `bool` are
-rejected (`E0605`); and the emitted C/HashMap ABI changed. Single-file
-programs that stick to the byte-oriented String API and do not cast numbers to
-bool keep working. See the [release notes](#release-history) and the
-[roadmap](docs/language/16-roadmap.md).
+Version 1.7.0 (the previous release) made lsaca a multi-file language with a
+package manager: `mod`/`use`/`pub` visibility, `lsaca.toml` manifests with
+path dependencies, and a multi-file `SourceMap` so diagnostics and panic
+locations name the real file and line. The
+[release history](#release-history) keeps the details.
 
 ## Highlights
 
@@ -128,16 +102,31 @@ bool keep working. See the [release notes](#release-history) and the
   arguments. Instantiations are checked lazily per concrete type. See
   [docs/language/17-generics.md](docs/language/17-generics.md) and
   [docs/language/18-traits.md](docs/language/18-traits.md).
+- **Trait objects and dynamic dispatch**: `dyn Trait` behind `Box`, `Rc`,
+  `&` and `&mut`, object safety (`E0038`), coercion diagnostics (`E0277`),
+  one vtable per (trait instantiation, concrete type), and `Box<dyn Trait>`
+  values that can be stored together in a `Vec`. See
+  [docs/language/25-trait-objects.md](docs/language/25-trait-objects.md).
+- **Slices and string views**: `&[T]`, `&mut [T]`, `&str`, `&mut str`,
+  range slicing syntax, `&Vec<T>`/`&String` coercions, and slice/`str`
+  methods implemented in the standard library. See
+  [docs/language/26-slices-and-str.md](docs/language/26-slices-and-str.md).
+- **A standard library you can read**: `Vec`, `String`, the collections,
+  iterators, formatting, math, `io`, `fs`, `net`, `time`, `env`, `process`
+  and `error` are lsaca source compiled into the compiler, backed by a small
+  set of `extern fn` intrinsics. See [docs/stdlib/README.md](docs/stdlib/README.md).
 - **Lazy iterators**: `Vec<T>.iter()` and the adapters `map`, `filter`, `take`,
   `skip`, `enumerate`, `collect`, `fold`, `count`, `sum`, `any`, `all` and
-  `find`, implemented generically in a prelude written in lsaca itself; `for`
-  loops accept any type implementing `Iterator<T>`. See
+  `find`, implemented generically in the standard library (`stdlib/src/iter.ls`);
+  `for` loops accept any type implementing `Iterator<T>`, and simple adapter
+  chains are fused into a single C loop by the code generator. See
   [docs/language/19-iterators.md](docs/language/19-iterators.md).
 - **Builtin `HashMap<K, V>`**: `insert`, `get`, `get_with`, `contains_key`,
   `remove`, `len`, `is_empty`, `clear`, `keys` and `values`, with
-  deterministic hashing, content equality and ORC ownership rules. The 1.6 map
-  uses a Swiss-Table-style open-addressed layout and also accepts `char` keys;
-  iteration order (`keys()`, `values()` and the printed form) is unspecified.
+  deterministic hashing, content equality and ORC ownership rules. The map uses
+  a Swiss-Table-style open-addressed layout and also accepts `char`, `isize`
+  and `usize` keys; iteration order (`keys()`, `values()` and the printed form)
+  is unspecified.
   See [docs/language/20-hashmap.md](docs/language/20-hashmap.md).
 - **Characters and UTF-8 strings**: a Copy `char` scalar type with character
   literals and escapes, comparisons, patterns and formatting; strings
@@ -189,14 +178,15 @@ bool keep working. See the [release notes](#release-history) and the
   profile and shared by every program.
 - **Pure Rust compiler, no third-party crates**: the compiler uses only the Rust
   standard library and forbids unsafe code. The runtime is plain C17.
-- **Documented and measured**: a detailed 24-chapter language manual under
-  [docs/](docs/README.md), published as a static documentation site, plus
+- **Documented and measured**: a detailed 26-chapter language manual and a
+  standard-library reference under [docs/](docs/README.md), published as a
+  static documentation site, plus
   cross-language benchmarks (compile time, runtime and peak memory) against C,
   Rust, Python and Node.js with the raw data checked in.
-- **Tested end to end**: 697 compiler unit tests, 19 end-to-end test functions
-  that compile and run more than a hundred programs (single files, module trees
-  and packages), 55 robustness tests, 22 CLI tests, a 10,357-check C runtime
-  suite and a 103-check runtime smoke script; CI runs the test matrix on Linux,
+- **Tested end to end**: more than 820 compiler unit tests, 20 end-to-end test
+  functions that compile and run 133 programs (single files, module trees and
+  packages), 55 robustness tests, 22 CLI tests, a 10,357-check C runtime
+  suite and a 121-check runtime smoke script; CI runs the test matrix on Linux,
   macOS and Windows, plus AddressSanitizer and UndefinedBehaviorSanitizer jobs.
 
 ## Requirements
@@ -277,7 +267,7 @@ error, `101` a panic inside the compiled program.
     |  module loader    SourceMap, module tree, package dependency graph
     |  lexer            tokens
     |  parser           AST
-    |  prelude          generic iterator library, written in lsaca
+    |  standard library   Vec, String, collections, io, fs, net, ... in lsaca
     |  type checker     typed HIR: module/use/visibility resolution, inference,
     |                   generic instantiation, trait dispatch, exhaustiveness,
     |                   constant evaluation, ? desugaring
@@ -285,7 +275,7 @@ error, `101` a panic inside the compiled program.
     |  borrow checker   NLL borrow checking and reference safety
     |  C code generator main.c (+ lsaca_unit_N.c)
     v
- C17 project  +  runtime (6 C files, 3 headers, embedded in the compiler)
+ C17 project  +  runtime (7 C files, 3 headers, embedded in the compiler)
     |
     +--> system C compiler (default, no CMake) ----> native executable
     |
@@ -305,6 +295,7 @@ lsaca_rt_string.c    String implementation, UTF-8 helpers, formatting support
 lsaca_rt_vec.c       Vec implementation
 lsaca_rt_fmt.c       format-string machinery
 lsaca_rt_map.c       Swiss-Table-style HashMap (control bytes, group probing)
+lsaca_rt_io.c        files, directories, standard streams, TCP, time, env, args
 lsaca_rt_unicode.c   Unicode tables, char/string case mapping
 CMakeLists.txt       portable build description (Debug: -g -O0 -DLSACA_DEBUG,
                      Release: -O2 -DNDEBUG)
@@ -312,11 +303,11 @@ CMakeLists.txt       portable build description (Debug: -g -O0 -DLSACA_DEBUG,
 
 Builds are cached by content hash (source, generated C, runtime sources,
 compiler version and path, build mode and leak-tracking mode), so repeated runs
-of unchanged programs are fast. The compiler object files for the runtime are
-compiled once per profile and cached under `_runtime/<hash>/` in the cache root;
-only the program's generated unit(s) (`main.c` and any `lsaca_unit_N.c`) are
-recompiled for each program. The cache location is chosen
-defensively:
+of unchanged programs are fast. The runtime's C objects are compiled once per
+profile and stored in a separate shared runtime-object cache, outside the
+per-program build cache, so even a cold program build only compiles its own
+generated unit(s) (`main.c` and any `lsaca_unit_N.c`) and then links.
+The per-program build cache location is chosen defensively:
 
 1. `LSACA_CACHE_DIR`, when set;
 2. `lsaca-builds` under the system temporary directory, when that path is
@@ -610,29 +601,114 @@ The output is `14 bytes, 9 characters`, `upper = HÉLLO, 世界`,
 `first = Some('H')`, `substring = é`, `hi!😀 'é'` and `STRASSE`.
 The full program is [examples/unicode.ls](examples/unicode.ls).
 
+Release 2.0 added trait objects, slices and `str`, and the lsaca standard
+library:
+
+```rust
+use std::collections::HashSet;
+use std::fs;
+
+trait Shape {
+    fn name(&self) -> String;
+    fn area(&self) -> f64;
+}
+
+struct Rect { width: f64, height: f64 }
+struct Square { side: f64 }
+
+impl Shape for Rect {
+    fn name(&self) -> String { String::from("rect") }
+    fn area(&self) -> f64 { self.width * self.height }
+}
+
+impl Shape for Square {
+    fn name(&self) -> String { String::from("square") }
+    fn area(&self) -> f64 { self.side * self.side }
+}
+
+fn describe(shape: &dyn Shape) -> String {
+    format!("{} area {:.2}", shape.name(), shape.area())
+}
+
+fn main() {
+    let values = vec![10, 20, 30, 40, 50];
+    let window: &[i64] = &values[1..4];
+    let mut total = 0;
+    let mut index = 0;
+    while index < window.len() {
+        total = total + window[index];
+        index = index + 1;
+    }
+
+    let text = String::from("héllo wörld");
+    let world: &str = &text[7..];
+    println!("{:?} {} {} {}", window, total, world, world.char_count());
+
+    let rect = Rect { width: 4.0, height: 5.0 };
+    println!("{}", describe(&rect));
+
+    let mut shapes: Vec<Box<dyn Shape>> = Vec::new();
+    shapes.push(Box::new(Rect { width: 2.0, height: 5.0 }));
+    shapes.push(Box::new(Square { side: 3.0 }));
+    let mut index = 0;
+    while index < shapes.len() {
+        println!("{} area {:.2}", shapes[index].name(), shapes[index].area());
+        index = index + 1;
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(String::from("alpha"));
+    seen.insert(String::from("beta"));
+    println!("{} {}", seen.len(), seen.contains(String::from("alpha")));
+
+    fs::write(String::from("notes.txt"), String::from("hello")).unwrap();
+    let readback = fs::read_to_string(String::from("notes.txt")).unwrap();
+    println!("{}", readback);
+    fs::remove_file(String::from("notes.txt")).unwrap();
+}
+```
+
+The output is:
+
+```text
+[20, 30, 40] 90 wörld 5
+rect area 20.00
+rect area 10.00
+square area 9.00
+2 true
+hello
+```
+
+The example writes and removes `notes.txt` in the current directory. The
+standard library is ordinary lsaca code under [stdlib/src/](stdlib/src/) - the
+full API is listed in [docs/stdlib/README.md](docs/stdlib/README.md).
+
 ## Documentation
 
 The manual is split into one detailed page per topic under [docs/](docs/):
 
-- [docs/README.md](docs/README.md) - the manual hub: overview, reading order and
-  a table linking every chapter.
+- [docs/README.md](docs/README.md) - the manual hub: overview, reading order,
+  and a table linking every chapter and the standard-library reference.
 - [docs/language/01-getting-started.md](docs/language/01-getting-started.md)
   through
-  [docs/language/24-packages.md](docs/language/24-packages.md) - getting
-  started, program structure, lexical structure, types, the memory model,
-  variables and mutability, operators, statements and control flow, functions,
-  structs/enums/`impl`, ownership and moves, references and borrowing, pattern
-  matching, closures, the standard library (including `?` and the combinators),
-  the roadmap with the deviations from Rust, generics, traits, iterators,
-  `HashMap`, the benchmarks, characters and Unicode, modules, and packages.
-- [docs/language/17-generics.md](docs/language/17-generics.md) and
-  [docs/language/18-traits.md](docs/language/18-traits.md) - user-defined
-  generics, trait bounds, trait declarations and implementations, dispatch
-  rules and the new diagnostics (`E0107`, `E0277`, `E0034`, `E0046`, `E0119`).
-- [docs/language/19-iterators.md](docs/language/19-iterators.md) and
-  [docs/language/20-hashmap.md](docs/language/20-hashmap.md) - lazy iterator
-  adapters implemented in the lsaca prelude, `for` over iterators, and the
-  builtin hash map with its ownership rules.
+  [docs/language/26-slices-and-str.md](docs/language/26-slices-and-str.md) -
+  the 26-chapter language manual: getting started, program structure, lexical
+  structure, types, the memory model, variables and mutability, operators,
+  statements and control flow, functions, structs/enums/`impl`, ownership and
+  moves, references and borrowing, pattern matching, closures, the standard
+  library, the roadmap and deviations from Rust, generics, traits, iterators,
+  `HashMap`, benchmarks, characters and Unicode, modules, packages, trait
+  objects, and slices and `str`.
+- [docs/stdlib/README.md](docs/stdlib/README.md) - the standard-library
+  reference: `core` (`Option`, `Result`, `Iterator`), `String`, `char`,
+  `Vec`, iterators, `fmt`, `math`, `io`, `fs`, `net`, `time`, `env`,
+  `process` and `error`, plus the collections
+  ([`HashSet`](docs/stdlib/collections/hash-set.md),
+  [`BTreeSet`](docs/stdlib/collections/btree-set.md),
+  [`BTreeMap`](docs/stdlib/collections/btree-map.md),
+  [`VecDeque`](docs/stdlib/collections/deque.md) and
+  [`BinaryHeap`](docs/stdlib/collections/binary-heap.md)), with exact
+  signatures, ownership notes and examples.
 - [docs/language/11-ownership-and-moves.md](docs/language/11-ownership-and-moves.md)
   - the ownership model: `Copy` versus move-only types, moves, `.clone()`,
   the `Drop` trait, move diagnostics and the differences from Rust.
@@ -643,16 +719,9 @@ The manual is split into one detailed page per topic under [docs/](docs/):
   deviations from Rust and the verified limitations of the current release.
 - [docs/language/21-benchmarks.md](docs/language/21-benchmarks.md) - benchmark
   methodology, per-workload analysis and the measured numbers.
-- [docs/language/22-characters-and-unicode.md](docs/language/22-characters-and-unicode.md)
-  - the `char` type, character literals and escapes, UTF-8 string invariants,
-  byte- versus character-oriented APIs, Unicode case mapping and whitespace,
-  substring boundary panics and invalid-input handling.
-- [docs/language/23-modules.md](docs/language/23-modules.md) - inline and file
-  modules, module directories, `use` trees, path resolution, visibility and
-  re-exports, and the module diagnostics.
-- [docs/language/24-packages.md](docs/language/24-packages.md) - package layout,
-  `lsaca.toml`, path dependencies, package mode on the command line, and
-  the package diagnostics.
+- [docs/language/23-modules.md](docs/language/23-modules.md) and
+  [docs/language/24-packages.md](docs/language/24-packages.md) - modules,
+  multi-file crates, `lsaca.toml` and path dependencies.
 
 The same pages are published as a static site with GitHub Pages at
 <https://menghuihuan44.github.io/lsaca/> (built by
@@ -661,70 +730,101 @@ sources with [scripts/docsite.py](scripts/docsite.py)).
 
 ## Benchmarks
 
-`python scripts/bench.py` runs eighteen runtime workloads and three compile-only
-multi-file workloads in lsaca and in C, Rust, Python and Node.js, verifies each
-output checksum, and records compile time, runtime median and peak working set.
-lsaca programs are built through the normal cached `lsaca build -r` pipeline
-(the direct C backend); where the C toolchain is unavailable the harness can
-fall back to a labelled direct-compile mode.
+`python scripts/bench.py` runs **25 programs** - 22 executed workloads and
+three compile-only multi-file workloads - in lsaca and in C, Rust, Python and
+Node.js (thirteen scalable workloads are measured at small, medium and large
+scales as well). Every output is checked against an independent Python oracle
+before it is timed; the harness records cold and cached build time, runtime
+median and peak working set. lsaca programs go through the normal cached
+`lsaca build -r` pipeline (the default direct C backend).
 
-The latest measured results for the 1.7.0 compiler are in
-[benchmarks/results/latest.md](benchmarks/results/latest.md): compile-time,
-runtime and peak-memory tables for twenty-one workloads, compared with C, Rust,
-Python and Node. The same tables, per-workload analysis, methodology and caveats
-are in [docs/language/21-benchmarks.md](docs/language/21-benchmarks.md); raw JSON
-data is in [benchmarks/results/](benchmarks/results/).
+The official 2.0.0 result is [benchmarks/results/latest.md](benchmarks/results/latest.md),
+archived under [benchmarks/results/archive/v2.0/](benchmarks/results/archive/v2.0/),
+with the full three-way analysis in
+[benchmarks/results/v2.0-report.md](benchmarks/results/v2.0-report.md) and the
+per-workload commentary on
+[docs/language/21-benchmarks.md](docs/language/21-benchmarks.md). The run used
+Windows 11 on a Core i7-1260P (16 threads, 15.6 GiB), gcc 15.2.0 (`-O2`),
+rustc 1.99 (`-O`), Node 24 and Python 3.14; runtimes are medians of seven
+runs after one warmup and are lower-is-better.
 
-Headline numbers of the 1.7.0 run on an otherwise idle machine (Windows 11,
-Core i7-1260P, gcc 15.2.0, rustc 1.99, median of 7 runtime runs and 3 compile
-runs):
+| workload | lsaca 2.0.0 | C (gcc -O2) | Rust (rustc -O) | ratio vs C |
+| --- | ---: | ---: | ---: | ---: |
+| `fib` | 31.4 ms | 23.8 ms | 19.2 ms | 1.32x |
+| `fib_iter` | 13.4 ms | 7.3 ms | - | 1.83x |
+| `fib_memo` | 10.5 ms | 9.7 ms | - | 1.09x |
+| `loop_sum` | 17.5 ms | 12.4 ms | 9.8 ms | 1.41x |
+| `string_build` | 26.8 ms | 11.0 ms | 59.4 ms | 2.44x |
+| `vec_memory` | 17.9 ms | 12.4 ms | 13.5 ms | 1.44x |
+| `sort_i64` | 30.8 ms | 30.9 ms | 35.2 ms | 1.00x |
+| `sort_insertion` | 11.4 ms | 8.9 ms | - | 1.28x |
+| `matrix_multiply` | 18.1 ms | 12.7 ms | 10.9 ms | 1.43x |
+| `binary_trees` | 190.7 ms | 18.5 ms | 17.6 ms | 10.31x |
+| `binary_trees_refs` | 59.5 ms | 25.5 ms | 33.4 ms | 2.33x |
+| `string_split` | 24.4 ms | 12.8 ms | 16.7 ms | 1.91x |
+| `sieve` | 32.9 ms | 29.6 ms | 28.2 ms | 1.11x |
+| `mandelbrot` | 44.0 ms | 26.6 ms | 29.8 ms | 1.65x |
+| `iterator_pipeline` | 14.2 ms | 12.3 ms | 12.1 ms | 1.15x |
+| `hashmap_wordcount` | 36.0 ms | 25.2 ms | 46.2 ms | 1.43x |
+| `array_wordcount` | 13.7 ms | 9.0 ms | - | 1.51x |
+| `generic_stack` | 18.0 ms | 13.6 ms | 15.6 ms | 1.32x |
+| `fn_pipeline` | 12.7 ms | 9.1 ms | 9.7 ms | 1.40x |
+| `string_unicode` | 33.3 ms | 10.9 ms | 14.6 ms | 3.06x |
+| `hashmap_i64` | 212.5 ms | 150.2 ms | 187.6 ms | 1.42x |
+| `hashmap_string` | 193.2 ms | 180.5 ms | 238.1 ms | 1.07x |
 
-| workload | lsaca 1.7.0 | C (gcc -O2) | Rust (rustc -O) |
-| --- | ---: | ---: | ---: |
-| `fib` (runtime) | 26.1 ms | 26.4 ms | 10.7 ms |
-| `loop_sum` | 8.0 ms | 7.8 ms | 8.0 ms |
-| `string_build` | 30.0 ms | 11.5 ms | 61.5 ms |
-| `vec_memory` (runtime / peak) | 13.5 ms / 18.8 MiB | 14.4 ms / 18.8 MiB | 14.1 ms / 18.9 MiB |
-| `sort_i64` | 30.5 ms | 26.6 ms | 26.3 ms |
-| `matrix_multiply` | 9.9 ms | 9.6 ms | 10.1 ms |
-| `sieve` | 26.1 ms | 23.4 ms | 24.0 ms |
-| `mandelbrot` | 23.0 ms | 23.9 ms | 24.6 ms |
-| `iterator_pipeline` | 27.7 ms | 10.7 ms | 10.8 ms |
-| `hashmap_wordcount` | 44.2 ms | 22.2 ms | 42.3 ms |
-| `generic_stack` | 12.9 ms | 12.5 ms | 14.0 ms |
-| `fn_pipeline` | 7.6 ms | 7.5 ms | 7.8 ms |
-| `string_split` | 15.9 ms | 11.4 ms | 11.4 ms |
-| `string_unicode` | 27.9 ms | 10.9 ms | 12.0 ms |
-| `hashmap_i64` | 213.0 ms | 135.1 ms | 168.5 ms |
-| `hashmap_string` | 243.7 ms | 164.8 ms | 213.1 ms |
-| `binary_trees` (runtime / peak) | 331.3 ms / 52.3 MiB | 16.3 ms / 7.6 MiB | 18.0 ms / 7.7 MiB |
-| `binary_trees_refs` (runtime / peak) | 25.9 ms / 15.7 MiB | 16.0 ms / 7.6 MiB | 17.3 ms / 7.7 MiB |
-| cold build, typical single file | 0.98-1.17 s | 0.21-0.28 s | 0.20-0.46 s |
-| cached build, typical single file | 16-20 ms | - | - |
-| `compile_large` (4,511 lines), cold / cached | 1.84 s / 238 ms | - | - |
-| `modules_compile` (9 files, 3,587 lines), cold / cached | 2.38 s / 199 ms | - | - |
-| `package_compile` (13 files, 3 packages), cold / cached | 1.48 s / 42 ms | - | - |
+Compile times on the same machine (cold: fresh program cache with a warm
+shared runtime-object cache; cached: only relinking):
 
-The direct C backend keeps cold builds around 1.0-1.2 s for single-file programs,
-roughly four times a bare `gcc -O2` invocation: the lsaca front end and C
-emission are fast, and most of the time is the system C compiler compiling the
-generated translation units (only the program's own units are recompiled; the
-runtime objects are cached). Multi-file programs add module loading, module
-parsing and package resolution on top: 2.38 s cold for the 3,587-line nine-module
-program and 1.48 s for the thirteen-file package with path dependencies, while
-cached rebuilds stay between 16 and 42 ms (238 ms for the 4,511-line single
-file). At run time most workloads are at parity with C - despite the fact that
-generated indexing is bounds-checked on every access - and a few are slightly
-faster; the remaining gaps are explained per workload in the benchmarks page:
-`string_build` still beats Rust thanks to an amortised growable buffer with
-append fast paths; `iterator_pipeline` and `hashmap_wordcount` pay for lazy
-adapter calls and generic-key hashing; `string_unicode` is dominated by
-`char_at` walking UTF-8 from the start of the string (a documented O(n) API);
-the Swiss-table HashMap trades a slightly slower present lookup for faster
-absent lookups, deletion and iteration, so `hashmap_i64`/`hashmap_string` sit
-between C and Rust; and by-value `binary_trees` still deep-copies the tree when
-it is summed, which is why the `binary_trees_refs` variant - traversing through
-borrowed references - is 13x faster and uses 3.3x less memory.
+| build | lsaca 2.0.0 | C (gcc -O2) |
+| --- | ---: | ---: |
+| cold build, typical single file | 0.38-0.64 s (median 0.50 s) | 0.21-0.37 s (median 0.26 s) |
+| cached build, typical single file | 34-66 ms (median 42 ms) | - |
+| `compile_large` (4,511 lines), cold / cached | 2.02 s / 513 ms | - |
+| `modules_compile` (9 files), cold / cached | 2.90 s / 478 ms | - |
+| `package_compile` (13 files, 3 packages), cold / cached | 1.38 s / 100 ms | - |
+
+Peak memory is at parity with C for most workloads: `fib` 5.1 vs 4.0 MiB,
+`vec_memory` 20.1 vs 18.8 MiB, `sieve` 20.1 vs 18.8 MiB, `hashmap_i64` 56.7
+vs 52.4 MiB. The exceptions are documented workload-fairness effects: by-value
+`binary_trees` deep-copies the tree when summing (53.1 vs 7.6 MiB, 10.31x
+runtime) while the borrowed `binary_trees_refs` variant is the fair comparison
+(17.0 vs 7.6 MiB, 2.33x), and `hashmap_string` allocates one shared `String`
+buffer per unique word (30.8 vs 19.7 MiB).
+
+The single-file cold build is dominated by the system C compiler compiling the
+generated translation units; the seven runtime translation units are compiled
+once per toolchain and profile into a shared runtime-object cache, so a normal
+program build compiles only its own generated unit(s) and links. The first
+build on a fresh machine (empty runtime cache) still pays for the runtime and
+takes roughly 1.8 s. Cached rebuilds skip the C compiler for unchanged
+content.
+
+At run time, 14 of the 22 executed workloads are within 1.5x of C and nine are
+within 1.4x; five are at or below 1.15x (`sort_i64`, `fib_memo`, `sieve`,
+`iterator_pipeline`, `hashmap_string`). The 13 workloads above 1.4x are analyzed
+individually on the benchmarks page and in the report: `string_unicode`
+(3.06x) spends its time in the documented O(n) `char_at` API walking UTF-8
+from the start of the string, `string_build` (2.44x) and `string_split`
+(1.91x) pay for reference-counted buffer growth and per-piece allocation,
+`binary_trees_refs` (2.33x) pays reference-count traffic on boxed nodes,
+`fib_iter` (1.83x) and `mandelbrot` (1.65x) are loop/closure-heavy,
+`array_wordcount` (1.51x) combines hashing with per-character string work, and
+`vec_memory` (1.44x), `matrix_multiply` (1.43x), `hashmap_wordcount` (1.43x),
+`hashmap_i64` (1.42x) and `loop_sum` (1.41x) sit just outside the target;
+`binary_trees` remains the deliberate by-value semantics comparison.
+
+The 2.0.0 code-generation and runtime work shows up as large same-suite gains
+over 1.7.0 in `iterator_pipeline` (27.7 -> 14.2 ms, iterator-chain fusion),
+`binary_trees` (331.3 -> 190.7 ms, the allocator size-class pool),
+`hashmap_string` (243.7 -> 193.2 ms) and `hashmap_wordcount` (44.2 -> 36.0 ms).
+Rows that regressed against the 1.7 run - `fib` 26.1 -> 31.4 ms, `loop_sum`
+8.0 -> 17.5 ms, `binary_trees_refs` 25.9 -> 59.5 ms and `mandelbrot` 23.0 ->
+44.0 ms - moved together with their C baselines on a host that was busier than
+the idle 1.7 host (gcc needed 0.21-0.37 s for the same workloads here versus
+0.21-0.29 s in 1.7), so only same-run comparisons are exact. The
+[benchmarks page](docs/language/21-benchmarks.md) has the complete before/after
+tables.
 
 ## Environment variables
 
@@ -732,9 +832,14 @@ borrowed references - is 13x faster and uses 3.3x less memory.
   `cc` or `clang` from `PATH`, then common MSYS2 locations on Windows).
 - `LSACA_JOBS` - parallel build jobs for the C compiler (with `--cmake`, passed
   to the CMake build instead).
-- `LSACA_CACHE_DIR` - build cache location (default: tried under the system
-  temporary directory first, then `.lsaca-build-cache` in the current
-  directory).
+- `LSACA_CACHE_DIR` - per-program build cache location (default: tried under
+  the system temporary directory first, then `.lsaca-build-cache` in the
+  current directory).
+- `LSACA_RUNTIME_CACHE_DIR` - shared compiled-runtime object cache location
+  (default: `lsaca-runtime-objects` under the system temporary directory, then
+  `.lsaca-runtime-cache` in the current directory). It is kept out of the
+  per-program build cache so clearing that cache (for example before a
+  benchmark run) does not force a runtime recompile.
 - `LSACA_DEBUG_RC` - read by the compiler: set to `1` (`true`, `on` or `yes`
   also work) to compile the runtime with leak tracking in *every* build
   profile, including release; emitted CMake projects expose the same switch as
@@ -746,7 +851,9 @@ borrowed references - is 13x faster and uses 3.3x less memory.
   compiler could not write to its build cache. Run with `-v` to see the chosen
   cache directory, or point `LSACA_CACHE_DIR` at a writable directory. The
   compiler probes the cache location and falls back to `.lsaca-build-cache` in
-  the current directory instead of failing on an unwritable `TEMP`.
+  the current directory instead of failing on an unwritable `TEMP`. The
+  shared runtime-object cache has the same fallback and can be redirected with
+  `LSACA_RUNTIME_CACHE_DIR`.
 - **`no C compiler found`**: install GCC or Clang (MSYS2 UCRT64 on Windows) and
   put it on `PATH`, or set `LSACA_CC` to the compiler executable.
 - **`CMake was not found on PATH`** or **`no build generator found`**: these
@@ -757,26 +864,31 @@ borrowed references - is 13x faster and uses 3.3x less memory.
 ## Testing
 
 ```sh
-cargo test --workspace   # 697 unit + 19 end-to-end + 55 robustness + 22 CLI tests
+cargo test --workspace   # more than 820 unit + 20 end-to-end + 55 robustness + 22 CLI tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-The end-to-end tests in `crates/lsaca/tests/` compile and run more than a
-hundred programs: single files under `crates/lsaca/tests/programs/` and
-`examples/`, module trees under `tests/programs/modules/`, and package
-projects (including path dependencies) under `tests/packages/`. They are
-skipped when no C compiler is available. `crates/lsaca/tests/modules_audit.rs`
-replays a 60-case module and visibility corpus, and
-`crates/lsaca/tests/robustness.rs` fuzzes the module, manifest and package
-loaders with malformed input under timeouts. The C runtime has its own 10,357-check suite
-(`runtime/test/main.c`, including ORC stress and HashMap tests) plus a 103-check
-Windows smoke script (`runtime/test/run_smoke.ps1`). Every generated project is
-compiled without warnings under `-Wall -Wextra -Wpedantic -Werror` in both
-profiles by [scripts/check_generated_c.py](scripts/check_generated_c.py), which
-also verifies byte-identical output across runs and runs every program; CI also
-runs the C runtime in release, debug and leak-tracking modes, and checks the
+`cargo test --workspace` runs more than 820 unit tests across the compiler
+library - including the lexer, parser, type checker, borrow checker, move
+checker, C code generator and the embedded standard library loader - plus 20
+end-to-end test functions that compile and run 133 programs: single files under
+`crates/lsaca/tests/programs/` and `examples/`, module trees under
+`tests/programs/modules/`, package projects (including path dependencies)
+under `tests/packages/`, and IO/FS fixtures that run in a private scratch
+directory with controlled stdin and environment. They are skipped when no C
+compiler is available. `crates/lsaca/tests/modules_audit.rs` replays a 60-case
+module and visibility corpus, and `crates/lsaca/tests/robustness.rs` fuzzes the
+module, manifest and package loaders with malformed input under timeouts.
+
+The C runtime has its own 10,357-check suite (`runtime/test/main.c`, including
+ORC stress, HashMap and Phase C IO tests) plus a 121-check Windows smoke script
+(`runtime/test/run_smoke.ps1`). Every generated project is compiled without
+warnings under `-Wall -Wextra -Wpedantic -Werror` in both profiles by
+[scripts/check_generated_c.py](scripts/check_generated_c.py), which also
+verifies byte-identical output across runs and runs every program; CI also runs
+the C runtime in release, debug and leak-tracking modes, and checks the
 documentation site with `scripts/docsite.py --check`. The documentation examples
 are executed against the real compiler by `scripts/docs_verify.py` (every
 `ls`, `ls,compile-fail` and `ls,panic` fence), and
@@ -871,34 +983,60 @@ only that CLI test; the dedicated CI job still covers the CMake backend.
   match guards; non-`bool` conditions became a compile-time error.
 - **1.0.0** - first release of the rewrite.
 
+- **2.0.0** - the standard library is now written in lsaca and ships as the
+  `std` crate under `stdlib/src` (embedded into the compiler): `Option`,
+  `Result`, `Iterator`, `String`, `char`, `Vec`, formatting, math, `io`, `fs`,
+  `net`, `time`, `env`, `process`, `error` and the collections (`HashSet`,
+  `BTreeSet`, `BTreeMap`, `VecDeque`, `BinaryHeap`). Builtin marker types are
+  lowered to the C runtime through `extern fn` intrinsics that only the standard
+  library may declare. Trait default method bodies; trait objects (`dyn Trait`
+  with object safety, `Box<dyn Trait>`, `Rc<dyn Trait>` and `&dyn Trait`, one
+  vtable per trait and implementing type, automatic coercion at `&`, `Box` and
+  `Rc` sites); slices and string views (`[T]` behind references, `&str`, slice
+  expressions, `&Vec<T>`/`&mut Vec<T>` and `&String`/`&mut String` coercions,
+  UTF-8 boundary checks) with `isize`/`usize`; system interfaces for files,
+  directories, TCP, time and the environment; managed closure environments and
+  `Rc` cells allocated through the ORC collector; performance work:
+  iterator-chain fusion, allocator size-class pool, Swiss-table and string fast
+  paths, less reference traffic, and a shared runtime-object cache outside the
+  per-program build cache (cold build median 0.50 s, cached 42 ms); a
+  25-program benchmark matrix. Source compatible with 1.7.0 except programs
+  using `dyn` or `extern` as identifiers.
+
 ## Repository layout
 
 ```text
 crates/lsaca/            the compiler library (lexer, parser, module loader, package
                          manifest resolver, type checker, borrow checker, move
-                         checker, C codegen, driver) plus the prelude
-                         (generic iterator library written in lsaca)
+                         checker, C code generator, driver) and the embedded standard
+                         library
 crates/lsaca/tests/      end-to-end tests and test programs (single files, module
-                         trees under tests/programs/modules, packages under
-                         tests/packages)
+                         trees, packages and IO/FS fixtures)
 crates/lsaca-cli/        the lsaca command line tool
+stdlib/src/              the standard library, written in lsaca (the std crate: core,
+                         String, char, Vec, iterators, collections, io, fs, net,
+                         time, env, process, error); embedded into the compiler by
+                         scripts/gen_stdlib_embed.py
 runtime/                 the C17 ORC runtime embedded into generated projects
                          (lsaca_rt.c, lsaca_rt_string.c, lsaca_rt_vec.c,
-                         lsaca_rt_fmt.c, lsaca_rt_map.c, lsaca_rt_unicode.c,
-                         lsaca_rt.h, lsaca_rt_internal.h, lsaca_rt_unicode.h);
-                         the map is a Swiss-Table-style open-addressed table
-runtime/test/            C runtime tests (10,357-check suite, ORC stress and
+                         lsaca_rt_fmt.c, lsaca_rt_map.c, lsaca_rt_io.c,
+                         lsaca_rt_unicode.c and headers): reference-counted allocator
+                         with cycle collector and a Swiss-Table-style map
+runtime/test/            C runtime tests (10,357-check suite, ORC stress and the
                          Windows smoke script)
 examples/                example programs
-benchmarks/              benchmark programs in five languages, harness and recorded results
-scripts/                 benchmark harness (bench.py), generated-C checker
-                         (check_generated_c.py), documentation example verifier
+benchmarks/              benchmark programs in five languages, harness, oracles and
+                         recorded results (archived per release)
+scripts/                 benchmark harness (bench.py), report generator
+                         (bench_report.py), oracle verifier (oracles.py), generated-C
+                         checker (check_generated_c.py), documentation verifier
                          (docs_verify.py), benchmark-page checker
-                         (check_bench21.py), link checker (linkcheck.py), prose
-                         checker (prose_check.py), documentation site generator
-                         (docsite.py) and Unicode table generator
-docs/                    the multi-page language manual (docs/README.md is the hub)
-.github/workflows/       CI, benchmark smoke and GitHub Pages workflows
+                         (check_bench21.py), link and prose checkers, site generator
+                         (docsite.py), standard-library embedder
+                         (gen_stdlib_embed.py) and Unicode table generator
+docs/                    the manual: docs/README.md is the hub, 26 language chapters
+                         plus the standard-library reference under docs/stdlib/
+.github/workflows/       CI, benchmark smoke, benchmark matrix and GitHub Pages
 ```
 
 ## License

@@ -89,10 +89,10 @@ identifier rules.
 The following words are reserved and cannot be used as identifiers:
 
 ```text
-fn    let   mut   const  struct  enum   impl   type   trait
-if    else  match while  loop    for    in     return
-break continue true false as     self   Self   pub    move
-mod   use   crate super
+fn     let    mut    const   struct  enum    impl    type    trait
+if     else   match  while   loop    for     in      return
+break  continue true   false   as      self    Self    pub     move
+mod    use    crate  super   dyn     extern
 ```
 
 Two of them are context-sensitive in a useful way: `self` and `Self` are
@@ -101,7 +101,11 @@ can still be used as, say, struct field names — although code is clearer if th
 are not. `crate` and `super` are keywords only in paths (expressions, types,
 patterns and `use` trees). `mod` and `use` start item declarations since 1.7.0,
 and `pub` is a visibility modifier (see [Program structure](02-program-structure.md)
-and [Modules](23-modules.md)).
+and [Modules](23-modules.md)). Two keywords were added in 2.0.0: `dyn` introduces
+a trait object type (`dyn Greet`), and `extern` introduces an extern function
+declaration (`extern fn …;`). `str` is a primitive type name, not a keyword; it
+is only meaningful as a type, and `[T]` is a type form built from square
+brackets (see [Slices and str](26-slices-and-str.md)).
 
 ## Comments
 

@@ -82,21 +82,16 @@ impl<'a> Checker<'a> {
                 pointee
             }
         };
-        // Track compound pattern layers: a by-value binding of a type with drop
-        // glue below one of them is rejected with E0509 in
-        // check_binding_pattern. Top-level identifier bindings (let x = ..., a
-        // lone match arm binding, a closure parameter) stay allowed.
+        // Destructuring a value whose own type has a user `impl Drop` hook may
+        // not move non-Copy parts out of it (E0509); remember the aggregate type
+        // so the binding check below can name it. Aggregates that do not
+        // implement Drop themselves are destructured by moving their parts,
+        // which is allowed even when a part has a Drop impl of its own.
         let compound = !matches!(&pat.kind, PatternKind::Wild | PatternKind::Binding { .. });
-        // Destructuring a value whose type has a user `impl Drop` hook can never
-        // move non-Copy parts out of it (E0509); remember the aggregate type so
-        // the binding check below can name it.
         let mut destructured_drop_type = false;
-        if compound {
-            self.pattern_nesting += 1;
-            if self.type_implements_drop(&expected) {
-                self.pattern_drop_hook_stack.push(expected.clone());
-                destructured_drop_type = true;
-            }
+        if compound && self.type_implements_drop(&expected) {
+            self.pattern_drop_hook_stack.push(expected.clone());
+            destructured_drop_type = true;
         }
         let checked = match &pat.kind {
             PatternKind::Wild => TPat::new(expected, TPatKind::Wild, pat.span),
@@ -117,11 +112,8 @@ impl<'a> Checker<'a> {
             }
             PatternKind::Or(alts) => self.check_or_pattern(alts, &expected, pat.span),
         };
-        if compound {
-            self.pattern_nesting -= 1;
-            if destructured_drop_type {
-                self.pattern_drop_hook_stack.pop();
-            }
+        if destructured_drop_type {
+            self.pattern_drop_hook_stack.pop();
         }
         checked
     }
@@ -171,25 +163,7 @@ impl<'a> Checker<'a> {
         if let Some(const_id) = self.lookup_const(name) {
             return self.check_const_pattern(const_id, &pointee, span);
         }
-        // Moving a value with drop glue out of a compound pattern is E0509: the
-        // original aggregate still owns the value and would run its destructor.
-        if self.pattern_nesting > 0 && self.has_drop_glue(&binding_ty) {
-            let described = self.describe_resolved(&binding_ty);
-            let diag = Diagnostic::error(
-                format!(
-                    "cannot move out of a value of type {} in a pattern because it implements Drop; use references instead",
-                    described
-                ),
-                span,
-            )
-            .with_code("E0509")
-            .with_span_label(span)
-            .with_note(
-                "by-value bindings of types with drop glue are only allowed with a simple identifier binding; match or borrow through a reference instead"
-                    .to_string(),
-            );
-            self.diagnostics.push(diag);
-        } else if let Some(aggregate) = self.pattern_drop_hook_stack.last().cloned() {
+        if let Some(aggregate) = self.pattern_drop_hook_stack.last().cloned() {
             // The value being destructured has its own `impl Drop` hook: Rust
             // forbids moving any non-Copy part out of it in a pattern. Copy
             // fields may still be copied.

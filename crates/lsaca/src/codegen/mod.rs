@@ -19,10 +19,17 @@ mod cmake;
 mod control;
 mod emit;
 mod expr;
+mod fusion;
 mod helper_defs;
 mod helpers;
+mod inline;
+mod intrinsics;
 mod items;
 mod ops;
+mod phase_c;
+mod reachability;
+mod slices;
+mod traits;
 mod types;
 mod util;
 
@@ -85,8 +92,21 @@ pub struct GeneratedUnit {
 
 /// Generate the C project for a checked program.
 pub fn generate(program: &hir::Program, options: &CodegenOptions) -> Generated {
-    let registry = types::TypeRegistry::collect(program);
-    let (main_c, units) = items::generate_project(program, &registry, options);
+    let plan = inline::InlinePlan::build(program, options);
+    let mut reachability = reachability::Reachability::compute(program, options, &[]);
+    // Drop hooks of standard-library types are only needed when the type itself
+    // is emitted (its release helper calls the hook). Iterate until the
+    // reachability and the registered type set agree.
+    let registry = loop {
+        let registry = types::TypeRegistry::collect(program, &plan, options, &reachability);
+        let hooks = reachability.needed_drop_hooks(program, &registry);
+        if hooks.is_empty() {
+            break registry;
+        }
+        reachability = reachability::Reachability::compute(program, options, &hooks);
+    };
+    let (main_c, units) =
+        items::generate_project(program, &registry, options, &plan, &reachability);
     let unit_file_names: Vec<String> = units.iter().map(|unit| unit.file_name.clone()).collect();
     let cmake = cmake::render(&options.program_name, &program.name, &unit_file_names);
     Generated {

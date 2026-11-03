@@ -87,6 +87,18 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// risking a stack overflow in the recursive loader or the compiler passes.
 const MAX_MODULE_DEPTH: usize = 256;
 
+/// Append the embedded standard-library sources to a compilation's sources.
+///
+/// User files are registered first and therefore occupy the low global offset
+/// range; the library is appended at [crate::stdlib::BASE] afterwards. The same
+/// files are registered in the same order by [crate::stdlib], so a span from a
+/// standard-library item resolves in this map to std/<path>:line:column.
+fn add_stdlib_sources(sources: &mut SourceMap) {
+    for (path, text) in crate::stdlib::files() {
+        sources.add_file_at(format!("std/{}", path), *text, crate::stdlib::BASE);
+    }
+}
+
 /// Front-end pipeline: load, lex, parse and type check a program.
 ///
 /// A program is one or more crates. Standalone files ([Frontend::new] and
@@ -131,6 +143,7 @@ impl Frontend {
             };
             loader.expand_items(&mut program.items, None, 0);
         }
+        add_stdlib_sources(&mut sources);
         Frontend {
             sources,
             graph: ast::CrateGraph::single(crate_name, program),
@@ -175,6 +188,7 @@ impl Frontend {
             };
             loader.expand_items(&mut program.items, root_dir.as_deref(), 0);
         }
+        add_stdlib_sources(&mut sources);
         Ok(Frontend {
             sources,
             graph: ast::CrateGraph::single(crate_name, program),
@@ -289,6 +303,7 @@ impl Frontend {
                 is_dependency: package.is_dependency,
             });
         }
+        add_stdlib_sources(&mut sources);
         // Crate order follows the package graph (dependencies first, root
         // last), so the root crate is the last one in the graph.
         let root_index = crates.len().saturating_sub(1);
@@ -364,13 +379,24 @@ impl Frontend {
         if diagnostics.has_errors() {
             return Err(diagnostics);
         }
-        // The standard-library prelude is embedded in the compiler and parsed
-        // once per process. Its spans are already zeroed, so prelude-origin
-        // diagnostics never point into the file being checked.
-        let prelude = match crate::prelude::program() {
-            Ok(program) => Some(program),
-            Err(errors) => {
+        // The standard library is embedded in the compiler and parsed once per
+        // process. Its sources live in their own offset range above the user
+        // files (see [add_stdlib_sources]), so a span in the library resolves
+        // to std/<path> while user spans keep their own file names.
+        let prelude = match run_on_compiler_stack(crate::stdlib::program) {
+            Ok(Ok(program)) => Some(program),
+            Ok(Err(errors)) => {
                 diagnostics.extend(errors);
+                return Err(diagnostics);
+            }
+            Err(payload) => {
+                diagnostics.error(
+                    format!(
+                        "the compiler crashed while parsing the standard library ({})",
+                        panic_message(&*payload)
+                    ),
+                    Span::default(),
+                );
                 return Err(diagnostics);
             }
         };
@@ -1027,11 +1053,13 @@ fn build_project_with_cmake(
 
 /// Compile and link a generated project by invoking the C compiler directly.
 ///
-/// Runtime translation units are compiled once into a shared object cache under
-/// cache_root/_runtime/<key>/, so the runtime cost is paid only when its
-/// sources, the compiler or the flags change. Missing runtime objects are
-/// compiled in parallel and the generated main.c is compiled at the same time;
-/// once both are ready everything is linked into project_dir/build.
+/// Runtime translation units are compiled once into a shared object cache that
+/// lives outside the per-program build cache (see [runtime_cache_root]), so a
+/// cold program build only pays for its own generated sources plus the link.
+/// The runtime cost is paid only when the runtime sources, the compiler or the
+/// flags change. Missing runtime objects are compiled in parallel and the
+/// generated main.c is compiled at the same time; once both are ready
+/// everything is linked into project_dir/build.
 fn build_project_direct(
     project_dir: &Path,
     cache_root: &Path,
@@ -1048,7 +1076,14 @@ fn build_project_direct(
     write_runtime_sources(project_dir)?;
 
     let runtime_sources = runtime_c_sources();
-    let object_dir = runtime_object_dir(cache_root, &compiler, &flags);
+    let object_dir = match runtime_object_dir(&compiler, &flags) {
+        Ok(dir) => dir,
+        // When no shared runtime cache is usable fall back to a per-build-tree
+        // directory so the build still succeeds (just without reuse).
+        Err(_) => cache_root
+            .join("_runtime")
+            .join(runtime_object_key(&compiler, &flags)),
+    };
     fs::create_dir_all(&object_dir)?;
 
     let mut missing: Vec<(String, PathBuf)> = Vec::new();
@@ -1105,6 +1140,10 @@ fn build_project_direct(
     link.arg("-o").arg(&temp_executable);
     if cfg!(unix) {
         link.arg("-lm");
+    }
+    if cfg!(windows) {
+        // The runtime uses Winsock for its networking primitives.
+        link.arg("-lws2_32");
     }
     link.current_dir(project_dir);
     prepare_child(&mut link, compiler.parent(), &tmp_dir);
@@ -1323,8 +1362,8 @@ fn runtime_object_name(source: &str) -> String {
     format!("{}.o", stem)
 }
 
-/// Directory of the shared runtime object cache for one compiler and flag set.
-fn runtime_object_dir(cache_root: &Path, compiler: &Path, flags: &[String]) -> PathBuf {
+/// Cache key of the shared runtime object cache for one compiler and flag set.
+fn runtime_object_key(compiler: &Path, flags: &[String]) -> String {
     let mut hash = FNV_OFFSET_BASIS;
     for (name, contents) in runtime::sources() {
         for bytes in [name.as_bytes(), contents.as_bytes()] {
@@ -1338,7 +1377,69 @@ fn runtime_object_dir(cache_root: &Path, compiler: &Path, flags: &[String]) -> P
         hash = fnv1a(hash, flag.as_bytes());
         hash = fnv1a(hash, &[0xff]);
     }
-    cache_root.join("_runtime").join(format!("{:016x}", hash))
+    format!("{:016x}", hash)
+}
+
+/// Directory of the shared runtime object cache for one compiler and flag set.
+///
+/// The cache is deliberately independent from [cache_root]: it survives
+/// clearing the per-program build cache (for example between benchmark runs),
+/// so a cold program build does not recompile the standard runtime.
+pub fn runtime_object_dir(compiler: &Path, flags: &[String]) -> io::Result<PathBuf> {
+    let root = runtime_cache_root()?;
+    Ok(root.join(runtime_object_key(compiler, flags)))
+}
+
+/// Directory for the shared compiled-runtime object cache.
+///
+/// Candidates, in order:
+///
+/// 1. LSACA_RUNTIME_CACHE_DIR, when set. An unusable value is an error
+///    instead of a silent fallback, because the user asked for it explicitly;
+/// 2. lsaca-runtime-objects under the system temporary directory, when that
+///    path is ASCII-only and writable;
+/// 3. .lsaca-runtime-cache in the current directory.
+pub fn runtime_cache_root() -> io::Result<PathBuf> {
+    if let Some(configured) = env::var_os("LSACA_RUNTIME_CACHE_DIR") {
+        let dir = PathBuf::from(configured);
+        return match probe_cache_dir(&dir) {
+            Ok(()) => Ok(dir),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "LSACA_RUNTIME_CACHE_DIR ({}) is not usable as a runtime object cache: {}",
+                    dir.display(),
+                    error
+                ),
+            )),
+        };
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for candidate in runtime_cache_root_candidates() {
+        match probe_cache_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) => failures.push(format!("{}: {}", candidate.display(), error)),
+        }
+    }
+    Err(io::Error::other(format!(
+        "no writable runtime object cache found ({}); set LSACA_RUNTIME_CACHE_DIR to a writable directory",
+        failures.join("; ")
+    )))
+}
+
+fn runtime_cache_root_candidates() -> Vec<PathBuf> {
+    let base = env::temp_dir();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if is_ascii_path(&base) {
+        candidates.push(base.join("lsaca-runtime-objects"));
+    }
+    if let Ok(cwd) = env::current_dir() {
+        let local = cwd.join(".lsaca-runtime-cache");
+        if !candidates.iter().any(|candidate| candidate == &local) {
+            candidates.push(local);
+        }
+    }
+    candidates
 }
 
 /// Flags shared by every translation unit of a build.
@@ -1853,6 +1954,25 @@ mod tests {
         assert_eq!(candidates.last(), Some(&cwd.join(".lsaca-build-cache")));
     }
 
+    #[test]
+    fn runtime_cache_candidates_end_with_workspace_fallback() {
+        let candidates = runtime_cache_root_candidates();
+        let cwd = env::current_dir().expect("the current directory should be available");
+        assert_eq!(candidates.last(), Some(&cwd.join(".lsaca-runtime-cache")));
+    }
+
+    #[test]
+    fn runtime_object_key_covers_sources_compiler_and_flags() {
+        let compiler = Path::new("gcc");
+        let base = runtime_object_key(compiler, &[String::from("-O2")]);
+        assert_eq!(base.len(), 16);
+        assert_ne!(base, runtime_object_key(compiler, &[String::from("-O0")]));
+        assert_ne!(
+            base,
+            runtime_object_key(Path::new("clang"), &[String::from("-O2")])
+        );
+    }
+
     fn sample_generated() -> Generated {
         Generated {
             main_c: String::from("int main(void) { return 0; }\n"),
@@ -1941,6 +2061,15 @@ mod tests {
         fs::write(&path, contents).expect("could not write a test source file");
     }
 
+    /// Number of source files contributed by the user program.
+    ///
+    /// Every compilation also registers the embedded standard library as a set
+    /// of std/<path> files, so assertions about the user's own files have to
+    /// subtract those.
+    fn user_source_count(frontend: &Frontend) -> usize {
+        frontend.sources().len() - crate::stdlib::files().len()
+    }
+
     /// Load a program and return every diagnostic rendered for assertions.
     fn load_and_render(root: &Path) -> Result<Frontend, String> {
         match Frontend::load(root) {
@@ -1958,7 +2087,7 @@ mod tests {
         write_scratch(&dir, "main.ls", "mod helper;\nfn main() { }\n");
         write_scratch(&dir, "helper.ls", "pub fn helper() -> i64 { 7 }\n");
         let frontend = Frontend::load(&dir.join("main.ls")).expect("the root file should load");
-        assert_eq!(frontend.sources().len(), 2, "both files are registered");
+        assert_eq!(user_source_count(&frontend), 2, "both files are registered");
         let root = frontend.graph().root_crate();
         let module = root
             .program
@@ -1983,7 +2112,7 @@ mod tests {
         write_scratch(&dir, "util/math.ls", "pub fn value() -> i64 { 3 }\n");
         let frontend =
             Frontend::load(&dir.join("main.ls")).expect("the nested module tree should load");
-        assert_eq!(frontend.sources().len(), 3, "every file is registered");
+        assert_eq!(user_source_count(&frontend), 3, "every file is registered");
         let root = frontend.graph().root_crate();
         let util = root
             .program
@@ -2076,7 +2205,7 @@ mod tests {
         let dir = scratch_dir("modules-utf8");
         write_scratch(&dir, "main.ls", "fn main() { }\n");
         let frontend = Frontend::load(&dir.join("main.ls")).expect("the root file is valid");
-        assert_eq!(frontend.sources().len(), 1);
+        assert_eq!(user_source_count(&frontend), 1);
         fs::write(dir.join("main2.ls"), b"mod bad;\n").expect("could not write a root file");
         fs::write(dir.join("bad.ls"), [0xffu8, 0xfe]).expect("could not write raw bytes");
         let rendered =
@@ -2102,7 +2231,7 @@ mod tests {
         write_scratch(&dir, "main.ls", "mod helper;\nfn main() { }\n");
         write_scratch(&dir, "helper.ls", "pub fn helper() {}\n");
         let frontend = Frontend::load(&dir.join("main.ls")).expect("the program should load");
-        assert_eq!(frontend.sources().len(), 2);
+        assert_eq!(user_source_count(&frontend), 2);
         for index in 0..frontend.sources().len() {
             let name = frontend.sources().file(index).name();
             assert!(!name.contains("//?/"), "verbatim prefix in {name}");
@@ -2119,6 +2248,33 @@ mod tests {
             frontend.sources().file(0).name()
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn standard_library_spans_resolve_in_the_user_source_map() {
+        let frontend = Frontend::new("main.ls", "fn main() { }\n");
+        let library = crate::stdlib::program().expect("the standard library must parse");
+        let mut resolved = 0;
+        for item in &library.items {
+            let file = frontend
+                .sources()
+                .file_of_span(item.span())
+                .expect("every standard-library item has a file");
+            assert!(
+                file.name().starts_with("std/"),
+                "unexpected standard library file name {}",
+                file.name()
+            );
+            resolved += 1;
+        }
+        assert!(resolved > 0, "the standard library has items");
+        let root = frontend.graph().root_crate();
+        let item = root.program.items.first().expect("main is an item");
+        let file = frontend
+            .sources()
+            .file_of_span(item.span())
+            .expect("user items resolve in the merged map");
+        assert_eq!(file.name(), "main.ls");
     }
 
     fn package_case_dir(name: &str) -> PathBuf {
@@ -2145,7 +2301,7 @@ mod tests {
         // Two crate roots plus the two manifests the resolver registers so
         // manifest diagnostics can render.
         assert_eq!(
-            frontend.sources().len(),
+            user_source_count(&frontend),
             4,
             "two manifests and two crate roots"
         );

@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-170), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-200), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 1.7.0 are:
+The pattern forms available in 2.0.0 are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -175,10 +175,9 @@ hi
 7
 ```
 
-A pattern that binds a type with `Drop` glue by value is rejected (`E0509`) —
-match through a reference instead:
+A pattern can bind a type with `Drop` glue by value: the payload moves into the binding and is dropped exactly once, when that binding goes out of scope.
 
-```ls,compile-fail
+```ls
 struct Guard {
     name: String,
 }
@@ -197,18 +196,14 @@ fn main() {
 }
 ```
 
-Error:
+Output:
 
 ```text
-error[E0509]: cannot move out of a value of type Guard in a pattern because it implements Drop; use references instead
-   --> example-06.ls:13:17
-    |
- 13 |     if let Some(value) = Some(guard) {
-    |                 ^^^^^
-    = note: by-value bindings of types with drop glue are only allowed with a simple identifier binding; match or borrow through a reference instead
-
-lsaca: example-06.ls: could not compile example-06.ls due to previous error(s)
+g
+drop g
 ```
+
+Destructuring the drop type's own fields by value (for example `let Guard { name } = guard;`) is still rejected (`E0509`); match through a reference instead.
 
 ### Tuple patterns
 
@@ -767,7 +762,7 @@ Output:
 7
 ```
 
-Bindings from a `&mut` *aggregate* pattern are writable in version 1.7.0: a struct
+Bindings from a `&mut` *aggregate* pattern are writable in version 2.0.0: a struct
 pattern with several bindings behaves like a single binding, and assignments such as
 `match &mut maybe { Some(value) => { *value = 9; } ... }` compile and update the
 referent (see [References and
@@ -908,10 +903,10 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 1.7.0
+## Known limitations in 2.0.0
 
 Or-patterns, match guards and string-literal patterns are fully supported. The
-pattern restrictions that remain in 1.7.0 are:
+pattern restrictions that remain in 2.0.0 are:
 
 * **Guards only in `match`** — `if let` and `while let` take a pattern but no
   guard; nest an `if` inside the body instead.

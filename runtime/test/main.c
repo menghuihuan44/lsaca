@@ -3,7 +3,8 @@
  * Build (from an ASCII directory, because the repo path has non-ASCII bytes):
  *     gcc -std=c17 -Wall -Wextra -Wpedantic -O1 main.c lsaca_rt.c \
  *         lsaca_rt_string.c lsaca_rt_vec.c lsaca_rt_fmt.c lsaca_rt_map.c \
- *         lsaca_rt_unicode.c -lm -o smoke
+ *         lsaca_rt_unicode.c lsaca_rt_io.c -lm -lws2_32 -o smoke
+ * (drop -lws2_32 on POSIX).
  *     smoke                 -- in-process checks (no file IO)
  *     smoke --io <file>     -- in-process checks including file IO
  *     smoke --args a b      -- prints the language-level argument vector

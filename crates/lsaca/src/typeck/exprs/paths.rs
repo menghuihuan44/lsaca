@@ -42,6 +42,16 @@ impl<'a> Checker<'a> {
                     "E0107",
                 );
             }
+            // Local value bindings shadow module items and prelude re-exports,
+            // including generic functions such as the standard library's
+            // generic `max`, `min`, `abs` and `sqrt`.
+            if !self.in_const
+                && self.find_local(&name).is_some()
+                && let Some(expr) = self.resolve_local_name(&name, path.span)
+            {
+                self.apply_hint(&expr.ty, hint);
+                return expr;
+            }
             if self.lookup_generic_fn(&name).is_some() {
                 self.error_code(
                     format!(
@@ -141,6 +151,18 @@ impl<'a> Checker<'a> {
             }
             match binding.def {
                 DefRef::Fn(fn_id) => {
+                    if self.fns[fn_id].decl.is_extern {
+                        let name = self.fns[fn_id].name.clone();
+                        self.error_code(
+                            format!(
+                                "extern function {} cannot be used as a value; call it instead",
+                                name
+                            ),
+                            span,
+                            "E0425",
+                        );
+                        return self.never_expr(span);
+                    }
                     if let Some(sig) = self.fns[fn_id].sig.clone() {
                         let ty = ITy::function(sig.params, sig.ret);
                         self.apply_hint(&ty, hint);
@@ -520,6 +542,18 @@ impl<'a> Checker<'a> {
             );
         }
         if let Some(fn_id) = self.lookup_fn(name) {
+            if self.fns[fn_id].decl.is_extern {
+                let name = self.fns[fn_id].name.clone();
+                self.error_code(
+                    format!(
+                        "extern function {} cannot be used as a value; call it instead",
+                        name
+                    ),
+                    span,
+                    "E0425",
+                );
+                return self.never_expr(span);
+            }
             let sig = self.fns[fn_id].sig.clone();
             if let Some(sig) = sig {
                 let ty = ITy::function(sig.params, sig.ret);

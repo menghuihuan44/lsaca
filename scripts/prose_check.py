@@ -174,6 +174,17 @@ SOURCES["hashmap_char_keys"] = r"""fn main() {
 }
 """
 
+SOURCES["hashmap_pointer_key_types"] = r"""fn main() {
+    let mut by_index: HashMap<usize, i64> = HashMap::new();
+    by_index.insert(3 as usize, 7);
+    println!("{:?}", by_index.get(3 as usize));
+
+    let mut offsets: HashMap<isize, i64> = HashMap::new();
+    offsets.insert(-2 as isize, 5);
+    println!("{:?}", offsets.get(-2 as isize));
+}
+"""
+
 SOURCES["hashmap_bad_key"] = r"""fn main() {
     let mut map: HashMap<Vec<i64>, i64> = HashMap::new();
     map.insert(vec![1], 2);
@@ -377,11 +388,20 @@ CASES = [
         "kind": "check",
         "source": "hashmap_bad_key",
         "docs": [("docs/language/20-hashmap.md", [
-            "The key type must be i64, u64, bool, String or char",
+            "The key type must be i64, u64, isize, usize, bool, String or char",
         ])],
         "stderr_contains": [
-            "error[E0277]: HashMap keys must be one of i64, u64, bool, char or String, found Vec<i64>",
+            "error[E0277]: HashMap keys must be one of i64, u64, isize, usize, bool, char or String, found Vec<i64>",
         ],
+    },
+    {
+        "name": "hashmap-pointer-sized-keys",
+        "kind": "run",
+        "source": "hashmap_pointer_key_types",
+        "docs": [("docs/language/20-hashmap.md", [
+            "The pointer-sized integer types hash like the other integer types",
+        ])],
+        "stdout": ["Some(7)", "Some(5)"],
     },
     {
         "name": "hashmap-for-loop-rejection",

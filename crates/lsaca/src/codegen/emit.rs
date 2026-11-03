@@ -35,7 +35,9 @@ use crate::types::Ty;
 
 use super::CodegenOptions;
 use super::c_writer::CWriter;
+use super::inline::InlinePlan;
 use super::ops;
+use super::reachability::Reachability;
 use super::types::{TypeNames, TypeRegistry};
 use super::util;
 
@@ -91,6 +93,12 @@ pub(crate) struct Gen<'a> {
     pub program: &'a hir::Program,
     pub registry: &'a TypeRegistry,
     pub options: &'a CodegenOptions,
+    /// Standard-library wrappers that are expanded at their call sites and get
+    /// no generated C function.
+    pub inline_plan: &'a InlinePlan,
+    /// Functions and closures that are reachable from the entry point. Only
+    /// those get a generated C definition.
+    pub reachability: &'a Reachability,
     pub names: &'a TypeNames,
     pub w: CWriter,
     pub tmp: usize,
@@ -115,12 +123,16 @@ impl<'a> Gen<'a> {
         program: &'a hir::Program,
         registry: &'a TypeRegistry,
         options: &'a CodegenOptions,
+        inline_plan: &'a InlinePlan,
+        reachability: &'a Reachability,
         w: CWriter,
     ) -> Gen<'a> {
         Gen {
             program,
             registry,
             options,
+            inline_plan,
+            reachability,
             names: registry.names(),
             w,
             tmp: 0,
@@ -441,7 +453,12 @@ impl<'a> Gen<'a> {
             | Ty::Box(_)
             | Ty::HashMap(_, _)
             | Ty::Fn(_, _)
-            | Ty::Ref { .. } => true,
+            | Ty::Ref { .. }
+            // Unsized values are non-owning pointers in the runtime layout:
+            // releasing a zeroed one never frees anything.
+            | Ty::Slice(_)
+            | Ty::Str
+            | Ty::Dyn(_) => true,
             // Tag 0 means None: the release helper never reads the payload.
             Ty::Option(_) => true,
             // Tag 0 means Ok: only the Ok payload is released.
@@ -593,8 +610,16 @@ impl<'a> Gen<'a> {
     }
 
     /// Lvalue reached by dereferencing a reference expression: `(*(ptr))`.
-    /// The pointer expression itself is materialised into a temporary.
+    ///
+    /// A place pointer is dereferenced in place: copying a receiver parameter
+    /// into a temporary would lose or add a const qualifier on the pointee
+    /// handle type. Any other pointer expression is materialised into a
+    /// temporary first.
     pub(crate) fn deref_lvalue(&mut self, expr: &HExpr) -> String {
+        if expr.is_place() {
+            let pointer = self.gen_place(expr);
+            return format!("(*({}))", pointer);
+        }
         let pointer = self.gen_owned(expr);
         format!("(*({}))", pointer)
     }
@@ -625,6 +650,10 @@ impl<'a> Gen<'a> {
             return;
         };
         let ctype = self.ctype(ref_ty);
+        if pointee.is_unsized() {
+            self.gen_into(inner, target);
+            return;
+        }
         if let Some(existing) = inner.ty.ref_inner()
             && *existing == pointee
         {
@@ -657,6 +686,9 @@ impl<'a> Gen<'a> {
         for _ in 0..8 {
             match &ty {
                 Ty::Ref { inner, .. } => {
+                    if inner.is_unsized() {
+                        break;
+                    }
                     lvalue = format!("(*({}))", lvalue);
                     ty = (**inner).clone();
                 }
@@ -690,7 +722,15 @@ impl<'a> Gen<'a> {
             HExprKind::Capture { index, .. } => self.capture_lvalue(*index),
             HExprKind::Field { base, field } => self.field_lvalue(base, *field),
             HExprKind::Index { base, index } => self.index_lvalue(base, index, expr.span),
-            HExprKind::Deref { expr: inner } => self.deref_lvalue(inner),
+            HExprKind::Deref { expr: inner } => {
+                if expr.ty.is_unsized() {
+                    // Dereferencing a reference to an unsized value yields the
+                    // fat value itself, so reading it is a plain value copy.
+                    self.gen_owned(inner)
+                } else {
+                    self.deref_lvalue(inner)
+                }
+            }
             _ => self.gen_owned(expr),
         }
     }
@@ -706,6 +746,9 @@ impl<'a> Gen<'a> {
         let mut lvalue = self.gen_place(expr);
         let mut ty = expr.ty.clone();
         while let Ty::Ref { inner, .. } = ty {
+            if inner.is_unsized() {
+                break;
+            }
             lvalue = format!("(*({}))", lvalue);
             ty = *inner;
         }
@@ -783,14 +826,23 @@ impl<'a> Gen<'a> {
                 fn_id,
                 receiver,
                 args,
-            } => self.gen_direct_call(
-                *fn_id,
-                receiver.as_deref(),
-                args,
-                &expr.ty,
-                target,
-                expr.span,
-            ),
+            } => {
+                if receiver.is_none()
+                    && super::fusion::try_gen_fused_terminal(
+                        self, *fn_id, args, &expr.ty, target, expr.span,
+                    )
+                {
+                    return;
+                }
+                self.gen_direct_call(
+                    *fn_id,
+                    receiver.as_deref(),
+                    args,
+                    &expr.ty,
+                    target,
+                    expr.span,
+                )
+            }
             HExprKind::BuiltinMethod {
                 receiver,
                 method,
@@ -857,7 +909,12 @@ impl<'a> Gen<'a> {
                 next_fn,
                 pat,
                 body,
-            } => self.gen_for_iter(iter, *next_fn, pat, body, &expr.ty, target),
+            } => {
+                if super::fusion::try_gen_fused_for(self, iter, pat, body, &expr.ty, target) {
+                    return;
+                }
+                self.gen_for_iter(iter, *next_fn, pat, body, &expr.ty, target)
+            }
             HExprKind::StructLit { struct_id, fields } => {
                 self.gen_struct_lit(*struct_id, fields, &expr.ty, target)
             }
@@ -888,6 +945,22 @@ impl<'a> Gen<'a> {
                 expr: inner,
             } => self.gen_ref(inner, &expr.ty, target),
             HExprKind::Deref { expr: inner } => {
+                if expr.ty.is_unsized() {
+                    let source = match &inner.ty {
+                        Ty::Box(inner_ty) | Ty::Rc(inner_ty) if inner_ty.is_dyn() => {
+                            let cell = self.gen_owned(inner);
+                            format!("({})->payload", cell)
+                        }
+                        Ty::Ref { inner: pointee, .. } if pointee.is_unsized() => {
+                            // The pointer operand already is the fat value: the
+                            // referent is the same data-and-length pair.
+                            self.gen_owned(inner)
+                        }
+                        _ => self.gen_place(expr),
+                    };
+                    self.emit_copy_into(target, &expr.ty, &source);
+                    return;
+                }
                 let place = self.deref_lvalue(inner);
                 let source = if self.is_pointer_type(&expr.ty) {
                     // A shared reference to a pointer-shaped value (String,
@@ -899,6 +972,37 @@ impl<'a> Gen<'a> {
                 };
                 self.emit_copy_into(target, &expr.ty, &source);
             }
+            HExprKind::DynCoerce { value, vtable } => {
+                self.gen_dyn_coerce(value, *vtable, &expr.ty, target)
+            }
+            HExprKind::DynCall {
+                object,
+                trait_object,
+                slot,
+                args,
+            } => self.gen_dyn_call(
+                object,
+                *trait_object,
+                *slot,
+                args,
+                &expr.ty,
+                target,
+                expr.span,
+            ),
+            HExprKind::Slice {
+                base,
+                start,
+                end,
+                inclusive,
+            } => self.gen_slice(
+                base,
+                start.as_deref(),
+                end.as_deref(),
+                *inclusive,
+                &expr.ty,
+                target,
+                expr.span,
+            ),
         }
     }
 

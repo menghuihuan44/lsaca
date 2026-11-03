@@ -16,6 +16,7 @@ Cargo.lock.bak
 *.d
 cmake-build*/
 .lsaca-build-cache/
+.lsaca-runtime-cache/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake

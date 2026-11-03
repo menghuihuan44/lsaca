@@ -7,10 +7,11 @@
 #
 # Jobs:
 #   fmt          rustfmt check
+#   stdlib       the embedded standard library matches stdlib/src
 #   clippy       clippy over all targets, warnings denied
 #   test         cargo test --workspace on Linux, macOS and Windows
 #   docs         rustdoc build with warnings denied
-#   runtime      the generated-program C runtime smoke test (gcc, C17)
+#   runtime      the C runtime smoke test and the IO suite (plain gcc, C17)
 #   sanitizers   the C runtime and every generated example under ASan + UBSan
 #   generated-c  emit C for every example, compile with -Werror, run hello,
 #                and build one generated project through CMake + Ninja
@@ -60,6 +61,24 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  stdlib:
+    name: Standard library embedding
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # stdlib/src is the source of truth: crates/lsaca/src/stdlib_embed.rs is
+      # generated from it by scripts/gen_stdlib_embed.py and embedded into the
+      # compiler, so a hand edit of the generated file or a forgotten
+      # regeneration must fail here before it reaches the test jobs.
+      - name: Check the embedded standard library is up to date
+        run: python scripts/gen_stdlib_embed.py --check
 
   clippy:
     name: Clippy
@@ -199,20 +218,39 @@ jobs:
       # so this job proves that the C17 sources build with a plain gcc.
       - name: Build and run the smoke test (release build)
         run: |
-          gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -I runtime \
+          gcc -std=c17 -Wall -Wextra -Werror -Wpedantic -O2 -DNDEBUG -I runtime \
             runtime/test/main.c runtime/lsaca_rt.c runtime/lsaca_rt_string.c \
             runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c \
+            runtime/lsaca_rt_io.c runtime/lsaca_rt_unicode.c \
             -lm -o rt-test
           ./rt-test
       - name: Build and run the smoke test (debug build with leak tracking)
         run: |
-          gcc -std=c17 -Wall -Wextra -Werror -O0 -g -DLSACA_DEBUG -DLSACA_DEBUG_RC \
+          gcc -std=c17 -Wall -Wextra -Werror -Wpedantic -O0 -g -DLSACA_DEBUG -DLSACA_DEBUG_RC \
             -I runtime runtime/test/main.c runtime/lsaca_rt.c runtime/lsaca_rt_string.c \
             runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c \
+            runtime/lsaca_rt_io.c runtime/lsaca_rt_unicode.c \
             -lm -o rt-test-debug
           ./rt-test-debug
-      # Panic paths call exit(101); a bash script must not treat that as an
-      # unhandled failure before inspecting the output.
+      # The standalone I/O suite covers the handle table, files and
+      # directories, TCP loopback, time and environment access added in 2.0.
+      # It creates and removes the scratch directory it is given.
+      - name: Build and run the standalone I/O suite (release build)
+        run: |
+          gcc -std=c17 -Wall -Wextra -Werror -Wpedantic -O2 -DNDEBUG -I runtime \
+            runtime/test/io_tests.c runtime/lsaca_rt.c runtime/lsaca_rt_string.c \
+            runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c \
+            runtime/lsaca_rt_io.c runtime/lsaca_rt_unicode.c \
+            -lm -o io-tests
+          ./io-tests "$(mktemp -d)/io_scratch"
+      - name: Build and run the standalone I/O suite (debug build with leak tracking)
+        run: |
+          gcc -std=c17 -Wall -Wextra -Werror -Wpedantic -O0 -g -DLSACA_DEBUG -DLSACA_DEBUG_RC \
+            -I runtime runtime/test/io_tests.c runtime/lsaca_rt.c runtime/lsaca_rt_string.c \
+            runtime/lsaca_rt_vec.c runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c \
+            runtime/lsaca_rt_io.c runtime/lsaca_rt_unicode.c \
+            -lm -o io-tests-debug
+          ./io-tests-debug "$(mktemp -d)/io_scratch"
       - name: Check panic exits and the debug leak report
         shell: bash
         run: |
@@ -268,7 +306,8 @@ jobs:
           gcc -std=c17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
             -fno-omit-frame-pointer -I runtime runtime/test/main.c \
             runtime/lsaca_rt.c runtime/lsaca_rt_string.c runtime/lsaca_rt_vec.c \
-            runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c -lm -o rt-test-san
+            runtime/lsaca_rt_fmt.c runtime/lsaca_rt_map.c runtime/lsaca_rt_io.c \
+            runtime/lsaca_rt_unicode.c -lm -o rt-test-san
           ./rt-test-san
           ./rt-test-san --orc-shutdown
           ./rt-test-san --leak
@@ -352,8 +391,8 @@ jobs:
           # The runtime is split into several translation units; every emitted
           # project must contain all of them (the driver writes runtime::sources()).
           units=$(ls "$workdir/hello"/lsaca_rt*.c | wc -l)
-          if [ "$units" -ne 5 ]; then
-            echo "expected 5 emitted runtime translation units, found $units"
+          if [ "$units" -ne 7 ]; then
+            echo "expected 7 emitted runtime translation units, found $units"
             exit 1
           fi
           cmake -S "$workdir/hello" -B "$workdir/hello/build" -G Ninja -DCMAKE_BUILD_TYPE=Release

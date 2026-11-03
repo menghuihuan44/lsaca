@@ -228,8 +228,28 @@ impl<'a> Checker<'a> {
     /// be validated *after* unification, so callers run this on the resolved
     /// type. The type is resolved here as well so diagnostics never describe
     /// an unresolved variable as `_`.
+    /// The diagnostic message for an unsized type used where a sized value is
+    /// required: slices, str and trait objects may only appear behind a pointer.
+    pub(crate) fn unsized_type_message(resolved: &ITy) -> String {
+        match resolved {
+            ITy::Dyn(_) => {
+                "trait objects are unsized; use Box<dyn Trait>, Rc<dyn Trait> or &dyn Trait"
+                    .to_string()
+            }
+            ITy::Str => "str is unsized; use a reference such as &str".to_string(),
+            _ => "slices are unsized; use a reference such as &[T]".to_string(),
+        }
+    }
+
     pub fn validate_storage_type(&mut self, ty: &ITy, span: Span) -> bool {
         let resolved = self.infer.resolve(ty);
+        // Unsized values cannot be stored in aggregates: they only exist behind
+        // a pointer.
+        if resolved.is_unsized() {
+            let message = Self::unsized_type_message(&resolved);
+            self.error_code(message, span, "E0001");
+            return false;
+        }
         if self.type_contains_ref(&resolved) {
             let described = self.describe_resolved(&resolved);
             self.error_code(
@@ -250,10 +270,18 @@ impl<'a> Checker<'a> {
     /// expression result types. Mutable references must be plain values.
     pub fn validate_value_type(&mut self, ty: &ITy, span: Span) -> bool {
         let resolved = self.infer.resolve(ty);
+        if resolved.is_unsized() {
+            let message = Self::unsized_type_message(&resolved);
+            self.error_code(message, span, "E0001");
+            return false;
+        }
         match resolved {
             ITy::Ref { mutable, inner } => {
                 let mut valid = true;
-                if mutable && !self.is_mutable_reference_target(&inner) {
+                if mutable
+                    && !self.infer.resolve(&inner).is_unsized()
+                    && !self.is_mutable_reference_target(&inner)
+                {
                     let described = self.describe_resolved(&inner);
                     self.error_code(
                         format!(
@@ -265,7 +293,12 @@ impl<'a> Checker<'a> {
                     );
                     valid = false;
                 }
-                if !self.validate_value_type(&inner, span) {
+                // An unsized pointee (slice, str or trait object) is exactly
+                // the supported way to use those types, so it needs no further
+                // validation here.
+                if !self.infer.resolve(&inner).is_unsized()
+                    && !self.validate_value_type(&inner, span)
+                {
                     valid = false;
                 }
                 valid
@@ -282,8 +315,15 @@ impl<'a> Checker<'a> {
                 }
                 valid
             }
-            ITy::Vec(inner) | ITy::Rc(inner) | ITy::Box(inner) | ITy::Option(inner) => {
-                self.validate_storage_type(&inner, span)
+            ITy::Vec(inner) | ITy::Option(inner) => self.validate_storage_type(&inner, span),
+            ITy::Rc(inner) | ITy::Box(inner) => {
+                // Box and Rc are the owning pointers that may point at an
+                // unsized value, such as Box<dyn Trait>.
+                if self.infer.resolve(&inner).is_unsized() {
+                    true
+                } else {
+                    self.validate_storage_type(&inner, span)
+                }
             }
             ITy::Result(ok, err) => {
                 self.validate_storage_type(&ok, span) && self.validate_storage_type(&err, span)
@@ -313,6 +353,15 @@ impl<'a> Checker<'a> {
         if probe.unify(&actual, &wanted).is_ok() {
             let _ = self.unify_quiet(&actual, &wanted);
             return expr;
+        }
+        // Trait-object and slice/str coercions (DESIGN 2.0 sections 7 and 8) are
+        // tried before the reference reborrow block: `&mut Vec<T>` to `&[T]`
+        // must lower to a slice node, not to a plain reference reborrow.
+        if let Some(coerced) = self.try_dyn_coerce(expr.clone(), &actual, &wanted, span) {
+            return coerced;
+        }
+        if let Some(coerced) = self.try_slice_coerce(expr.clone(), &actual, &wanted, span) {
+            return coerced;
         }
         if let (
             ITy::Ref {
@@ -374,6 +423,26 @@ impl<'a> Checker<'a> {
         span: Span,
         hint: Option<&ITy>,
     ) -> TExpr {
+        // `&base[start..end]` is a slice borrow rather than an ordinary borrow of
+        // an unsized value: check it directly so no temporary-value diagnostic is
+        // reported for the inner slice expression.
+        if let ast::ExprKind::Slice {
+            base,
+            start,
+            end,
+            inclusive,
+        } = &inner.kind
+        {
+            return self.check_slice_ref(
+                mutable,
+                base,
+                start.as_deref(),
+                end.as_deref(),
+                *inclusive,
+                span,
+                hint,
+            );
+        }
         let pointee_hint = hint.and_then(|hint| match self.infer.resolve(hint) {
             ITy::Ref { inner, .. } => Some((*inner).clone()),
             _ => None,
@@ -393,7 +462,7 @@ impl<'a> Checker<'a> {
         }
         if mutable {
             let _ = self.require_mutable_place(&inner_expr, span, "borrow this value as mutable");
-            if !self.is_mutable_reference_target(&inner_ty) {
+            if !inner_ty.is_unsized() && !self.is_mutable_reference_target(&inner_ty) {
                 let described = self.describe_resolved(&inner_ty);
                 self.error_code(
                     format!(

@@ -32,6 +32,12 @@ pub enum ITy {
         mutable: bool,
         inner: Box<ITy>,
     },
+    /// A slice type [T]. Unsized: only valid behind a reference or in Box/Rc.
+    Slice(Box<ITy>),
+    /// The unsized UTF-8 string slice type str.
+    Str,
+    /// A trait object type dyn Trait, identified by the trait's id.
+    Dyn(usize),
     Struct(usize),
     Enum(usize),
     /// The type of diverging expressions (return, break, continue). It unifies
@@ -101,6 +107,23 @@ impl ITy {
         ITy::Never
     }
 
+    pub fn slice(elem: ITy) -> ITy {
+        ITy::Slice(Box::new(elem))
+    }
+
+    pub fn str_() -> ITy {
+        ITy::Str
+    }
+
+    pub fn dynamic(trait_id: usize) -> ITy {
+        ITy::Dyn(trait_id)
+    }
+
+    /// True for the unsized types: slices, str and trait objects.
+    pub fn is_unsized(&self) -> bool {
+        matches!(self, ITy::Slice(_) | ITy::Str | ITy::Dyn(_))
+    }
+
     pub fn is_never(&self) -> bool {
         matches!(self, ITy::Never)
     }
@@ -132,6 +155,9 @@ impl ITy {
                 mutable: *mutable,
                 inner: Box::new(ITy::from_ty(inner)),
             },
+            Ty::Slice(elem) => ITy::slice(ITy::from_ty(elem)),
+            Ty::Str => ITy::Str,
+            Ty::Dyn(trait_id) => ITy::Dyn(*trait_id),
             Ty::Struct(id) => ITy::Struct(*id),
             Ty::Enum(id) => ITy::Enum(*id),
         }
@@ -258,6 +284,7 @@ impl Infer {
                 mutable: *mutable,
                 inner: Box::new(self.resolve(inner)),
             },
+            ITy::Slice(elem) => ITy::slice(self.resolve(elem)),
             ITy::Vec(elem) => ITy::vec(self.resolve(elem)),
             ITy::Rc(elem) => ITy::rc(self.resolve(elem)),
             ITy::Box(elem) => ITy::box_(self.resolve(elem)),
@@ -369,6 +396,9 @@ impl Infer {
                 }
                 self.unify_resolved(*a_ret, *b_ret)
             }
+            (ITy::Slice(a), ITy::Slice(b)) => self.unify_resolved(*a, *b),
+            (ITy::Str, ITy::Str) => Ok(()),
+            (ITy::Dyn(a), ITy::Dyn(b)) if a == b => Ok(()),
             (ITy::Struct(a), ITy::Struct(b)) if a == b => Ok(()),
             (ITy::Enum(a), ITy::Enum(b)) if a == b => Ok(()),
             _ => Err(()),
@@ -432,7 +462,8 @@ impl Infer {
             ITy::Fn(params, ret) => {
                 params.iter().any(|param| self.occurs(id, param)) || self.occurs(id, ret)
             }
-            ITy::Never => false,
+            ITy::Slice(elem) => self.occurs(id, elem),
+            ITy::Never | ITy::Str | ITy::Dyn(_) => false,
             _ => false,
         }
     }
@@ -501,6 +532,9 @@ impl Infer {
                 }
                 Ok(Ty::function(out, self.finalize_resolved(ret)?))
             }
+            ITy::Slice(elem) => Ok(Ty::slice(self.finalize_resolved(elem)?)),
+            ITy::Str => Ok(Ty::Str),
+            ITy::Dyn(trait_id) => Ok(Ty::Dyn(*trait_id)),
             ITy::Struct(id) => Ok(Ty::Struct(*id)),
             ITy::Enum(id) => Ok(Ty::Enum(*id)),
             ITy::Ref { mutable, inner } => Ok(Ty::Ref {

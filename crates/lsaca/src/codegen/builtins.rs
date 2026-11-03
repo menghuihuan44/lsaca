@@ -45,6 +45,11 @@ impl<'a> Gen<'a> {
         span: Span,
     ) {
         let loc = self.loc(span);
+        // The decisions below (frozen representation, element type, payload
+        // types) are made on the receiver's value type: a receiver may be a
+        // reference, for example `self: &mut Vec<T>` in a standard library impl
+        // block.
+        let receiver_value = self.receiver_value_ty(receiver);
         match method {
             // ----- String --------------------------------------------------
             HBuiltinMethod::StrLen => {
@@ -340,7 +345,7 @@ impl<'a> Gen<'a> {
                 if let Some(arg) = args.first() {
                     // The element argument is consumed by the vector: managed
                     // values are moved instead of copied.
-                    let frozen = ops::is_frozen_shared(&receiver.ty);
+                    let frozen = ops::is_frozen_shared(&receiver_value);
                     let value = if frozen {
                         self.gen_owned(arg)
                     } else {
@@ -371,7 +376,7 @@ impl<'a> Gen<'a> {
                         self.w.indent();
                         self.line(format!(
                             "({place}) = {}(({place}), {value});",
-                            ops::push_slow_fn_name(self.names, &receiver.ty)
+                            ops::push_slow_fn_name(self.names, &receiver_value)
                         ));
                         self.w.dedent();
                         self.line("}");
@@ -382,7 +387,7 @@ impl<'a> Gen<'a> {
             }
             HBuiltinMethod::VecPop => {
                 let place = self.place_through_reference(receiver);
-                if ops::is_frozen_shared(&receiver.ty) {
+                if ops::is_frozen_shared(&receiver_value) {
                     let out = self.new_plain_of("LsString*", "out");
                     self.line(format!("if (ls_vec_string_pop(&({}), &{})) {{", place, out));
                     self.w.indent();
@@ -410,7 +415,7 @@ impl<'a> Gen<'a> {
                 let place = self.place_through_reference(receiver);
                 if let (Some(index), Some(value)) = (args.first(), args.get(1)) {
                     let index_value = self.gen_owned(index);
-                    let element_value = if ops::is_frozen_shared(&receiver.ty) {
+                    let element_value = if ops::is_frozen_shared(&receiver_value) {
                         self.gen_owned(value)
                     } else {
                         self.gen_owned_move(value)
@@ -419,13 +424,13 @@ impl<'a> Gen<'a> {
                         "if ((int64_t)({}) < 0 || (uint64_t)({}) > (uint64_t)({}).len) {{ ls_panic_bounds({}, (int64_t)({}).len, (int64_t)({})); }}",
                         index_value, index_value, place, loc, place, index_value
                     ));
-                    if ops::is_frozen_shared(&receiver.ty) {
+                    if ops::is_frozen_shared(&receiver_value) {
                         self.line(format!(
                             "ls_vec_string_insert(&({}), (size_t)({}), {});",
                             place, index_value, element_value
                         ));
                     } else {
-                        let element = vec_element(&receiver.ty);
+                        let element = vec_element(&receiver_value);
                         let element_ctype = self.ctype(&element);
                         self.line(format!(
                             "ls_vec_insert_bytes((void**)&({}).data, &({}).len, &({}).cap, (size_t)({}), (const void*)&{}, sizeof({}));",
@@ -444,13 +449,13 @@ impl<'a> Gen<'a> {
                         "if ((int64_t)({}) < 0 || (uint64_t)({}) >= (uint64_t)({}).len) {{ ls_panic_bounds({}, (int64_t)({}).len, (int64_t)({})); }}",
                         index_value, index_value, place, loc, place, index_value
                     ));
-                    if ops::is_frozen_shared(&receiver.ty) {
+                    if ops::is_frozen_shared(&receiver_value) {
                         self.line(format!(
                             "{} = ls_vec_string_remove(&({}), (size_t)({}));",
                             target, place, index_value
                         ));
                     } else {
-                        let element = vec_element(&receiver.ty);
+                        let element = vec_element(&receiver_value);
                         let element_ctype = self.ctype(&element);
                         self.line(format!(
                             "{} = ({}).data[(size_t)({})];",
@@ -466,10 +471,10 @@ impl<'a> Gen<'a> {
             }
             HBuiltinMethod::VecClear => {
                 let place = self.place_through_reference(receiver);
-                if ops::is_frozen_shared(&receiver.ty) {
+                if ops::is_frozen_shared(&receiver_value) {
                     self.line(format!("ls_vec_string_clear(&({}));", place));
                 } else {
-                    let element = vec_element(&receiver.ty);
+                    let element = vec_element(&receiver_value);
                     if !self.is_trivial_copy(&element) {
                         let index = self.fresh("i");
                         self.line(format!(
@@ -502,7 +507,7 @@ impl<'a> Gen<'a> {
                 if let Some(arg) = args.first() {
                     // The iterable argument is consumed: its elements are
                     // transferred into the receiver.
-                    let frozen = ops::is_frozen_shared(&receiver.ty);
+                    let frozen = ops::is_frozen_shared(&receiver_value);
                     let other = if frozen {
                         self.gen_owned(arg)
                     } else {
@@ -511,7 +516,7 @@ impl<'a> Gen<'a> {
                     if frozen {
                         self.line(format!("ls_vec_string_extend(&({}), &({}));", place, other));
                     } else {
-                        let element = vec_element(&receiver.ty);
+                        let element = vec_element(&receiver_value);
                         let element_ctype = self.ctype(&element);
                         self.line(format!(
                             "ls_vec_reserve((void**)&({}).data, &({}).cap, ({}).len, ({}).len + ({}).len, sizeof({}));",
@@ -540,10 +545,10 @@ impl<'a> Gen<'a> {
             }
             HBuiltinMethod::VecReverse => {
                 let place = self.place_through_reference(receiver);
-                if ops::is_frozen_shared(&receiver.ty) {
+                if ops::is_frozen_shared(&receiver_value) {
                     self.line(format!("ls_vec_string_reverse(&({}));", place));
                 } else {
-                    let element = vec_element(&receiver.ty);
+                    let element = vec_element(&receiver_value);
                     let element_ctype = self.ctype(&element);
                     self.line(format!(
                         "ls_vec_reverse_bytes((void*)({}).data, ({}).len, sizeof({}));",
@@ -573,8 +578,8 @@ impl<'a> Gen<'a> {
                 ));
             }
             HBuiltinMethod::OptUnwrap => {
-                let payload_ty = option_payload(&receiver.ty);
-                if ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref() {
+                let payload_ty = option_payload(&receiver_value);
+                if ops::is_frozen_shared(&receiver_value) || receiver.ty.is_ref() {
                     let place = self.place_through_reference(receiver);
                     self.line(format!("if (({}).{} != 1) {{", place, types::TAG_FIELD));
                     self.w.indent();
@@ -622,9 +627,9 @@ impl<'a> Gen<'a> {
                 let _ = payload_ty;
             }
             HBuiltinMethod::OptUnwrapOr => {
-                let payload_ty = option_payload(&receiver.ty);
+                let payload_ty = option_payload(&receiver_value);
                 if let Some(default) = args.first() {
-                    let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                    let frozen = ops::is_frozen_shared(&receiver_value) || receiver.ty.is_ref();
                     // The receiver is consumed unless it is a shared runtime
                     // type or reached through a reference.
                     let shell = if frozen {
@@ -675,9 +680,9 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::OptExpect => {
-                let payload_ty = option_payload(&receiver.ty);
+                let payload_ty = option_payload(&receiver_value);
                 if let Some(message) = args.first() {
-                    let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                    let frozen = ops::is_frozen_shared(&receiver_value) || receiver.ty.is_ref();
                     let shell = if frozen {
                         None
                     } else {
@@ -744,8 +749,8 @@ impl<'a> Gen<'a> {
                 ));
             }
             HBuiltinMethod::ResUnwrap => {
-                let ok_ty = result_ok_type(&receiver.ty);
-                let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                let ok_ty = result_ok_type(&receiver_value);
+                let frozen = ops::is_frozen_shared(&receiver_value) || receiver.ty.is_ref();
                 // The receiver is consumed: the payload is transferred into
                 // the target and the cell shell is not released again.
                 let shell = if frozen {
@@ -800,10 +805,10 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::ResUnwrapOr => {
-                let ok_ty = result_ok_type(&receiver.ty);
-                let err_ty = result_err_type(&receiver.ty);
+                let ok_ty = result_ok_type(&receiver_value);
+                let err_ty = result_err_type(&receiver_value);
                 if let Some(default) = args.first() {
-                    let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                    let frozen = ops::is_frozen_shared(&receiver_value) || receiver.ty.is_ref();
                     let shell = if frozen {
                         None
                     } else {
@@ -868,9 +873,9 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::ResExpect => {
-                let ok_ty = result_ok_type(&receiver.ty);
+                let ok_ty = result_ok_type(&receiver_value);
                 if let Some(message) = args.first() {
-                    let frozen = ops::is_frozen_shared(&receiver.ty) || receiver.ty.is_ref();
+                    let frozen = ops::is_frozen_shared(&receiver_value) || receiver.ty.is_ref();
                     let shell = if frozen {
                         None
                     } else {
@@ -933,7 +938,7 @@ impl<'a> Gen<'a> {
             }
             HBuiltinMethod::ResOk => {
                 let place = self.place_through_reference(receiver);
-                let ok_ty = result_ok_type(&receiver.ty);
+                let ok_ty = result_ok_type(&receiver_value);
                 let names = self.names;
                 let value = ops::copy_expr(
                     names,
@@ -952,7 +957,7 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
             HBuiltinMethod::RcGet => {
-                if let Ty::Rc(inner) = &receiver.ty {
+                if let Ty::Rc(inner) = &receiver_value {
                     let place = self.place_through_reference(receiver);
                     let suffix = self.names.mangle(inner);
                     // The helper already returns the payload C type, so a cast
@@ -964,12 +969,12 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::RcSet => {
-                if let (Ty::Rc(inner), Some(arg)) = (&receiver.ty, args.first()) {
+                if let (Ty::Rc(inner), Some(arg)) = (&receiver_value, args.first()) {
                     // Mutation goes through the shared cell, so the receiver
                     // may be reached through a shared reference (a const
                     // qualified pointer in C). The cell itself is never const,
                     // so the qualifier is cast away for the mutating helper.
-                    let cell_ctype = self.ctype(&receiver.ty);
+                    let cell_ctype = self.ctype(&receiver_value);
                     let place = self.place_through_reference(receiver);
                     let place = format!("(({})({}))", cell_ctype, place);
                     let suffix = self.names.mangle(inner);
@@ -989,7 +994,7 @@ impl<'a> Gen<'a> {
                 self.line(format!("{} = ({})ls_refcount({});", target, ctype, place));
             }
             HBuiltinMethod::BoxGet => {
-                if let Ty::Box(inner) = &receiver.ty {
+                if let Ty::Box(inner) = &receiver_value {
                     let place = self.place_through_reference(receiver);
                     let suffix = self.names.mangle(inner);
                     // See RcGet: the helper's return type is already the
@@ -1002,11 +1007,11 @@ impl<'a> Gen<'a> {
                 }
             }
             HBuiltinMethod::BoxSet => {
-                if let (Ty::Box(inner), Some(arg)) = (&receiver.ty, args.first()) {
+                if let (Ty::Box(inner), Some(arg)) = (&receiver_value, args.first()) {
                     // See RcSet: a receiver reached through a shared reference
                     // is const qualified in C, while the box cell that owns the
                     // payload is not.
-                    let cell_ctype = self.ctype(&receiver.ty);
+                    let cell_ctype = self.ctype(&receiver_value);
                     let place = self.place_through_reference(receiver);
                     let place = format!("(({})({}))", cell_ctype, place);
                     let suffix = self.names.mangle(inner);
@@ -1022,7 +1027,7 @@ impl<'a> Gen<'a> {
             }
             HBuiltinMethod::ResErr => {
                 let place = self.place_through_reference(receiver);
-                let err_ty = result_err_type(&receiver.ty);
+                let err_ty = result_err_type(&receiver_value);
                 let names = self.names;
                 let value = ops::copy_expr(
                     names,
@@ -1077,8 +1082,10 @@ impl<'a> Gen<'a> {
                     let value_ty = (**value).clone();
                     let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
                     let place = self.map_place(receiver);
-                    // Lookup copies the key: the map never takes ownership here.
-                    let key_value = self.gen_owned(key_arg);
+                    // Lookup only reads the key: the map never takes ownership
+                    // here, so a place key is read through its lvalue without a
+                    // retain and only an rvalue key needs an owned temporary.
+                    let key_value = self.gen_borrowed(key_arg);
                     let out = self.declare_temp(&value_ty);
                     self.line(format!(
                         "if (lsaca_map_get_{}({}, {}, &{})) {{",
@@ -1104,7 +1111,8 @@ impl<'a> Gen<'a> {
                     let value_ty = (**value).clone();
                     let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
                     let place = self.map_place(receiver);
-                    let key_value = self.gen_owned(key_arg);
+                    // The lookup only reads the key; the closure is consumed.
+                    let key_value = self.gen_borrowed(key_arg);
                     let closure = self.gen_owned_move(closure_arg);
                     let value_ptr_ctype = format!("{}*", self.ctype(&value_ty));
                     let slot = self.new_plain_of(&value_ptr_ctype, "slot");
@@ -1157,7 +1165,8 @@ impl<'a> Gen<'a> {
                 if let (Ty::HashMap(_, _), Some(key_arg)) = (&map_ty, args.first()) {
                     let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
                     let place = self.map_place(receiver);
-                    let key_value = self.gen_owned(key_arg);
+                    // contains_key only reads the lookup key.
+                    let key_value = self.gen_borrowed(key_arg);
                     self.line(format!(
                         "{} = lsaca_map_contains_{}({}, {});",
                         target, suffix, place, key_value
@@ -1170,7 +1179,8 @@ impl<'a> Gen<'a> {
                     let value_ty = (**value).clone();
                     let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
                     let place = self.map_place(receiver);
-                    let key_value = self.gen_owned(key_arg);
+                    // remove only reads the lookup key to find the slot.
+                    let key_value = self.gen_borrowed(key_arg);
                     let out = self.declare_temp(&value_ty);
                     self.line(format!(
                         "if (lsaca_map_remove_{}({}, {}, &{})) {{",
@@ -1395,14 +1405,24 @@ impl<'a> Gen<'a> {
                     let value = self.gen_owned(arg);
                     match ty {
                         Ty::Int(int_ty) => {
-                            let suffix = int_ty.name();
+                            let int_ty = *int_ty;
+                            let suffix = util::runtime_int_suffix(int_ty);
+                            let argument = util::runtime_int_argument(int_ty, &value);
                             if int_ty.is_signed() && self.debug_checks {
+                                let call =
+                                    format!("ls_abs_{}_checked({}, {})", suffix, argument, loc);
                                 self.line(format!(
-                                    "{} = ls_abs_{}_checked({}, {});",
-                                    target, suffix, value, loc
+                                    "{} = {};",
+                                    target,
+                                    util::runtime_int_result(int_ty, call)
                                 ));
                             } else {
-                                self.line(format!("{} = ls_abs_{}({});", target, suffix, value));
+                                let call = format!("ls_abs_{}({})", suffix, argument);
+                                self.line(format!(
+                                    "{} = {};",
+                                    target,
+                                    util::runtime_int_result(int_ty, call)
+                                ));
                             }
                         }
                         Ty::Float(float_ty) => {
@@ -1580,10 +1600,18 @@ impl<'a> Gen<'a> {
             let name = if is_min { "min" } else { "max" };
             match ty {
                 Ty::Int(int_ty) => {
-                    let suffix = int_ty.name();
+                    let int_ty = *int_ty;
+                    let call = format!(
+                        "ls_{}_{}({}, {})",
+                        name,
+                        util::runtime_int_suffix(int_ty),
+                        util::runtime_int_argument(int_ty, &first_value),
+                        util::runtime_int_argument(int_ty, &second_value)
+                    );
                     self.line(format!(
-                        "{} = ls_{}_{}({}, {});",
-                        target, name, suffix, first_value, second_value
+                        "{} = {};",
+                        target,
+                        util::runtime_int_result(int_ty, call)
                     ));
                 }
                 Ty::Float(float_ty) => {
@@ -1609,8 +1637,9 @@ impl<'a> Gen<'a> {
         index_arg: Option<&HExpr>,
         target: &str,
     ) {
+        let receiver_value = self.receiver_value_ty(receiver);
         let place = self.place_through_reference(receiver);
-        let frozen = ops::is_frozen_shared(&receiver.ty);
+        let frozen = ops::is_frozen_shared(&receiver_value);
         let index_value = index_arg.map(|argument| self.gen_owned(argument));
         let condition = match &index_value {
             Some(value) => format!(
@@ -1642,7 +1671,7 @@ impl<'a> Gen<'a> {
             self.w.dedent();
             self.line("}");
         } else {
-            let element = vec_element(&receiver.ty);
+            let element = vec_element(&receiver_value);
             let names = self.names;
             let value = ops::copy_expr(
                 names,
@@ -1805,9 +1834,100 @@ impl<'a> Gen<'a> {
         self.pop_frame();
     }
 
+    /// True when values of this type are the fat string value itself: str, or
+    /// a reference to str (references to unsized values are stored by value).
+    fn is_str_value(ty: &Ty) -> bool {
+        match ty {
+            Ty::Str => true,
+            Ty::Ref { inner, .. } => inner.is_str(),
+            _ => false,
+        }
+    }
+
+    /// True when values of this type carry a trait object fat value: the trait
+    /// object itself, a reference to one, or a Box/Rc cell holding one.
+    fn is_dyn_value(ty: &Ty) -> bool {
+        match ty {
+            Ty::Dyn(_) => true,
+            Ty::Ref { inner, .. } | Ty::Box(inner) | Ty::Rc(inner) => inner.is_dyn(),
+            _ => false,
+        }
+    }
+
+    /// Read a fat borrowed value into a plain local so the display code can
+    /// use its fields more than once without re-evaluating the expression.
+    ///
+    /// The local is not registered for cleanup: unsized views own nothing, and
+    /// the Box/Rc cell is only read, never released.
+    fn fat_read(&mut self, ty: &Ty, value: &str) -> String {
+        let fat = self.new_plain(ty, "fat");
+        self.line(format!("{} = {};", fat, value));
+        match ty {
+            Ty::Box(inner) | Ty::Rc(inner) if inner.is_dyn() => format!("({})->payload", fat),
+            _ => fat,
+        }
+    }
+
+    /// Append a str value as text, honouring the optional precision.
+    fn append_str_value(
+        &mut self,
+        accumulator: &str,
+        ty: &Ty,
+        value: &str,
+        precision: Option<i64>,
+    ) {
+        let fat = self.fat_read(ty, value);
+        let text = self.declare_temp(&Ty::String);
+        self.line(format!(
+            "{} = ls_str_from_parts((const char*)({}).data, ({}).len);",
+            text, fat, fat
+        ));
+        match precision {
+            Some(precision) => self.line(format!(
+                "{} = ls_fmt_str_prec({}, {}, {});",
+                accumulator, accumulator, text, precision
+            )),
+            None => self.line(format!(
+                "{} = ls_format_push_str({}, {});",
+                accumulator, accumulator, text
+            )),
+        }
+    }
+
+    /// Append a trait object value through the debug slot of its vtable, which
+    /// is what both {} and {:?} of a dyn value render.
+    fn append_dyn_value(&mut self, accumulator: &str, ty: &Ty, value: &str) {
+        let fat = self.fat_read(ty, value);
+        self.line(format!(
+            "if (({}).{} != NULL) {{",
+            fat,
+            types::DYN_VTABLE_FIELD
+        ));
+        self.w.indent();
+        self.line(format!(
+            "{} = ({}).{}->debug({}, ({}).{});",
+            accumulator,
+            fat,
+            types::DYN_VTABLE_FIELD,
+            accumulator,
+            fat,
+            types::DYN_DATA_FIELD
+        ));
+        self.w.dedent();
+        self.line("}");
+    }
+
     /// Display one value with the precision and sign parts of a format
     /// specification; padding is applied by the caller.
     fn append_display_spec(&mut self, accumulator: &str, ty: &Ty, value: &str, spec: &FormatSpec) {
+        if Self::is_str_value(ty) {
+            self.append_str_value(accumulator, ty, value, spec.precision);
+            return;
+        }
+        if Self::is_dyn_value(ty) {
+            self.append_dyn_value(accumulator, ty, value);
+            return;
+        }
         let plus = if spec.sign_plus { "true" } else { "false" };
         let precision = spec.precision.unwrap_or(-1);
         match ty {
@@ -1874,6 +1994,14 @@ impl<'a> Gen<'a> {
     }
 
     fn append_display(&mut self, accumulator: &str, ty: &Ty, value: &str) {
+        if Self::is_str_value(ty) {
+            self.append_str_value(accumulator, ty, value, None);
+            return;
+        }
+        if Self::is_dyn_value(ty) {
+            self.append_dyn_value(accumulator, ty, value);
+            return;
+        }
         let statement = match ty {
             Ty::Unit => Some(format!(
                 "{} = ls_format_push_cstr({}, {});",
@@ -2035,6 +2163,7 @@ impl<'a> Gen<'a> {
 fn option_payload(ty: &Ty) -> Ty {
     match ty {
         Ty::Option(inner) => (**inner).clone(),
+        Ty::Ref { inner, .. } => option_payload(inner),
         _ => Ty::Unit,
     }
 }
@@ -2042,6 +2171,7 @@ fn option_payload(ty: &Ty) -> Ty {
 fn result_ok_type(ty: &Ty) -> Ty {
     match ty {
         Ty::Result(ok, _) => (**ok).clone(),
+        Ty::Ref { inner, .. } => result_ok_type(inner),
         _ => Ty::Unit,
     }
 }
@@ -2049,6 +2179,7 @@ fn result_ok_type(ty: &Ty) -> Ty {
 fn result_err_type(ty: &Ty) -> Ty {
     match ty {
         Ty::Result(_, err) => (**err).clone(),
+        Ty::Ref { inner, .. } => result_err_type(inner),
         _ => Ty::Unit,
     }
 }
@@ -2056,6 +2187,7 @@ fn result_err_type(ty: &Ty) -> Ty {
 fn vec_element(ty: &Ty) -> Ty {
     match ty {
         Ty::Vec(element) => (**element).clone(),
+        Ty::Ref { inner, .. } => vec_element(inner),
         _ => Ty::Unit,
     }
 }

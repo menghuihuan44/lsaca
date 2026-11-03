@@ -1,12 +1,22 @@
-"""string_split: build a comma-separated string of 50,000 decimal numbers
-(about 194,500 bytes), split it, parse every field and sum it."""
+"""string_split: build a comma-separated string of decimal numbers, split it,
+parse every field and sum it.
 
-TOKENS = 50_000
+Optional argument: token count (default 50,000, the medium scale).
+"""
+
+import sys
+
+
+def arg_int(args, index, fallback):
+    if index < len(args):
+        return int(args[index])
+    return fallback
 
 
 def main():
+    tokens = arg_int(sys.argv[1:], 0, 50_000)
     parts = []
-    for i in range(TOKENS):
+    for i in range(tokens):
         parts.append(str(i % 1000) + ",")
     text = "".join(parts)
 

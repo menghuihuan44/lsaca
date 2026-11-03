@@ -320,6 +320,29 @@ impl SourceMap {
         index
     }
 
+    /// Append a file whose global offset range starts at or after base.
+    ///
+    /// This is used for embedded libraries, whose sources must sit in a
+    /// different offset range than the files the driver loads. The stored base
+    /// is the larger of base and the position after the previous file, so
+    /// repeated calls with the same base still produce disjoint ranges.
+    pub fn add_file_at(
+        &mut self,
+        name: impl Into<String>,
+        text: impl Into<String>,
+        base: u32,
+    ) -> usize {
+        let text: String = text.into();
+        let start = match self.files.last() {
+            None => base as u64,
+            Some(last) => (last.end() as u64 + 1).max(base as u64),
+        };
+        let start = u32::try_from(start).unwrap_or(u32::MAX);
+        let index = self.files.len();
+        self.files.push(SourceFile::with_base(name, text, start));
+        index
+    }
+
     pub fn files(&self) -> &[SourceFile] {
         &self.files
     }

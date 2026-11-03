@@ -2,8 +2,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-int main(void) {
-    const int64_t tokens = 1000000;
+static int64_t arg_i64(int argc, char **argv, int index, int64_t fallback) {
+    if (index < argc - 1) {
+        return strtoll(argv[index + 1], NULL, 10);
+    }
+    return fallback;
+}
+
+int main(int argc, char **argv) {
+    // Optional argument: token count; the default is the medium scale.
+    const int64_t tokens = arg_i64(argc, argv, 0, 1000000);
     char *buf = (char *)malloc((size_t)tokens * 4 + 1);
     if (buf == NULL) {
         return 1;

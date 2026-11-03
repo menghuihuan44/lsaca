@@ -191,6 +191,34 @@ pub enum TExprKind {
     Break,
     Continue,
     Return(Option<Box<TExpr>>),
+    /// Coerce a concrete pointer value to a trait object pointer: `&T` to
+    /// `&dyn Trait`, `Box<T>` to `Box<dyn Trait>`, and so on.
+    DynCoerce {
+        value: Box<TExpr>,
+        /// Index into `Checker::vtables`.
+        vtable: usize,
+    },
+    /// Call a method through a trait object's vtable slot.
+    DynCall {
+        /// Receiver exactly as written (`Box<dyn Trait>`, `Rc<dyn Trait>`,
+        /// `&dyn Trait` or `&mut dyn Trait`).
+        object: Box<TExpr>,
+        /// Index into `Checker::trait_objects`.
+        trait_object: usize,
+        /// Zero-based method slot inside the trait object.
+        slot: usize,
+        args: Vec<TExpr>,
+    },
+    /// Slice of a vector, string or existing slice: `base[start..end]`.
+    /// Always wrapped in a reference on the HIR level; the expression type is
+    /// `&[T]`, `&mut [T]`, `&str` or `&mut str`.
+    Slice {
+        /// Container place expression (the vector, string or slice).
+        base: Box<TExpr>,
+        start: Option<Box<TExpr>>,
+        end: Option<Box<TExpr>>,
+        inclusive: bool,
+    },
     /// Postfix try operator. Lowered into a match plus an early return that
     /// propagates None or Err out of the enclosing function or closure.
     Try {

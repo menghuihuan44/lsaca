@@ -119,6 +119,7 @@ EXPECTED_RUNTIME_C_FILES = (
     "lsaca_rt_vec.c",
     "lsaca_rt_fmt.c",
     "lsaca_rt_map.c",
+    "lsaca_rt_io.c",
     "lsaca_rt_unicode.c",
 )
 EXPECTED_C_FILES = ("main.c",) + EXPECTED_RUNTIME_C_FILES
@@ -204,6 +205,8 @@ EXPECTED_FAILURE_REASONS = {
     "crates/lsaca/tests/programs/panic_div.ls": "panic fixture; e2e expects exit 101",
     "crates/lsaca/tests/programs/panic_unwrap.ls": "panic fixture; e2e expects exit 101",
     "crates/lsaca/tests/programs/panic_substring.ls": "panic fixture; e2e checks the char-boundary message",
+    "crates/lsaca/tests/programs/panic_slice_bounds.ls": "panic fixture; e2e checks the slice bounds message",
+    "crates/lsaca/tests/programs/panic_str_boundary.ls": "panic fixture; e2e checks the char-boundary message",
     "crates/lsaca/tests/programs/vec_capacity_negative.ls": "panic fixture; e2e expects exit 101",
     "crates/lsaca/tests/programs/iter_collect_no_type.ls": "documented compile-error fixture (collect needs a known Vec<T>)",
     "crates/lsaca/tests/programs/iter_sum_non_numeric.ls": "documented compile-error fixture (sum supports only i64/f64)",
@@ -694,13 +697,19 @@ def compile_project(config: Config, emit_dir: Path, executable: Path, profile: s
     except OSError as exc:
         raise StepFailed("gcc-error", f"cannot list emitted project {emit_dir}: {exc}") from None
     sources = [emit_dir / name for name in project_source_names(present)]
+    # The runtime's I/O translation unit talks to WinSock on Windows, so the
+    # generated project must link ws2_32 there. The compiler driver and the
+    # generated CMakeLists.txt do the same.
+    link_flags = ["-lm"]
+    if os.name == "nt":
+        link_flags.append("-lws2_32")
     argv = [
         config.compiler,
         *flags,
         "-I",
         emit_dir,
         *sources,
-        "-lm",
+        *link_flags,
         "-o",
         executable,
     ]

@@ -1,12 +1,18 @@
-/* binary_trees: build a perfect binary tree of depth 16 (131,071 nodes,
- * leaves carry consecutive payloads), recursively sum the payloads, then free
- * the tree. C uses malloc/free; the other languages use their own heap types. */
+/* binary_trees: build a perfect binary tree (leaves carry consecutive
+ * payloads), recursively sum the payloads, then free the tree. C uses
+ * malloc/free; the other languages use their own heap types.
+ * Optional argument: depth (default 16, the medium scale). */
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#define DEPTH 16
+static int64_t arg_i64(int argc, char **argv, int index, int64_t fallback) {
+    if (index < argc - 1) {
+        return strtoll(argv[index + 1], NULL, 10);
+    }
+    return fallback;
+}
 
 typedef struct Node {
     int64_t value;
@@ -48,8 +54,9 @@ static void free_tree(Node *node) {
     free(node);
 }
 
-int main(void) {
-    Node *tree = build(DEPTH, 0);
+int main(int argc, char **argv) {
+    const int64_t depth = arg_i64(argc, argv, 0, 16);
+    Node *tree = build(depth, 0);
     int64_t total = sum_tree(tree);
     printf("checksum=%" PRId64 "\n", total);
     free_tree(tree);

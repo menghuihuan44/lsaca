@@ -1,12 +1,20 @@
-// hashmap_wordcount: count 200,000 deterministic words (4,096 distinct) in a
+// hashmap_wordcount: count deterministic words (4,096 distinct) in a
 // hand-written open-addressing hash map keyed by the word text, then print a
 // checksum over the frequencies, the number of distinct keys and the highest
 // frequency. The checksum (sum of squared counts) is independent of hash-map
 // iteration order.
+// Optional argument: token count (default 200,000, the medium scale).
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static int64_t arg_i64(int argc, char **argv, int index, int64_t fallback) {
+    if (index < argc - 1) {
+        return strtoll(argv[index + 1], NULL, 10);
+    }
+    return fallback;
+}
 
 typedef struct {
     char *key; // NULL marks an empty slot
@@ -105,8 +113,8 @@ static void map_increment(WordMap *map, const char *key) {
     }
 }
 
-int main(void) {
-    const int64_t tokens = 200000;
+int main(int argc, char **argv) {
+    const int64_t tokens = arg_i64(argc, argv, 0, 200000);
     const int64_t distinct = 4096;
     WordMap counts;
     map_init(&counts);

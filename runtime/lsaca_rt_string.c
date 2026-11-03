@@ -398,9 +398,33 @@ LsString* ls_str_replace(const LsString* s, const LsString* from,
  * encoded scalars instead of rewriting bytes in place. The output buffer stays
  * valid UTF-8 by construction. */
 static LsString* ls_str_map_case(const LsString* s, bool upper) {
-    LsString* result = ls_str_alloc_capacity(s->len);
+    LsString* result;
     size_t in = 0;
 
+    /* ASCII text maps one byte to one byte with a range check, so it needs no
+     * Unicode table lookups, no per-scalar encoding and no growth (the input
+     * length is the exact output length). */
+    if (ls_rt_all_ascii(s->data, s->len)) {
+        result = ls_str_alloc_capacity(s->len);
+        for (in = 0; in < s->len; in += 1) {
+            unsigned char byte = (unsigned char)s->data[in];
+
+            if (upper) {
+                if (byte >= (unsigned char)'a' && byte <= (unsigned char)'z') {
+                    byte = (unsigned char)(byte - 32u);
+                }
+            } else {
+                if (byte >= (unsigned char)'A' && byte <= (unsigned char)'Z') {
+                    byte = (unsigned char)(byte + 32u);
+                }
+            }
+            result->data[in] = (char)byte;
+        }
+        result->len = s->len;
+        result->data[s->len] = '\0';
+        return result;
+    }
+    result = ls_str_alloc_capacity(s->len);
     while (in < s->len) {
         const unsigned char* bytes = (const unsigned char*)s->data + in;
         size_t length = ls_rt_utf8_decode_length(bytes, s->len - in);
@@ -441,6 +465,25 @@ LsString* ls_str_trim(const LsString* s) {
     size_t start = 0;
     size_t end = s->len;
 
+    /* Pure ASCII text: the Unicode whitespace set restricted to ASCII is
+     * exactly { tab, LF, VT, FF, CR, space }, so trimming needs no decoding. */
+    if (ls_rt_all_ascii(s->data, s->len)) {
+        while (start < end) {
+            unsigned char byte = (unsigned char)s->data[start];
+            if (byte != (unsigned char)' ' && (byte < 0x09u || byte > 0x0Du)) {
+                break;
+            }
+            start += 1;
+        }
+        while (end > start) {
+            unsigned char byte = (unsigned char)s->data[end - 1];
+            if (byte != (unsigned char)' ' && (byte < 0x09u || byte > 0x0Du)) {
+                break;
+            }
+            end -= 1;
+        }
+        return ls_str_alloc_from(s->data + start, end - start);
+    }
     while (start < end) {
         size_t length = ls_rt_utf8_decode_length(
             (const unsigned char*)s->data + start, end - start);
@@ -1015,6 +1058,10 @@ int64_t ls_str_char_count(const LsString* s) {
     int64_t count = 0;
     size_t i = 0;
 
+    /* Pure ASCII text has one scalar per byte; skip the decoder entirely. */
+    if (ls_rt_all_ascii(s->data, s->len)) {
+        return (int64_t)s->len;
+    }
     while (i < s->len) {
         size_t length = ls_rt_utf8_decode_length(
             (const unsigned char*)s->data + i, s->len - i);
@@ -1106,6 +1153,18 @@ LsVec_char ls_str_chars(const LsString* s) {
     size_t i = 0;
     size_t index = 0;
 
+    /* Pure ASCII text: each byte is its own code point, so the vector can be
+     * sized and filled in one pass (the generic path decodes twice: once to
+     * count, once to fill). */
+    if (ls_rt_all_ascii(s->data, s->len)) {
+        vector.len = s->len;
+        vector.cap = vector.len;
+        vector.data = (uint32_t*)ls_vec_alloc(vector.len, sizeof(uint32_t));
+        for (i = 0; i < s->len; i += 1) {
+            vector.data[i] = (uint32_t)(unsigned char)s->data[i];
+        }
+        return vector;
+    }
     vector.len = (size_t)ls_str_char_count(s);
     vector.cap = vector.len;
     vector.data = (uint32_t*)ls_vec_alloc(vector.len, sizeof(uint32_t));

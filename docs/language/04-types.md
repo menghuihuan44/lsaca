@@ -12,6 +12,7 @@ type, and describes inference and conversions.
 | `bool` | Boolean. | `true` / `false`. |
 | `i8` `i16` `i32` `i64` | Signed integers. | Two's complement; `i64` is the default integer type and the type of all lengths and indices. |
 | `u8` `u16` `u32` `u64` | Unsigned integers. | Values are kept in the corresponding C unsigned type. |
+| `isize` `usize` | Pointer-sized signed / unsigned integers. | Added in 2.0.0; C `intptr_t`/`uintptr_t`, 64 bits on every supported target; integer literals still infer `i64`; see [Integers](#integers). |
 | `f32` `f64` | IEEE-754 binary floating point. | `f64` is the default float type. |
 | `char` | Unicode scalar value. | Added in 1.6.0; written with single quotes; a `Copy` scalar stored as a 32-bit value; see [Characters and Unicode](22-characters-and-unicode.md). |
 | `String` | Owned UTF-8 string. | Move-only refcounted buffer; `.clone()` produces an independent copy; `len()` is a byte count. |
@@ -22,18 +23,28 @@ type, and describes inference and conversions.
 | `Rc<T>` | Shared, mutable heap cell. | Move-only handle; `.clone()` shares one payload; `get()`/`set()`. |
 | `Box<T>` | Owned heap indirection. | Added in 1.1.0; move-only; `.clone()` deep-copies the payload. |
 | `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. Cannot be stored in aggregates (mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4); see [References and borrowing](12-references-and-borrowing.md). |
+| `&[T]` / `&mut [T]` / `&str` / `&mut str` | References to an unsized slice or UTF-8 text value. | Added in 2.0.0; `&[T]` is a `Copy` fat reference (data pointer plus length); produced by coercions from `Vec`/`String` and by slicing a place with `&`/`&mut`; see [Slices and str](26-slices-and-str.md). |
 | `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; tuples can nest. |
 | `fn(A, B) -> R` | Function type. | Values of this type are first-class but move-only; since 1.5 they can be stored in aggregates. See [Functions](09-functions.md). |
+| `dyn Trait` | Trait object (unsized). | Added in 2.0.0; only behind a pointer: `Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait`, `&mut dyn Trait`; see [Trait objects](25-trait-objects.md). |
 | `Name` | User struct or enum. | Declared with `struct`/`enum`; generic types are written `Name<T, ...>` since 1.5. `Copy` when every kind of field is `Copy` and there is no `Drop` impl; otherwise move-only. `.clone()` is derived automatically unless the type implements `Drop`; `impl Drop for Name` adds a destructor hook. |
 | `Alias` | Type alias. | `type Alias = T;` introduces no new type. |
 
-There is no `usize`, `isize`, raw pointer type, array type or slice type.
-Generic user types are written with type arguments, `Name<T, ...>` (see
-[Generics](17-generics.md)); a trait name is not a type, and using one as a type
-is `E0412` because there are no trait objects (see [Traits](18-traits.md)).
-References are written `&T` (shared) and `&mut T` (mutable); they are
-**non-owning** views of an existing place, added in 1.3.0, and cannot be stored
-in aggregates. They are described in [References and
+`isize` and `usize` are the pointer-sized integer types: their C types are
+`intptr_t` and `uintptr_t`, and on every supported 64-bit target their ranges
+equal `i64` and `u64`. They are distinct types like every other integer type,
+and an unannotated integer literal still infers `i64`; see [Integers](#integers).
+There is no raw pointer type and no array type. `[T]` and `str` are *unsized*
+types: they have no values of their own, and the only usable forms are the
+references `&[T]`, `&mut [T]`, `&str` and `&mut str` (see
+[Slices and str](26-slices-and-str.md)). Generic user types are written with
+generic type arguments, `Name<T, ...>` (see [Generics](17-generics.md)). A bare
+trait name is not a type and using one as a type is `E0412`; since 2.0.0 a trait
+becomes a type only behind `dyn`, as in `Box<dyn Greet>` (see
+[Traits](18-traits.md) and [Trait objects](25-trait-objects.md)). References are
+written `&T` (shared) and `&mut T` (mutable); they are **non-owning** views of
+an existing place, added in 1.3.0, and cannot be stored in aggregates (the slice
+and `str` references follow the same rule). They are described in [References and
 borrowing](12-references-and-borrowing.md). `Self` is not a type available to
 user code in general: it names "the type of this `impl` block" inside an
 `impl`, and is accepted in parameter and return positions there (see [Structs,
@@ -55,6 +66,8 @@ both operands to have the same type; to change the type, use `as`.
 | `u16` | 0 ..= 65,535 |
 | `u32` | 0 ..= 4,294,967,295 |
 | `u64` | 0 ..= 18,446,744,073,709,551,615 |
+| `isize` | same range as `i64` on every supported (64-bit) target |
+| `usize` | same range as `u64` on every supported (64-bit) target |
 
 The type of an unannotated integer literal is `i64` unless context determines a
 different integer type. Debug builds check overflow and division by zero at run
@@ -433,23 +446,12 @@ fn main() {
 
 Error:
 ```text
-error[E0282]: type annotations needed: the type of this expression is not known
-  --> example-11.ls:2:9
-   |
- 2 |     let v = Vec::new();
-   |         ^
-
-error[E0282]: type annotations needed: the type of this expression is not known
+error[E0282]: type annotations needed
   --> example-11.ls:2:13
    |
  2 |     let v = Vec::new();
    |             ^^^^^^^^^^
-
-error[E0282]: type annotations needed: the type of this expression is not known
-  --> example-11.ls:3:20
-   |
- 3 |     println!("{}", v.len());
-   |                    ^
+   = note: cannot infer the type arguments for this call; annotate the binding or the expected type
 
 lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 ```
@@ -492,7 +494,7 @@ The conversion rules follow Rust:
 
 * Integer to integer: truncate to the target width, sign-extend or zero-extend
   according to the target type's signedness. `300 as u8` is `44`; `-1 as u8` is
-  `255`.
+  `255`. `isize` and `usize` cast exactly like the other integer types.
 * Integer to float: exact value if it fits, otherwise rounded.
 * Float to integer: truncate toward zero, saturating at the target type's
   bounds; NaN becomes `0`.
@@ -589,26 +591,23 @@ error[E0308]: mismatched types
 lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 ```
 
-A type that does not exist gives a name-resolution error rather than a cast
-error. `usize` is a good example: it is Rust, not lsaca:
+Since 2.0.0 `isize` and `usize` are ordinary integer types, so they print and
+cast like the others:
 
-```ls,compile-fail
+```ls
 fn main() {
     let x: usize = 0;
-    println!("{}", x);
+    let y: isize = -1;
+    println!("{} {}", x, y);
+    println!("{} {}", x as u64, y as i64);
 }
 ```
 
-Error:
+Output:
 
 ```text
-error[E0412]: cannot find type 'usize' in this scope
-  --> example-17.ls:2:12
-   |
- 2 |     let x: usize = 0;
-   |            ^^^^^
-
-lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
+0 -1
+0 -1
 ```
 
 Finally, an unknown type name in any position is reported as `E0412`:

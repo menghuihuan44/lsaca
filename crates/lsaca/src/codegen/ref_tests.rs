@@ -125,6 +125,7 @@ fn main_fn(body: crate::hir::HBlock) -> HFn {
         params: Vec::new(),
         ret: Ty::unit(),
         self_kind: None,
+        intrinsic: false,
         body,
         span: sp(),
     }
@@ -154,6 +155,8 @@ fn program_with(
         copy_enums: Vec::new(),
         drop_structs: Vec::new(),
         drop_enums: Vec::new(),
+        trait_objects: Vec::new(),
+        vtables: Vec::new(),
     };
     program.classify_types(Vec::new(), Vec::new());
     program
@@ -228,6 +231,7 @@ fn emits_shared_reference_parameters_and_borrows() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -275,10 +279,12 @@ fn emits_shared_reference_parameters_and_borrows() {
         main_c.contains("(const int64_t*)&(v0);"),
         "the borrow of a local is not emitted as the address of its lvalue"
     );
-    // Reading through the reference materialises the pointer into a temporary and
-    // dereferences it; no retain traffic.
-    assert!(main_c.contains("= p0;"));
-    assert!(main_c.contains("(*(t"));
+    // Reading through the reference dereferences the pointer in place; the
+    // reference value itself is never copied and carries no retain traffic.
+    assert!(
+        main_c.contains("(*(p0))"),
+        "the shared reference is not dereferenced in place:\n{main_c}"
+    );
     // References never receive copy/release helpers.
     assert!(!main_c.contains("lsaca_copy_Ref"));
     assert!(!main_c.contains("lsaca_release_Ref"));
@@ -298,6 +304,7 @@ fn emits_reference_self_receivers() {
         }],
         ret: int_ty(),
         self_kind: Some(SelfKind::Ref),
+        intrinsic: false,
         // `self` is a reference in the HIR, so field access auto-derefs it.
         body: block(Vec::new(), Some(field_x(local("self", "p0", struct_ref())))),
         span: sp(),
@@ -312,6 +319,7 @@ fn emits_reference_self_receivers() {
         }],
         ret: Ty::unit(),
         self_kind: Some(SelfKind::RefMut),
+        intrinsic: false,
         body: block(
             vec![HStmt::Expr(HExpr::new(
                 Ty::unit(),
@@ -406,6 +414,7 @@ fn emits_mutable_reference_parameters() {
         }],
         ret: Ty::unit(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             vec![HStmt::Expr(HExpr::new(
                 Ty::unit(),
@@ -453,8 +462,10 @@ fn emits_mutable_reference_parameters() {
     // A mutable borrow keeps a mutable pointer type.
     assert!(main_c.contains("= (int64_t*)&(v0);"));
     // The write goes through the dereferenced pointer and releases no values.
-    assert!(main_c.contains("= p0;"));
-    assert!(main_c.contains("(*(t"));
+    assert!(
+        main_c.contains("(*(p0)) = "),
+        "the write does not go through the in-place pointer:\n{main_c}"
+    );
     assert!(!main_c.contains("lsaca_copy_Ref"));
     assert!(!main_c.contains("lsaca_release_Ref"));
 }
@@ -499,6 +510,7 @@ fn emits_match_ergonomics_reference_bindings() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -578,6 +590,7 @@ fn emits_reference_returns() {
         }],
         ret: shared_i64.clone(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -643,6 +656,7 @@ fn emits_builtin_methods_through_references() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -811,6 +825,7 @@ fn emits_nested_shared_references() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(deref(deref(local("pp", "p0", shared_shared.clone())))),
@@ -845,8 +860,8 @@ fn emits_nested_shared_references() {
     assert!(main_c.contains("(const int64_t**)&("));
     let body = function_body(&main_c, "int64_t lsaca_fn_read(const int64_t** p0)");
     assert!(
-        body.matches("(*(t").count() >= 2,
-        "the nested reference is not dereferenced twice: {body}"
+        body.matches("(*(").count() >= 2,
+        "the nested reference is not dereferenced twice in place: {body}"
     );
     assert!(!main_c.contains("lsaca_copy_Ref"));
 }
@@ -866,6 +881,7 @@ fn emits_reference_arguments_to_struct_and_vec_places() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(deref(local("x", "p0", shared_i64.clone()))),
@@ -947,6 +963,7 @@ fn emits_reference_equality_comparing_referents() {
         ],
         ret: Ty::bool_(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1031,6 +1048,7 @@ fn emits_match_ergonomics_writes_through_mutable_bindings() {
         }],
         ret: Ty::unit(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1115,10 +1133,9 @@ fn emits_match_ergonomics_writes_through_mutable_bindings() {
         body.contains("(int64_t*)(&(((*(t"),
         "missing payload address binding: {body}"
     );
-    // Writing through the binding stores through the pointer.
+    // Writing through the binding stores through the in-place pointer.
     assert!(
-        body.lines()
-            .any(|line| line.contains("(*(t") && line.contains(") = ")),
+        body.contains("(*(v1)) = "),
         "the mutable binding is not written through: {body}"
     );
     assert!(!main_c.contains("lsaca_copy_Opt_i64(LsOpt_i64"));
@@ -1141,6 +1158,7 @@ fn emits_reference_to_rc_payload_without_refcount_traffic() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(deref(local("x", "p0", shared_i64.clone()))),
@@ -1167,6 +1185,7 @@ fn emits_reference_to_rc_payload_without_refcount_traffic() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(direct_call(0, vec![payload_borrow], int_ty())),
@@ -1227,6 +1246,7 @@ fn emits_shared_string_reference_dereferencing_once() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1330,6 +1350,7 @@ fn emits_const_correct_payload_accessors_for_borrowed_cells() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1356,6 +1377,7 @@ fn emits_const_correct_payload_accessors_for_borrowed_cells() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1380,6 +1402,7 @@ fn emits_const_correct_payload_accessors_for_borrowed_cells() {
         }],
         ret: Ty::unit(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             vec![HStmt::Expr(HExpr::new(
                 Ty::unit(),
@@ -1394,7 +1417,47 @@ fn emits_const_correct_payload_accessors_for_borrowed_cells() {
         ),
         span: sp(),
     };
-    let main = main_fn(block(Vec::new(), None));
+    // The entry point calls the helpers so reachability pruning keeps them.
+    let rc_new = HExpr::new(
+        rc_ty(),
+        HExprKind::BuiltinAssoc {
+            func: HBuiltinAssoc::RcNew,
+            args: vec![int_lit(1)],
+            type_args: Vec::new(),
+        },
+        sp(),
+    );
+    let box_new = HExpr::new(
+        boxed.clone(),
+        HExprKind::BuiltinAssoc {
+            func: HBuiltinAssoc::BoxNew,
+            args: vec![int_lit(2)],
+            type_args: Vec::new(),
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(rc_ty(), "v0"), rc_new),
+            let_stmt(bind_pat(boxed.clone(), "v1"), box_new),
+            HStmt::Expr(direct_call(
+                0,
+                vec![borrow(local("cell", "v0", rc_borrow.clone()), false)],
+                int_ty(),
+            )),
+            HStmt::Expr(direct_call(
+                1,
+                vec![borrow(local("value", "v1", box_borrow.clone()), false)],
+                int_ty(),
+            )),
+            HStmt::Expr(direct_call(
+                2,
+                vec![borrow(local("cell", "v0", rc_borrow.clone()), false)],
+                Ty::unit(),
+            )),
+        ],
+        None,
+    ));
     let main_c = generate_program(
         "ref_cells",
         &program(
@@ -1752,6 +1815,7 @@ fn iterator_next_fn() -> HFn {
         params: Vec::new(),
         ret: option_ty.clone(),
         self_kind: Some(SelfKind::RefMut),
+        intrinsic: false,
         body: block(Vec::new(), Some(option_some(int_lit(7), option_ty))),
         span: sp(),
     }
@@ -1881,6 +1945,7 @@ fn releases_the_iterator_once_when_the_body_returns() {
         params: Vec::new(),
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             vec![
                 let_stmt(
@@ -1952,7 +2017,8 @@ fn callback_struct() -> HStruct {
 
 /// A function value stored in a struct field is a managed handle: copying the
 /// struct retains the environment, releasing it releases the environment, and a
-/// call through the field copies the handle without consuming the field.
+/// call through the field goes directly through the field place without copying
+/// or consuming the handle.
 #[test]
 fn emits_function_values_stored_in_struct_fields() {
     let holder_ty = Ty::Struct(0);
@@ -1967,6 +2033,7 @@ fn emits_function_values_stored_in_struct_fields() {
         }],
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(Vec::new(), Some(local("x", "p0", int_ty()))),
         span: sp(),
     };
@@ -2056,8 +2123,8 @@ fn emits_function_values_stored_in_struct_fields() {
     );
     assert_eq!(
         body.matches("lsaca_copy_Fn1_i64_to_i64(").count(),
-        2,
-        "each call must copy the borrowed function handle: {body}"
+        0,
+        "a call through the borrowed function field must not copy the handle: {body}"
     );
 }
 
@@ -2331,6 +2398,7 @@ fn does_not_store_unit_completion_values_for_diverging_loops() {
         params: Vec::new(),
         ret: int_ty(),
         self_kind: None,
+        intrinsic: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -2341,14 +2409,15 @@ fn does_not_store_unit_completion_values_for_diverging_loops() {
         ),
         span: sp(),
     };
+    // The entry point must call `f`, otherwise reachability pruning removes the
+    // function under test.
+    let main = main_fn(block(
+        vec![HStmt::Expr(direct_call(0, Vec::new(), Ty::unit()))],
+        None,
+    ));
     let generated = generate_program(
         "diverging_loop",
-        &program(
-            "diverging_loop",
-            Vec::new(),
-            vec![f, main_fn(block(Vec::new(), None))],
-            1,
-        ),
+        &program("diverging_loop", Vec::new(), vec![f, main], 1),
     );
 
     let body = function_body(&generated, "int64_t lsaca_fn_f()");

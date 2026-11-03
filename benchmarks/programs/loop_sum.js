@@ -1,12 +1,17 @@
-"use strict";
+// loop_sum: integer sum 1..=n.
+// Optional argument: n; the default is the medium scale.
+'use strict';
 
-function main() {
-    var n = 8000000;
-    var sum = 0;
-    for (var i = 1; i <= n; i++) {
-        sum += i;
-    }
-    console.log("checksum=" + sum);
+function argInt(args, index, fallback) {
+  if (index < args.length) {
+    return Number.parseInt(args[index], 10);
+  }
+  return fallback;
 }
 
-main();
+const n = argInt(process.argv.slice(2), 0, 8000000);
+let total = 0;
+for (let i = 1; i <= n; i++) {
+  total += i;
+}
+console.log('checksum=' + total);

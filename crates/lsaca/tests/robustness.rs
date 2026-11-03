@@ -496,7 +496,7 @@ fn loads_module_chain_within_the_limit() {
         write_module_chain(&scratch, "chain", 100);
         let frontend = load_ok(&scratch, "chain/main.ls");
         assert_eq!(
-            frontend.sources().len(),
+            frontend.sources().len() - lsaca::stdlib::files().len(),
             101,
             "one source per loaded module file"
         );
@@ -512,7 +512,7 @@ fn allows_empty_module_files() {
         scratch.write("main.ls", "mod empty;\nfn main() { }\n");
         scratch.write("empty.ls", "");
         let frontend = load_ok(&scratch, "main.ls");
-        assert_eq!(frontend.sources().len(), 2);
+        assert_eq!(frontend.sources().len() - lsaca::stdlib::files().len(), 2);
         expect_clean_check(&frontend);
     });
 }
@@ -561,7 +561,7 @@ fn accepts_bom_and_crlf_sources() {
         scratch.write("main.ls", main);
         scratch.write("helper.ls", "\u{feff}\r\npub fn value() -> i64 { 1 }\r\n");
         let frontend = load_ok(&scratch, "main.ls");
-        assert_eq!(frontend.sources().len(), 2);
+        assert_eq!(frontend.sources().len() - lsaca::stdlib::files().len(), 2);
         expect_clean_check(&frontend);
     });
 }
@@ -577,7 +577,7 @@ fn loads_one_megabyte_module_file() {
         assert!(big.len() > 1_000_000);
         scratch.write("big.ls", &big);
         let frontend = load_ok(&scratch, "main.ls");
-        assert_eq!(frontend.sources().len(), 2);
+        assert_eq!(frontend.sources().len() - lsaca::stdlib::files().len(), 2);
         assert_eq!(frontend.sources().file(1).text().len(), big.len());
     });
 }
@@ -612,7 +612,7 @@ fn loads_nested_module_directories() {
             "pub fn double(value: i64) -> i64 { value * 2 }\n",
         );
         let frontend = load_ok(&scratch, "main.ls");
-        assert_eq!(frontend.sources().len(), 3);
+        assert_eq!(frontend.sources().len() - lsaca::stdlib::files().len(), 3);
         expect_clean_check(&frontend);
     });
 }
@@ -631,7 +631,7 @@ fn loads_many_sibling_modules() {
             scratch.write(&format!("part{index}.ls"), "pub fn value() -> i64 { 1 }\n");
         }
         let frontend = load_ok(&scratch, "main.ls");
-        assert_eq!(frontend.sources().len(), 51);
+        assert_eq!(frontend.sources().len() - lsaca::stdlib::files().len(), 51);
     });
 }
 

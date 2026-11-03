@@ -210,6 +210,11 @@ impl<'a> Checker<'a> {
                     "E0107",
                 );
             }
+            if let Some(expr) =
+                self.check_builtin_assoc_impl_call(&type_name, &generics, &item, args, span, hint)
+            {
+                return expr;
+            }
             if let Some(func) = builtin_assoc(&type_name, &item) {
                 return self.check_builtin_assoc_call(func, &generics, args, span, hint);
             }
@@ -1179,6 +1184,21 @@ impl<'a> Checker<'a> {
                 let _ = self.check_expr(arg, None);
             }
             return self.never_expr(span);
+        }
+        // Trait-object receivers dispatch through the vtable recorded for the
+        // trait object; other receivers never match here, so the generic and
+        // trait impl dispatch below keeps working for concrete types.
+        if let Some(result) = self.check_dyn_method_call(
+            receiver_expr.clone(),
+            &raw_ty,
+            &receiver_ty,
+            method,
+            args,
+            receiver.span,
+            span,
+            hint,
+        ) {
+            return result;
         }
         // Trait and generic inherent methods were deferred during collection.
         // They are resolved before the derived .clone() and before builtin

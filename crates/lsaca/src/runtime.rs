@@ -6,7 +6,7 @@
 //! with include_str! and written out next to the generated main.c when a
 //! project is emitted.
 //!
-//! The runtime is split into six translation units so that the build back end
+//! The runtime is split into seven translation units so that the build back end
 //! can compile them in parallel:
 //!
 //! * `lsaca_rt.c` — allocations/ORC collector, lifetime, panics, checked
@@ -18,6 +18,8 @@
 //!   primitives.
 //! * `lsaca_rt_unicode.c` — generated Unicode tables (case mapping, White_Space
 //!   and Debug printability) shared by the String, Vec and formatting units.
+//! * `lsaca_rt_io.c` — the handle table plus operating system I/O: files,
+//!   directories, TCP sockets, time, environment and process arguments.
 //!
 //! lsaca_rt_internal.h is the private contract shared by those translation
 //! units; generated code only ever includes the public lsaca_rt.h.
@@ -53,12 +55,15 @@ pub const RUNTIME_UNICODE_H: &str = include_str!("../../../runtime/lsaca_rt_unic
 /// The contents of runtime/lsaca_rt_unicode.c (generated Unicode tables).
 pub const RUNTIME_UNICODE_C: &str = include_str!("../../../runtime/lsaca_rt_unicode.c");
 
+/// The contents of runtime/lsaca_rt_io.c (operating system I/O).
+pub const RUNTIME_IO_C: &str = include_str!("../../../runtime/lsaca_rt_io.c");
+
 /// Every runtime file name, in the order the compiler must write them out.
 ///
 /// Headers come first, then the translation units. Every file ending in ".c"
 /// is compiled as its own translation unit and linked with the generated
 /// program; the two headers are included by those translation units.
-pub const RUNTIME_FILES: [&str; 9] = [
+pub const RUNTIME_FILES: [&str; 10] = [
     "lsaca_rt.h",
     "lsaca_rt_internal.h",
     "lsaca_rt_unicode.h",
@@ -68,6 +73,7 @@ pub const RUNTIME_FILES: [&str; 9] = [
     "lsaca_rt_fmt.c",
     "lsaca_rt_map.c",
     "lsaca_rt_unicode.c",
+    "lsaca_rt_io.c",
 ];
 
 /// The runtime source files, as (file name, contents) pairs.
@@ -86,6 +92,7 @@ pub fn sources() -> &'static [(&'static str, &'static str)] {
         ("lsaca_rt_fmt.c", RUNTIME_FMT_C),
         ("lsaca_rt_map.c", RUNTIME_MAP_C),
         ("lsaca_rt_unicode.c", RUNTIME_UNICODE_C),
+        ("lsaca_rt_io.c", RUNTIME_IO_C),
     ]
 }
 

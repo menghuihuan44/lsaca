@@ -4,20 +4,29 @@ lsaca is a small, statically typed programming language with Rust-like syntax.
 You write `fn`s, `struct`s, `enum`s, `impl` blocks, generic declarations,
 traits, pattern matches and closures; the compiler checks the program and
 translates it to portable C17. A
-tiny C runtime provides a standard library and the memory management machinery,
-and the compiler builds the generated C itself with the system C compiler, so
-the result is a normal native executable. CMake is optional: pass `--cmake` to
-build through the emitted CMake project instead. A program can be a single
-file, or a crate split across modules and files, or a package with path
-dependencies; see [Modules](language/23-modules.md) and
-[Packages](language/24-packages.md).
+tiny C runtime provides the memory management machinery, and the compiler builds
+the generated C itself with the system C compiler, so the result is a normal
+native executable. CMake is optional: pass `--cmake` to build through the emitted
+CMake project instead. A program can be a single file, a crate split across
+modules and files, or a package with path dependencies; see
+[Modules](language/23-modules.md) and [Packages](language/24-packages.md).
+
+Version 2.0.0 moves the standard library out of the compiler into a normal crate
+named `std`, and adds four language features: the pointer-sized integer types
+`isize` and `usize`, trait objects (`dyn Trait`), slices and `str`, and
+`extern fn` declarations for compiler intrinsics. It also lets trait methods have
+default bodies. The [standard library reference](stdlib/README.md) documents the
+library module by module, and marks each module and API as implemented in version
+2.0.0 or not implemented in 2.0.0 and planned for a later release.
 
 This documentation set is the reference for the language as of **version
-1.7.0**. It is split into short pages, one per topic, so you can read it
-linearly from [Getting started](language/01-getting-started.md) or jump straight
-to the part you need. Every runnable example on these pages has been executed
-with the 1.7.0 compiler and shows its real output, including the multi-file and
-package examples.
+2.0.0**. It is split into short pages, one per topic, so you can read it linearly
+from [Getting started](language/01-getting-started.md) or jump straight to the
+part you need. Every runnable example on these pages has been executed with the
+compiler of the release it documents and shows its real output, including the
+multi-file and package examples; the 2.0.0 examples, including the runnable examples
+in the standard-library reference, are part of the 2.0.0 verification gate and were
+executed against the 2.0.0 compiler.
 
 ## Why lsaca?
 
@@ -25,54 +34,64 @@ package examples.
   familiar: `fn`, `let`, `struct`, `enum`, `impl`, `match`, closures, the same
   operator set and the same expression-oriented style. Version 1.4 added
   ownership and move semantics, automatically derived `Copy` and `Clone`, the
-  `Drop` trait and mutable references to owned heap types; version 1.5 adds
+  `Drop` trait and mutable references to owned heap types; 1.5 added
   user-defined generics and traits, lazy iterators and the builtin
-  `HashMap<K, V>`; version 1.6 adds the `char` scalar type and makes every
-  `String` a guaranteed-valid UTF-8 string with character-aware methods; version
-  1.7 adds modules, multi-file crates and a package manager with path
-  dependencies. `Copy` and `Clone` are derived for you and there are still no
-  lifetime annotations to write.
+  `HashMap<K, V>`; 1.6 added the `char` scalar type and made every `String` a
+  guaranteed-valid UTF-8 string with character-aware methods; 1.7 added modules,
+  multi-file crates and a package manager with path dependencies; 2.0 adds
+  `isize`/`usize`, trait objects, slices and `str`, `extern fn` intrinsics and
+  trait methods with default bodies. `Copy` and `Clone` are derived for you and
+  there are still no lifetime annotations to write.
 * **Memory safety without a tracing garbage collector.** Values are managed by
   **ORC**: automatic reference counting plus a trial-deletion (Bacon-Rajan)
   cycle collector. Ownership decides when a value can be moved and when
   `Drop` runs; acyclic data is freed deterministically when its last owner is
   released, cycles are collected automatically, and there is no stop-the-world
-  tracing GC.
+  tracing GC. Trait objects extend the model without changing it: a `Box<dyn
+  Trait>` still moves a concrete value and a `Rc<dyn Trait>` still refcounts one.
 * **A small, complete language.** A program is one crate: a root file plus the
-  modules it declares, compiled as one unit. The items are `fn`, `struct`,
-  `enum`, `impl`, `trait`, `const`, `type`, `mod` and `use`; the standard library
-  is built in: `String`, `Vec<T>`, `HashMap<K, V>`, `Option<T>`, `Result<T, E>`,
-  `Rc<T>`, `Box<T>` and the lazy iterator adapters. Version 1.2 added the postfix
+  modules it declares, compiled as one unit, or a package of crates. The items
+  are `fn`, `struct`, `enum`, `impl`, `trait`, `const`, `type`, `mod` and
+  `use`; the standard library is a crate whose root is the prelude: `String`,
+  `Vec<T>`, `HashMap<K, V>`, `Option<T>`, `Result<T, E>`, `Rc<T>`, `Box<T>`
+  and the lazy iterator adapters, plus the module APIs documented in the
+  [standard library reference](stdlib/README.md). Version 1.2 added the postfix
   `?` operator and the Option/Result combinators; 1.3 added non-owning
   references and borrowing; 1.4 added ownership, moves, `.clone()` and `Drop`;
   1.5 added user-defined generics, traits, iterators and `HashMap`; 1.6 added the
   `char` type, Unicode-aware `String` methods and a Swiss-Table `HashMap`; 1.7
-  adds modules, multi-file crates and packages with path dependencies.
+  added modules, multi-file crates and packages with path dependencies; 2.0 adds
+  `isize`/`usize`, trait objects, slices and `str`, `extern fn` intrinsics and
+  default trait method bodies.
 * **Predictable native output, built directly.** The compiler emits readable
   C17 plus a small vendored runtime; by default it compiles and links that C
   itself, with no CMake, no Ninja and no extra configuration step. It also
   writes a complete `CMakeLists.txt`, so `lsaca emit-c` output can be inspected
   or embedded in another build, and `--cmake` builds through it when you want
   the platform's CMake pipeline.
-* **Fast builds.** On the reference machine a cold build of a benchmark program
-  takes about 0.98-1.17 s (1.84 s for the deliberately large `compile_large`
-  program, which records 349,472 bytes - about 0.35 MB - of generated program C in
-  `main.c`; 2.38 s for the multi-file `modules_compile` crate and 1.48 s for the
-  three-package `package_compile` project), and a cached rebuild of an unchanged
-  program takes 16-20 ms (238 ms for `compile_large`, 199 ms for
-  `modules_compile`, 42 ms for `package_compile`). Runtime objects are compiled
-  once per profile and reused. These figures were measured on 1.7.0; full details
-  are on the [Benchmarks](language/21-benchmarks.md) page.
+* **Fast builds.** On the reference machine a cold build of an ordinary benchmark
+  program takes about 0.38-0.64 s (the two largest single-file programs,
+  `iterator_pipeline` and `fn_pipeline`, take 1.18 s and 1.16 s; 2.02 s for the
+  deliberately large `compile_large` program, which records 301,361 bytes - about
+  0.30 MB - of generated program C in `main.c`; 2.90 s for the multi-file
+  `modules_compile` crate and 1.38 s for the three-package `package_compile`
+  project), and a cached rebuild of an unchanged program takes 34-66 ms (513 ms for
+  `compile_large`, 478 ms for `modules_compile`, 100 ms for `package_compile`).
+  Runtime objects are compiled once per profile and reused. These figures are the
+  official 2.0.0 numbers, published on the
+  [Benchmarks](language/21-benchmarks.md) page.
 * **A useful subset, honestly documented.** Version 1.1.0 added `Box<T>` and
   format widths/precision; 1.2.0 added `?` and the combinators; 1.3.0 added
   references and the borrow checker; 1.4.0 added ownership, moves, `.clone()` and
   `Drop`; 1.5.0 added user-defined generics and traits, lazy iterators,
   `HashMap<K, V>` and a 16-program benchmark suite; 1.6.0 added the `char` type,
   UTF-8-validated strings with Unicode case and whitespace handling and a
-  Swiss-Table `HashMap` (19-program suite); 1.7.0 adds modules, multi-file
-  crates, a package manager with path dependencies and `lsaca new`, and extends
+  Swiss-Table `HashMap` (19-program suite); 1.7.0 added modules, multi-file
+  crates, a package manager with path dependencies and `lsaca new`, and extended
   the benchmark suite to 21 programs with compile-time workloads for multi-file
-  crates and packages. Known
+  crates and packages; 2.0.0 adds `isize`/`usize`, trait objects, slices and
+  `str`, `extern fn` intrinsics, default trait method bodies and the standard
+  library as a crate. Known
   implementation limitations are listed in
   [Roadmap and differences from Rust](language/16-roadmap.md) rather than
   hidden.
@@ -102,7 +121,9 @@ The feature releases have their own pages:
 [Generics](language/17-generics.md), [Traits](language/18-traits.md),
 [Iterators](language/19-iterators.md), [HashMap](language/20-hashmap.md),
 [Characters and Unicode](language/22-characters-and-unicode.md),
-[Modules](language/23-modules.md) and [Packages](language/24-packages.md).
+[Modules](language/23-modules.md), [Packages](language/24-packages.md),
+[Trait objects](language/25-trait-objects.md) and
+[Slices and str](language/26-slices-and-str.md).
 More complete programs live in the repository's `examples/` directory, including
 [`examples/ownership.ls`](../examples/ownership.ls), which demonstrates moves,
 `.clone()` and a `Drop` hook end to end,
@@ -113,36 +134,97 @@ character and shows Unicode case mapping.
 
 ## Documentation map
 
-Start with **Getting started** if lsaca is new to you. The remaining pages are
-roughly ordered from the surface of the language down to its memory model and
-reference material.
+Start with **Getting started** if lsaca is new to you. The rest is grouped by
+topic: the language chapters first, then the standard library reference, then the
+reference material and the example programs.
+
+### Getting started
 
 | Page | What it covers |
 | --- | --- |
 | [01 Getting started](language/01-getting-started.md) | Requirements, building the compiler, the first program, the direct and CMake backends, the CLI and exit codes. |
-| [02 Program structure](language/02-program-structure.md) | Crates and compilation units, the nine item kinds, modules, `main`, nesting and the complete EBNF grammar. |
+
+### Language
+
+| Page | What it covers |
+| --- | --- |
+| [02 Program structure](language/02-program-structure.md) | Crates and compilation units, the item kinds including `extern fn`, modules, `main`, nesting and the complete EBNF grammar. |
 | [03 Lexical structure](language/03-lexical-structure.md) | Identifiers, keywords, comments, integer/float/string/character literals, escapes and booleans. |
-| [04 Types](language/04-types.md) | Primitive and builtin types including `char`, `Copy` and move-only types, tuples, function types, `Self`, type inference and `as` casts. |
+| [04 Types](language/04-types.md) | Primitive and builtin types including `char`, `isize`/`usize`, slices and `str`, trait objects, tuples, function types, `Self`, type inference and `as` casts. |
 | [05 Memory model](language/05-memory-model.md) | Ownership, moves, `Drop`, ORC reference counting, copy-on-write, iterator and `HashMap` ownership, `Box<T>`, `Rc<T>` cycles, the cycle collector and leak tracking. |
 | [06 Variables and mutability](language/06-variables-and-mutability.md) | `let`, `let mut`, shadowing, assignment (which moves), compound assignment and `const`. |
 | [07 Operators](language/07-operators.md) | The full precedence table, arithmetic (including overflow), bitwise and boolean operators, comparisons, casts and `?`. |
 | [08 Statements and control flow](language/08-statements-and-control-flow.md) | Blocks, `if`/`else`, `loop`, `while`, `for` (which moves a `Vec`), ranges, `if let`, `while let` and `return`. |
-| [09 Functions](language/09-functions.md) | Declarations, parameters (by value, which moves), recursion, function values, early returns and the restrictions on `main`. |
+| [09 Functions](language/09-functions.md) | Declarations, parameters (by value, which moves), recursion, function values, early returns, `extern fn` and the restrictions on `main`. |
 | [10 Structs, enums and impl](language/10-structs-enums-and-impl.md) | Data declarations, literals, methods and associated functions, receivers, `Drop`, `.clone()` and value semantics. |
-| [11 Ownership and moves](language/11-ownership-and-moves.md) | `Copy` versus move-only types, consuming contexts, move errors, `Drop`, drop order, `.clone()` semantics and how moves interact with references and ORC. |
-| [12 References and borrowing](language/12-references-and-borrowing.md) | `&T`/`&mut T`, borrow expressions and dereferencing, the aliasing rules, reference parameters and returns, match ergonomics, mutable heap references and how references interact with ORC. |
+| [11 Ownership and moves](language/11-ownership-and-moves.md) | `Copy` versus move-only types, consuming contexts, move errors, `Drop`, drop order, `.clone()` semantics and how moves interact with references, ORC and trait objects. |
+| [12 References and borrowing](language/12-references-and-borrowing.md) | `&T`/`&mut T`, borrow expressions and dereferencing, the aliasing rules, reference parameters and returns, match ergonomics, mutable heap references, `&[T]`/`&str` and how references interact with ORC. |
 | [13 Pattern matching](language/13-pattern-matching.md) | All pattern forms including or-patterns and `match` guards, exhaustiveness, refutability, unreachable arms and moves in patterns. |
 | [14 Closures](language/14-closures.md) | Closure syntax and types, capture by value (copy or move), mutation, `move`, storing closures in aggregates, and using `Rc<T>` for shared state. |
-| [15 Standard library](language/15-standard-library.md) | Formatting (widths/precision, `char` and `Debug` escaping), UTF-8 `String` with byte and character methods, `Vec`, `Option` and `Result` with their combinators, `?`, `Rc`, `Box`, `.clone()`, iterators and `HashMap` at a glance, free functions and panics. |
-| [16 Roadmap and differences](language/16-roadmap.md) | How lsaca deliberately differs from Rust, verified limitations of the current release and what comes next. |
+| [15 Standard library](language/15-standard-library.md) | Language-level library behaviour: formatting, UTF-8 `String`, `Vec`, `Option`/`Result`, `?`, `Rc`, `Box`, iterators and `HashMap`; links to the per-module reference. |
+| [16 Roadmap and differences](language/16-roadmap.md) | How lsaca deliberately differs from Rust, verified limitations of 2.0.0 and what comes next. |
 | [17 Generics](language/17-generics.md) | Generic structs, enums, functions and impls, bounds, turbofish syntax, monomorphization and its late-checking rules. |
-| [18 Traits](language/18-traits.md) | Trait declarations, implementing a trait for a struct or enum, method dispatch, coherence errors, `Fn`/`Drop` bounds and why there are no trait objects. |
+| [18 Traits](language/18-traits.md) | Trait declarations, default method bodies, implementing a trait for a struct or enum, static dispatch, coherence errors and `Fn`/`Drop` bounds. |
 | [19 Iterators](language/19-iterators.md) | The `Iterator<T>` trait, `.iter()`, lazy adapters, terminal operations, `for` loops over iterators and writing your own iterator. |
 | [20 HashMap](language/20-hashmap.md) | The builtin `HashMap<K, V>`: construction, allowed key types, ownership of keys and values, lookup and mutation, the Swiss-Table layout, iteration order and equality. |
-| [21 Benchmarks](language/21-benchmarks.md) | Measured compile times, runtime and memory against C, Rust, Python and Node. |
+| [21 Benchmarks](language/21-benchmarks.md) | Measured compile times, runtime and memory against C, Rust, Python and Node: the official 2.0.0 run. |
 | [22 Characters and Unicode](language/22-characters-and-unicode.md) | The `char` type, character literals and escapes, Unicode scalar values, UTF-8 `String` APIs, byte indices versus character indices, Unicode case mapping and whitespace, `Debug` escaping and validated text input. |
 | [23 Modules](language/23-modules.md) | Inline and external modules, the module file layout, `crate`/`self`/`super` paths, `use` trees, visibility, multi-file diagnostics and how modules are compiled. |
 | [24 Packages](language/24-packages.md) | The `lsaca.toml` manifest, path dependencies and the dependency graph, `src/main.ls` versus `src/lib.ls`, `lsaca new`, package mode for `run`/`build`/`check`/`emit-c` and the resulting C project. |
+| [25 Trait objects](language/25-trait-objects.md) | `dyn Trait`, coercion from `Box`/`Rc`/references, object safety, sharing and copies, vtables and the object-safety limitations of 2.0. |
+| [26 Slices and str](language/26-slices-and-str.md) | The unsized types `[T]` and `str`, slice expressions, implicit coercions from `Vec`/`String`, slice and `str` methods, UTF-8 and bounds panics and the representation. |
+
+### Standard library
+
+The library is documented module by module in the
+[standard library reference](stdlib/README.md), which is the API reference; the
+[Standard library chapter](language/15-standard-library.md) covers the
+language-level behaviour that is not a module (formatting macros, panics, exit
+codes).
+
+| Module | Page | Status in 2.0.0 |
+| --- | --- | --- |
+| `std::core` (Option, Result, Iterator) | [core](stdlib/core.md) | migrated from 1.7 |
+| `std::string` | [string](stdlib/string.md) | migrated; `from_str`, `as_str`, `as_mut_str` and the `str` methods implemented |
+| `std::char` | [char](stdlib/char.md) | ASCII classification methods implemented; Unicode classification not implemented in 2.0.0 |
+| `std::vec` | [vec](stdlib/vec.md) | migrated; `sort`, `as_slice` and `as_mut_slice` implemented |
+| `std::iter` | [iter](stdlib/iter.md) | migrated; the new adapters are not implemented in 2.0.0 |
+| `std::fmt` | [fmt](stdlib/fmt.md) | compiler-implemented |
+| `std::math` | [math](stdlib/math.md) | migrated; `abs`/`min`/`max` remain compiler builtins in 2.0.0 |
+| `std::collections` | [collections](stdlib/collections/README.md) | `HashMap` migrated; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented |
+| `std::io` | [io](stdlib/io.md) | error types, file and stream handles implemented; the stream traits and `io::Result` alias are not implemented in 2.0.0 |
+| `std::fs` | [fs](stdlib/fs.md) | path, directory and metadata API implemented |
+| `std::net` | [net](stdlib/net.md) | implemented (plain TCP) |
+| `std::time` | [time](stdlib/time.md) | implemented |
+| `std::env` | [env](stdlib/env.md) | implemented |
+| `std::process` | [process](stdlib/process.md) | `args` implemented; `exit` is not implemented in 2.0.0 |
+| `std::error` | [error](stdlib/error.md) | the `Error` trait implemented |
+
+The status column records what version 2.0.0 provides; where a module is only
+partly implemented, its page separates the implemented API from the API that is
+not implemented in 2.0.0 and planned for a later release. Entries marked *planned*
+are documented from the 2.0 design rather than from runnable behaviour.
+
+### Reference
+
+| Page | What it covers |
+| --- | --- |
+| [Program structure](language/02-program-structure.md#the-complete-grammar) | The complete EBNF grammar of the language. |
+| [Getting started](language/01-getting-started.md) | The complete command-line interface, the build backends and exit codes. |
+| [Types](language/04-types.md) | The complete type system summary and the type table. |
+| [Memory model](language/05-memory-model.md) | The ORC memory model, drop order and leak tracking. |
+| [Roadmap and differences from Rust](language/16-roadmap.md) | The exact list of deviations from Rust and the known limitations of 2.0.0. |
+
+### Guides and examples
+
+| Page | What it covers |
+| --- | --- |
+| [Getting started](language/01-getting-started.md) | The first program and the two build backends step by step. |
+| [Ownership and moves](language/11-ownership-and-moves.md) | A guide to `Copy`, moves, `Drop` and `.clone()`. |
+| [`examples/ownership.ls`](../examples/ownership.ls) | A complete program demonstrating moves, `.clone()` and a `Drop` hook. |
+| [`examples/iterators.ls`](../examples/iterators.ls) | A user iterator run through the adapters. |
+| [`examples/unicode.ls`](../examples/unicode.ls) | Walking strings by character and Unicode case mapping. |
+| [Benchmarks](language/21-benchmarks.md) | The measured numbers and the benchmark programs. |
 
 ## Building the compiler
 
@@ -157,7 +239,9 @@ cargo build --release
 
 The binary is a single executable. It needs a C17 compiler at run time and
 nothing else; CMake 3.16 or newer is only needed if you pass `--cmake`. The
-compiler itself has no dependencies beyond the Rust standard library.
+compiler itself has no dependencies beyond the Rust standard library. Building
+the compiler also embeds the standard library, so the compiler binary contains
+the `std` crate's source.
 
 ## Conventions used on these pages
 
@@ -173,8 +257,8 @@ compiler itself has no dependencies beyond the Rust standard library.
   tree whose manifest is `DIR/lsaca.toml`; it is compiled and run in package
   mode from inside `DIR`. Both forms follow the same `Output:`/`Error:`
   convention as single-file examples.
-* A block marked `check` runs `lsaca check` instead of `lsaca run`: it shows the
-  front end output for a program that is expected to be accepted.
+* A block marked `check` runs `lsaca check` instead of `lsaca run`: it shows
+  the front end output for a program that is expected to be accepted.
 * Syntax-only fragments and the grammar use `rust` or `ebnf` blocks; shell
   sessions use `console` blocks. These are not executable examples.
 * "Debug build" means the default profile used when `-r`/`--release` is absent:

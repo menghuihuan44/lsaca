@@ -523,7 +523,13 @@ impl<'a> ManifestParser<'a> {
                     return;
                 }
                 self.name_seen = true;
-                if !valid_package_name(&value.content) {
+                if value.content == "std" {
+                    self.error(
+                        "`std` is reserved for the standard library and cannot be a package name",
+                        value.start,
+                        value.end,
+                    );
+                } else if !valid_package_name(&value.content) {
                     let message = if KEYWORDS.contains(&value.content.as_str()) {
                         format!(
                             "`{}` is a keyword and cannot be a package name",
@@ -576,7 +582,13 @@ impl<'a> ManifestParser<'a> {
             .dependencies
             .iter()
             .any(|dependency| dependency.name == key);
-        if !valid_package_name(key) {
+        if key == "std" {
+            self.error(
+                "`std` is reserved for the standard library and cannot be a dependency name",
+                key_span.0,
+                key_span.1,
+            );
+        } else if !valid_package_name(key) {
             let message = if KEYWORDS.contains(&key) {
                 format!("`{key}` is a keyword and cannot be a dependency name")
             } else {
@@ -1529,6 +1541,55 @@ name = "example" junk
             error.message
         );
         assert_at(&sources, error.span, location_of(text, "junk"));
+    }
+
+    #[test]
+    fn parse_reserved_std_package_name() {
+        let dir = TestDir::new("parse-reserved-std-name");
+        let text = r#"[package]
+name = "std"
+version = "0.1.0"
+"#;
+        dir.write("lsaca.toml", text);
+        let (sources, diagnostics, _) = parse_file(&dir.path().join("lsaca.toml"));
+        let error = single_error(&diagnostics);
+        assert!(
+            error.message.contains("reserved for the standard library"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("cannot be a package name"),
+            "{}",
+            error.message
+        );
+        assert_at(&sources, error.span, quoted_location(text, "\"std\""));
+    }
+
+    #[test]
+    fn parse_reserved_std_dependency_name() {
+        let dir = TestDir::new("parse-reserved-std-dep");
+        let text = r#"[package]
+name = "example"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../std" }
+"#;
+        dir.write("lsaca.toml", text);
+        let (sources, diagnostics, _) = parse_file(&dir.path().join("lsaca.toml"));
+        let error = single_error(&diagnostics);
+        assert!(
+            error.message.contains("reserved for the standard library"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("cannot be a dependency name"),
+            "{}",
+            error.message
+        );
+        assert_at(&sources, error.span, location_of(text, "std ="));
     }
 
     #[test]

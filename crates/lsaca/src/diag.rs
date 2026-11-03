@@ -186,7 +186,18 @@ impl Diagnostics {
     }
 }
 
+/// Prefix used by [crate::stdlib] and [crate::prelude] when a diagnostic is
+/// produced while checking standard-library code, which means a compiler bug.
+pub const INTERNAL_STDLIB_PREFIX: &str = "internal standard library error: ";
+
 /// Sort diagnostics by source position and de-duplicate exact duplicates.
+///
+/// An internal standard-library error is also dropped when the same problem is
+/// already reported as an ordinary error elsewhere: checking an instantiated
+/// generic standard-library body can rediscover a problem that the user already
+/// sees at its own call site, and repeating it as an internal compiler error
+/// would be noise. Internal errors without such a counterpart are kept, so real
+/// standard-library bugs still surface.
 pub fn sort_and_dedup(diagnostics: &mut Diagnostics) {
     diagnostics
         .items
@@ -194,6 +205,20 @@ pub fn sort_and_dedup(diagnostics: &mut Diagnostics) {
     diagnostics
         .items
         .dedup_by(|a, b| a.message == b.message && a.span == b.span);
+    let reported: Vec<(Option<&'static str>, String)> = diagnostics
+        .items
+        .iter()
+        .filter(|d| !d.message.starts_with(INTERNAL_STDLIB_PREFIX))
+        .map(|d| (d.code, d.message.clone()))
+        .collect();
+    diagnostics.items.retain(|d| {
+        let Some(original) = d.message.strip_prefix(INTERNAL_STDLIB_PREFIX) else {
+            return true;
+        };
+        !reported
+            .iter()
+            .any(|(code, message)| *code == d.code && message == original)
+    });
 }
 
 /// Resolve the file owning a span, falling back to the primary file so that
@@ -389,6 +414,45 @@ mod tests {
                 line.chars().count()
             );
         }
+    }
+
+    #[test]
+    fn drops_internal_stdlib_duplicates_of_reported_errors() {
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.push(
+            Diagnostic::error(
+                "internal standard library error: references cannot be stored in this type (found &String)",
+                Span::new(10, 20),
+            )
+            .with_code("E0498"),
+        );
+        diagnostics.push(
+            Diagnostic::error(
+                "references cannot be stored in this type (found &String)",
+                Span::new(100, 110),
+            )
+            .with_code("E0498"),
+        );
+        sort_and_dedup(&mut diagnostics);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics.iter().next().map(|d| d.span),
+            Some(Span::new(100, 110))
+        );
+    }
+
+    #[test]
+    fn keeps_internal_stdlib_errors_without_a_counterpart() {
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.push(
+            Diagnostic::error(
+                "internal standard library error: expected a type, found a value",
+                Span::new(10, 20),
+            )
+            .with_code("E0425"),
+        );
+        sort_and_dedup(&mut diagnostics);
+        assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]

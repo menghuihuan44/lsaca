@@ -23,6 +23,8 @@ impl<'a> Checker<'a> {
         let consts = self.lower_consts();
         let closures = self.lower_closures();
         let main_fn = self.root_main_fn().unwrap_or(0);
+        let trait_objects = self.lower_trait_objects();
+        let vtables = self.lower_vtables();
         // "impl Drop for T" registration recorded one hook per user type. The
         // checker function ids and the lowered HIR function ids coincide
         // because lower_fns lowers every function in dense id order.
@@ -40,9 +42,57 @@ impl<'a> Checker<'a> {
             copy_enums: Vec::new(),
             drop_structs: Vec::new(),
             drop_enums: Vec::new(),
+            trait_objects,
+            vtables,
         };
         program.classify_types(drop_structs, drop_enums);
         program
+    }
+
+    /// Lower the registered trait objects in registration order. `Ty::Dyn`
+    /// indexes this vector, so the order must be preserved exactly.
+    fn lower_trait_objects(&mut self) -> Vec<HTraitObject> {
+        let objects = self.trait_objects.clone();
+        objects
+            .iter()
+            .map(|object| HTraitObject {
+                name: object.name.clone(),
+                args: object
+                    .args
+                    .iter()
+                    .map(|arg| self.finalize_ty(arg, object.span))
+                    .collect(),
+                c_name: object.c_name.clone(),
+                methods: object
+                    .methods
+                    .iter()
+                    .map(|method| HTraitMethodSig {
+                        name: method.name.clone(),
+                        receiver: method.receiver,
+                        params: method
+                            .params
+                            .iter()
+                            .map(|param| self.finalize_ty(param, object.span))
+                            .collect(),
+                        ret: self.finalize_ty(&method.ret, object.span),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// Lower the vtables in first-coercion order; `HVtable::trait_object`
+    /// indexes the lowered trait-object vector.
+    fn lower_vtables(&mut self) -> Vec<HVtable> {
+        let vtables = self.vtables.clone();
+        vtables
+            .iter()
+            .map(|vtable| HVtable {
+                trait_object: vtable.trait_object,
+                self_ty: self.finalize_ty(&vtable.self_ty, vtable.span),
+                methods: vtable.methods.clone(),
+            })
+            .collect()
     }
 
     fn validate_literal_checks(&mut self) {
@@ -194,6 +244,7 @@ impl<'a> Checker<'a> {
                 ret,
                 self_kind: info.self_kind,
                 body,
+                intrinsic: info.decl.is_extern,
                 span: info.span,
             });
         }
@@ -510,6 +561,49 @@ impl<'a> Checker<'a> {
             } => {
                 let operand = self.lower_expr(expr);
                 self.lower_try(operand, ret, value_c_name, error_c_name, span)
+            }
+            TExprKind::DynCoerce { value, vtable } => HExprKind::DynCoerce {
+                value: Box::new(self.lower_expr(value)),
+                vtable: *vtable,
+            },
+            TExprKind::DynCall {
+                object,
+                trait_object,
+                slot,
+                args,
+            } => HExprKind::DynCall {
+                object: Box::new(self.lower_expr(object)),
+                trait_object: *trait_object,
+                slot: *slot,
+                args: args.iter().map(|arg| self.lower_expr(arg)).collect(),
+            },
+            TExprKind::Slice {
+                base,
+                start,
+                end,
+                inclusive,
+            } => {
+                // Every slice value lowers to a reference to a slice node (see
+                // DESIGN 2.0 section 8); the slice node itself is annotated
+                // with the unsized slice/str type.
+                let (mutable, inner_ty) = match &ty {
+                    Ty::Ref { mutable, inner } => (*mutable, (**inner).clone()),
+                    _ => (false, Ty::Str),
+                };
+                let slice = HExpr::new(
+                    inner_ty,
+                    HExprKind::Slice {
+                        base: Box::new(self.lower_expr(base)),
+                        start: start.as_ref().map(|start| Box::new(self.lower_expr(start))),
+                        end: end.as_ref().map(|end| Box::new(self.lower_expr(end))),
+                        inclusive: *inclusive,
+                    },
+                    span,
+                );
+                HExprKind::Ref {
+                    mutable,
+                    expr: Box::new(slice),
+                }
             }
             TExprKind::Break => HExprKind::Break,
             TExprKind::Continue => HExprKind::Continue,

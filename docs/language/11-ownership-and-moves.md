@@ -18,7 +18,7 @@ lsaca decides at compile time whether a type is Copy. The rule is structural: a 
 | Copy | `i64` and the other integer types, `f64` and the other float types, `bool`, `char`, unit `()`; shared references `&T` and mutable references `&mut T`; tuples, `Option` and `Result` whose parts are all Copy; user structs and enums whose fields are all Copy and that do not implement `Drop` |
 | Move-only | `String`, `Vec<T>`, `Rc<T>`, `Box<T>`; function values and closures; user structs and enums that contain a move-only type or implement `Drop` |
 
-Copy is derived automatically. There is no `impl Copy for ...` syntax in version 1.7.0; writing one is rejected. Move-only is the default for owned data, so the compiler derives move-onlyness the same way: a struct with a `String` field is move-only, while a struct with only `i64` fields is Copy. There are no ownership annotations to write: the type structure decides.
+Copy is derived automatically. There is no `impl Copy for ...` syntax in version 2.0.0; writing one is rejected. Move-only is the default for owned data, so the compiler derives move-onlyness the same way: a struct with a `String` field is move-only, while a struct with only `i64` fields is Copy. There are no ownership annotations to write: the type structure decides.
 
 ### Copy values can be used repeatedly
 
@@ -276,9 +276,9 @@ hi
 
 ### Drop values in patterns (E0509)
 
-A value whose type implements `Drop` owns resources that its hook must release. Moving such a value through a *destructuring* pattern would split the ownership of the hook, so destructuring bindings of drop types are rejected. Whole-value bindings are allowed: `let guard = value;` and a match arm that binds the whole value with a plain identifier (`match value { guard => ... }`) move the value and drop it exactly once. Destructuring with `match`/`if let`/`while let` must borrow instead.
+A value whose type implements `Drop` owns resources that its hook must release, but it follows the ordinary pattern rules: a binding can move the whole value, and a destructuring pattern can move it out of a tuple element or an enum payload. The moved value stays a single owner and is dropped exactly once, at the end of the scope that owns the binding.
 
-```ls,compile-fail
+```ls
 struct Guard {
     name: String,
 }
@@ -296,18 +296,14 @@ fn main() {
 }
 ```
 
-Error:
+Output:
 
 ```text
-error[E0509]: cannot move out of a value of type Guard in a pattern because it implements Drop; use references instead
-   --> example-11.ls:13:10
-    |
- 13 |     let (guard, count) = pair;
-    |          ^^^^^
-    = note: by-value bindings of types with drop glue are only allowed with a simple identifier binding; match or borrow through a reference instead
-
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+first 7
+drop first
 ```
+
+What stays rejected is destructuring the type's *own* fields by value: `let Guard { name } = guard;` is `E0509` ("cannot move out of a value of type Guard in a pattern because it implements Drop; use references instead"), because the hook needs the whole value intact. Match through a reference instead (`match &guard { ... }`); moving a single field out without a pattern is `E0507`, and a `Drop` type cannot be cloned either (see [Cloning values](#cloning-values)).
 
 ## Moves in loops, matches and closures
 
@@ -465,11 +461,11 @@ The hook in this example runs when `loud` goes out of scope at the end of `main`
 * An inherent method named `drop` is rejected; the name is reserved for the trait.
 * Types with a Drop impl can neither implement Copy nor Clone: both traits are derived automatically and a type with `Drop` is move-only. Writing `impl Copy` or `impl Clone` for any type is an error.
 
-A value with a Drop impl also cannot be moved out of a pattern (E0509, above), and it cannot be cloned (see [Cloning values](#cloning-values)).
+A value with a Drop impl cannot be moved out of a field, an indexed element or a dereference (E0507), cannot be destructured by its own fields by value (`E0509`), and cannot be cloned (see [Cloning values](#cloning-values)); bindings and patterns that move the whole value are allowed and drop it exactly once (see [Drop values in patterns](#drop-values-in-patterns-e0509)).
 
 ### Drop order and timing
 
-Drop order is deterministic in version 1.7.0. When a value is released:
+Drop order is deterministic in version 2.0.0. When a value is released:
 
 1. The type's own hook runs first (if it has one).
 2. Then the value's fields are released in declaration order, each running its own hook in turn.
@@ -617,7 +613,7 @@ fn main() {
 Error:
 
 ```text
-error[E0425]: cannot find function drop in this scope
+error[E0425]: cannot find function drop in this scope; did you mean from?
    --> example-20.ls:13:5
     |
  13 |     drop(loud);
@@ -843,10 +839,10 @@ Mutable references to a user struct or enum are supported only when the type is 
 * Drop hooks do not run on panic or on process exit; Rust unwinds and runs destructors during unwinding.
 * Function values are move-only, unlike Rust function pointers; since 1.5.0 they can be stored in struct fields, enum variants, tuples, `Vec`, `Box` and as HashMap values.
 * References are Copy, including `&mut` references; the alias checker still enforces borrowing rules.
-* User-defined generics and traits exist since 1.5.0, but `Copy`, `Clone` and `Drop` remain the only compiler-known traits; there are no trait objects and no dynamic dispatch (see [Roadmap and deviations from Rust](16-roadmap.md)).
+* User-defined generics and traits exist since 1.5.0, and `Copy`, `Clone` and `Drop` remain the only compiler-known traits; since 2.0 a trait value can be used behind a pointer as a trait object (`Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait`) with calls dispatched through a vtable (see [Trait objects](25-trait-objects.md)).
 * Since 1.5.0 user structs, enums, tuples, `Vec`, `Option`, `Result`, references and `HashMap` compare with `==`; function values do not (`E0369`).
 
-## Known limitations in version 1.7.0
+## Known limitations in version 2.0.0
 
 * `Copy` and `Clone` cannot be implemented (both are derived automatically); `Drop` keeps its special form, and user-defined traits can be implemented since 1.5.0.
 * There is no explicit lifetime syntax and references cannot be stored in struct or enum fields.
@@ -856,8 +852,8 @@ Mutable references to a user struct or enum are supported only when the type is 
 * Mutable references are supported for Copy values and for `String`, `Vec<T>`, `Rc<T>` and `Box<T>`; mutable references to a user struct or enum with heap fields are rejected (E0498).
 * `for` loops consume a vector and there is no iteration over `&Vec`.
 * Drop hooks do not run on panic or exit.
-* `if let Some(value) = maybe` where the payload type has drop glue is rejected (E0509); match a reference (`if let Some(value) = &maybe`) instead.
-* Generics are monomorphized and checked per instantiation, so an unused generic body is never checked; there are no trait objects or dynamic dispatch (see [Generics](17-generics.md) and [Traits](18-traits.md)).
+* A value whose type has `Drop` glue cannot be destructured by its own fields by value (`let Guard { name } = guard;` is `E0509`); moving the whole value, a tuple element or an enum payload through a pattern is allowed and drops it exactly once.
+* Generics are monomorphized and checked per instantiation, so an unused generic body is never checked; since 2.0 dynamic dispatch is available through trait objects, but generic code itself is still statically monomorphized (see [Generics](17-generics.md) and [Trait objects](25-trait-objects.md)).
 * Function and closure values cannot be compared with `==`.
 
 ## Summary

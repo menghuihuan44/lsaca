@@ -211,7 +211,12 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     /// None means the function returns the unit type.
     pub ret: Option<TypeExpr>,
-    pub body: Block,
+    /// The body. None exactly when is_extern is true: an extern function is
+    /// an intrinsic declaration implemented by the compiler or the runtime.
+    pub body: Option<Block>,
+    /// True for extern fn declarations, which only the standard library may
+    /// write. Extern functions have no body and never reach the HIR as bodies.
+    pub is_extern: bool,
     /// Set when the function is declared inside an impl block.
     pub self_kind: Option<SelfKind>,
     pub span: Span,
@@ -278,8 +283,8 @@ pub struct TraitRef {
     pub span: Span,
 }
 
-/// A method signature inside a trait declaration. Trait methods are
-/// signature-only in version 1.5: the body is not part of the AST.
+/// A method signature inside a trait declaration. A method without a body is
+/// required; a method with a body is a default method that impls inherit.
 #[derive(Debug, Clone)]
 pub struct TraitMethod {
     pub name: String,
@@ -288,8 +293,10 @@ pub struct TraitMethod {
     /// impl method (name "self" and the trait self type as the parameter type).
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
-    /// Always Some in version 1.5; kept optional to mirror [FnDecl].
+    /// Always Some; kept optional to mirror [FnDecl].
     pub self_kind: Option<SelfKind>,
+    /// None for a required method, Some for a default method.
+    pub body: Option<Block>,
     pub span: Span,
 }
 
@@ -525,6 +532,15 @@ pub enum ExprKind {
     /// lowering desugars it into a match plus early return.
     Try {
         expr: Box<Expr>,
+    },
+    /// A slicing expression, `base[start..end]`, `base[..end]`, `base[start..]`
+    /// or `base[..]`. Only valid as the operand of `&` or `&mut`; the type
+    /// checker produces a slice of the base. Missing bounds are None.
+    Slice {
+        base: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        inclusive: bool,
     },
 }
 
@@ -820,6 +836,11 @@ pub enum TypeExpr {
         inner: Box<TypeExpr>,
         span: Span,
     },
+    /// A dynamically dispatched trait object type: dyn Trait or dyn Trait<Args>.
+    /// The inner [TraitRef] carries the trait name, its arguments and the span.
+    Dyn(TraitRef),
+    /// A slice type: [T]. Unsized; only usable behind a reference.
+    Slice { elem: Box<TypeExpr>, span: Span },
 }
 
 impl TypeExpr {
@@ -829,6 +850,8 @@ impl TypeExpr {
             TypeExpr::Tuple { span, .. } => *span,
             TypeExpr::Fn { span, .. } => *span,
             TypeExpr::Ref { span, .. } => *span,
+            TypeExpr::Dyn(trait_ref) => trait_ref.span,
+            TypeExpr::Slice { span, .. } => *span,
         }
     }
 
@@ -876,6 +899,20 @@ impl TypeExpr {
                     format!("&{}", inner.describe())
                 }
             }
+            TypeExpr::Dyn(trait_ref) => {
+                if trait_ref.args.is_empty() {
+                    format!("dyn {}", trait_ref.name)
+                } else {
+                    let args = trait_ref
+                        .args
+                        .iter()
+                        .map(TypeExpr::describe)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("dyn {}<{}>", trait_ref.name, args)
+                }
+            }
+            TypeExpr::Slice { elem, .. } => format!("[{}]", elem.describe()),
         }
     }
 }
@@ -986,7 +1023,9 @@ impl FnDecl {
         if let Some(ret) = &mut self.ret {
             ret.for_each_span_mut(visit);
         }
-        self.body.for_each_span_mut(visit);
+        if let Some(body) = &mut self.body {
+            body.for_each_span_mut(visit);
+        }
     }
 }
 
@@ -1059,6 +1098,9 @@ impl TraitMethod {
         }
         if let Some(ret) = &mut self.ret {
             ret.for_each_span_mut(visit);
+        }
+        if let Some(body) = &mut self.body {
+            body.for_each_span_mut(visit);
         }
     }
 }
@@ -1261,6 +1303,17 @@ impl Expr {
             ExprKind::Ref { expr, .. } => expr.for_each_span_mut(visit),
             ExprKind::Deref { expr } => expr.for_each_span_mut(visit),
             ExprKind::Try { expr } => expr.for_each_span_mut(visit),
+            ExprKind::Slice {
+                base, start, end, ..
+            } => {
+                base.for_each_span_mut(visit);
+                if let Some(start) = start {
+                    start.for_each_span_mut(visit);
+                }
+                if let Some(end) = end {
+                    end.for_each_span_mut(visit);
+                }
+            }
         }
     }
 }
@@ -1422,6 +1475,11 @@ impl TypeExpr {
             TypeExpr::Ref { inner, span, .. } => {
                 visit(span);
                 inner.for_each_span_mut(visit);
+            }
+            TypeExpr::Dyn(trait_ref) => trait_ref.for_each_span_mut(visit),
+            TypeExpr::Slice { elem, span } => {
+                visit(span);
+                elem.for_each_span_mut(visit);
             }
         }
     }

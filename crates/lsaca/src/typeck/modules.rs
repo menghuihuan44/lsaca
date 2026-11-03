@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use super::check::Checker;
 use super::generics::DefOrigin;
+use super::itype::ITy;
 use crate::ast::{UseDecl, UseTree, Visibility};
 use crate::diag::Diagnostic;
 use crate::span::Span;
@@ -28,6 +29,8 @@ pub enum DefRef {
     GenericFn(usize),
     Fn(usize),
     Const(usize),
+    /// A builtin type provided by the standard library (`Vec`, `String`, ...).
+    BuiltinType(BuiltinTypeKind),
 }
 
 impl DefRef {
@@ -42,11 +45,98 @@ impl DefRef {
             DefRef::GenericFn(_) => "function",
             DefRef::Fn(_) => "function",
             DefRef::Const(_) => "constant",
+            DefRef::BuiltinType(_) => "builtin type",
         }
     }
 
     pub fn is_type_namespace(self) -> bool {
-        !matches!(self, DefRef::Fn(_) | DefRef::Const(_))
+        // Generic functions live in the value namespace just like other
+        // functions: an imported generic function must be bound in
+        // modules[module].values so that lookup_fn/lookup_generic_fn see it.
+        !matches!(
+            self,
+            DefRef::Fn(_) | DefRef::GenericFn(_) | DefRef::Const(_)
+        )
+    }
+}
+
+/// A builtin type declared as a marker struct by the standard library.
+///
+/// The standard library declares these types as ordinary (empty) structs so
+/// that user code can name them; while collecting the standard library the type
+/// checker maps the declaration to a builtin definition instead of creating a
+/// user struct. Impl blocks in the standard library may target them, and user
+/// crates get E0428 when they try to redeclare one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltinTypeKind {
+    Vec,
+    String,
+    Option,
+    Result,
+    Rc,
+    Box,
+    HashMap,
+    Char,
+}
+
+impl BuiltinTypeKind {
+    /// The source name of the builtin type.
+    pub fn name(self) -> &'static str {
+        match self {
+            BuiltinTypeKind::Vec => "Vec",
+            BuiltinTypeKind::String => "String",
+            BuiltinTypeKind::Option => "Option",
+            BuiltinTypeKind::Result => "Result",
+            BuiltinTypeKind::Rc => "Rc",
+            BuiltinTypeKind::Box => "Box",
+            BuiltinTypeKind::HashMap => "HashMap",
+            BuiltinTypeKind::Char => "char",
+        }
+    }
+
+    /// Number of type parameters the builtin type takes.
+    pub fn arity(self) -> usize {
+        match self {
+            BuiltinTypeKind::Vec
+            | BuiltinTypeKind::Option
+            | BuiltinTypeKind::Rc
+            | BuiltinTypeKind::Box => 1,
+            BuiltinTypeKind::Result | BuiltinTypeKind::HashMap => 2,
+            BuiltinTypeKind::String | BuiltinTypeKind::Char => 0,
+        }
+    }
+
+    /// The builtin kind named `name`, if any. `char` has no marker struct but is
+    /// listed so the standard library can write inherent impls for it.
+    pub fn from_name(name: &str) -> Option<BuiltinTypeKind> {
+        match name {
+            "Vec" => Some(BuiltinTypeKind::Vec),
+            "String" => Some(BuiltinTypeKind::String),
+            "Option" => Some(BuiltinTypeKind::Option),
+            "Result" => Some(BuiltinTypeKind::Result),
+            "Rc" => Some(BuiltinTypeKind::Rc),
+            "Box" => Some(BuiltinTypeKind::Box),
+            "HashMap" => Some(BuiltinTypeKind::HashMap),
+            "char" => Some(BuiltinTypeKind::Char),
+            _ => None,
+        }
+    }
+
+    /// Build the builtin type from concrete type arguments.
+    pub fn resolve(self, args: &[ITy]) -> Option<ITy> {
+        if args.len() != self.arity() {
+            return None;
+        }
+        Some(match self {
+            BuiltinTypeKind::Vec => ITy::vec(args[0].clone()),
+            BuiltinTypeKind::String => ITy::string(),
+            BuiltinTypeKind::Option => ITy::option(args[0].clone()),
+            BuiltinTypeKind::Result => ITy::result(args[0].clone(), args[1].clone()),
+            BuiltinTypeKind::Rc => ITy::rc(args[0].clone()),
+            BuiltinTypeKind::Box => ITy::box_(args[0].clone()),
+            BuiltinTypeKind::HashMap => ITy::hash_map(args[0].clone(), args[1].clone()),
+            BuiltinTypeKind::Char => ITy::char_(),
+        })
     }
 }
 
@@ -123,10 +213,12 @@ impl<'a> Checker<'a> {
         self.push_crate_root(name, is_dependency, prefix, is_dependency, DefOrigin::User)
     }
 
-    /// Start the embedded prelude "crate". Its items keep their version 1.6
-    /// C names (no prefix) and it is not reachable through a crate path.
+    /// Start the standard-library "crate". Its items keep their version 1.6
+    /// C names (no prefix), its root module acts as the prelude and the crate
+    /// is reachable through the `std::` crate path (design section 4), so
+    /// `use std::collections::HashMap` style imports resolve.
     pub fn begin_prelude_crate(&mut self, name: &str) -> usize {
-        let crate_id = self.push_crate_root(name, true, String::new(), false, DefOrigin::Prelude);
+        let crate_id = self.push_crate_root(name, true, String::new(), true, DefOrigin::Prelude);
         self.prelude_module = Some(self.crate_roots[crate_id]);
         crate_id
     }
@@ -313,6 +405,7 @@ impl<'a> Checker<'a> {
             DefRef::GenericFn(id) => Some(self.generic_fns.get(id)?.name.clone()),
             DefRef::Fn(id) => Some(self.fns.get(id)?.name.clone()),
             DefRef::Const(id) => Some(self.consts.get(id)?.decl.name.clone()),
+            DefRef::BuiltinType(kind) => Some(kind.name().to_string()),
         }
     }
 

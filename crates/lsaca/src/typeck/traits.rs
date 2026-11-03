@@ -132,8 +132,13 @@ impl<'a> Checker<'a> {
         }
         // A trait can only be implemented for a user-defined struct or enum.
         // Builtin types (String, Vec<T>, tuples, i64, ...) cannot gain trait
-        // methods: the runtime has no place to dispatch them.
-        if !self.impl_target_is_user_type(block) {
+        // methods in user code: the runtime has no place to dispatch them.
+        // The standard library is exempt so it can implement traits such as
+        // Iterator for its builtin types.
+        if !self.impl_target_is_user_type(block)
+            && self.impl_target_builtin_kind(block).is_none()
+            && !self.impl_target_unsized_builtin_kind(block)
+        {
             self.report_invalid_impl_target(block);
             return;
         }
@@ -156,6 +161,33 @@ impl<'a> Checker<'a> {
             );
             methods.push(ImplMethod {
                 name: func.name.clone(),
+                gfn_id,
+            });
+        }
+        // Trait default bodies: every omitted default is registered as a
+        // synthetic impl method so calls on a receiver dispatch to this impl.
+        // Written methods were registered first, so an override always wins.
+        let trait_info = self.traits[trait_id].clone();
+        let written: Vec<String> = block.fns.iter().map(|func| func.name.clone()).collect();
+        for method in &trait_info.methods {
+            if method.body.is_none() || written.iter().any(|name| name == &method.name) {
+                continue;
+            }
+            let func = self.synthesize_default_method(block, trait_ref, trait_id, method);
+            let gfn_id = self.register_generic_method(
+                impl_id,
+                &block.generics,
+                &func,
+                GenericOwner::TraitImpl(impl_id),
+                format!(
+                    "lsaca_fn_{}_{}",
+                    sanitize_c_ident(&trait_ref.name),
+                    sanitize_c_ident(&method.name)
+                ),
+                format!("{}::{}", trait_ref.name, method.name),
+            );
+            methods.push(ImplMethod {
+                name: method.name.clone(),
                 gfn_id,
             });
         }
@@ -228,6 +260,59 @@ impl<'a> Checker<'a> {
             display_base,
         });
         def_id
+    }
+
+    /// Build the synthetic impl method for an omitted trait default body.
+    ///
+    /// The trait method signature is written in terms of Self and the trait's
+    /// generic parameters; in the impl context Self becomes the impl target type
+    /// and the trait parameters become the arguments of the impl's trait
+    /// reference. The body is cloned as written and checked in the impl
+    /// context, so a call like self.other() resolves to this impl.
+    fn synthesize_default_method(
+        &self,
+        block: &ImplBlock,
+        trait_ref: &TraitRef,
+        trait_id: usize,
+        method: &TraitMethod,
+    ) -> ast::FnDecl {
+        let mut args: HashMap<String, ast::TypeExpr> = HashMap::new();
+        for (index, param) in self.traits[trait_id].generics.iter().enumerate() {
+            if let Some(arg) = trait_ref.args.get(index) {
+                args.insert(param.name.clone(), arg.clone());
+            }
+        }
+        let mut params = Vec::with_capacity(method.params.len());
+        for (index, param) in method.params.iter().enumerate() {
+            // The receiver of a trait method is written as Self (or &Self),
+            // while impl methods store the plain self type and let self_kind
+            // add the reference layer.
+            let ty = if index == 0 {
+                block.ty.clone()
+            } else {
+                substitute_default_ty(&param.ty, &block.ty, &args)
+            };
+            params.push(ast::Param {
+                name: param.name.clone(),
+                name_span: param.name_span,
+                ty,
+            });
+        }
+        ast::FnDecl {
+            name: method.name.clone(),
+            name_span: method.name_span,
+            vis: ast::Visibility::Private,
+            generics: block.generics.clone(),
+            params,
+            ret: method
+                .ret
+                .as_ref()
+                .map(|ret| substitute_default_ty(ret, &block.ty, &args)),
+            body: method.body.clone(),
+            is_extern: false,
+            self_kind: method.self_kind,
+            span: method.span,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -393,8 +478,16 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|method| method.name.clone())
             .collect();
+        // Methods with a default body are not required: an omitted default is
+        // registered as a synthetic impl method during impl registration.
+        let required: Vec<&String> = trait_info
+            .methods
+            .iter()
+            .filter(|method| method.body.is_none())
+            .map(|method| &method.name)
+            .collect();
         let mut missing = Vec::new();
-        for name in &trait_methods {
+        for name in required {
             if !impl_methods.contains(name) {
                 missing.push(name.clone());
             }
@@ -423,7 +516,7 @@ impl<'a> Checker<'a> {
 
     /// Verify that the impl method name has a signature compatible with the
     /// trait declaration under substitution (E0053).
-    fn verify_trait_method_signature(
+    pub(crate) fn verify_trait_method_signature(
         &mut self,
         impl_id: usize,
         args: &[ITy],
@@ -603,6 +696,15 @@ impl<'a> Checker<'a> {
                 matches.push((impl_id, fn_id));
             }
         }
+        // Method resolution order: inherent methods take priority over trait
+        // methods, so a generic inherent impl shadows a trait method of the
+        // same name for a matching receiver.
+        if matches
+            .iter()
+            .any(|(impl_id, _)| self.impls[*impl_id].trait_ref.is_none())
+        {
+            matches.retain(|(impl_id, _)| self.impls[*impl_id].trait_ref.is_none());
+        }
         if matches.len() > 1 {
             let duplicate = match (matches.first(), matches.get(1)) {
                 (Some(first), Some(second)) => {
@@ -743,5 +845,77 @@ impl<'a> Checker<'a> {
             return Some((impl_id, args));
         }
         None
+    }
+}
+
+/// Rewrite a trait method type expression for the context of an impl of that
+/// trait: Self becomes the impl target type and the trait's generic parameters
+/// become the arguments of the impl's trait reference.
+fn substitute_default_ty(
+    ty: &ast::TypeExpr,
+    self_ty: &ast::TypeExpr,
+    args: &HashMap<String, ast::TypeExpr>,
+) -> ast::TypeExpr {
+    match ty {
+        ast::TypeExpr::Path {
+            name,
+            name_span,
+            generics,
+        } => {
+            if name == "Self" && generics.is_empty() {
+                return self_ty.clone();
+            }
+            if generics.is_empty()
+                && let Some(replacement) = args.get(name)
+            {
+                return replacement.clone();
+            }
+            ast::TypeExpr::Path {
+                name: name.clone(),
+                name_span: *name_span,
+                generics: generics
+                    .iter()
+                    .map(|arg| substitute_default_ty(arg, self_ty, args))
+                    .collect(),
+            }
+        }
+        ast::TypeExpr::Tuple { elems, span } => ast::TypeExpr::Tuple {
+            elems: elems
+                .iter()
+                .map(|elem| substitute_default_ty(elem, self_ty, args))
+                .collect(),
+            span: *span,
+        },
+        ast::TypeExpr::Fn { params, ret, span } => ast::TypeExpr::Fn {
+            params: params
+                .iter()
+                .map(|param| substitute_default_ty(param, self_ty, args))
+                .collect(),
+            ret: Box::new(substitute_default_ty(ret, self_ty, args)),
+            span: *span,
+        },
+        ast::TypeExpr::Ref {
+            mutable,
+            inner,
+            span,
+        } => ast::TypeExpr::Ref {
+            mutable: *mutable,
+            inner: Box::new(substitute_default_ty(inner, self_ty, args)),
+            span: *span,
+        },
+        ast::TypeExpr::Dyn(trait_ref) => ast::TypeExpr::Dyn(ast::TraitRef {
+            name: trait_ref.name.clone(),
+            name_span: trait_ref.name_span,
+            args: trait_ref
+                .args
+                .iter()
+                .map(|arg| substitute_default_ty(arg, self_ty, args))
+                .collect(),
+            span: trait_ref.span,
+        }),
+        ast::TypeExpr::Slice { elem, span } => ast::TypeExpr::Slice {
+            elem: Box::new(substitute_default_ty(elem, self_ty, args)),
+            span: *span,
+        },
     }
 }

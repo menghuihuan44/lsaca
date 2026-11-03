@@ -17,7 +17,11 @@ generics and traits, lazy iterators, the builtin `HashMap<K, V>`, and extends
 `==` to aggregates, references and maps. Version 1.6 adds the `char` scalar
 type and makes every `String` a guaranteed-valid UTF-8 string with
 character-aware methods; see [Characters and
-Unicode](22-characters-and-unicode.md).
+Unicode](22-characters-and-unicode.md). Version 2.0 adds unsized values that
+only exist behind a pointer — trait objects (`Box<dyn Trait>`, `Rc<dyn Trait>`,
+`&dyn Trait`) and slices and `str` (`&[T]`, `&str`) — plus the pointer-sized
+integer types `isize`/`usize`; ownership, moves and ORC apply to what the
+pointer refers to.
 
 This page is the authoritative description of ownership, moves, `.clone()`,
 `Drop`, copy-on-write mutation, `Rc<T>`, `Box<T>`, iterator ownership,
@@ -29,30 +33,38 @@ in expressions are also collected in [Ownership and moves](11-ownership-and-move
 Every lsaca value is represented in one of three ways:
 
 1. **Copy values** are stored directly and copied bit by bit: the scalar types
-   `bool`, `char`, all integer and float types, `()`, and references
-   (`&T`, `&mut T`).
+   `bool`, `char`, all integer and float types (including `isize`/`usize` since
+   2.0), `()`, and references (`&T`, `&mut T`). Since 2.0 the Copy family also
+   includes the two-word *fat* references `&[T]`, `&mut [T]`, `&str`,
+   `&mut str`, `&dyn Trait` and `&mut dyn Trait`.
    Copying a value of these types is always allowed and never invalidates the
    original.
 2. **Move-only values** are owned values with a heap payload or drop glue:
-   `String`, every `Vec<T>`, `Rc<T>`, `Box<T>`, function values and closures, and
-   any struct, enum, tuple, `Option` or `Result` that contains one of those or
-   implements `Drop`. These values are *moved* when used by value; a move
+   `String`, every `Vec<T>`, `Rc<T>`, `Box<T>` (including `Box<dyn Trait>` and
+   `Rc<dyn Trait>` since 2.0), function values and closures, and any struct,
+   enum, tuple, `Option` or `Result` that contains one of those or implements
+   `Drop`. These values are *moved* when used by value; a move
    transfers ownership and the source binding may not be used again.
 3. **References** are a borrowed representation: a plain C pointer that never
-   participates in reference counting. A reference is a non-owning view of an
-   existing place; it is never retained or released, and it cannot be stored
-   inside a struct, enum, tuple, `Vec`, `Option`, `Result` or `Box`, so it never
-   appears as a field or element of an aggregate.
+   participates in reference counting. Since 2.0 a reference can also be a
+   *fat* value: a data pointer plus a length for `&[T]`/`&mut [T]`/`&str`/
+   `&mut str`, or a data pointer plus a vtable pointer for `&dyn Trait`/
+   `&mut dyn Trait`. A reference is a non-owning view of an existing place; it
+   is never retained or released, and it cannot be stored inside a struct, enum,
+   tuple, `Vec`, `Option`, `Result` or `Box`, so it never appears as a field or
+   element of an aggregate.
 
 `Copy` and `Clone` are derived automatically from a type's definition;
 `Drop` is the one builtin trait you can implement (user-defined traits also
 exist since 1.5.0, but they do not change value semantics). The rules are given
-in the next sections.
+in the next sections. Unsized types (`dyn Trait`, `[T]` and `str`) have no
+by-value representation at all: they only ever appear behind one of the pointer
+forms above.
 
 | Category | Types | What use-by-value does |
 | --- | --- | --- |
-| Copy | `bool`, `char`, integers, floats, `()`, `&T`, `&mut T`; tuples, `Option` and `Result` all of whose parts are Copy; user structs and enums whose fields are all Copy and that do not implement `Drop` | Copies the value; the original stays usable |
-| Move-only | `String`, `Vec<T>`, `HashMap<K, V>`, `Rc<T>`, `Box<T>`, function values and closures; any type containing one of them; every type that implements `Drop` | Moves ownership to the new place; using the old binding is an error |
+| Copy | `bool`, `char`, integers, floats, `()`, `&T`, `&mut T`, and the 2.0 fat references `&[T]`, `&mut [T]`, `&str`, `&mut str`, `&dyn Trait`, `&mut dyn Trait`; tuples, `Option` and `Result` all of whose parts are Copy; user structs and enums whose fields are all Copy and that do not implement `Drop` | Copies the value; the original stays usable |
+| Move-only | `String`, `Vec<T>`, `HashMap<K, V>`, `Rc<T>`, `Box<T>`, `Box<dyn Trait>`, `Rc<dyn Trait>`, function values and closures; any type containing one of them; every type that implements `Drop` | Moves ownership to the new place; using the old binding is an error |
 
 ```ls
 struct Point {
@@ -161,8 +173,9 @@ moves](11-ownership-and-moves.md).
 `Copy` is derived automatically; there is no `impl Copy` syntax. A type is Copy
 when every part of it is Copy and it does not implement `Drop`:
 
-* `bool`, `char`, all integer and float types, `()`;
-* shared and mutable references, `&T` and `&mut T`;
+* `bool`, `char`, all integer and float types (including `isize`/`usize`), `()`;
+* shared and mutable references, `&T` and `&mut T`, plus the fat references
+  `&[T]`, `&mut [T]`, `&str`, `&mut str`, `&dyn Trait` and `&mut dyn Trait`;
 * tuples, `Option<T>` and `Result<T, E>` when all their parts are Copy;
 * user structs and enums whose fields or payloads are all Copy, when the type
   has no `Drop` implementation.
@@ -185,7 +198,9 @@ it on a value leaves the original usable and returns an independent value
 | `String` | An independent string; later mutations of either value do not affect the other |
 | `Vec<T>` | A deep copy: a new vector with cloned elements |
 | `Rc<T>` | Another handle to the **same** cell; the reference count grows |
+| `Rc<dyn Trait>` | Another handle to the **same** cell; dispatched through the same vtable |
 | `Box<T>` | A deep copy: a new box with a cloned payload |
+| `Box<dyn Trait>` | A deep copy through the vtable's clone slot: a fresh box with a cloned concrete payload |
 | User structs, enums, tuples, `Option`, `Result` | A field-wise clone, recursively |
 | Function values and closures | A value that shares the same closure environment (the environment is not duplicated by the language) |
 | `&T` / `&mut T` | The reference layers are stripped and the referred value is cloned into an owned value |
@@ -431,6 +446,10 @@ Notes:
 * `Display`/`Debug` of an `Rc` print `Rc(payload)`, using the payload's own
   formatting: `Rc(5)`, `Rc("x")` for `Rc<String>`, `Rc([1, 2])` for
   `Rc<Vec<i64>>`.
+* Since 2.0 a cell may hold a trait object: `Rc<dyn Trait>` captures the
+  concrete payload in the cell and dispatches method calls through the trait
+  object's vtable. Cloning it returns another handle to the **same** cell and
+  increments the count like any `Rc`; see [Trait objects](25-trait-objects.md).
 
 ```ls
 struct Counter {
@@ -468,8 +487,8 @@ it instead, giving the helper the only handle.
 
 ## Cycles
 
-A reference cycle is possible only through `Rc<T>`, because `Rc` is the only
-type whose handles share one mutable payload. A cycle exists when a chain of
+A reference cycle is possible only through `Rc<T>` (including `Rc<dyn Trait>`),
+because `Rc` is the only type whose handles share one mutable payload. A cycle exists when a chain of
 handles starting from a cell leads back to that same cell:
 
 ```rust
@@ -568,6 +587,11 @@ Rules:
 * `Box<T>` works with `Vec`, `Option` and `Rc`, and is the standard way to build
   recursive lists and trees. A box inside an `Rc` cell is a shared mutable
   subtree — the `Rc` provides sharing and the `Box` provides the shape.
+* Since 2.0 a box can hold a trait object: `Box<dyn Trait>` owns the concrete
+  payload and dispatches its methods through the vtable. `.clone()` deep-copies
+  through the vtable's clone slot, `{}` and `{:?}` use its debug slot, and
+  `get`/`set` are rejected with `E0001` because the payload is unsized; see
+  [Trait objects](25-trait-objects.md).
 
 ```ls
 struct Node {
@@ -674,6 +698,14 @@ return types, and mutating methods work through them. References still cannot be
 stored inside aggregates or captured by closures; they live in locals,
 parameters and return values.
 
+Since 2.0 the same rule extends to the *fat* references: `&[T]`, `&mut [T]`,
+`&str`, `&mut str`, `&dyn Trait` and `&mut dyn Trait` are non-owning views too.
+They are produced by coercion (`&Vec<T>` to `&[T]`, `&mut Vec<T>` to
+`&mut [T]`, `&String` to `&str`, `&mut String` to `&mut str`, `&T` to
+`&dyn Trait`) or by taking a slice with `&values[1..3]`; copying one copies the
+two words and never touches a reference count, and none of them can be stored
+inside an aggregate. See [Slices and str](26-slices-and-str.md).
+
 ```ls
 fn append(text: &mut String) {
     text.push_str("!");
@@ -750,9 +782,19 @@ See [References and borrowing](12-references-and-borrowing.md) for the rules.
   enables recursive types.
 * Cycles exist only through `Rc<T>` and are collected automatically by the
   trial-deletion collector, which runs the collected values' `Drop` hooks.
-* References (`&T`/`&mut T`) are non-owning pointers: borrowing never changes a
-  reference count and never keeps a value alive; the borrow checker enforces
-  aliasing and rejects moves of borrowed values.
+* References (`&T`/`&mut T`, and the two-word `&[T]`, `&str` and `&dyn Trait`
+  references) are non-owning pointers: borrowing never changes a reference count
+  and never keeps a value alive; the borrow checker enforces aliasing and
+  rejects moves of borrowed values.
+* Unsized types (`dyn Trait`, `[T]`, `str`) exist only behind a pointer:
+  `Box<dyn Trait>` and `Rc<dyn Trait>` own the concrete payload through a
+  vtable, while `&dyn Trait`, `&[T]` and `&str` (and their `mut` forms)
+  borrow it. A `Box<dyn Trait>` clone deep-copies the concrete payload through
+  the vtable's clone slot; cloning an `Rc<dyn Trait>` just adds a handle to the
+  same cell.
+* `isize` and `usize` are pointer-sized integer types (64 bits on every
+  supported target) and behave like every other integer for moves, casts and
+  formatting.
 * Leak tracking is opt-in and reports only at a normal shutdown.
 * Panics and `exit` terminate the process; the operating system reclaims all
   memory.
@@ -769,3 +811,5 @@ See [References and borrowing](12-references-and-borrowing.md) for the rules.
 * Closures capture by value and move their captures: [Closures](14-closures.md).
 * Generics, traits, iterators and the hash map: [Generics](17-generics.md),
   [Traits](18-traits.md), [Iterators](19-iterators.md), [HashMap](20-hashmap.md).
+* Trait objects and dynamic dispatch: [Trait objects](25-trait-objects.md).
+* Slices and `str`: [Slices and str](26-slices-and-str.md).

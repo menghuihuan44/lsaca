@@ -10,6 +10,10 @@ use std::collections::HashMap;
 use crate::hir::{self, HExprKind, HFormatPartKind, HPatKind};
 use crate::types::Ty;
 
+use super::CodegenOptions;
+use super::inline::InlinePlan;
+use super::reachability::{self, Reachability};
+
 /// Names of the user defined types, indexed by StructId / EnumId.
 #[derive(Debug, Clone, Default)]
 pub struct TypeNames {
@@ -83,6 +87,9 @@ impl TypeNames {
             Ty::HashMap(key, value) => {
                 format!("Map_{}_{}", self.mangle(key), self.mangle(value))
             }
+            Ty::Slice(elem) => format!("Slice_{}", self.mangle(elem)),
+            Ty::Str => String::from("Str"),
+            Ty::Dyn(index) => format!("Dyn{}", index),
         }
     }
 
@@ -122,6 +129,12 @@ impl TypeNames {
             // -Wduplicate-decl-specifier (implied by -Wall) rejects it, so a
             // second const layer is only added when the referent is not
             // already const-qualified.
+            Ty::Ref { inner, .. } if inner.is_unsized() => {
+                // References to unsized values (slices, str, trait objects)
+                // are fat structs stored by value: the reference adds no
+                // extra pointer layer.
+                format!("Ls{}", self.mangle(inner))
+            }
             Ty::Ref { mutable, inner } => {
                 let referent = self.ctype(inner);
                 if *mutable || referent.starts_with("const ") {
@@ -152,6 +165,13 @@ pub enum TypeDef {
     Tuple(Vec<Ty>),
     Fn(Vec<Ty>, Ty),
     HashMap(Ty, Ty),
+    /// A by-value fat slice struct, used for shared and mutable slices.
+    Slice(Ty),
+    /// The by-value fat string slice struct behind shared and mutable str refs.
+    Str,
+    /// The by-value fat trait object struct; the id indexes
+    /// Program::trait_objects.
+    Dyn(usize),
 }
 
 impl TypeDef {
@@ -169,7 +189,12 @@ pub struct TypeRegistry {
 }
 
 impl TypeRegistry {
-    pub fn collect(program: &hir::Program) -> TypeRegistry {
+    pub fn collect(
+        program: &hir::Program,
+        inline_plan: &InlinePlan,
+        options: &CodegenOptions,
+        reachability: &Reachability,
+    ) -> TypeRegistry {
         let mut registry = TypeRegistry {
             names: TypeNames::from_program(program),
             order: Vec::new(),
@@ -178,6 +203,9 @@ impl TypeRegistry {
         {
             let mut collector = Collector {
                 program,
+                inline_plan,
+                options,
+                reachability,
                 registry: &mut registry,
             };
             collector.run();
@@ -356,30 +384,85 @@ fn push_if_compound(deps: &mut Vec<Ty>, ty: &Ty) {
 
 struct Collector<'a> {
     program: &'a hir::Program,
+    /// Standard-library wrappers expanded at their call sites need no type
+    /// registration: only their expanded intrinsic calls are emitted.
+    inline_plan: &'a InlinePlan,
+    /// Resolves spans to source files, so standard library items can be
+    /// distinguished from user items.
+    options: &'a CodegenOptions,
+    /// Only reachable functions and closures are emitted, so only their types
+    /// are registered.
+    reachability: &'a Reachability,
     registry: &'a mut TypeRegistry,
 }
 
 impl<'a> Collector<'a> {
     fn run(&mut self) {
         let program = self.program;
-        for (index, item) in program.structs.iter().enumerate() {
-            self.visit_ty(&Ty::Struct(index));
-            for field in &item.fields {
-                self.visit_ty(&field.ty);
-            }
-        }
-        for (index, item) in program.enums.iter().enumerate() {
-            self.visit_ty(&Ty::Enum(index));
-            for variant in &item.variants {
-                for field in &variant.fields {
-                    self.visit_ty(field);
+        // User defined structs and enums are always registered (they may be
+        // named by reachable code in ways this pass does not model: drop hooks,
+        // debug formatting, monomorphized instances). Standard library types are
+        // registered only when reachable code mentions them, so a program that
+        // never touches an io error type does not emit its helpers. The loop
+        // reaches a fixed point because registering a type can register the
+        // types of its fields, which are then processed in the next round.
+        let mut visited_structs = vec![false; program.structs.len()];
+        let mut visited_enums = vec![false; program.enums.len()];
+        loop {
+            let mut progressed = false;
+            for (index, item) in program.structs.iter().enumerate() {
+                if visited_structs[index] {
+                    continue;
                 }
+                let ty = Ty::Struct(index);
+                if reachability::is_standard_library(self.options, item.span)
+                    && self.registry.get(&ty).is_none()
+                {
+                    continue;
+                }
+                visited_structs[index] = true;
+                self.visit_ty(&ty);
+                for field in &item.fields {
+                    self.visit_ty(&field.ty);
+                }
+                progressed = true;
+            }
+            for (index, item) in program.enums.iter().enumerate() {
+                if visited_enums[index] {
+                    continue;
+                }
+                let ty = Ty::Enum(index);
+                if reachability::is_standard_library(self.options, item.span)
+                    && self.registry.get(&ty).is_none()
+                {
+                    continue;
+                }
+                visited_enums[index] = true;
+                self.visit_ty(&ty);
+                for variant in &item.variants {
+                    for field in &variant.fields {
+                        self.visit_ty(field);
+                    }
+                }
+                progressed = true;
+            }
+            if !progressed {
+                break;
             }
         }
         for konst in &program.consts {
             self.visit_ty(&konst.ty);
         }
-        for function in &program.fns {
+        for (index, function) in program.fns.iter().enumerate() {
+            // Intrinsics never get a C definition; an expanded forwarding
+            // wrapper only contributes its intrinsic call sites, so neither
+            // registers its signature types or body.
+            if function.intrinsic
+                || self.inline_plan.is_inlined(index)
+                || !self.reachability.is_reachable(index)
+            {
+                continue;
+            }
             self.visit_ty(&function.ret);
             for param in &function.params {
                 self.visit_ty(&param.ty);
@@ -387,6 +470,9 @@ impl<'a> Collector<'a> {
             self.visit_block(&function.body);
         }
         for closure in &program.closures {
+            if !self.reachability.is_closure_reachable(closure.id) {
+                continue;
+            }
             self.visit_ty(&closure.ret);
             for param in &closure.params {
                 self.visit_ty(&param.ty);
@@ -395,6 +481,27 @@ impl<'a> Collector<'a> {
                 self.visit_ty(&capture.ty);
             }
             self.visit_block(&closure.body);
+        }
+        // Trait objects register their fat value type; vtable signatures are
+        // visited too so the emitted thunks can rely on the registry.
+        for (index, object) in program.trait_objects.iter().enumerate() {
+            self.visit_ty(&Ty::Dyn(index));
+            for arg in &object.args {
+                self.visit_ty(arg);
+            }
+            for method in &object.methods {
+                self.visit_ty(&method.ret);
+                for param in &method.params {
+                    self.visit_ty(param);
+                }
+            }
+        }
+        for vtable in &program.vtables {
+            self.visit_ty(&vtable.self_ty);
+            // The clone slot of a vtable builds a fresh managed Box cell that
+            // holds a deep copy of the concrete value, regardless of which
+            // ownership container produced the trait object.
+            self.visit_ty(&Ty::box_(vtable.self_ty.clone()));
         }
     }
 
@@ -410,7 +517,7 @@ impl<'a> Collector<'a> {
             return;
         }
         match ty {
-            Ty::Vec(elem) | Ty::Option(elem) => self.visit_ty(elem),
+            Ty::Vec(elem) | Ty::Option(elem) | Ty::Rc(elem) | Ty::Box(elem) => self.visit_ty(elem),
             Ty::Result(ok, err) => {
                 self.visit_ty(ok);
                 self.visit_ty(err);
@@ -435,6 +542,10 @@ impl<'a> Collector<'a> {
                 self.visit_ty(&Ty::vec((**key).clone()));
                 self.visit_ty(&Ty::vec((**value).clone()));
             }
+            Ty::Slice(elem) => self.visit_ty(elem),
+            // "str" and trait objects are unsized: they never name a type that
+            // needs a C definition in this phase.
+            Ty::Str | Ty::Dyn(_) => {}
             _ => {}
         }
     }
@@ -648,6 +759,24 @@ impl<'a> Collector<'a> {
                     self.visit_expr(value);
                 }
             }
+            HExprKind::DynCoerce { value, .. } => self.visit_expr(value),
+            HExprKind::DynCall { object, args, .. } => {
+                self.visit_expr(object);
+                for arg in args {
+                    self.visit_expr(arg);
+                }
+            }
+            HExprKind::Slice {
+                base, start, end, ..
+            } => {
+                self.visit_expr(base);
+                if let Some(start) = start {
+                    self.visit_expr(start);
+                }
+                if let Some(end) = end {
+                    self.visit_expr(end);
+                }
+            }
         }
     }
 }
@@ -675,6 +804,9 @@ impl TypeRegistry {
             // References are never registered through `insert_ty`; they have no
             // generated definition. This arm only keeps the match exhaustive.
             Ty::Ref { .. } => TypeDef::Scalar,
+            Ty::Slice(elem) => TypeDef::Slice((**elem).clone()),
+            Ty::Str => TypeDef::Str,
+            Ty::Dyn(index) => TypeDef::Dyn(*index),
         };
         self.order.push(ty.clone());
         self.defs.insert(ty.clone(), def);
@@ -711,6 +843,34 @@ pub const RESULT_ERR_MEMBER: &str = "err";
 pub const FN_ENV_FIELD: &str = "env";
 pub const FN_PTR_FIELD: &str = "fn_ptr";
 
+/// Fields of the generated trait object fat value.
+pub const DYN_DATA_FIELD: &str = "data";
+pub const DYN_VTABLE_FIELD: &str = "vtable";
+
+/// Fields of the generated vtable struct, in slot order.
+pub const VTABLE_DROP_FIELD: &str = "drop";
+pub const VTABLE_CLONE_FIELD: &str = "clone";
+pub const VTABLE_TRACE_FIELD: &str = "trace";
+pub const VTABLE_DEBUG_FIELD: &str = "debug";
+
+/// C name of the static table holding one concrete vtable.
+pub fn vtable_table_name(vtable_id: usize) -> String {
+    format!("lsaca_vtable_{}", vtable_id)
+}
+
+/// C name of one thunk of a concrete vtable.
+///
+/// The slot is "drop", "clone", "trace", "debug" or "m<index>" for the method
+/// at that index in the trait object method list.
+pub fn vtable_thunk_name(vtable_id: usize, slot: &str) -> String {
+    format!("lsaca_vtable_{}_{}", vtable_id, slot)
+}
+
+/// C name of the vtable struct member that calls method slot `index`.
+pub fn vtable_method_field(index: usize) -> String {
+    format!("m{}", index)
+}
+
 impl TypeNames {
     /// A valid zero value of the given type, as a C expression. Used for
     /// pre-declared locals and block result temporaries; every managed value
@@ -724,9 +884,13 @@ impl TypeNames {
             Ty::Char => String::from("((uint32_t)0)"),
             Ty::String => String::from("ls_str_new()"),
             Ty::Vec(_) => format!("(({}){{0, 0, NULL}})", self.ctype(ty)),
-            Ty::Rc(_) | Ty::Box(_) | Ty::HashMap(_, _) | Ty::Ref { .. } => {
+            Ty::Rc(_) | Ty::Box(_) | Ty::HashMap(_, _) => {
                 format!("(({})NULL)", self.ctype(ty))
             }
+            Ty::Ref { inner, .. } if inner.is_unsized() => {
+                format!("(({}){{0}})", self.ctype(ty))
+            }
+            Ty::Ref { .. } => format!("(({})NULL)", self.ctype(ty)),
             Ty::Option(elem) => {
                 if **elem == Ty::String {
                     String::from("ls_opt_string_none()")
@@ -822,6 +986,9 @@ impl TypeNames {
                     )
                 }
             }
+            Ty::Slice(_) | Ty::Str | Ty::Dyn(_) => crate::codegen::util::internal_error(
+                "cannot materialise an unsized value; slices, str and trait objects are only stored behind references",
+            ),
         }
     }
 }
@@ -850,5 +1017,23 @@ mod tests {
         assert_eq!(names.ctype(&Ty::bool_()), "bool");
         assert_eq!(names.ctype(&Ty::Float(FloatTy::F32)), "float");
         assert_eq!(names.ctype(&Ty::Int(IntTy::U32)), "uint32_t");
+        assert_eq!(names.mangle(&Ty::Int(IntTy::Isize)), "isize");
+        assert_eq!(names.mangle(&Ty::Int(IntTy::Usize)), "usize");
+        assert_eq!(names.ctype(&Ty::Int(IntTy::Isize)), "intptr_t");
+        assert_eq!(names.ctype(&Ty::Int(IntTy::Usize)), "uintptr_t");
+        assert_eq!(names.mangle(&Ty::slice(Ty::i64())), "Slice_i64");
+        assert_eq!(names.ctype(&Ty::slice(Ty::i64())), "LsSlice_i64");
+        assert_eq!(names.mangle(&Ty::str_()), "Str");
+        assert_eq!(names.ctype(&Ty::str_()), "LsStr");
+        assert_eq!(names.mangle(&Ty::dynamic(0)), "Dyn0");
+        assert_eq!(names.ctype(&Ty::dynamic(0)), "LsDyn0");
+        // References to unsized values are fat structs stored by value.
+        assert_eq!(
+            names.ctype(&Ty::Ref {
+                mutable: false,
+                inner: Box::new(Ty::str_())
+            }),
+            "LsStr"
+        );
     }
 }

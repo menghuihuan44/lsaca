@@ -12,9 +12,23 @@ pub fn is_managed(ty: &Ty) -> bool {
     !ty.is_bitwise_copy()
 }
 
+/// The value type behind a chain of references.
+///
+/// Builtin method receivers are sometimes references (a standard library impl
+/// method has `self: &mut Vec<T>`), but the frozen/element decisions are made
+/// on the referent's type.
+fn receiver_value_type(ty: &Ty) -> &Ty {
+    let mut ty = ty;
+    while let Ty::Ref { inner, .. } = ty {
+        ty = inner;
+    }
+    ty
+}
+
 /// True when the type is the runtime provided frozen instantiation
 /// LsVec_String, LsOpt_String or LsRes_String_String.
 pub fn is_frozen_shared(ty: &Ty) -> bool {
+    let ty = receiver_value_type(ty);
     match ty {
         Ty::Vec(elem) => **elem == Ty::String,
         Ty::Option(elem) => **elem == Ty::String,
@@ -44,7 +58,10 @@ pub fn eq_fn_name(names: &TypeNames, ty: &Ty) -> String {
 /// address of the vector, which would force the compiler to keep `len` and
 /// `cap` in memory instead of registers.
 pub fn push_slow_fn_name(names: &TypeNames, ty: &Ty) -> String {
-    format!("lsaca_vec_push_slow_{}", names.mangle(ty))
+    format!(
+        "lsaca_vec_push_slow_{}",
+        names.mangle(receiver_value_type(ty))
+    )
 }
 
 /// An owned copy of a borrowed value expression of the given type.
@@ -83,6 +100,12 @@ pub fn release_stmt(names: &TypeNames, ty: &Ty, expr: &str) -> Option<String> {
 /// A C boolean expression comparing two values.
 pub fn eq_expr(names: &TypeNames, ty: &Ty, a: &str, b: &str) -> String {
     if let Ty::Ref { inner, .. } = ty {
+        // A reference to an unsized value (str, slice, trait object) is a fat
+        // value by itself: the value already is the stored data, there is no
+        // second pointer to dereference.
+        if inner.is_unsized() {
+            return eq_expr(names, inner, a, b);
+        }
         // References compare by referent value, matching Rust's PartialEq for
         // shared and mutable references.
         return eq_expr(names, inner, &format!("(*({}))", a), &format!("(*({}))", b));
@@ -174,6 +197,11 @@ pub fn debug_append_statement(
     value: &str,
 ) -> Option<String> {
     if let Ty::Ref { inner, .. } = ty {
+        // A reference to an unsized value (str, slice, trait object) is a fat
+        // value by itself and is rendered without a second dereference.
+        if inner.is_unsized() {
+            return debug_append_statement(names, inner, acc, value);
+        }
         // Debug output for a reference delegates to the referent.
         return debug_append_statement(names, inner, acc, &format!("(*({}))", value));
     }

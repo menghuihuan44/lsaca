@@ -23,6 +23,8 @@ use crate::types::{FloatTy, IntTy, SelfKind, Ty};
 pub type StructId = usize;
 pub type EnumId = usize;
 pub type FnId = usize;
+pub type TraitObjectId = usize;
+pub type VtableId = usize;
 
 /// A whole checked program.
 #[derive(Debug, Clone)]
@@ -46,6 +48,11 @@ pub struct Program {
     pub drop_structs: Vec<Option<FnId>>,
     /// The Drop::drop hook of each enum, if it implements the trait.
     pub drop_enums: Vec<Option<FnId>>,
+    /// Registered trait object types (dyn Trait<Args>), indexed by Ty::Dyn.
+    pub trait_objects: Vec<HTraitObject>,
+    /// One vtable per (trait object, concrete self type) pair, indexed by the
+    /// vtable id stored in HExprKind::DynCoerce.
+    pub vtables: Vec<HVtable>,
 }
 
 /// User-facing name of a type item: internal prelude items lose their prefix.
@@ -104,6 +111,21 @@ impl Program {
                     format!("&{}", self.type_name(inner))
                 }
             }
+            Ty::Slice(elem) => format!("[{}]", self.type_name(elem)),
+            Ty::Str => "str".to_string(),
+            Ty::Dyn(id) => match self.trait_objects.get(*id) {
+                Some(object) if object.args.is_empty() => format!("dyn {}", object.name),
+                Some(object) => {
+                    let args = object
+                        .args
+                        .iter()
+                        .map(|arg| self.type_name(arg))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("dyn {}<{}>", object.name, args)
+                }
+                None => format!("dyn#{}", id),
+            },
             other => format!("{}", other),
         }
     }
@@ -187,7 +209,15 @@ impl Program {
     /// Whether values of ty are implicitly copied (no move, no drop flag).
     pub fn is_copy(&self, ty: &Ty) -> bool {
         match ty {
-            Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::Ref { .. } => true,
+            Ty::Unit
+            | Ty::Bool
+            | Ty::Char
+            | Ty::Int(_)
+            | Ty::Float(_)
+            | Ty::Ref { .. }
+            | Ty::Slice(_)
+            | Ty::Str
+            | Ty::Dyn(_) => true,
             Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) | Ty::HashMap(_, _) => {
                 false
             }
@@ -283,7 +313,10 @@ impl Program {
             | Ty::String
             | Ty::Rc(_)
             | Ty::Fn(_, _)
-            | Ty::Ref { .. } => false,
+            | Ty::Ref { .. }
+            | Ty::Slice(_)
+            | Ty::Str
+            | Ty::Dyn(_) => false,
         }
     }
 }
@@ -327,6 +360,40 @@ pub struct HVariant {
     pub fields: Vec<Ty>,
 }
 
+/// A registered trait object type: dyn Trait<Args>.
+#[derive(Debug, Clone)]
+pub struct HTraitObject {
+    /// Display name of the trait, for example Display or Iterator.
+    pub name: String,
+    /// Generic arguments of the trait instantiation, for example [i64].
+    pub args: Vec<Ty>,
+    /// Unique C identifier of the vtable type, for example LsVTable_Display.
+    pub c_name: String,
+    /// Object safe method signatures in vtable slot order.
+    pub methods: Vec<HTraitMethodSig>,
+}
+
+/// One object safe method of a trait object, in vtable slot order.
+#[derive(Debug, Clone)]
+pub struct HTraitMethodSig {
+    /// Display name of the method, used in diagnostics.
+    pub name: String,
+    /// Receiver kind: Ref for &self, RefMut for &mut self.
+    pub receiver: SelfKind,
+    /// Parameter types after the receiver.
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+/// A concrete vtable: one trait object instantiated for one concrete type.
+#[derive(Debug, Clone)]
+pub struct HVtable {
+    pub trait_object: TraitObjectId,
+    pub self_ty: Ty,
+    /// Instantiated function for every vtable slot, in HTraitObject order.
+    pub methods: Vec<FnId>,
+}
+
 /// A checked function or method.
 #[derive(Debug, Clone)]
 pub struct HFn {
@@ -339,6 +406,10 @@ pub struct HFn {
     pub ret: Ty,
     /// None for free functions and associated functions; Some for methods.
     pub self_kind: Option<SelfKind>,
+    /// True for extern functions declared by the standard library. The code
+    /// generator emits calls to them through its intrinsic emitter table
+    /// instead of emitting a C function definition.
+    pub intrinsic: bool,
     pub body: HBlock,
     pub span: Span,
 }
@@ -602,6 +673,30 @@ pub enum HExprKind {
     /// An explicit dereference of a reference place: `*expr`.
     Deref {
         expr: Box<HExpr>,
+    },
+    /// Implicit coercion of a concrete value into a trait object value.
+    /// The value is either a reference (&T, &mut T) or a Box<T>/Rc<T> handle.
+    /// The vtable id indexes Program::vtables.
+    DynCoerce {
+        value: Box<HExpr>,
+        vtable: VtableId,
+    },
+    /// A dynamically dispatched method call through a trait object.
+    DynCall {
+        object: Box<HExpr>,
+        trait_object: TraitObjectId,
+        /// Vtable slot, indexing HTraitObject::methods.
+        slot: usize,
+        args: Vec<HExpr>,
+    },
+    /// A slice expression: `&base[start..end]` and friends. Missing bounds
+    /// are None; inclusive selects `..=` over `..`. The result type (slice
+    /// reference or str reference) is the enclosing expression's type.
+    Slice {
+        base: Box<HExpr>,
+        start: Option<Box<HExpr>>,
+        end: Option<Box<HExpr>>,
+        inclusive: bool,
     },
 }
 

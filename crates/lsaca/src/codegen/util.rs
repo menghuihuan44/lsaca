@@ -93,7 +93,49 @@ fn min_c_macro(ty: IntTy) -> &'static str {
         IntTy::I16 => "INT16_MIN",
         IntTy::I32 => "INT32_MIN",
         IntTy::I64 => "INT64_MIN",
+        IntTy::Isize => "INT64_MIN",
         _ => "0",
+    }
+}
+
+/// The runtime family used for the integer helpers of `int_ty`.
+///
+/// The runtime defines its checked arithmetic, `abs`, `min` and `max`
+/// helpers for the fixed-width integer types only. `isize` and `usize` are
+/// pointer sized; the supported targets are 64 bit, so they share the
+/// `i64`/`u64` families and the generated code casts the operands and the
+/// result back to the pointer type.
+pub fn runtime_int_suffix(int_ty: IntTy) -> &'static str {
+    match int_ty {
+        IntTy::Isize => "i64",
+        IntTy::Usize => "u64",
+        other => other.name(),
+    }
+}
+
+/// The fixed-width C type backing the runtime helpers of `int_ty`, when the
+/// language type is not itself fixed width.
+fn runtime_fixed_ctype(int_ty: IntTy) -> Option<&'static str> {
+    match int_ty {
+        IntTy::Isize => Some("int64_t"),
+        IntTy::Usize => Some("uint64_t"),
+        _ => None,
+    }
+}
+
+/// Cast an operand of `int_ty` to the C type its runtime helper expects.
+pub fn runtime_int_argument(int_ty: IntTy, value: &str) -> String {
+    match runtime_fixed_ctype(int_ty) {
+        Some(fixed) => format!("({})({})", fixed, value),
+        None => value.to_string(),
+    }
+}
+
+/// Cast the result of a runtime integer helper back to the language type.
+pub fn runtime_int_result(int_ty: IntTy, expression: String) -> String {
+    match runtime_fixed_ctype(int_ty) {
+        Some(_) => format!("({})({})", int_ty.c_type(), expression),
+        None => expression,
     }
 }
 
@@ -147,6 +189,17 @@ pub fn source_location(
     }
 }
 
+/// Report a compiler internal error.
+///
+/// This is used for constructs that a later pipeline phase has already lowered
+/// but codegen does not implement yet (for example trait objects or slice
+/// expressions in the current phase, or an intrinsic without an emitter). Such
+/// a call is always a compiler bug; it never describes a problem with the input
+/// program and must never turn into invalid C.
+pub fn internal_error(message: impl Into<String>) -> ! {
+    panic!("internal compiler error: {}", message.into());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +225,14 @@ mod tests {
         assert_eq!(
             int_literal(18446744073709551615u128 as i128, IntTy::U64),
             "((uint64_t)0xFFFFFFFFFFFFFFFFULL)"
+        );
+        assert_eq!(
+            int_literal(i128::from(i64::MIN), IntTy::Isize),
+            "((intptr_t)INT64_MIN)"
+        );
+        assert_eq!(
+            int_literal(18446744073709551615u128 as i128, IntTy::Usize),
+            "((uintptr_t)0xFFFFFFFFFFFFFFFFULL)"
         );
     }
 

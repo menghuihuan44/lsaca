@@ -1,5 +1,12 @@
-"""binary_trees: build a perfect binary tree of depth 16 (131,071 nodes,
-leaves carry consecutive payloads), recursively sum the payloads."""
+"""binary_trees_refs: identical tree and checksum to binary_trees; the lsaca
+version differs only by traversing through borrowed references.
+Originally binary_trees: build a perfect binary tree (leaves carry consecutive
+payloads), recursively sum the payloads.
+
+Optional argument: depth (default 16, the medium scale).
+"""
+
+import sys
 
 DEPTH = 16
 
@@ -29,8 +36,15 @@ def sum_tree(node):
     return node.value + sum_tree(node.left) + sum_tree(node.right)
 
 
+def arg_int(args, index, fallback):
+    if index < len(args):
+        return int(args[index])
+    return fallback
+
+
 def main():
-    print(f"checksum={sum_tree(build(DEPTH, 0))}")
+    depth = arg_int(sys.argv[1:], 0, DEPTH)
+    print(f"checksum={sum_tree(build(depth, 0))}")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,12 @@ fn parse() -> Result<ast::Program, Diagnostics> {
 /// Rewrite a diagnostic produced while processing the prelude into an internal
 /// standard-library error, so users never see compiler-library source positions.
 pub fn internal_error(diagnostic: Diagnostic) -> Diagnostic {
+    if diagnostic
+        .message
+        .starts_with(crate::diag::INTERNAL_STDLIB_PREFIX)
+    {
+        return diagnostic;
+    }
     let mut message = String::from("internal standard library error: ");
     message.push_str(&diagnostic.message);
     let mut rewritten = Diagnostic::error(message, Span::empty(0));

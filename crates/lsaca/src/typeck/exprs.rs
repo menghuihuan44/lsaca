@@ -79,6 +79,16 @@ impl<'a> Checker<'a> {
                 expr: inner,
             } => self.check_ref(*mutable, inner, span, hint),
             ExprKind::Deref { expr: inner } => self.check_deref(inner, span, hint),
+            ExprKind::Slice {
+                base,
+                start,
+                end,
+                inclusive,
+            } => {
+                let start = start.as_deref();
+                let end = end.as_deref();
+                self.check_slice_expr(base, start, end, *inclusive, span)
+            }
         }
     }
 
@@ -467,9 +477,11 @@ impl<'a> Checker<'a> {
     /// Check the postfix try operator: expr?.
     ///
     /// The operand must be an Option or a Result, and the enclosing function or
-    /// closure must declare the same kind of return type. The payload types and,
-    /// for Result, the error types must unify exactly: there is no From
-    /// conversion. Lowering desugars the operator into a match plus early return.
+    /// closure must declare the same kind of return type. The operator unwraps
+    /// the operand's payload, so the Ok/Some payload type of the enclosing
+    /// function is independent of it. For Result the error types must match
+    /// exactly: there is no From conversion. Lowering desugars the operator into
+    /// a match plus early return.
     fn check_try(&mut self, inner: &ast::Expr, span: Span, hint: Option<&ITy>) -> TExpr {
         if self.in_const {
             self.error_code(
@@ -491,13 +503,7 @@ impl<'a> Checker<'a> {
             ITy::Never => self.never_expr(span),
             ITy::Option(inner_ty) => {
                 let payload = (**inner_ty).clone();
-                if let ITy::Option(ret_payload) = &resolved_ret {
-                    let expected = (**ret_payload).clone();
-                    if !self.unify_quiet(&expected, &payload) {
-                        let expected = self.infer.resolve(&expected);
-                        let found = self.infer.resolve(&payload);
-                        self.report_mismatch(&expected, &found, span);
-                    }
+                if matches!(resolved_ret, ITy::Option(_)) {
                     self.finish_try(operand, payload, frame_ret, hint, span, false)
                 } else {
                     self.report_try_return_mismatch(&operand_ty, &frame_ret, is_closure, span);
@@ -507,14 +513,8 @@ impl<'a> Checker<'a> {
             ITy::Result(ok_ty, err_ty) => {
                 let payload = (**ok_ty).clone();
                 let error = (**err_ty).clone();
-                if let ITy::Result(ret_ok, ret_err) = &resolved_ret {
-                    let expected_ok = (**ret_ok).clone();
+                if let ITy::Result(_, ret_err) = &resolved_ret {
                     let expected_err = (**ret_err).clone();
-                    if !self.unify_quiet(&expected_ok, &payload) {
-                        let expected = self.infer.resolve(&expected_ok);
-                        let found = self.infer.resolve(&payload);
-                        self.report_mismatch(&expected, &found, span);
-                    }
                     if !self.unify_quiet(&expected_err, &error) {
                         let expected = self.infer.resolve(&expected_err);
                         let found = self.infer.resolve(&error);
@@ -1296,7 +1296,7 @@ impl<'a> Checker<'a> {
         let raw_ty = self.infer.resolve(&base_expr.ty);
         let base_ty = self.peel_refs(&raw_ty);
         match &base_ty {
-            ITy::Vec(elem) => {
+            ITy::Vec(elem) | ITy::Slice(elem) => {
                 let elem = (**elem).clone();
                 self.apply_hint(&elem, hint);
                 TExpr::new(
@@ -1319,6 +1319,23 @@ impl<'a> Checker<'a> {
                 self.never_expr(span)
             }
         }
+    }
+
+    /// Check a bare slice expression, `base[start..end]`, whose value is not
+    /// behind a reference.
+    ///
+    /// Slice values are unsized, so a bare slice expression is a placement
+    /// error; the operands are still checked so that inference and borrow
+    /// analysis see them.
+    fn check_slice_expr(
+        &mut self,
+        base: &ast::Expr,
+        start: Option<&ast::Expr>,
+        end: Option<&ast::Expr>,
+        inclusive: bool,
+        span: Span,
+    ) -> TExpr {
+        self.check_bare_slice(base, start, end, inclusive, span)
     }
 
     // -- helpers ------------------------------------------------------------

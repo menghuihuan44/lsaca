@@ -4,8 +4,11 @@ Version 1.5.0 adds the `Iterator<T>` trait and a lazy adapter pipeline over it.
 Iterators are ordinary values: an adapter returns a generic struct that stores
 its input and the closures it needs, and nothing runs until a terminal operation
 asks for the next item. The trait and the adapter functions themselves are
-written in lsaca — they live in the compiler's standard-library prelude — but a
-program only uses the public surface described here.
+written in lsaca — in 2.0.0 they live in the `std` crate (`std::iter`,
+`stdlib/src/iter.ls`), whose root re-exports the prelude names — but a program
+only uses the public surface described here. The 2.0 design adds the `zip`,
+`chain`, `rev` and `flat_map` adapters; they are not implemented in 2.0.0 and
+are planned for a later release (see [iter](../stdlib/iter.md)).
 
 The trait is small:
 
@@ -18,8 +21,8 @@ pub trait Iterator<T> {
 `T` is the **item type**. `next` returns `Some(item)` while items remain and
 `None` once the iterator is exhausted. It takes `&mut self`, so calling it
 borrows the iterator but does not consume it: call `next` as often as needed.
-The `Iterator` trait is part of the prelude; do not declare another trait with
-that name.
+The `Iterator` trait is re-exported by the `std` crate root, so it is in scope in
+every module; do not declare another trait with that name.
 
 ## Getting an iterator from a Vec
 
@@ -46,13 +49,13 @@ None
 
 Unlike Rust's `into_iter`, `.iter()` **consumes the vector**: the iterator owns
 the elements from then on, so `values` cannot be used again. That is a
-documented deviation from Rust (there is no borrowing iteration of a `Vec` in
-1.5.0), but it means `.iter()` works for any element type, including move-only
-types that are neither `Copy` nor cloneable.
+documented deviation from Rust (`.iter()` still consumes the vector in 2.0.0), but
+it means `.iter()` works for any element type, including move-only types that
+are neither `Copy` nor cloneable.
 
 The iterator value may be stored in a local and advanced later. Its concrete
-type is an ordinary generic struct from the prelude, so the compiler names it
-with the usual generic display form; programs rarely need to spell it.
+type is an ordinary generic struct from the `std` crate, so the compiler names
+it with the usual generic display form; programs rarely need to spell it.
 
 ## Adapters
 
@@ -375,10 +378,9 @@ vector shown.
 
 ## What is not provided
 
-The 1.7.0 iterator pipeline is deliberately small. It has no:
+The 2.0 iterator pipeline is still deliberately small. It has no:
 
-* `rev`/`reverse`, `zip`, `chain`, `flat_map`, `for_each`, `size_hint` or
-  slices;
+* `for_each`, `size_hint` or double-ended iteration;
 * `iter_mut` or borrowing iteration over a `Vec` (`.iter()` consumes it);
 * `into_iter` (the method is spelled `.iter()`);
 * for-loop iteration over a `HashMap` (use `keys()`/`values()`, see
@@ -387,10 +389,16 @@ The 1.7.0 iterator pipeline is deliberately small. It has no:
   structs implement the trait, while ranges keep their own `for` lowering;
 * `collect` into anything except `Vec<T>`.
 
-## Known limitations in 1.7.0
+The 2.0 design closes part of that gap: `zip`, `chain`, `rev` and `flat_map`
+join the adapter set, and iteration over slices (`&[T]`) arrives with the slice
+methods. Neither is implemented in 2.0.0: the adapter names below are not
+available and slices are not iterable yet (see [iter](../stdlib/iter.md) for the
+planned signatures).
 
-* `.iter()` consumes the `Vec`; there is no way to iterate a vector by
-  reference in 1.7.0.
+## Known limitations in 2.0.0
+
+* `.iter()` still consumes the `Vec`; a borrowed vector is not iterated by
+  `.iter()` (borrowing iteration goes through slice references instead).
 * `collect` needs a known result type; a bare `collect()` without an
   annotation or turbofish is `E0282`.
 * `sum` supports `i64` and `f64` items only; other item types are `E0277`.
@@ -410,7 +418,9 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 * `Iterator<T>` has one method, `next(&mut self) -> Option<T>`.
 * `.iter()` consumes a `Vec<T>` and yields its elements in order.
 * Adapters `map`, `filter`, `take`, `skip` and `enumerate` are lazy and
-  chainable; `enumerate` turns the item type into `(i64, T)`.
+  chainable; `enumerate` turns the item type into `(i64, T)`. The 2.0 design
+  adds `zip`, `chain`, `rev` and `flat_map`; they are not implemented in 2.0.0
+  and are planned for a later release.
 * Terminal operations are `collect`, `fold`, `count`, `sum`, `any`, `all` and
   `find`.
 * `for` loops consume any concrete `Iterator<T>`; user structs and enums can
@@ -422,5 +432,6 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 
 * Declaring traits and implementing them: [Traits](18-traits.md).
 * Writing generic structs, functions and impls: [Generics](17-generics.md).
-* The `Vec` methods behind `.iter()`: [Standard library](15-standard-library.md#vec).
+* The `Vec` methods behind `.iter()`: [Standard library](15-standard-library.md).
+* The `std::iter` module: [iter](../stdlib/iter.md).
 * Key/value storage: [HashMap](20-hashmap.md).

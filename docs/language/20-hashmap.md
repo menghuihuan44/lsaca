@@ -11,9 +11,16 @@ it is passed to functions by value or by
 reference like any other value (see [Ownership and
 moves](11-ownership-and-moves.md)).
 
+In 2.0 the map is `std::collections::HashMap`: the type stays builtin (its
+declaration in the `std` crate is a marker that the compiler maps to the
+builtin table) and the API described here is unchanged, so the same methods work
+through `use std::collections::HashMap` or through the prelude re-export. See
+the standard library reference for [HashMap](../stdlib/collections/hash-map.md).
+
 Unlike `Vec`, the key type is restricted: it must be one of `i64`, `u64`,
-`bool`, `String` or `char`. The value type may be any valid value type,
-including move-only types and types that implement `Drop`.
+`isize`, `usize`, `bool`, `String` or `char`. The value type may be any valid
+value type, including move-only types and types that implement `Drop`. The
+pointer-sized integer types hash like the other integer types.
 
 ## Creating a map
 
@@ -253,8 +260,8 @@ Output:
 
 ## Key types
 
-The key type must be `i64`, `u64`, `bool`, `String` or `char`. Other key types
-are rejected at the point where the map type is formed:
+The key type must be `i64`, `u64`, `isize`, `usize`, `bool`, `String` or `char`.
+Other key types are rejected at the point where the map type is formed:
 
 ```ls,compile-fail
 fn main() {
@@ -265,7 +272,7 @@ fn main() {
 
 Error:
 ```text
-error[E0277]: HashMap keys must be one of i64, u64, bool, char or String, found Vec<i64>
+error[E0277]: HashMap keys must be one of i64, u64, isize, usize, bool, char or String, found Vec<i64>
   --> example-11.ls:2:18
    |
  2 |     let mut map: HashMap<Vec<i64>, i64> = HashMap::new();
@@ -405,10 +412,10 @@ error[E0277]: cannot iterate over a value of type HashMap<i64, i64>; for loops r
 lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
-## Known limitations in 1.7.0
+## Known limitations in 2.0.0
 
-* Key types are limited to `i64`, `u64`, `bool`, `String` and `char`; user
-  structs, enums and other types cannot be keys.
+* Key types are limited to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and
+  `char`; user structs, enums and other types cannot be keys.
 * There is no entry API, no `HashMap::from`, no `insert_or_update`, and no
   iteration over the map; `keys()` and `values()` allocate a vector.
 * `get` and `values()` require a cloneable value type; a `Drop` value cannot
@@ -428,7 +435,8 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 ## Summary
 
 * `HashMap<K, V>` is a builtin generic map with key types `i64`, `u64`,
-  `bool`, `String` and `char`; the value type may be any value type.
+  `isize`, `usize`, `bool`, `String` and `char`; the value type may be any
+  value type.
 * `HashMap::new()` creates a map; type arguments come from annotations,
   parameters, return types or the turbofish.
 * `insert` moves key and value and returns the previous value; `get` copies the
@@ -438,11 +446,13 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 * `insert`, `remove` and `clear` need a mutable binding.
 * `==` compares contents, ignoring insertion order; `{}` and `{:?}` print the
   entries in slot order.
-* There is no `for`-loop iteration over a map in 1.7.0.
+* There is no `for`-loop iteration over a map in 2.0.0 either.
 
 ## What next
 
 * Iterating `keys()` and `values()` results: [Iterators](19-iterators.md).
+* The `std::collections` reference: [HashMap](../stdlib/collections/hash-map.md)
+  and [collections](../stdlib/collections/README.md).
 * Generic types in general: [Generics](17-generics.md).
 * The `Vec` API: [Standard library](15-standard-library.md#vec).
 * Ownership and the move checker: [Ownership and moves](11-ownership-and-moves.md).

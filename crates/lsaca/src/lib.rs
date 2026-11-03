@@ -2,8 +2,10 @@
 //!
 //! lsaca is a statically typed, Rust-flavoured language that compiles to C.
 //! Its memory management model is ORC: every owned value is reference counted
-//! (like Nim's ARC/ORC) and mutation uses copy-on-write, so programs never need
-//! a tracing garbage collector.
+//! (like Nim's ARC/ORC) and a trial-deletion cycle collector reclaims reference
+//! cycles, so programs never need a tracing garbage collector. The standard
+//! library is written in lsaca itself (stdlib/src) and embedded into the
+//! compiler.
 //!
 //! # Compilation pipeline
 //!
@@ -31,6 +33,8 @@ pub mod parser;
 pub mod prelude;
 pub mod runtime;
 pub mod span;
+pub mod stdlib;
+mod stdlib_embed;
 pub mod typeck;
 pub mod types;
 

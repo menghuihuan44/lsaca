@@ -88,6 +88,9 @@ impl<'a> Checker<'a> {
             | ITy::Rc(_)
             | ITy::Fn(..)
             | ITy::Ref { .. }
+            | ITy::Slice(_)
+            | ITy::Str
+            | ITy::Dyn(_)
             | ITy::Never
             | ITy::Var(_) => false,
         }
@@ -96,11 +99,22 @@ impl<'a> Checker<'a> {
     /// Whether the type may be borrowed mutably.
     ///
     /// In addition to plain values, mutable references to heap types are
-    /// allowed: `&mut String`, `&mut Vec<T>`, `&mut Rc<T>` and `&mut Box<T>`.
+    /// allowed: `&mut String`, `&mut Vec<T>`, `&mut Rc<T>`, `&mut Box<T>` and
+    /// `&mut HashMap<K, V>`. Every sized user struct, enum and tuple is also a
+    /// valid mutable target (the borrow checker enforces exclusive access);
+    /// references are still not storable inside aggregates, so a struct with a
+    /// reference field cannot be borrowed mutably.
     pub fn is_mutable_reference_target(&mut self, ty: &ITy) -> bool {
         let ty = self.infer.resolve(ty);
         match &ty {
-            ITy::String | ITy::Vec(_) | ITy::Rc(_) | ITy::Box(_) => true,
+            ITy::String
+            | ITy::Vec(_)
+            | ITy::Rc(_)
+            | ITy::Box(_)
+            | ITy::HashMap(_, _)
+            | ITy::Struct(_)
+            | ITy::Enum(_)
+            | ITy::Tuple(_) => true,
             _ => self.is_plain_value_type(&ty),
         }
     }
@@ -178,6 +192,9 @@ impl<'a> Checker<'a> {
             | ITy::Rc(_)
             | ITy::Box(_)
             | ITy::HashMap(_, _)
+            | ITy::Slice(_)
+            | ITy::Str
+            | ITy::Dyn(_)
             | ITy::Fn(..) => false,
             ITy::Unit
             | ITy::Bool

@@ -34,6 +34,17 @@
 //! reports E0505. As elsewhere the analysis stays conservative: `while`
 //! conditions keep their previous loop-wide region.
 //!
+//! Version 2.0 adds slices and trait objects. A slice expression borrows its
+//! base for as long as the reference it is part of lives, exactly like a plain
+//! `&base`: `&values[1..3]` is a shared borrow of `values` and
+//! `&mut values[..]` is exclusive. The bounds are evaluated before the borrow
+//! starts, so `&values[..values.len()]` is fine. Coercing a `Box<T>`/`Rc<T>`
+//! handle to a trait object moves the handle - and with it the boxed value, so
+//! a live borrow of the contents reports E0505 - while coercing `&T`/`&mut T`
+//! keeps the same borrow. A dynamic call borrows its receiver for the call: a
+//! `&mut self` method needs exclusive access and a `&self` method shared
+//! access.
+//!
 //! The analysis is a single forward pass over the HIR per function and per
 //! closure. Every borrow expression creates a loan over a Target: a local, a
 //! borrowed parameter or a captured variable, plus a projection path of
@@ -943,7 +954,15 @@ impl<'a> FnChecker<'a> {
                 target
             }
             HExprKind::Index { base, .. } => self.target_of_place(base),
-            HExprKind::Deref { expr } => self.provenance_value(expr).target,
+            HExprKind::Deref { expr } => {
+                if expr.ty.is_ref() {
+                    self.provenance_value(expr).target
+                } else {
+                    // Dereferencing an owned Box/Rc handle borrows the
+                    // handle place; that is what conflicts with a move.
+                    self.target_of_place(expr)
+                }
+            }
             _ => {
                 if expr.ty.is_ref() {
                     self.provenance_value(expr).target
@@ -977,8 +996,14 @@ impl<'a> FnChecker<'a> {
                 (target, via.or_else(|| self.root_reference(base)))
             }
             HExprKind::Deref { expr } => {
-                let provenance = self.provenance_value(expr);
-                (provenance.target, self.root_reference(expr))
+                let via = self.root_reference(expr);
+                if expr.ty.is_ref() {
+                    (self.provenance_value(expr).target, via)
+                } else {
+                    // A write through an owned Box/Rc handle writes the
+                    // handle place.
+                    (self.target_of_place(expr), via)
+                }
             }
             _ => (Target::opaque(), None),
         }
@@ -1014,13 +1039,21 @@ impl<'a> FnChecker<'a> {
                 expr: inner,
             } => {
                 let loan = self.ptr_loan.get(&expr_address(expr)).copied();
-                let target = self.target_of_place(inner);
+                // Slicing borrows the base, so the provenance of `&v[..]` is
+                // the base place rather than an opaque value; that is what
+                // makes returning a slice of a local escape (E0515).
+                let target = if let HExprKind::Slice { base, .. } = &inner.kind {
+                    self.slice_place(base).0
+                } else {
+                    self.target_of_place(inner)
+                };
                 Provenance {
                     target,
                     mutable: *mutable,
                     loan,
                 }
             }
+            HExprKind::DynCoerce { value, .. } => self.provenance_value(value),
             HExprKind::Block(block) => match &block.tail {
                 Some(tail) => self.provenance_value(tail),
                 None => opaque,
@@ -1133,6 +1166,7 @@ impl<'a> FnChecker<'a> {
         match &expr.kind {
             HExprKind::Ref { .. } => self.ptr_loan.get(&expr_address(expr)).copied(),
             HExprKind::Local { c_name, .. } => self.lookup(c_name).and_then(|id| self.loan_of(id)),
+            HExprKind::DynCoerce { value, .. } => self.origin_loan(value),
             // A field or element projection reborrows from the place it is
             // projected out of: either the loan behind an auto-dereferenced
             // reference, or the implicit loan of a `&mut self` receiver.
@@ -1328,13 +1362,9 @@ impl<'a> FnChecker<'a> {
             },
         };
         let mutable = ty.is_ref_mut();
-        let adopted = match init {
-            Some(init) => match &init.kind {
-                HExprKind::Ref { .. } => self.ptr_loan.get(&expr_address(init)).copied(),
-                _ => None,
-            },
-            None => None,
-        };
+        // A reference initializer hands its loan to the new binding, also
+        // when it was coerced to a trait-object reference.
+        let adopted = init.and_then(|init| self.adopted_loan(init));
         let loan = if let Some(loan_id) = adopted {
             if let Some(loan) = self.loans.get_mut(loan_id) {
                 loan.owner = Some(id);
@@ -1425,10 +1455,171 @@ impl<'a> FnChecker<'a> {
         }
     }
 
+    /// Record the implicit borrow a slice expression performs.
+    ///
+    /// A slice value is always the inside of a reference (`&base[start..end]`),
+    /// and that reference borrows the base for as long as it lives, exactly
+    /// like a plain `&base`. The bounds are ordinary `i64` expressions
+    /// evaluated before the borrow starts, so a bound may read the base
+    /// without extending the borrow; the tick keeps the two event ranges
+    /// disjoint. When the base is itself a reference the borrow applies to the
+    /// referent, exactly like `&*base`.
+    fn walk_slice_borrow(
+        &mut self,
+        ref_expr: &HExpr,
+        base: &HExpr,
+        start: Option<&HExpr>,
+        end: Option<&HExpr>,
+        mutable: bool,
+    ) {
+        if let Some(start) = start {
+            self.walk_expr(start);
+        }
+        if let Some(end) = end {
+            self.walk_expr(end);
+        }
+        let _ = self.tick();
+        self.walk_place(base);
+        let (target, parent) = self.slice_place(base);
+        let loan = self.push_loan(target, mutable, ref_expr.span, None, parent, self.idx);
+        self.ptr_loan.insert(expr_address(ref_expr), loan);
+    }
+
+    /// The place a slice expression borrows, and the loan it reborrows from.
+    fn slice_place(&self, base: &HExpr) -> (Target, Option<LoanId>) {
+        if base.ty.is_ref() {
+            let provenance = self.provenance_value(base);
+            (provenance.target, provenance.loan)
+        } else {
+            (self.target_of_place(base), self.origin_loan(base))
+        }
+    }
+
+    /// The place a dynamic call borrows through its receiver.
+    ///
+    /// `Box<dyn Trait>`/`Rc<dyn Trait>` hold the object, so the receiver is
+    /// the place storing the handle. `&dyn Trait`/`&mut dyn Trait` borrow
+    /// through the reference, so the receiver is the referent.
+    fn dyn_receiver_place(&self, object: &HExpr) -> (Target, Option<NameId>) {
+        let (target, via) = if object.ty.is_ref() {
+            let provenance = self.provenance_value(object);
+            (provenance.target, self.root_reference(object))
+        } else {
+            (self.target_of_place(object), None)
+        };
+        // Only a reference-typed local owns a loan; writing through it is a
+        // self-write of that loan rather than a conflicting new access.
+        (target, via.filter(|id| self.ref_loan.contains_key(id)))
+    }
+
+    /// A reference value built in place by the expression itself (`&mut x`,
+    /// `&mut x as &mut dyn Trait`). The loan it creates already describes the
+    /// whole access, so no additional mutation or read event is recorded.
+    fn is_borrow_value(expr: &HExpr) -> bool {
+        match &expr.kind {
+            HExprKind::Ref { .. } => true,
+            HExprKind::DynCoerce { value, .. } => Self::is_borrow_value(value),
+            _ => false,
+        }
+    }
+
+    /// The loan a reference binding takes ownership of, looking through dyn
+    /// coercions: coercing `&T` to `&dyn Trait` keeps the same borrow.
+    fn adopted_loan(&self, expr: &HExpr) -> Option<LoanId> {
+        match &expr.kind {
+            HExprKind::Ref { .. } => self.ptr_loan.get(&expr_address(expr)).copied(),
+            HExprKind::DynCoerce { value, .. } => self.adopted_loan(value),
+            _ => None,
+        }
+    }
+
     fn walk_expr(&mut self, expr: &HExpr) {
         match &expr.kind {
             HExprKind::Lit(_) | HExprKind::ConstRef { .. } | HExprKind::FnRef { .. } => {}
             HExprKind::OptionNone | HExprKind::Break | HExprKind::Continue => {}
+            HExprKind::DynCoerce { value, .. } => {
+                // Appendix B contract, mirrored from the move checker:
+                // * Box<T> -> Box<dyn Trait> moves the box handle, and with it
+                //   the boxed value: a live borrow of the contents turns the
+                //   coercion into E0505;
+                // * Rc<T> -> Rc<dyn Trait> shares the handle instead of moving
+                //   it, so a live borrow of the contents is fine;
+                // * &T / &mut T -> &dyn / &mut dyn only changes the static type
+                //   of the same borrow.
+                match &value.ty {
+                    Ty::Box(_) => self.walk_consumed(value),
+                    Ty::Rc(_) | Ty::Ref { .. } => self.walk_expr(value),
+                    ty if self.program.is_copy(ty) => self.walk_expr(value),
+                    _ => self.walk_consumed(value),
+                }
+            }
+            HExprKind::DynCall {
+                object,
+                trait_object,
+                slot,
+                args,
+            } => {
+                // The call borrows the receiver: a &mut self method needs
+                // exclusive access, a &self method shared access. Box<dyn>
+                // and Rc<dyn> receivers own the object; &dyn and &mut dyn
+                // receivers borrow through the reference.
+                let receiver = self
+                    .program
+                    .trait_objects
+                    .get(*trait_object)
+                    .and_then(|trait_object| trait_object.methods.get(*slot))
+                    .map(|method| method.receiver);
+                match receiver {
+                    // Object safety rules out a by-value receiver; stay
+                    // conservative for malformed HIR.
+                    Some(SelfKind::Value) => self.walk_consumed(object),
+                    Some(SelfKind::RefMut) => {
+                        self.walk_place(object);
+                        // A mutable borrow created for the call itself
+                        // already makes the access exclusive, so only a place
+                        // receiver records a write.
+                        if !Self::is_borrow_value(object) {
+                            let (target, via) = self.dyn_receiver_place(object);
+                            self.mutations.push(Mutation {
+                                target,
+                                via,
+                                idx: self.idx,
+                                span: expr.span,
+                            });
+                        }
+                    }
+                    _ => {
+                        self.walk_place(object);
+                        // A shared call through an owned handle reads it;
+                        // through a reference, that reference's own loan
+                        // already describes the access.
+                        if !object.ty.is_ref()
+                            && !matches!(&object.kind, HExprKind::Deref { expr } if expr.ty.is_ref())
+                        {
+                            let (target, _) = self.dyn_receiver_place(object);
+                            self.reads.push(Read {
+                                target,
+                                idx: self.idx,
+                                span: expr.span,
+                            });
+                        }
+                    }
+                }
+                for arg in args {
+                    self.walk_consumed(arg);
+                }
+            }
+            HExprKind::Slice {
+                base, start, end, ..
+            } => {
+                self.walk_expr(base);
+                if let Some(start) = start {
+                    self.walk_expr(start);
+                }
+                if let Some(end) = end {
+                    self.walk_expr(end);
+                }
+            }
             HExprKind::Local { name, c_name } => {
                 self.register(c_name, name);
                 self.use_local(c_name, self.idx);
@@ -1663,11 +1854,20 @@ impl<'a> FnChecker<'a> {
                 mutable,
                 expr: inner,
             } => {
-                self.walk_place(inner);
-                let target = self.target_of_place(inner);
-                let parent = self.origin_loan(inner);
-                let loan = self.push_loan(target, *mutable, expr.span, None, parent, self.idx);
-                self.ptr_loan.insert(expr_address(expr), loan);
+                // A slice never stands alone: every slice value is the inside
+                // of a reference, and the slice expression borrows its base.
+                if let HExprKind::Slice {
+                    base, start, end, ..
+                } = &inner.kind
+                {
+                    self.walk_slice_borrow(expr, base, start.as_deref(), end.as_deref(), *mutable);
+                } else {
+                    self.walk_place(inner);
+                    let target = self.target_of_place(inner);
+                    let parent = self.origin_loan(inner);
+                    let loan = self.push_loan(target, *mutable, expr.span, None, parent, self.idx);
+                    self.ptr_loan.insert(expr_address(expr), loan);
+                }
             }
             HExprKind::Deref { expr } => self.walk_expr(expr),
         }
@@ -1685,7 +1885,18 @@ impl<'a> FnChecker<'a> {
                 self.walk_place(base);
                 self.walk_expr(index);
             }
-            HExprKind::Deref { expr } => self.walk_expr(expr),
+            HExprKind::Deref { expr } => {
+                // Auto-deref of a reference reuses the reference's
+                // provenance; an owned Box/Rc handle is only used (kept
+                // live), never read immutably, so taking a borrow of the
+                // contents such as `&mut *boxed` does not count as a
+                // shared read of the handle itself.
+                if expr.ty.is_ref() {
+                    self.walk_expr(expr);
+                } else {
+                    self.walk_place(expr);
+                }
+            }
             _ => self.walk_expr(expr),
         }
     }
@@ -3056,5 +3267,952 @@ mod tests {
                  println!(\"{}\", total);
              }",
         );
+    }
+    // -- v2.0 Phase B: slices and trait objects, checked at the HIR level ----
+    //
+    // Slices and trait objects are lowered by the type checker in the same
+    // release that introduces them. These tests build the HIR directly, so the
+    // borrow rules for the new shapes are pinned down independently of the
+    // front end syntax. Every program declares its locals without
+    // initializers: the borrow checker reasons about places and events, not
+    // about values, and the code generator is never run.
+
+    use crate::types::{IntTy, SelfKind, Ty};
+
+    fn ir_span() -> crate::span::Span {
+        crate::span::Span { start: 0, end: 0 }
+    }
+
+    fn i64_ty() -> Ty {
+        Ty::Int(IntTy::I64)
+    }
+
+    fn vec_ty() -> Ty {
+        Ty::Vec(Box::new(i64_ty()))
+    }
+
+    fn dynamic_ty() -> Ty {
+        Ty::Dyn(0)
+    }
+
+    fn box_ty(inner: Ty) -> Ty {
+        Ty::Box(Box::new(inner))
+    }
+
+    fn rc_ty(inner: Ty) -> Ty {
+        Ty::Rc(Box::new(inner))
+    }
+
+    fn ref_ty(mutable: bool, inner: Ty) -> Ty {
+        Ty::Ref {
+            mutable,
+            inner: Box::new(inner),
+        }
+    }
+
+    fn slice_ty() -> Ty {
+        Ty::Slice(Box::new(i64_ty()))
+    }
+
+    fn local(name: &str, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::Local {
+                name: name.to_string(),
+                c_name: name.to_string(),
+            },
+            ir_span(),
+        )
+    }
+
+    fn int_expr(value: i128) -> hir::HExpr {
+        hir::HExpr::new(
+            i64_ty(),
+            hir::HExprKind::Lit(hir::HLit::Int {
+                value,
+                int_ty: IntTy::I64,
+            }),
+            ir_span(),
+        )
+    }
+
+    fn deref_expr(inner: hir::HExpr, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::Deref {
+                expr: Box::new(inner),
+            },
+            ir_span(),
+        )
+    }
+
+    fn ref_expr(inner: hir::HExpr, ty: Ty, mutable: bool) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::Ref {
+                mutable,
+                expr: Box::new(inner),
+            },
+            ir_span(),
+        )
+    }
+
+    /// Build `&base[start..end]`. `inner` is the unsized referent type ([T]
+    /// or str) and is also the element type stored on the Slice node.
+    fn slice_expr(
+        base: hir::HExpr,
+        start: Option<hir::HExpr>,
+        end: Option<hir::HExpr>,
+        mutable: bool,
+        inner: Ty,
+    ) -> hir::HExpr {
+        let result_ty = ref_ty(mutable, inner.clone());
+        let slice = hir::HExpr::new(
+            inner,
+            hir::HExprKind::Slice {
+                base: Box::new(base),
+                start: start.map(Box::new),
+                end: end.map(Box::new),
+                inclusive: false,
+            },
+            ir_span(),
+        );
+        hir::HExpr::new(
+            result_ty,
+            hir::HExprKind::Ref {
+                mutable,
+                expr: Box::new(slice),
+            },
+            ir_span(),
+        )
+    }
+
+    fn builtin_method(
+        receiver: hir::HExpr,
+        method: hir::HBuiltinMethod,
+        args: Vec<hir::HExpr>,
+        ty: Ty,
+    ) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::BuiltinMethod {
+                receiver: Box::new(receiver),
+                method,
+                args,
+            },
+            ir_span(),
+        )
+    }
+
+    fn dyn_coerce(value: hir::HExpr, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::DynCoerce {
+                value: Box::new(value),
+                vtable: 0,
+            },
+            ir_span(),
+        )
+    }
+
+    fn dyn_call(object: hir::HExpr, slot: usize, ret: Ty, args: Vec<hir::HExpr>) -> hir::HExpr {
+        hir::HExpr::new(
+            ret,
+            hir::HExprKind::DynCall {
+                object: Box::new(object),
+                trait_object: 0,
+                slot,
+                args,
+            },
+            ir_span(),
+        )
+    }
+
+    /// A trait object with a `&mut self` method in slot 0 and a `&self`
+    /// method in slot 1: the object safe receiver shapes of the language.
+    fn trait_object() -> hir::HTraitObject {
+        hir::HTraitObject {
+            name: "Speaker".to_string(),
+            args: Vec::new(),
+            c_name: "LsVTable_Speaker".to_string(),
+            methods: vec![
+                hir::HTraitMethodSig {
+                    name: "bump".to_string(),
+                    receiver: SelfKind::RefMut,
+                    params: Vec::new(),
+                    ret: Ty::Unit,
+                },
+                hir::HTraitMethodSig {
+                    name: "speak".to_string(),
+                    receiver: SelfKind::Ref,
+                    params: Vec::new(),
+                    ret: i64_ty(),
+                },
+            ],
+        }
+    }
+
+    fn bind_pat(name: &str, ty: Ty) -> hir::HPat {
+        hir::HPat {
+            ty,
+            kind: hir::HPatKind::Bind {
+                c_name: name.to_string(),
+                name: name.to_string(),
+            },
+            span: ir_span(),
+        }
+    }
+
+    fn let_stmt(name: &str, ty: Ty, init: Option<hir::HExpr>) -> hir::HStmt {
+        hir::HStmt::Let {
+            pat: bind_pat(name, ty),
+            init,
+            span: ir_span(),
+        }
+    }
+
+    fn use_stmt(name: &str, ty: Ty) -> hir::HStmt {
+        hir::HStmt::Expr(local(name, ty))
+    }
+
+    fn block(stmts: Vec<hir::HStmt>, tail: Option<hir::HExpr>) -> hir::HBlock {
+        hir::HBlock {
+            stmts,
+            tail: tail.map(Box::new),
+            span: ir_span(),
+        }
+    }
+
+    /// A fresh program whose only function is `main` with the given body.
+    fn main_program(body: hir::HBlock, trait_objects: Vec<hir::HTraitObject>) -> hir::Program {
+        hir::Program {
+            name: "borrow_phase_b_unit".to_string(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+            fns: vec![hir::HFn {
+                name: "main".to_string(),
+                c_name: "lsaca_fn_main".to_string(),
+                params: Vec::new(),
+                ret: Ty::Unit,
+                self_kind: None,
+                intrinsic: false,
+                body,
+                span: ir_span(),
+            }],
+            consts: Vec::new(),
+            closures: Vec::new(),
+            main_fn: 0,
+            copy_structs: Vec::new(),
+            copy_enums: Vec::new(),
+            drop_structs: Vec::new(),
+            drop_enums: Vec::new(),
+            trait_objects,
+            vtables: Vec::new(),
+        }
+    }
+
+    /// Assert that the borrow checker accepts a hand-built program.
+    fn accepted(program: &hir::Program) {
+        let diagnostics = check(program);
+        assert!(
+            !diagnostics.has_errors(),
+            "borrow checker rejected the program: {}",
+            messages(&diagnostics)
+        );
+    }
+
+    /// Assert that the borrow checker reports one of the expected error codes.
+    fn rejected(program: &hir::Program, expected: &[&str]) {
+        let diagnostics = check(program);
+        let codes = diagnostics
+            .as_slice()
+            .iter()
+            .filter_map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert!(
+            expected.iter().any(|code| codes.contains(code)),
+            "expected one of {:?}, got: {}",
+            expected,
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn slice_borrow_conflicts_with_vec_push_while_live() {
+        let part_ty = ref_ty(false, slice_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "part",
+                        part_ty.clone(),
+                        Some(slice_expr(
+                            local("values", vec_ty()),
+                            Some(int_expr(1)),
+                            Some(int_expr(3)),
+                            false,
+                            slice_ty(),
+                        )),
+                    ),
+                    hir::HStmt::Expr(builtin_method(
+                        local("values", vec_ty()),
+                        hir::HBuiltinMethod::VecPush,
+                        vec![int_expr(4)],
+                        Ty::Unit,
+                    )),
+                ],
+                Some(local("part", part_ty)),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0506"]);
+    }
+
+    #[test]
+    fn slice_borrow_that_ends_before_the_mutation_is_accepted() {
+        let part_ty = ref_ty(false, slice_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "part",
+                        part_ty.clone(),
+                        Some(slice_expr(
+                            local("values", vec_ty()),
+                            Some(int_expr(1)),
+                            Some(int_expr(3)),
+                            false,
+                            slice_ty(),
+                        )),
+                    ),
+                    use_stmt("part", part_ty.clone()),
+                    hir::HStmt::Expr(builtin_method(
+                        local("values", vec_ty()),
+                        hir::HBuiltinMethod::VecPush,
+                        vec![int_expr(4)],
+                        Ty::Unit,
+                    )),
+                ],
+                None,
+            ),
+            Vec::new(),
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn mutable_slice_borrow_conflicts_with_a_shared_read() {
+        let part_ty = ref_ty(true, slice_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "part",
+                        part_ty.clone(),
+                        Some(slice_expr(
+                            local("values", vec_ty()),
+                            None,
+                            None,
+                            true,
+                            slice_ty(),
+                        )),
+                    ),
+                    hir::HStmt::Expr(builtin_method(
+                        local("values", vec_ty()),
+                        hir::HBuiltinMethod::VecLen,
+                        Vec::new(),
+                        i64_ty(),
+                    )),
+                ],
+                Some(local("part", part_ty)),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0502"]);
+    }
+
+    #[test]
+    fn string_slice_borrow_conflicts_with_push_str_while_live() {
+        let part_ty = ref_ty(false, Ty::Str);
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("text", Ty::String, None),
+                    let_stmt(
+                        "part",
+                        part_ty.clone(),
+                        Some(slice_expr(
+                            local("text", Ty::String),
+                            None,
+                            None,
+                            false,
+                            Ty::Str,
+                        )),
+                    ),
+                    hir::HStmt::Expr(builtin_method(
+                        local("text", Ty::String),
+                        hir::HBuiltinMethod::StrPushStr,
+                        Vec::new(),
+                        Ty::Unit,
+                    )),
+                ],
+                Some(local("part", part_ty)),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0506"]);
+    }
+
+    #[test]
+    fn slice_bounds_are_evaluated_before_the_borrow_starts() {
+        let part_ty = ref_ty(true, slice_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "part",
+                        part_ty.clone(),
+                        Some(slice_expr(
+                            local("values", vec_ty()),
+                            None,
+                            Some(builtin_method(
+                                local("values", vec_ty()),
+                                hir::HBuiltinMethod::VecLen,
+                                Vec::new(),
+                                i64_ty(),
+                            )),
+                            true,
+                            slice_ty(),
+                        )),
+                    ),
+                ],
+                Some(local("part", part_ty)),
+            ),
+            Vec::new(),
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn mutable_slice_borrow_of_a_shared_borrowed_value_is_rejected() {
+        let whole_ty = ref_ty(false, vec_ty());
+        let part_ty = ref_ty(true, slice_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "whole",
+                        whole_ty.clone(),
+                        Some(ref_expr(local("values", vec_ty()), whole_ty.clone(), false)),
+                    ),
+                    let_stmt(
+                        "part",
+                        part_ty.clone(),
+                        Some(slice_expr(
+                            local("values", vec_ty()),
+                            None,
+                            None,
+                            true,
+                            slice_ty(),
+                        )),
+                    ),
+                ],
+                Some(local("whole", whole_ty)),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0499", "E0502"]);
+    }
+
+    #[test]
+    fn box_coercion_moves_the_handle_while_its_contents_are_borrowed() {
+        let boxed_ty = box_ty(i64_ty());
+        let seen_ty = ref_ty(false, i64_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", boxed_ty.clone(), None),
+                    let_stmt(
+                        "seen",
+                        seen_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("boxed", boxed_ty.clone()), i64_ty()),
+                            seen_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    let_stmt(
+                        "coerced",
+                        box_ty(dynamic_ty()),
+                        Some(dyn_coerce(local("boxed", boxed_ty), box_ty(dynamic_ty()))),
+                    ),
+                ],
+                Some(local("seen", seen_ty)),
+            ),
+            vec![trait_object()],
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn rc_coercion_shares_the_handle_while_its_contents_are_borrowed() {
+        let shared_ty = rc_ty(i64_ty());
+        let seen_ty = ref_ty(false, i64_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("shared", shared_ty.clone(), None),
+                    let_stmt(
+                        "seen",
+                        seen_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("shared", shared_ty.clone()), i64_ty()),
+                            seen_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    let_stmt(
+                        "coerced",
+                        rc_ty(dynamic_ty()),
+                        Some(dyn_coerce(local("shared", shared_ty), rc_ty(dynamic_ty()))),
+                    ),
+                ],
+                Some(local("seen", seen_ty)),
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn box_coercion_after_the_borrow_ends_is_accepted() {
+        let boxed_ty = box_ty(i64_ty());
+        let seen_ty = ref_ty(false, i64_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", boxed_ty.clone(), None),
+                    let_stmt(
+                        "seen",
+                        seen_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("boxed", boxed_ty.clone()), i64_ty()),
+                            seen_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    use_stmt("seen", seen_ty),
+                    let_stmt(
+                        "coerced",
+                        box_ty(dynamic_ty()),
+                        Some(dyn_coerce(local("boxed", boxed_ty), box_ty(dynamic_ty()))),
+                    ),
+                ],
+                None,
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn box_coercion_while_a_mutable_borrow_is_live_is_rejected() {
+        let boxed_ty = box_ty(i64_ty());
+        let seen_ty = ref_ty(true, i64_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", boxed_ty.clone(), None),
+                    let_stmt(
+                        "seen",
+                        seen_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("boxed", boxed_ty.clone()), i64_ty()),
+                            seen_ty.clone(),
+                            true,
+                        )),
+                    ),
+                    let_stmt(
+                        "coerced",
+                        box_ty(dynamic_ty()),
+                        Some(dyn_coerce(local("boxed", boxed_ty), box_ty(dynamic_ty()))),
+                    ),
+                ],
+                Some(local("seen", seen_ty)),
+            ),
+            vec![trait_object()],
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn dyn_call_with_mut_receiver_conflicts_with_a_shared_borrow() {
+        let boxed_ty = box_ty(dynamic_ty());
+        let seen_ty = ref_ty(false, dynamic_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", boxed_ty.clone(), None),
+                    let_stmt(
+                        "seen",
+                        seen_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("boxed", boxed_ty.clone()), dynamic_ty()),
+                            seen_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    hir::HStmt::Expr(dyn_call(local("boxed", boxed_ty), 0, Ty::Unit, Vec::new())),
+                ],
+                Some(local("seen", seen_ty)),
+            ),
+            vec![trait_object()],
+        );
+        rejected(&program, &["E0506"]);
+    }
+
+    #[test]
+    fn dyn_call_with_shared_receiver_is_accepted() {
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", box_ty(dynamic_ty()), None),
+                    hir::HStmt::Expr(dyn_call(
+                        local("boxed", box_ty(dynamic_ty())),
+                        1,
+                        i64_ty(),
+                        Vec::new(),
+                    )),
+                ],
+                None,
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn dyn_call_through_a_shared_trait_object_reference_is_accepted() {
+        let boxed_ty = box_ty(dynamic_ty());
+        let view_ty = ref_ty(false, dynamic_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", boxed_ty.clone(), None),
+                    let_stmt(
+                        "view",
+                        view_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("boxed", boxed_ty), dynamic_ty()),
+                            view_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    hir::HStmt::Expr(dyn_call(
+                        local("view", view_ty.clone()),
+                        1,
+                        i64_ty(),
+                        Vec::new(),
+                    )),
+                ],
+                Some(local("view", view_ty)),
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn dyn_call_with_mut_receiver_through_a_mutable_trait_object_reference_is_accepted() {
+        let boxed_ty = box_ty(dynamic_ty());
+        let view_ty = ref_ty(true, dynamic_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", boxed_ty.clone(), None),
+                    let_stmt(
+                        "view",
+                        view_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("boxed", boxed_ty), dynamic_ty()),
+                            view_ty.clone(),
+                            true,
+                        )),
+                    ),
+                    hir::HStmt::Expr(dyn_call(
+                        local("view", view_ty.clone()),
+                        0,
+                        Ty::Unit,
+                        Vec::new(),
+                    )),
+                ],
+                Some(local("view", view_ty)),
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn dyn_call_with_mut_receiver_on_an_owned_box_is_accepted() {
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", box_ty(dynamic_ty()), None),
+                    hir::HStmt::Expr(dyn_call(
+                        local("boxed", box_ty(dynamic_ty())),
+                        0,
+                        Ty::Unit,
+                        Vec::new(),
+                    )),
+                ],
+                None,
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn slice_borrow_inside_a_loop_ends_with_the_iteration() {
+        let part_ty = ref_ty(false, slice_ty());
+        let body = block(
+            vec![let_stmt(
+                "part",
+                part_ty.clone(),
+                Some(slice_expr(
+                    local("values", vec_ty()),
+                    None,
+                    None,
+                    false,
+                    slice_ty(),
+                )),
+            )],
+            Some(local("part", part_ty)),
+        );
+        let loop_expr = hir::HExpr::new(
+            Ty::Unit,
+            hir::HExprKind::ForRange {
+                pat: bind_pat("index", i64_ty()),
+                start: Box::new(int_expr(0)),
+                end: Box::new(int_expr(3)),
+                inclusive: false,
+                body,
+            },
+            ir_span(),
+        );
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    hir::HStmt::Expr(loop_expr),
+                    hir::HStmt::Expr(builtin_method(
+                        local("values", vec_ty()),
+                        hir::HBuiltinMethod::VecPush,
+                        vec![int_expr(4)],
+                        Ty::Unit,
+                    )),
+                ],
+                None,
+            ),
+            Vec::new(),
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn reference_coercion_keeps_the_same_borrow() {
+        let values_ty = vec_ty();
+        let whole_ty = ref_ty(false, values_ty.clone());
+        let dyn_view_ty = ref_ty(false, dynamic_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", values_ty.clone(), None),
+                    let_stmt(
+                        "whole",
+                        whole_ty.clone(),
+                        Some(ref_expr(
+                            local("values", values_ty),
+                            whole_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    let_stmt(
+                        "dyn_view",
+                        dyn_view_ty.clone(),
+                        Some(dyn_coerce(local("whole", whole_ty.clone()), dyn_view_ty)),
+                    ),
+                ],
+                Some(local("whole", whole_ty)),
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn box_coercion_without_a_live_borrow_is_accepted() {
+        let boxed_ty = box_ty(i64_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", boxed_ty.clone(), None),
+                    let_stmt(
+                        "coerced",
+                        box_ty(dynamic_ty()),
+                        Some(dyn_coerce(local("boxed", boxed_ty), box_ty(dynamic_ty()))),
+                    ),
+                ],
+                None,
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn slice_borrow_prevents_moving_the_base() {
+        let part_ty = ref_ty(false, slice_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "part",
+                        part_ty.clone(),
+                        Some(slice_expr(
+                            local("values", vec_ty()),
+                            Some(int_expr(1)),
+                            Some(int_expr(3)),
+                            false,
+                            slice_ty(),
+                        )),
+                    ),
+                    let_stmt("moved", vec_ty(), Some(local("values", vec_ty()))),
+                ],
+                Some(local("part", part_ty)),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn slice_borrow_that_ends_allows_moving_the_base() {
+        let part_ty = ref_ty(false, slice_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "part",
+                        part_ty.clone(),
+                        Some(slice_expr(
+                            local("values", vec_ty()),
+                            None,
+                            None,
+                            false,
+                            slice_ty(),
+                        )),
+                    ),
+                    use_stmt("part", part_ty),
+                    let_stmt("moved", vec_ty(), Some(local("values", vec_ty()))),
+                ],
+                None,
+            ),
+            Vec::new(),
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn dyn_call_argument_that_moves_a_borrowed_value_is_rejected() {
+        let seen_ty = ref_ty(false, vec_ty());
+        let object_ty = ref_ty(false, dynamic_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "seen",
+                        seen_ty.clone(),
+                        Some(ref_expr(local("values", vec_ty()), seen_ty.clone(), false)),
+                    ),
+                    let_stmt("object", object_ty.clone(), None),
+                    hir::HStmt::Expr(dyn_call(
+                        local("object", object_ty),
+                        1,
+                        i64_ty(),
+                        vec![local("values", vec_ty())],
+                    )),
+                ],
+                Some(local("seen", seen_ty)),
+            ),
+            vec![trait_object()],
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn dyn_call_with_mut_receiver_through_a_reference_conflicts_with_a_shared_borrow() {
+        let boxed_ty = box_ty(dynamic_ty());
+        let view_ty = ref_ty(true, dynamic_ty());
+        let shared_ty = ref_ty(false, dynamic_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("boxed", boxed_ty.clone(), None),
+                    let_stmt(
+                        "view",
+                        view_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("boxed", boxed_ty.clone()), dynamic_ty()),
+                            view_ty.clone(),
+                            true,
+                        )),
+                    ),
+                    let_stmt(
+                        "shared",
+                        shared_ty.clone(),
+                        Some(ref_expr(
+                            deref_expr(local("boxed", boxed_ty), dynamic_ty()),
+                            shared_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    hir::HStmt::Expr(dyn_call(local("view", view_ty), 0, Ty::Unit, Vec::new())),
+                ],
+                Some(local("shared", shared_ty)),
+            ),
+            vec![trait_object()],
+        );
+        rejected(&program, &["E0499", "E0502"]);
+    }
+
+    #[test]
+    fn dyn_call_with_shared_receiver_on_an_owned_rc_is_accepted() {
+        let object_ty = rc_ty(dynamic_ty());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("object", object_ty.clone(), None),
+                    hir::HStmt::Expr(dyn_call(
+                        local("object", object_ty),
+                        1,
+                        i64_ty(),
+                        Vec::new(),
+                    )),
+                ],
+                None,
+            ),
+            vec![trait_object()],
+        );
+        accepted(&program);
     }
 }

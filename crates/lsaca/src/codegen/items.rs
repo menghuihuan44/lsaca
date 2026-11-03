@@ -31,7 +31,9 @@ use super::c_writer::CWriter;
 use super::emit::{BoundVar, EnvInfo, Gen};
 use super::helper_defs;
 use super::helpers;
+use super::inline::InlinePlan;
 use super::ops;
+use super::reachability::Reachability;
 use super::types::{
     EMPTY_STRUCT_FIELD, FN_ENV_FIELD, FN_PTR_FIELD, OPTION_SOME_MEMBER, RESULT_ERR_MEMBER,
     RESULT_OK_MEMBER, TAG_FIELD, TypeDef, TypeRegistry, UNION_FIELD, field_cname, positional_field,
@@ -56,8 +58,17 @@ pub(crate) fn generate_project(
     program: &Program,
     registry: &TypeRegistry,
     options: &CodegenOptions,
+    inline_plan: &InlinePlan,
+    reachability: &Reachability,
 ) -> (String, Vec<GeneratedUnit>) {
-    let mut generator = Gen::new(program, registry, options, CWriter::new());
+    let mut generator = Gen::new(
+        program,
+        registry,
+        options,
+        inline_plan,
+        reachability,
+        CWriter::new(),
+    );
     generator.emit_program()
 }
 
@@ -88,11 +99,14 @@ impl<'a> Gen<'a> {
 
         let ordered = self.registry.topological_order(self.program);
         self.emit_forward_typedefs(&ordered);
+        self.emit_vtable_forward_typedefs();
         self.emit_type_definitions(&ordered);
+        self.emit_vtable_types();
         helpers::emit_env_types(&mut self.w);
         self.emit_env_structs();
         helpers::emit_helper_prototypes(&mut self.w, self.program, self.registry);
         self.emit_function_prototypes();
+        self.emit_vtable_thunk_prototypes();
         let declarations = self.take_w();
 
         helpers::emit_helper_definitions(&mut self.w, self.program, self.registry);
@@ -102,6 +116,8 @@ impl<'a> Gen<'a> {
         let helper_definitions = self.take_w();
 
         self.emit_thunks();
+        self.emit_vtable_thunks();
+        self.emit_vtable_tables();
         self.emit_closure_fns();
         let closure_support = self.take_w();
 
@@ -177,6 +193,7 @@ impl<'a> Gen<'a> {
         unit_prefix.append(declarations.clone());
         self.emit_interned_literal_externs(&mut unit_prefix);
         self.emit_thunk_prototypes(&mut unit_prefix);
+        self.emit_vtable_table_externs(&mut unit_prefix);
         let unit_prefix = unit_prefix.finish();
         let units: Vec<GeneratedUnit> = groups
             .into_iter()
@@ -269,6 +286,21 @@ impl<'a> Gen<'a> {
             self.w.line(format!("return ({})value;", c_type));
             self.w.dedent();
             self.w.line("}");
+        }
+        self.w.blank();
+    }
+
+    /// Forward declarations of the generated vtable struct types. They must
+    /// precede the trait object struct definitions, which hold a pointer to
+    /// one of them.
+    fn emit_vtable_forward_typedefs(&mut self) {
+        if self.program.trait_objects.is_empty() {
+            return;
+        }
+        for trait_object in &self.program.trait_objects {
+            let c_name = trait_object.c_name.clone();
+            self.w
+                .line(format!("typedef struct {} {};", c_name, c_name));
         }
         self.w.blank();
     }
@@ -413,6 +445,59 @@ impl<'a> Gen<'a> {
                 self.w.line("};");
                 self.w.blank();
             }
+            TypeDef::Slice(elem) => {
+                // A slice is a by-value fat pointer: borrowed data and a
+                // length. It is never owned, so it is not managed.
+                let c_name = self.registry.tag(ty);
+                let element = self.registry.ctype(&elem);
+                self.w.line(format!("struct {} {{", c_name));
+                self.w.indent();
+                self.w.line(format!("{}* data;", element));
+                self.w.line("size_t len;");
+                self.w.dedent();
+                self.w.line("};");
+                self.w.blank();
+            }
+            TypeDef::Str => {
+                // str is the byte-slice specialisation with its own C name so
+                // that signatures read LsStr instead of LsSlice_u8.
+                self.w.line("struct LsStr {");
+                self.w.indent();
+                self.w.line("uint8_t* data;");
+                self.w.line("size_t len;");
+                self.w.dedent();
+                self.w.line("};");
+                self.w.blank();
+            }
+            TypeDef::Dyn(index) => {
+                // A trait object value: erased data pointer plus the vtable of
+                // the (trait instance, concrete self type) pair it came from.
+                let c_name = self.registry.tag(ty);
+                let vtable = self.trait_object_c_name(index);
+                self.w.line(format!("struct {} {{", c_name));
+                self.w.indent();
+                self.w
+                    .line(format!("void* {};", super::types::DYN_DATA_FIELD));
+                self.w.line(format!(
+                    "const {}* {};",
+                    vtable,
+                    super::types::DYN_VTABLE_FIELD
+                ));
+                self.w.dedent();
+                self.w.line("};");
+                self.w.blank();
+            }
+        }
+    }
+
+    /// C type name of the generated vtable struct for a trait object.
+    fn trait_object_c_name(&self, index: usize) -> String {
+        match self.program.trait_objects.get(index) {
+            Some(trait_object) => trait_object.c_name.clone(),
+            None => util::internal_error(format!(
+                "trait object {} is missing from the program",
+                index
+            )),
         }
     }
 
@@ -479,6 +564,9 @@ impl<'a> Gen<'a> {
     fn emit_env_structs(&mut self) {
         let closures = self.program.closures.clone();
         for closure in &closures {
+            if !self.reachability.is_closure_reachable(closure.id) {
+                continue;
+            }
             self.w
                 .line(format!("typedef struct LsEnv_{} {{", closure.id));
             self.w.indent();
@@ -500,6 +588,9 @@ impl<'a> Gen<'a> {
     fn emit_env_drops(&mut self) {
         let closures = self.program.closures.clone();
         for closure in &closures {
+            if !self.reachability.is_closure_reachable(closure.id) {
+                continue;
+            }
             let c_type = format!("LsEnv_{}", closure.id);
             self.w
                 .line(format!("void lsaca_env_drop_{}(void* self) {{", closure.id));
@@ -530,6 +621,9 @@ impl<'a> Gen<'a> {
     fn emit_env_traces(&mut self) {
         let closures = self.program.closures.clone();
         for closure in &closures {
+            if !self.reachability.is_closure_reachable(closure.id) {
+                continue;
+            }
             let c_type = format!("LsEnv_{}", closure.id);
             self.w.line(format!(
                 "void lsaca_trace_env_{}(const void* payload, LsTraceVisit visit) {{",
@@ -555,7 +649,16 @@ impl<'a> Gen<'a> {
 
     fn emit_function_prototypes(&mut self) {
         let fns = self.program.fns.clone();
-        for function in &fns {
+        for (fn_id, function) in fns.iter().enumerate() {
+            // Intrinsics expand at their call sites and forwarding wrappers are
+            // expanded too, so neither needs a C prototype. Unreachable
+            // functions get no definition, so they need no prototype either.
+            if function.intrinsic
+                || self.inline_plan.is_inlined(fn_id)
+                || !self.reachability.is_reachable(fn_id)
+            {
+                continue;
+            }
             let return_type = self.registry.ctype(&function.ret);
             let parameters = self.fn_param_declarations(&function.params, function.self_kind);
             self.w.line(format!(
@@ -567,6 +670,9 @@ impl<'a> Gen<'a> {
         }
         let closures = self.program.closures.clone();
         for closure in &closures {
+            if !self.reachability.is_closure_reachable(closure.id) {
+                continue;
+            }
             let return_type = self.registry.ctype(&closure.ret);
             let parameters = self.fn_param_declarations(&closure.params, None);
             self.w.line(format!(
@@ -594,9 +700,25 @@ impl<'a> Gen<'a> {
                     Some(SelfKind::Ref) | Some(SelfKind::RefMut) => {
                         // The HIR signature stores the receiver as a shared or
                         // mutable reference, but the C calling convention
-                        // passes a plain pointer to the impl type.
+                        // passes a plain pointer to the impl type. Unsized
+                        // receivers (impl str, impl [T]) are already fat
+                        // descriptors, so they are passed by value. A shared
+                        // receiver whose pointee is itself a pointer (&String,
+                        // &Rc<T>) keeps the reference type's const
+                        // qualification so wrapper bodies can copy the
+                        // parameter without discarding qualifiers.
                         parameter_type = match param.ty.ref_inner() {
-                            Some(inner) => format!("{}*", self.registry.ctype(inner)),
+                            Some(inner) if inner.is_unsized() => self.registry.ctype(&param.ty),
+                            Some(inner) => {
+                                let inner_ctype = self.registry.ctype(inner);
+                                if matches!(self_kind, Some(SelfKind::Ref))
+                                    && inner_ctype.ends_with('*')
+                                {
+                                    self.registry.ctype(&param.ty)
+                                } else {
+                                    format!("{}*", inner_ctype)
+                                }
+                            }
                             None => format!("{}*", parameter_type),
                         };
                     }
@@ -611,7 +733,14 @@ impl<'a> Gen<'a> {
     fn emit_thunks(&mut self) {
         let fns = self.program.fns.clone();
         for (fn_id, function) in fns.iter().enumerate() {
-            if function.self_kind.is_some() {
+            // Intrinsics have no C definition, so they get no thunk either.
+            // Expanded wrappers only exist as call sites, so they need no thunk.
+            // Unreachable functions have no thunk either.
+            if function.self_kind.is_some()
+                || function.intrinsic
+                || self.inline_plan.is_inlined(fn_id)
+                || !self.reachability.is_reachable(fn_id)
+            {
                 continue;
             }
             let return_type = self.registry.ctype(&function.ret);
@@ -641,6 +770,9 @@ impl<'a> Gen<'a> {
     fn emit_closure_fns(&mut self) {
         let closures = self.program.closures.clone();
         for closure in &closures {
+            if !self.reachability.is_closure_reachable(closure.id) {
+                continue;
+            }
             let return_type = self.registry.ctype(&closure.ret);
             let parameters = self.fn_param_declarations(&closure.params, None);
             self.w.line(format!(
@@ -669,7 +801,18 @@ impl<'a> Gen<'a> {
     fn emit_user_fns(&mut self) -> Vec<String> {
         let fns = self.program.fns.clone();
         let mut texts = Vec::with_capacity(fns.len());
-        for function in &fns {
+        for (fn_id, function) in fns.iter().enumerate() {
+            // Intrinsic declarations are expanded at their call sites and have
+            // no C definition; expanded wrappers are only call sites too, and
+            // unreachable functions are pruned. Keep one slot per function so
+            // ids stay indexes.
+            if function.intrinsic
+                || self.inline_plan.is_inlined(fn_id)
+                || !self.reachability.is_reachable(fn_id)
+            {
+                texts.push(String::new());
+                continue;
+            }
             // The buffer must be empty between functions; each function body is
             // generated into a fresh writer and captured afterwards.
             self.w = CWriter::new();
@@ -874,7 +1017,11 @@ impl<'a> Gen<'a> {
     fn emit_thunk_prototypes(&self, w: &mut CWriter) {
         let mut emitted = false;
         for (fn_id, function) in self.program.fns.iter().enumerate() {
-            if function.self_kind.is_some() {
+            if function.self_kind.is_some()
+                || function.intrinsic
+                || self.inline_plan.is_inlined(fn_id)
+                || !self.reachability.is_reachable(fn_id)
+            {
                 continue;
             }
             let return_type = self.registry.ctype(&function.ret);

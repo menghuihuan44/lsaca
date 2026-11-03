@@ -7,7 +7,9 @@ fn lcg_next(state: i64) -> i64 {
 }
 
 fn main() {
-    let n: i64 = 200000;
+    // Optional argument: value count; the default is the medium scale.
+    let all = args();
+    let n: i64 = if all.len() > 0 { all[0].clone().parse_i64().unwrap() } else { 200000 };
     let mut values: Vec<i64> = Vec::new();
     let mut state: i64 = 12345;
     let mut i = 0;

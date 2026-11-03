@@ -16,6 +16,13 @@
 //! loop head on later iterations. Code after a terminating statement (return,
 //! break, continue) is unreachable and produces no diagnostics.
 //!
+//! Phase B adds trait object coercions and slice expressions: a Box<T> to
+//! Box<dyn Trait> coercion moves the box handle, an Rc<T> to Rc<dyn Trait>
+//! coercion shares the handle (so Rc<dyn Trait> is classified as Copy even
+//! though plain Rc<T> stays move-only), a reference coercion only borrows its
+//! referent, a dynamic method call auto-derefs and borrows its object, and a
+//! slice expression implicitly borrows its base.
+//!
 //! Two related diagnostics are owned by other passes: E0505 (cannot move while
 //! borrowed) belongs to the borrow checker and E0509 (moving out of a value
 //! with drop glue through a pattern binding) belongs to the type checker. This
@@ -138,6 +145,21 @@ impl<'a> FnChecker<'a> {
         self.diagnostics
     }
 
+    /// Copy classification used by the move checker.
+    ///
+    /// The HIR classification predates phase B: it treats every Rc<T> as an
+    /// owning, move-only handle. Phase B trait objects share an Rc handle when
+    /// it is copied (the reference count is increased, the value stays live),
+    /// so Rc<dyn Trait> is Copy for move checking. Plain Rc<T> keeps the v1.x
+    /// move-only behavior, and Box handles are always move-only, including
+    /// Box<dyn Trait>.
+    fn is_copy_value(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Rc(inner) => matches!(**inner, Ty::Dyn(_)),
+            _ => self.program.is_copy(ty),
+        }
+    }
+
     // ------------------------------------------------------------------
     // Diagnostics
     // ------------------------------------------------------------------
@@ -182,7 +204,7 @@ impl<'a> FnChecker<'a> {
     /// Consume a binding: mark it moved, or report a use of an already moved
     /// value.
     fn consume_local(&mut self, name: &str, binding: &str, ty: &Ty, span: Span) {
-        if self.program.is_copy(ty) {
+        if self.is_copy_value(ty) {
             // Copying never moves the source; this is a read.
             return;
         }
@@ -344,6 +366,59 @@ impl<'a> FnChecker<'a> {
     fn walk_expr(&mut self, expr: &HExpr, ctx: Ctx) -> bool {
         match &expr.kind {
             HExprKind::Lit(_) | HExprKind::ConstRef { .. } | HExprKind::FnRef { .. } => true,
+            HExprKind::DynCoerce { value, .. } => {
+                // Coercing a concrete value into a trait object. The concrete
+                // handle decides what happens to the source:
+                // * Box<T> -> Box<dyn Trait> moves the box handle;
+                // * Rc<T> -> Rc<dyn Trait> shares the handle, so the source
+                //   stays live (Rc<dyn Trait> itself is Copy);
+                // * &T / &mut T -> &dyn / &mut dyn only borrows the referent.
+                let value_ctx = match &value.ty {
+                    Ty::Box(_) => Ctx::Consume,
+                    Ty::Rc(_) | Ty::Ref { .. } => Ctx::Borrow,
+                    other if self.is_copy_value(other) => Ctx::Borrow,
+                    _ => Ctx::Consume,
+                };
+                self.walk_expr(value, value_ctx)
+            }
+            HExprKind::DynCall {
+                object,
+                trait_object,
+                slot,
+                args,
+            } => {
+                // Dynamic dispatch auto-derefs the receiver, so the object is
+                // always borrowed: it is never moved or copied by the call.
+                self.walk_expr(object, Ctx::Borrow);
+                let params = self
+                    .program
+                    .trait_objects
+                    .get(*trait_object)
+                    .and_then(|trait_object| trait_object.methods.get(*slot))
+                    .map(|method| method.params.clone());
+                for (index, arg) in args.iter().enumerate() {
+                    let arg_ctx = match params.as_ref().and_then(|params| params.get(index)) {
+                        Some(param) if !param.is_ref() => Ctx::Consume,
+                        _ => Ctx::Borrow,
+                    };
+                    self.walk_expr(arg, arg_ctx);
+                }
+                true
+            }
+            HExprKind::Slice {
+                base, start, end, ..
+            } => {
+                // A slice expression implicitly borrows its base; the bounds
+                // are ordinary value expressions.
+                self.walk_expr(base, Ctx::Borrow);
+                if let Some(start) = start {
+                    self.walk_expr(start, Ctx::Consume);
+                }
+                if let Some(end) = end {
+                    self.walk_expr(end, Ctx::Consume);
+                }
+                true
+            }
             HExprKind::Local { name, c_name } => {
                 match ctx {
                     Ctx::Consume => self.consume_local(name, c_name, &expr.ty, expr.span),
@@ -352,7 +427,7 @@ impl<'a> FnChecker<'a> {
                 true
             }
             HExprKind::Capture { name, .. } => {
-                if ctx == Ctx::Consume && !self.program.is_copy(&expr.ty) {
+                if ctx == Ctx::Consume && !self.is_copy_value(&expr.ty) {
                     self.report_move_out_of(
                         expr.span,
                         &format!("the captured variable {}", name),
@@ -362,7 +437,7 @@ impl<'a> FnChecker<'a> {
                 true
             }
             HExprKind::Field { base, .. } => {
-                if ctx == Ctx::Consume && !self.program.is_copy(&expr.ty) {
+                if ctx == Ctx::Consume && !self.is_copy_value(&expr.ty) {
                     self.report_move_out_of(expr.span, "a field", &expr.ty);
                 } else {
                     self.read_place(base);
@@ -370,7 +445,7 @@ impl<'a> FnChecker<'a> {
                 true
             }
             HExprKind::Index { base, index } => {
-                if ctx == Ctx::Consume && !self.program.is_copy(&expr.ty) {
+                if ctx == Ctx::Consume && !self.is_copy_value(&expr.ty) {
                     self.report_move_out_of(expr.span, "an indexed element", &expr.ty);
                 } else {
                     self.read_place(base);
@@ -379,7 +454,7 @@ impl<'a> FnChecker<'a> {
                 true
             }
             HExprKind::Deref { expr: inner } => {
-                if ctx == Ctx::Consume && !self.program.is_copy(&expr.ty) {
+                if ctx == Ctx::Consume && !self.is_copy_value(&expr.ty) {
                     self.report_move_out_of(expr.span, "a dereferenced value", &expr.ty);
                 } else {
                     self.walk_expr(inner, Ctx::Borrow);
@@ -2163,8 +2238,8 @@ mod hir_tests {
     use super::check;
     use crate::diag::Diagnostics;
     use crate::hir::{
-        HArm, HBlock, HBuiltinMethod, HExpr, HExprKind, HField, HFieldRef, HFn, HLit, HPat,
-        HPatKind, HStmt, HStruct, Program,
+        HArm, HBlock, HBuiltinAssoc, HBuiltinMethod, HExpr, HExprKind, HField, HFieldRef, HFn,
+        HLit, HPat, HPatKind, HStmt, HStruct, HTraitMethodSig, HTraitObject, HVtable, Program,
     };
     use crate::span::Span;
     use crate::types::{IntTy, SelfKind, Ty};
@@ -2266,6 +2341,7 @@ mod hir_tests {
             params: Vec::new(),
             ret: Ty::unit(),
             self_kind: None,
+            intrinsic: false,
             body,
             span: sp(),
         }
@@ -2284,6 +2360,8 @@ mod hir_tests {
             copy_enums: Vec::new(),
             drop_structs: Vec::new(),
             drop_enums: Vec::new(),
+            trait_objects: Vec::new(),
+            vtables: Vec::new(),
         };
         program.classify_types(Vec::new(), Vec::new());
         program
@@ -3099,6 +3177,7 @@ mod hir_tests {
             params: Vec::new(),
             ret: Ty::option(Ty::String),
             self_kind: Some(SelfKind::RefMut),
+            intrinsic: false,
             body: block(vec![expr_stmt(loop_expr)]),
             span: sp(),
         };
@@ -3112,5 +3191,321 @@ mod hir_tests {
             "prelude FilterIter::next shape was rejected: {}",
             messages(&diagnostics)
         );
+    }
+
+    // -- phase B: trait object coercions, dynamic calls and slices ---------
+
+    const SHAPE_TRAIT: usize = 0;
+
+    /// The concrete, move-only type behind the trait object.
+    fn shape_type() -> Ty {
+        Ty::Struct(0)
+    }
+
+    fn shape_struct() -> HStruct {
+        HStruct {
+            name: "Square".to_string(),
+            c_name: "Square".to_string(),
+            fields: vec![HField {
+                name: "name".to_string(),
+                ty: Ty::String,
+            }],
+            span: sp(),
+        }
+    }
+
+    fn shape_trait_object() -> HTraitObject {
+        HTraitObject {
+            name: "Shape".to_string(),
+            args: Vec::new(),
+            c_name: "LsVTable_Shape".to_string(),
+            methods: vec![
+                HTraitMethodSig {
+                    name: "area".to_string(),
+                    receiver: SelfKind::Ref,
+                    params: Vec::new(),
+                    ret: Ty::f64(),
+                },
+                HTraitMethodSig {
+                    name: "absorb".to_string(),
+                    receiver: SelfKind::Ref,
+                    params: vec![shape_type()],
+                    ret: Ty::f64(),
+                },
+            ],
+        }
+    }
+
+    fn dyn_program(body: HBlock) -> Program {
+        let mut program = base_program(vec![main_fn(body)], vec![shape_struct()]);
+        program.trait_objects = vec![shape_trait_object()];
+        program.vtables = vec![HVtable {
+            trait_object: SHAPE_TRAIT,
+            self_ty: shape_type(),
+            methods: vec![0, 0],
+        }];
+        program.classify_types(Vec::new(), Vec::new());
+        program
+    }
+
+    fn dyn_run(body: HBlock) -> Diagnostics {
+        check(&dyn_program(body))
+    }
+
+    fn dyn_accept(body: HBlock) {
+        let diagnostics = dyn_run(body);
+        assert!(
+            !diagnostics.has_errors(),
+            "move checker rejected valid phase B HIR: {}",
+            messages(&diagnostics)
+        );
+    }
+
+    fn shape_value() -> HExpr {
+        HExpr::new(
+            shape_type(),
+            HExprKind::StructLit {
+                struct_id: 0,
+                fields: vec![(0, str_lit("square"))],
+            },
+            sp(),
+        )
+    }
+
+    fn builtin_assoc(func: HBuiltinAssoc, args: Vec<HExpr>, ty: Ty) -> HExpr {
+        HExpr::new(
+            ty,
+            HExprKind::BuiltinAssoc {
+                func,
+                args,
+                type_args: Vec::new(),
+            },
+            sp(),
+        )
+    }
+
+    fn box_type() -> Ty {
+        Ty::box_(shape_type())
+    }
+
+    fn box_dyn_type() -> Ty {
+        Ty::box_(Ty::dynamic(SHAPE_TRAIT))
+    }
+
+    fn rc_type() -> Ty {
+        Ty::rc(shape_type())
+    }
+
+    fn rc_dyn_type() -> Ty {
+        Ty::rc(Ty::dynamic(SHAPE_TRAIT))
+    }
+
+    fn ref_dyn_type() -> Ty {
+        Ty::ref_to(Ty::dynamic(SHAPE_TRAIT))
+    }
+
+    fn boxed_shape() -> HExpr {
+        builtin_assoc(HBuiltinAssoc::BoxNew, vec![shape_value()], box_type())
+    }
+
+    fn shared_shape() -> HExpr {
+        builtin_assoc(HBuiltinAssoc::RcNew, vec![shape_value()], rc_type())
+    }
+
+    fn dyn_coerce(value: HExpr, ty: Ty) -> HExpr {
+        HExpr::new(
+            ty,
+            HExprKind::DynCoerce {
+                value: Box::new(value),
+                vtable: 0,
+            },
+            sp(),
+        )
+    }
+
+    fn dyn_call(object: HExpr, slot: usize, args: Vec<HExpr>) -> HExpr {
+        HExpr::new(
+            Ty::f64(),
+            HExprKind::DynCall {
+                object: Box::new(object),
+                trait_object: SHAPE_TRAIT,
+                slot,
+                args,
+            },
+            sp(),
+        )
+    }
+
+    fn int_vector() -> HExpr {
+        HExpr::new(
+            Ty::vec(Ty::i64()),
+            HExprKind::VecLit {
+                elems: vec![int_lit(1), int_lit(2)],
+            },
+            sp(),
+        )
+    }
+
+    fn int_vector_type() -> Ty {
+        Ty::vec(Ty::i64())
+    }
+
+    fn slice_of(base: HExpr) -> HExpr {
+        let slice_ty = Ty::slice(Ty::i64());
+        let slice = HExpr::new(
+            slice_ty.clone(),
+            HExprKind::Slice {
+                base: Box::new(base),
+                start: None,
+                end: None,
+                inclusive: false,
+            },
+            sp(),
+        );
+        HExpr::new(
+            Ty::ref_to(slice_ty),
+            HExprKind::Ref {
+                mutable: false,
+                expr: Box::new(slice),
+            },
+            sp(),
+        )
+    }
+
+    #[test]
+    fn box_coercion_moves_the_box_handle() {
+        // Box<T> -> Box<dyn Trait> moves the unique box handle: the later use
+        // of the box is a use of a moved value.
+        let body = block(vec![
+            let_stmt("boxed", boxed_shape()),
+            let_stmt(
+                "object",
+                dyn_coerce(local("boxed", box_type()), box_dyn_type()),
+            ),
+            expr_stmt(local("boxed", box_type())),
+        ]);
+        let diagnostics = dyn_run(body);
+        expect_code(&diagnostics, "E0382");
+    }
+
+    #[test]
+    fn rc_coercion_copies_the_shared_handle() {
+        // Rc<T> -> Rc<dyn Trait> shares the handle: the source stays live.
+        let body = block(vec![
+            let_stmt("shared", shared_shape()),
+            let_stmt(
+                "object",
+                dyn_coerce(local("shared", rc_type()), rc_dyn_type()),
+            ),
+            expr_stmt(local("shared", rc_type())),
+            expr_stmt(local("object", rc_dyn_type())),
+        ]);
+        dyn_accept(body);
+    }
+
+    #[test]
+    fn reference_coercion_borrows_the_payload() {
+        // &T -> &dyn Trait only borrows the referent, so the payload can still
+        // be moved afterwards.
+        let body = block(vec![
+            let_stmt("payload", shape_value()),
+            let_stmt(
+                "object",
+                dyn_coerce(borrow(local("payload", shape_type())), ref_dyn_type()),
+            ),
+            let_stmt("moved", local("payload", shape_type())),
+        ]);
+        dyn_accept(body);
+    }
+
+    #[test]
+    fn box_dyn_is_move_only() {
+        let body = block(vec![
+            let_stmt("boxed", boxed_shape()),
+            let_stmt(
+                "object",
+                dyn_coerce(local("boxed", box_type()), box_dyn_type()),
+            ),
+            let_stmt("alias", local("object", box_dyn_type())),
+            expr_stmt(local("object", box_dyn_type())),
+        ]);
+        let diagnostics = dyn_run(body);
+        expect_code(&diagnostics, "E0382");
+    }
+
+    #[test]
+    fn rc_dyn_is_copy() {
+        let body = block(vec![
+            let_stmt("shared", shared_shape()),
+            let_stmt(
+                "object",
+                dyn_coerce(local("shared", rc_type()), rc_dyn_type()),
+            ),
+            let_stmt("alias", local("object", rc_dyn_type())),
+            expr_stmt(local("object", rc_dyn_type())),
+            expr_stmt(local("alias", rc_dyn_type())),
+        ]);
+        dyn_accept(body);
+    }
+
+    #[test]
+    fn dynamic_call_borrows_the_object_through_auto_deref() {
+        let body = block(vec![
+            let_stmt("boxed", boxed_shape()),
+            let_stmt(
+                "object",
+                dyn_coerce(local("boxed", box_type()), box_dyn_type()),
+            ),
+            let_stmt(
+                "area",
+                dyn_call(local("object", box_dyn_type()), 0, Vec::new()),
+            ),
+            let_stmt("moved", local("object", box_dyn_type())),
+        ]);
+        dyn_accept(body);
+    }
+
+    #[test]
+    fn dynamic_call_consumes_by_value_arguments() {
+        let body = block(vec![
+            let_stmt("payload", shape_value()),
+            let_stmt("boxed", boxed_shape()),
+            let_stmt(
+                "object",
+                dyn_coerce(local("boxed", box_type()), box_dyn_type()),
+            ),
+            let_stmt(
+                "absorbed",
+                dyn_call(
+                    local("object", box_dyn_type()),
+                    1,
+                    vec![local("payload", shape_type())],
+                ),
+            ),
+            expr_stmt(local("payload", shape_type())),
+        ]);
+        let diagnostics = dyn_run(body);
+        expect_code(&diagnostics, "E0382");
+    }
+
+    #[test]
+    fn slice_expression_borrows_the_base_without_moving_it() {
+        let body = block(vec![
+            let_stmt("numbers", int_vector()),
+            let_stmt("view", slice_of(local("numbers", int_vector_type()))),
+            let_stmt("moved", local("numbers", int_vector_type())),
+        ]);
+        dyn_accept(body);
+    }
+
+    #[test]
+    fn slice_of_a_moved_vector_reports_e0382() {
+        let body = block(vec![
+            let_stmt("numbers", int_vector()),
+            let_stmt("moved", local("numbers", int_vector_type())),
+            let_stmt("view", slice_of(local("numbers", int_vector_type()))),
+        ]);
+        let diagnostics = dyn_run(body);
+        expect_code(&diagnostics, "E0382");
     }
 }

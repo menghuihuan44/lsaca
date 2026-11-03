@@ -271,7 +271,7 @@ done -2
 
 `loop` repeats its block forever. Leave it with `break` (optionally from inside a
 nested `if`). `continue` skips to the next iteration. A loop has type `()`:
-`break` cannot carry a value in 1.7.0.
+`break` cannot carry a value in 2.0.0.
 
 ```ls
 fn main() {
@@ -421,7 +421,7 @@ Output:
 1: b
 ```
 
-The `mut` on a loop variable is accepted in 1.7.0; the assignment does not affect
+The `mut` on a loop variable is accepted in 2.0.0; the assignment does not affect
 the sequence of values:
 
 ```ls
@@ -490,7 +490,7 @@ lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
 
 `break` and `continue` are valid only inside `loop`, `while` or `for`. `break`
 leaves the innermost loop, `continue` starts the next iteration of the innermost
-loop. There are no labels in 1.7.0, so to leave nested loops use a flag or a
+loop. There are no labels in 2.0.0, so to leave nested loops use a flag or a
 function with `return`.
 
 Outside a loop, `continue` (and `break`) is a compile error:

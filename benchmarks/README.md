@@ -5,7 +5,15 @@ This directory holds the benchmark programs and the measurement harness used for
 
 The goal is a *small* but honest comparison: the same workloads implemented
 idiomatically in lsaca, C, Rust, Python and Node.js, with every run validated against an
-expected checksum so no language can "win" by doing less work. Three compile-only
+expected checksum so no language can "win" by doing less work. The same source is also
+measured at more than one data size: thirteen workloads take arguments and are run at
+small, medium and large scales. Four algorithms have a second implementation that uses a
+different strategy (iterative and memoised fibonacci, insertion sort, array-based word
+counting) so implementation choices can be compared within one language. Expected
+checksums are never captured from a run: scripts/oracles.py reimplements every executed
+workload in Python and the harness refuses to start when an expected line disagrees with
+it. Six functional check programs under benchmarks/programs/checks/ assert closed forms,
+sort invariants and other properties outside the measured tables. Three compile-only
 workloads measure how the lsaca build scales with source size and project layout: a
 generated 4,511-line source, a nine-file multi-module program, and a thirteen-file project
 whose binary package depends on two library packages through path dependencies.
@@ -21,6 +29,13 @@ whose binary package depends on two library packages through path dependencies.
                            iterator_pipeline, hashmap_wordcount, generic_stack,
                            fn_pipeline, string_unicode, hashmap_i64,
                            hashmap_string
+        fib_iter.*, fib_memo.*, sort_insertion.*, array_wordcount.*
+                           alternative implementations, two sources each (lsaca and
+                           C only), producing the same checksums as the workload
+                           they mirror
+        checks/            six functional/property check programs (lsaca only); not
+                           part of the measured tables, driven by
+                           scripts/bench_checks.py
         compile_large.ls   generated 4,511-line lsaca source (compile-only workload)
         gen_compile_large.py  stdlib-only generator for compile_large.ls
         modules_compile/   compile-only multi-module program: main.ls plus eight
@@ -32,10 +47,24 @@ whose binary package depends on two library packages through path dependencies.
       results/
         latest.json        raw measurement data (machine + toolchains + timings)
         latest.md          generated markdown tables (a subset of the JSON)
+        v2-docs-page-template.md  layout of the v2.0 report sections for the docs page
+        v2-official-run-plan.md   exact command and acceptance checks for the official run
+        v2-report-preview.md      dry run of the report sections against the v1.7 archive
+        v2-report-sections.md     generated v2.0 report sections (after a run)
+        v2.0-report.md     rendered report the docs page was refreshed from
+        archive/v1.7/      frozen copy of the published 1.7.0 run (before/after baseline)
+        archive/v2.0-pre-perf/  Phase D pre-performance baseline (directional reference)
+        archive/v2.0/      frozen copy of the published 2.0.0 run
       README.md            this file
 
-scripts/bench.py is the harness. It is standard-library-only Python 3 and works on
-Windows, Linux and macOS.
+scripts/bench.py is the harness; scripts/oracles.py holds the independent reference
+implementations and the small/medium/large scale matrix, and scripts/bench_checks.py
+builds and runs the functional check programs. All three are standard-library-only
+Python 3 and work on Windows, Linux and macOS. scripts/bench_report.py renders the
+v2.0 report sections (workload detail, build artefacts, data scales, independent
+oracles and the before/after comparison) from a result JSON plus the frozen v1.7
+archive and the Phase D pre-performance archive; it writes
+benchmarks/results/v2-report-sections.md after an official run.
 
 ## Quick start
 
@@ -47,10 +76,13 @@ Then run the suite from the repository root:
 
     python scripts/bench.py
 
-That takes a few minutes on a modern laptop. The suite has twenty-one programs: eighteen
-are executed with 7 runs each plus the peak-memory runs, and three are compile-only. The
-published 1.6 run took about three and a half minutes for its nineteen programs, eighteen
-of them executed. The run writes:
+That takes several minutes on a modern laptop. The suite has twenty-five programs:
+twenty-two are executed (7 measured runs each plus the peak-memory run) and three are
+compile-only; thirteen of the executed workloads also have small and large data-scale rows
+(3 measured runs each by default). The published 1.6 run took about three and a half
+minutes for its nineteen programs, eighteen of them executed; the 2.0 suite adds the four
+alternative workloads, the data-scale rows and the functional check programs, so a full
+run takes noticeably longer. The run writes:
 
 - benchmarks/results/latest.json  (raw data)
 - benchmarks/results/latest.md    (tables)
@@ -60,11 +92,16 @@ Useful options:
 
     python scripts/bench.py --quick                    # faster: 3 runtime runs, 1 compile run
     python scripts/bench.py --list                     # show workload/language names
+    python scripts/bench.py --list-scales              # scale arguments + expected lines
     python scripts/bench.py --programs fib,vec_memory  # subset of workloads
     python scripts/bench.py --programs sort_i64,compile_large
     python scripts/bench.py --languages lsaca,c        # subset of languages
+    python scripts/bench.py --scale small,large        # subset of the data scales
+    python scripts/bench.py --scale-runs 5             # runs per small/large scale (default 3)
     python scripts/bench.py --build-mode fallback      # emit-c -r + direct gcc (labelled)
     python scripts/bench.py --help                     # all options
+
+    python scripts/bench_checks.py --debug             # functional check programs
 
 The default (auto) build mode tries the normal `lsaca build -r` path first (the direct C
 compiler back end since 1.2) and only falls back to `emit-c -r` plus gcc if that path
@@ -75,10 +112,13 @@ fails; fallback results are labelled in the JSON and in the markdown tables.
 | name | what it measures | workload | expected stdout |
 | --- | --- | --- | --- |
 | fib | call overhead / recursion | recursive fib(30), 10 repetitions | checksum=8320400 |
+| fib_iter | iterative fibonacci (alternative implementation) | the same fib(30) computed with two rolling values, 10 repetitions; same checksum as fib | checksum=8320400 |
+| fib_memo | memoised recursion (alternative implementation) | the same fib(30) computed recursively with a memo table, 10 repetitions; same checksum as fib | checksum=8320400 |
 | loop_sum | tight integer loop | sum of 1..=8,000,000 | checksum=32000004000000 |
 | string_build | string concatenation | 1,000,000 decimal tokens (i % 1000) each followed by a comma, then length and token sum | checksum=3890000,499500000 |
 | vec_memory | allocation / peak memory | 1,000,000 Point{x=i, y=2*i} records, checksum of x+y | checksum=1499998500000 |
 | sort_i64 | sorting / indexed writes | in-language iterative quicksort of 200,000 pseudo-random i64 values; checksum is first,last,sum | checksum=21749,2147481261,214813518297651 |
+| sort_insertion | insertion sort on a small input (alternative implementation) | the same pseudo-random sequence, n=1,000, sorted with insertion sort instead of quicksort; checksum is first,last,sum | checksum=91125,2140623151,1054904362226 |
 | matrix_multiply | nested loops / arithmetic | naive triple-loop multiply of two 160x160 i64 matrices; checksum is the sum of the result | checksum=1018924712000 |
 | binary_trees | recursive allocation / pointer chasing | perfect binary tree of depth 16 (131,071 nodes), recursive build and sum; the lsaca traversal takes its input by value and clones the child subtrees explicitly | checksum=2147450880 |
 | binary_trees_refs | borrowed traversal (references) | the same tree as binary_trees, but summed through borrowed references (&Option<Box<Node>>) instead of by value, so the traversal copies nothing; checksum matches binary_trees | checksum=2147450880 |
@@ -87,6 +127,7 @@ fails; fallback results are labelled in the JSON and in the markdown tables.
 | mandelbrot | floating point math | 600x400 Mandelbrot grid, 100 iterations max, sum of iteration counts | checksum=6282265 |
 | iterator_pipeline | lazy iterator pipeline overhead | 1,000,000 i64 values through .iter().filter(even).map(x*x).fold(0, add); checksum is the folded sum | checksum=166666166667000000 |
 | hashmap_wordcount | hash map counting with String keys | 200,000 deterministic words from a 4,096-word alphabet counted in a map; checksum is the sum of squared frequencies, the number of distinct keys and the highest frequency | checksum=9766208,4096,49 |
+| array_wordcount | flat array vs hash map (alternative implementation) | the same 200,000 words and 4,096 counters as hashmap_wordcount, counted in a flat indexed array instead of a hash map; same checksum | checksum=9766208,4096,49 |
 | generic_stack | generic type instantiation | one generic Stack<T> instantiated for i64 (1,000,000 push/pop) and String (1,000 strings), same code both times | checksum=499999500000,5900 |
 | fn_pipeline | function values in struct fields, mixed ownership | three Rule{label: String, apply: fn(i64)->i64} records applied 1,000x each plus a clone of the first, 500x; checksum is result sum and label bytes | checksum=53637,22 |
 | string_unicode | UTF-8 string handling | build a 120,000-scalar mixed ASCII/Unicode string one char at a time, fold every scalar from iteration and 1,000 random char_at accesses, apply full-Unicode to_uppercase, slice on character boundaries, push/pop and extend; checksum is char count, byte length and the folded scalar checksum | checksum=3357,6921,368454760 |
@@ -102,12 +143,98 @@ implementation cannot silently skew the tables. The compile-only workloads (comp
 modules_compile and package_compile) are the exception: they are built but never executed,
 because their purpose is to measure build time for different source and project layouts.
 
+The four alternative implementations (fib_iter, fib_memo, sort_insertion, array_wordcount)
+ship lsaca and C sources only: their point is comparing two strategies in the same language
+on identical data, and the C version is the same algorithm in C's closest honest style.
+Their checksums are identical to the workload they mirror, so the harness still validates
+that each implementation does the same work.
+
 sort_i64 uses the same deterministic LCG (16807 * state % 2147483647, seed 12345) in
 every language, and the other workloads use fixed integer formulas, so all five
 implementations process identical data. Every checksum is an integer (or a list of
 integers) so it is bit-exact across languages. compile_large.ls is generated:
 run python benchmarks/programs/gen_compile_large.py to recreate it; do not edit it by
 hand.
+
+## Data scales
+
+Thirteen workloads take their size from arguments, so the same source is measured at
+three data scales instead of one. The medium scale is the primary measurement in the
+tables above: the program is run with no arguments and keeps its default size. The small
+and large scales pass explicit arguments and are measured with
+`--scale-runs` runs (default 3):
+
+| program | small | medium (default) | large |
+| --- | --- | --- | --- |
+| fib, fib_iter, fib_memo | n=20, 10 repetitions | n=30, 10 repetitions | n=31, 10 repetitions |
+| loop_sum | sum 1..=1,000,000 | sum 1..=8,000,000 | sum 1..=12,000,000 |
+| string_build | 10,000 tokens | 1,000,000 tokens | 4,000,000 tokens |
+| sort_i64 | 1,000 values | 200,000 values | 500,000 values |
+| sort_insertion | 250 values | 1,000 values | 4,000 values |
+| binary_trees, binary_trees_refs | depth 10 | depth 16 | depth 18 |
+| string_split | 1,000 tokens | 50,000 tokens | 500,000 tokens |
+| sieve | limit 100,000 | limit 2,000,000 | limit 5,000,000 |
+| hashmap_wordcount, array_wordcount | 10,000 tokens | 200,000 tokens | 1,000,000 tokens |
+
+Small sizes keep the extra rows cheap, and the large sizes stay around a few seconds even
+in the slower languages. `python scripts/bench.py --list-scales` prints the exact
+arguments and the expected output line for every (program, scale) pair, and `--scale`
+restricts which scales a run measures. The runtime-by-scale table is written to
+latest.md and the scale records live under `programs.<name>.scales` in latest.json, so
+the primary tables keep their original shape.
+
+## Independent oracles
+
+Expected checksums are not captured from a run. scripts/oracles.py reimplements the
+workload algorithms in plain Python, from the workload descriptions and arithmetic alone,
+and is the single source of truth for both the primary and the scale expected lines. The
+harness calls it before measuring anything; if a PROGRAMS entry disagrees with the oracle
+it aborts with "independent oracle mismatch" instead of recording numbers, so a stale
+checksum cannot silently drift. Every language is then validated byte-for-byte against the
+same expected line, so a mismatch in the lsaca, C, Rust, Python or Node.js implementation
+fails the run before a number is recorded. The verification report is stored under
+`oracle_verification` in latest.json and summarised in the generated markdown (number of
+program and scale checksums verified, number of mismatches).
+
+## Functional checks
+
+benchmarks/programs/checks/ holds six lsaca-only programs that test behaviour instead of
+speed:
+
+- checks_loop_sum.ls: the closed-form sum n*(n+1)/2 at many sizes, then 1,000 repetitions.
+- checks_loop_sum_scale.ls: the same property at three argument-driven data scales.
+- checks_sort_invariants.ls: a hand-written insertion sort over 2,000 values; the output
+  must be ordered, keep the length and the sum, and expose the correct minimum and maximum.
+- checks_fib_relations.ls: recursive, iterative and memoised fibonacci must agree for
+  n=0..20 and a known value must hold at n=50.
+- checks_hashmap_counts.ls: hash-map counts must agree with a flat counter array, including
+  the sum of squared frequencies over the key set.
+- checks_string_roundtrip.ls: split/parse/format round-trips, char counts, case conversion
+  and prefix/suffix slicing.
+
+They self-assert with assert!/assert_eq!, so a wrong result exits nonzero, and each prints
+one "ok ..." line. scripts/bench_checks.py rebuilds them, runs every argument set, and
+compares the output byte for byte; it also requires empty stderr, which catches leaked
+runtime allocations in debug builds:
+
+    python scripts/bench_checks.py --debug              # release and debug builds
+    python scripts/bench_checks.py --warnings-as-errors
+    python scripts/bench_checks.py --list               # cases and expected lines
+
+The scale checksums are recomputed by the script's own Python reference, never read from a
+run. CI runs the quick check set in the cross-platform matrix workflow and the full set in
+the weekly smoke workflow.
+
+## Statistics
+
+The runtime tables report the median and the minimum of the measured runs. latest.json
+also records every individual run plus mean_s, stdev_s, an approximated 95% confidence
+interval ci95_s (1.96 * stdev / sqrt(n)), and outliers_s (runs farther than 3 * MAD from
+the median) with outlier_count, so a noisy host can be spotted afterwards. Data-scale rows
+use --scale-runs measured runs (default 3). Tables never mix machines: all rows in one
+result file are measured on the same host, and a saved result records that host, so a
+result file is never a cross-machine comparison. The cross-platform workflows only check
+that the workloads build and produce the expected checksums on each platform.
 
 ## What is measured
 
@@ -118,17 +245,27 @@ For every available (workload, language) pair:
      1.2 the default back end is the compiler's built-in direct C compiler back end: it
      emits the generated C and drives gcc itself (no CMake; the old CMake + Ninja path
      remains available as --cmake but the harness does not measure it). The cached build
-     (second invocation on a warm cache) is measured separately.
+     (second invocation on a warm cache) is measured separately. Cold and cached numbers
+     are medians of --compile-repeats runs (default 3); latest.json records every cold and
+     cached run plus the minimum and maximum.
    - C: gcc -O2 (one translation unit, no -lm needed).
    - Rust: rustc -O.
    - Python / Node.js: n/a, these are interpreted (Node.js loads and compiles at start-up;
      that start-up cost is included in the runtime numbers instead).
 2. Runtime: 1 warm-up run (not measured) plus 7 measured runs; median and minimum are
-   reported. The harness records every measured run.
+   reported. The harness records every measured run, and latest.json also carries the
+   distribution summary described under Statistics. Data-scale rows run the same
+   executable with the scale arguments and use --scale-runs measured runs (no extra
+   warm-up).
 3. Peak memory: a separate run is sampled for the peak working set of the child process
    (Windows: PROCESS_MEMORY_COUNTERS via psapi; Linux: /usr/bin/time -v, macOS:
    /usr/bin/time -l, with a /proc fallback). This is peak resident memory, not allocated
-   bytes, so it includes the language runtime itself.
+   bytes, so it includes the language runtime itself. Data-scale rows keep the same
+   treatment.
+4. Artifact sizes: latest.json records the executable bytes for lsaca, C and Rust
+   (exe_bytes) and the generated C size for lsaca (generated_c_bytes, summed over all
+   translation units); interpreted languages record source_bytes. The generated markdown
+   shows an "Artifact sizes" table.
 
 Machine and toolchain information (CPU, RAM, OS, compiler versions) is collected at run
 time and stored in latest.json, so a saved result is self-describing.
@@ -230,6 +367,16 @@ The newer workloads add these language-specific choices, all described on the do
   inserts owned strings into the builtin HashMap<String, i64>, C strdup's its keys and frees
   them, and the other languages use their native string-keyed maps; the absent-lookup phase
   folds the UTF-8 bytes of each absent key in every language.
+- fib_iter and fib_memo: the same fib(30) as fib, computed iteratively and with a memo
+  table. fib measures call overhead; the two alternatives show that one language can pay
+  very different costs for the same result, and that the checksum does not depend on the
+  algorithm.
+- sort_insertion: insertion sort of 1,000 values next to sort_i64's 200,000-value
+  quicksort over the same deterministic LCG sequence. The pair shows the algorithm cost
+  dominating at small n.
+- array_wordcount: the same word stream as hashmap_wordcount counted in a flat i64 array
+  indexed by token % 4,096 instead of a hash map. It separates hash-map overhead from the
+  counting loop itself, and it is the honest choice when the key space is small and dense.
 
 A contiguous array of values (C, Rust, lsaca) and a per-element object (Python, Node.js)
 are both the natural representation in their language; the compiler/VM overhead that
@@ -277,13 +424,24 @@ the caller's shell configuration.
 ## Adding a workload
 
 1. Add benchmarks/programs/<name>.<ext> for each language you want to cover, printing a
-   single line checksum=...
+   single line checksum=... . Every expected line has to be recomputable, so also add an
+   independent Python implementation of the workload to scripts/oracles.py.
 2. Add the name, expected stdout, description and workload text to PROGRAMS in
-   scripts/bench.py. Two optional keys exist for special workloads:
+   scripts/bench.py. Optional keys exist for special workloads:
    - "languages": ["lsaca"] restricts a workload to some languages (default: all five);
    - "compile_only": True builds the program but never executes it, and keeps it out of
-     the runtime and peak-memory tables (compile_large uses both keys).
-3. Run python scripts/bench.py --programs <name> --quick to smoke-test it.
+     the runtime and peak-memory tables (compile_large uses both keys);
+   - "alternative": True marks a second implementation of an existing algorithm; set
+     "languages" to the ones you actually wrote (the four existing alternatives ship
+     lsaca and C sources).
+   Workloads that take a size argument should also get a SCALES entry in
+   scripts/oracles.py; the harness then attaches the small/medium/large matrix and
+   measures the scales automatically.
+3. Run python scripts/bench.py --programs <name> --quick to smoke-test it; the run first
+   checks every expected line against scripts/oracles.py. Use
+   python scripts/bench.py --list-scales to verify the scale arguments and expected lines.
+4. Behaviour/property checks belong in benchmarks/programs/checks/ and are registered in
+   CHECKS in scripts/bench_checks.py, with their expected line recomputed there.
 
 ## Results and the docs page
 
@@ -296,10 +454,40 @@ measured on the reference machine; those tables are generated from
 benchmarks/results/latest.md, and the page explains how to reproduce them. The recorded
 run used the `official` build mode (the normal `lsaca build -r` path, not the fallback);
 its JSON also contains every individual run, the compiler SHA-256 prefix and the
-repository commit, so a saved result is self-describing. The published v1.6 run was
-recorded on 2026-10-31T23:24:44+08:00 with lsaca 1.6.0 (compiler SHA-256 prefix
-b1489a3dec37e163, repository commit 59d56c7). The top-level `warnings` list
+repository commit, so a saved result is self-describing. The published 2.0.0 run was
+recorded on 2026-11-03T00:20:17+08:00 with lsaca 2.0.0 (compiler SHA-256 prefix
+2a60c5ac7c9fd34c, repository commit b151d1a); latest.json and latest.md hold that run,
+and a frozen copy is kept in benchmarks/results/archive/v2.0/. Two frozen references
+are used for the before/after comparison: the published 1.7.0 run in
+benchmarks/results/archive/v1.7/ (recorded 2026-11-01T13:25:52+08:00, compiler SHA-256
+prefix 37554c98f102841f, commit fd3657e) and the Phase D pre-performance baseline in
+benchmarks/results/archive/v2.0-pre-perf/ (taken earlier in the 2.0 cycle on a busier
+host, so it is a directional reference only). Neither archive is overwritten when a new
+run replaces latest.json/latest.md. python scripts/bench_report.py combines the current
+result with both references and writes benchmarks/results/v2-report-sections.md;
+benchmarks/results/v2.0-report.md is the rendered report that
+docs/language/21-benchmarks.md was refreshed from, v2-report-preview.md is a dry run of
+the script, and v2-docs-page-template.md records the layout of the sections the page
+needs. The top-level `warnings` list
 records anything that affects interpretation, for example a single sample that had to be
 re-measured because of unrelated background load on the machine. If you rerun the suite,
 do not compare fallback numbers with the numbers on the docs page - the two measure
 different build pipelines.
+
+All 2.0 additions to latest.json are additive, so schema_version stays 1: settings gains
+scales and scale_runs, each executed program gains a scales object, runtime records gain
+mean_s/stdev_s/ci95_s/outliers_s/outlier_count, compile records gain exe_bytes /
+generated_c_bytes / source_bytes, and a top-level oracle_verification report is added. The
+original tables keep their headings, row order and cell format, which keeps
+scripts/check_bench21.py working against the docs page.
+
+Two CI workflows exercise the suite without publishing performance numbers.
+.github/workflows/benchmark-smoke.yml runs the functional check programs and a quick
+benchmark run on Ubuntu every week. .github/workflows/benchmark-matrix.yml runs the check
+programs and a small benchmark subset on ubuntu-latest, macos-latest and windows-latest and
+uploads one artifact per platform. Those jobs verify that every workload builds and
+produces the expected checksum on each platform; they are not a cross-machine speed
+comparison, and their results are not merged into latest.json. Both jobs pass --quick,
+which caps compile repeats at 1, so they stay fast; when a CI-style run needs cold-build
+medians rather than a single cold sample, pass --compile-repeats 2. The published
+official run keeps the default of three cold builds.

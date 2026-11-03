@@ -12,8 +12,9 @@
 
 use std::fmt;
 
-/// The integer types of the language. There is deliberately no pointer-sized
-/// integer type: lengths and indices are i64.
+/// The integer types of the language. Isize and Usize are pointer sized
+/// (64 bits on every supported target), matching Rust. Lengths and indices of
+/// the builtin collections remain i64 in version 2.0.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum IntTy {
     I8,
@@ -24,10 +25,12 @@ pub enum IntTy {
     U16,
     U32,
     U64,
+    Isize,
+    Usize,
 }
 
 impl IntTy {
-    pub const ALL: [IntTy; 8] = [
+    pub const ALL: [IntTy; 10] = [
         IntTy::I8,
         IntTy::I16,
         IntTy::I32,
@@ -36,6 +39,8 @@ impl IntTy {
         IntTy::U16,
         IntTy::U32,
         IntTy::U64,
+        IntTy::Isize,
+        IntTy::Usize,
     ];
 
     pub fn name(self) -> &'static str {
@@ -48,6 +53,8 @@ impl IntTy {
             IntTy::U16 => "u16",
             IntTy::U32 => "u32",
             IntTy::U64 => "u64",
+            IntTy::Isize => "isize",
+            IntTy::Usize => "usize",
         }
     }
 
@@ -61,12 +68,17 @@ impl IntTy {
             "u16" => IntTy::U16,
             "u32" => IntTy::U32,
             "u64" => IntTy::U64,
+            "isize" => IntTy::Isize,
+            "usize" => IntTy::Usize,
             _ => return None,
         })
     }
 
     pub fn is_signed(self) -> bool {
-        matches!(self, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64)
+        matches!(
+            self,
+            IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize
+        )
     }
 
     pub fn bits(self) -> u32 {
@@ -74,7 +86,7 @@ impl IntTy {
             IntTy::I8 | IntTy::U8 => 8,
             IntTy::I16 | IntTy::U16 => 16,
             IntTy::I32 | IntTy::U32 => 32,
-            IntTy::I64 | IntTy::U64 => 64,
+            IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => 64,
         }
     }
 
@@ -89,6 +101,8 @@ impl IntTy {
             IntTy::U16 => "uint16_t",
             IntTy::U32 => "uint32_t",
             IntTy::U64 => "uint64_t",
+            IntTy::Isize => "intptr_t",
+            IntTy::Usize => "uintptr_t",
         }
     }
 
@@ -104,6 +118,8 @@ impl IntTy {
             IntTy::U16 => (u16::MIN as i128, u16::MAX as i128),
             IntTy::U32 => (u32::MIN as i128, u32::MAX as i128),
             IntTy::U64 => (u64::MIN as i128, u64::MAX as i128),
+            IntTy::Isize => (i64::MIN as i128, i64::MAX as i128),
+            IntTy::Usize => (u64::MIN as i128, u64::MAX as i128),
         }
     }
 
@@ -124,6 +140,8 @@ impl IntTy {
             IntTy::U16 => IntTy::U16,
             IntTy::U32 => IntTy::U32,
             IntTy::U64 => IntTy::U64,
+            IntTy::Isize => IntTy::Usize,
+            IntTy::Usize => IntTy::Usize,
         }
     }
 }
@@ -218,6 +236,16 @@ pub enum Ty {
         mutable: bool,
         inner: Box<Ty>,
     },
+    /// A slice type [T]. Unsized: a slice value can only live behind a
+    /// reference, and its C representation is a fat pointer struct.
+    Slice(Box<Ty>),
+    /// The unsized builtin UTF-8 string slice type str. Only usable behind a
+    /// reference: &str and &mut str.
+    Str,
+    /// A dynamically dispatched trait object type dyn Trait<Args>, referenced
+    /// by index into the HIR trait object table. Unsized: only usable behind
+    /// Box, Rc, & or &mut.
+    Dyn(usize),
     /// A user struct, referenced by index into the HIR struct table.
     Struct(usize),
     /// A user enum, referenced by index into the HIR enum table.
@@ -318,6 +346,21 @@ impl Ty {
         Ty::Fn(params, Box::new(ret))
     }
 
+    /// The slice type [T] built from an element type.
+    pub fn slice(elem: Ty) -> Ty {
+        Ty::Slice(Box::new(elem))
+    }
+
+    /// The unsized UTF-8 slice type str.
+    pub fn str_() -> Ty {
+        Ty::Str
+    }
+
+    /// A trait object type dyn Trait<Args> for a registered trait object.
+    pub fn dynamic(trait_object: usize) -> Ty {
+        Ty::Dyn(trait_object)
+    }
+
     /// A shared reference type `&T`.
     pub fn ref_to(inner: Ty) -> Ty {
         Ty::Ref {
@@ -402,6 +445,24 @@ impl Ty {
         matches!(self, Ty::Enum(_))
     }
 
+    pub fn is_slice(&self) -> bool {
+        matches!(self, Ty::Slice(_))
+    }
+
+    pub fn is_str(&self) -> bool {
+        matches!(self, Ty::Str)
+    }
+
+    pub fn is_dyn(&self) -> bool {
+        matches!(self, Ty::Dyn(_))
+    }
+
+    /// True for unsized types: [T], str and dyn Trait. Values of these types
+    /// may only appear behind a reference or one of the owning indirections.
+    pub fn is_unsized(&self) -> bool {
+        matches!(self, Ty::Slice(_) | Ty::Str | Ty::Dyn(_))
+    }
+
     pub fn is_ref(&self) -> bool {
         matches!(self, Ty::Ref { .. })
     }
@@ -424,6 +485,9 @@ impl Ty {
         match self {
             Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) => true,
             Ty::Ref { .. } => true,
+            // Slices, str and trait objects are fat values: a plain C copy is
+            // enough, but they are unsized and only exist behind references.
+            Ty::Slice(_) | Ty::Str | Ty::Dyn(_) => true,
             Ty::String | Ty::Vec(_) | Ty::Rc(_) | Ty::Box(_) | Ty::Fn(_, _) | Ty::HashMap(_, _) => {
                 false
             }
@@ -506,6 +570,9 @@ impl fmt::Display for Ty {
                 }
                 write!(f, ") -> {}", ret)
             }
+            Ty::Slice(elem) => write!(f, "[{}]", elem),
+            Ty::Str => write!(f, "str"),
+            Ty::Dyn(id) => write!(f, "dyn#{}", id),
             Ty::Struct(id) => write!(f, "struct#{}", id),
             Ty::Enum(id) => write!(f, "enum#{}", id),
         }

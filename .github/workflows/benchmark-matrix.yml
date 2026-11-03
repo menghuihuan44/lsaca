@@ -1,0 +1,104 @@
+# Cross-platform benchmark matrix.
+#
+# Runs the benchmark harness and the benchmark check programs on Linux, macOS
+# and Windows so that the data-scale workloads, the per-language checksum
+# validation and the harness itself are exercised on every supported platform.
+# Each runner uploads its JSON/markdown results as a workflow artifact.
+#
+# The suite is deliberately a small subset measured with --quick: the full
+# published suite (scripts/bench.py) is run on a single idle host instead, so
+# results from different runners are never compared in one table.
+#
+# Trigger it manually from the Actions tab ("Run workflow") or wait for the
+# weekly schedule; it is not part of ci.yml because benchmarks are slower and
+# can be noisy on shared runners.
+
+name: Benchmark matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Monday at 06:00 UTC.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-matrix
+  cancel-in-progress: true
+
+jobs:
+  benchmark-matrix:
+    name: Benchmark matrix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the C toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc
+
+      - name: Install the C toolchain (Windows, MSYS2 UCRT64)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      # The MSYS2 action only exports its environment to steps that use the
+      # MSYS2 shell, so put the UCRT64 toolchain on PATH explicitly. The
+      # harness invokes gcc as a child process for the fallback build path.
+      - name: Put the MSYS2 UCRT64 toolchain on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "C:\msys64\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmark-matrix-${{ matrix.os }}
+
+      # scripts/bench.py and scripts/bench_checks.py never invoke cargo: they
+      # expect target/release/lsaca to exist, so build the CLI here.
+      - name: Build the release compiler
+        run: cargo build --release -p lsaca-cli
+
+      - name: Run the benchmark check programs
+        run: >
+          python scripts/bench_checks.py
+          --debug --quick --json target/bench-matrix/checks.json
+
+      - name: Run the quick benchmark subset
+        run: >
+          python scripts/bench.py
+          --programs fib,loop_sum,string_build,sort_i64,sieve,hashmap_wordcount,array_wordcount,generic_stack,iterator_pipeline
+          --scale small --scale-runs 2 --quick
+          --json target/bench-matrix/results.json
+          --md target/bench-matrix/results.md
+
+      - name: Upload the per-platform benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-matrix-${{ matrix.os }}
+          path: target/bench-matrix/
+          if-no-files-found: error
+          retention-days: 14

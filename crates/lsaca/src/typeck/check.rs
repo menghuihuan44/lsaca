@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::dyn_traits::{TraitObjectInfo, VtableInfo};
 use super::generics::{DefOrigin, GEnumDef, GFnDef, GStructDef, ImplInfo};
 use super::items::{
     AliasInfo, ConstItem, ConstState, ConstVal, EnumInfo, FnInfo, StructInfo, TypeKey,
@@ -141,10 +142,6 @@ pub struct Checker<'a> {
     pub drop_structs: Vec<Option<usize>>,
     /// Drop hook (a method id in `fns`) for every enum, see [Self::drop_structs].
     pub drop_enums: Vec<Option<usize>>,
-    /// How many compound pattern layers (tuple/struct/variant/or) enclose the
-    /// pattern currently being checked. A by-value binding of a type with drop
-    /// glue below such a layer is E0509.
-    pub pattern_nesting: usize,
     /// Types with a user `impl Drop` hook that enclose the pattern currently
     /// being checked. Destructuring them can never move non-Copy parts out
     /// (E0509), so by-value bindings below such a layer are rejected.
@@ -184,6 +181,18 @@ pub struct Checker<'a> {
     /// diagnostic. A HashMap type is validated both where it is annotated and
     /// where a value is created, but only one diagnostic is reported.
     pub reported_hash_map_key_errors: HashSet<String>,
+    /// Trait objects (`dyn Trait<...>`) in first-resolution order. `ITy::Dyn`
+    /// stores an index into this table.
+    pub trait_objects: Vec<TraitObjectInfo>,
+    /// Vtables for (trait object, concrete self type) pairs, in first-coercion
+    /// order. Shared by every pointer form of the same concrete type.
+    pub vtables: Vec<VtableInfo>,
+    /// Index of a trait object by (trait id, resolved arguments).
+    pub trait_object_index: HashMap<(usize, Vec<ITy>), usize>,
+    /// Index of a vtable by (trait object, concrete self type).
+    pub vtable_index: HashMap<(usize, ITy), usize>,
+    /// Traits that already produced an object-safety diagnostic.
+    pub reported_object_unsafe: HashSet<usize>,
 }
 
 /// Internal standard-library items are prefixed so user code cannot collide
@@ -229,7 +238,6 @@ impl<'a> Checker<'a> {
             ref_local_sources: HashMap::new(),
             drop_structs: Vec::new(),
             drop_enums: Vec::new(),
-            pattern_nesting: 0,
             pattern_drop_hook_stack: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
@@ -244,6 +252,11 @@ impl<'a> Checker<'a> {
             probing: false,
             probe_quiet: false,
             reported_hash_map_key_errors: HashSet::new(),
+            trait_objects: Vec::new(),
+            vtables: Vec::new(),
+            trait_object_index: HashMap::new(),
+            vtable_index: HashMap::new(),
+            reported_object_unsafe: HashSet::new(),
         }
     }
 
@@ -488,6 +501,20 @@ impl<'a> Checker<'a> {
             }
             ITy::Struct(id) => self.struct_name(*id),
             ITy::Enum(id) => self.enum_name(*id),
+            ITy::Slice(elem) => format!("[{}]", self.describe_resolved(elem)),
+            ITy::Str => "str".to_string(),
+            ITy::Dyn(id) => match self.trait_objects.get(*id) {
+                Some(object) if object.args.is_empty() => format!("dyn {}", object.name),
+                Some(object) => {
+                    let args: Vec<String> = object
+                        .args
+                        .iter()
+                        .map(|arg| self.describe_resolved(arg))
+                        .collect();
+                    format!("dyn {}<{}>", object.name, args.join(", "))
+                }
+                None => format!("dyn trait{}", id),
+            },
             ITy::Never => "!".to_string(),
             ITy::Var(id) => match self.infer.var_kind(*id) {
                 super::itype::VarKind::IntLiteral => "{integer}".to_string(),
@@ -715,11 +742,43 @@ impl<'a> Checker<'a> {
             None => return,
         };
         let decl = self.fns[id].decl.clone();
+        // An extern function has no body: there is nothing to type-check.
+        // HIR lowering turns it into an intrinsic declaration with an empty
+        // block, so this function stays unchecked rather than a checked unit.
+        let Some(body_src) = decl.body.clone() else {
+            return;
+        };
         let param_cnames = self.fns[id].param_cnames.clone();
         let self_kind = self.fns[id].self_kind;
         let origin = self.fns[id].origin;
         let generic = self.fns[id].generic.clone();
         let self_ty = self.fns[id].self_ty.clone();
+        // A deferred instance is still generic at this point: the call site did
+        // not determine its type arguments. Its standard-library body calls
+        // generic functions that need them, so checking it would report an E0282
+        // from inside the prelude (an internal error). The inference failure
+        // belongs to the caller: report it as an ordinary user diagnostic at the
+        // recorded call site instead.
+        if let Some(span) = self.fns[id].deferred_span {
+            // Variables pinned to an integer or float literal normalize to i64
+            // or f64, so only genuinely open arguments make the body checkable.
+            let args = self.fns[id]
+                .generic
+                .as_ref()
+                .map(|instance| instance.args.clone());
+            if let Some(args) = args
+                && self.normalize_args(&args).is_none()
+            {
+                self.error_code_note(
+                    "type annotations needed".to_string(),
+                    span,
+                    "E0282",
+                    "cannot infer the type arguments for this call; annotate the binding or the expected type"
+                        .to_string(),
+                );
+                return;
+            }
+        }
         let diagnostics_before = self.diagnostics.len();
         let previous_module = self.current_module;
         self.current_module = self.fns[id].module;
@@ -761,7 +820,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.frames.push(frame);
-        let mut body = self.check_block(&decl.body, Some(&sig.ret));
+        let mut body = self.check_block(&body_src, Some(&sig.ret));
         self.frames.pop();
         if pushed_env {
             self.pop_generic_env();
@@ -774,7 +833,7 @@ impl<'a> Checker<'a> {
             body.tail = Some(Box::new(coerced));
         }
         let body_ty = block_type(&body);
-        if !self.unify_or_report(&sig.ret, &body_ty, decl.body.span) {
+        if !self.unify_or_report(&sig.ret, &body_ty, body_src.span) {
             // error already reported
         }
         if let Some(tail) = &body.tail {

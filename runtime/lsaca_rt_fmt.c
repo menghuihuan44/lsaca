@@ -46,18 +46,53 @@ LsString* ls_format_push_cstr(LsString* acc, const char* cstr) {
     return ls_fmt_append(acc, cstr, strlen(cstr));
 }
 
+/* Two decimal digits per table lookup: the 00..99 strings are concatenated so
+ * pair p occupies bytes 2p and 2p+1. Writing two digits at a time halves the
+ * number of 64-bit divisions per value, which is the dominant cost of integer
+ * formatting (this is on the hot path of every format! with an integer). */
+static const char ls_rt_digit_pairs[201] =
+    "00010203040506070809"
+    "10111213141516171819"
+    "20212223242526272829"
+    "30313233343536373839"
+    "40414243444546474849"
+    "50515253545556575859"
+    "60616263646566676869"
+    "70717273747576777879"
+    "80818283848586878889"
+    "90919293949596979899";
+
+/* Write the decimal digits of v back to front ending at end, return the first
+ * digit written. The caller guarantees room (20 digits for uint64_t). */
+static char* ls_rt_fmt_u64_digits(char* end, uint64_t v) {
+    char* start = end;
+
+    while (v >= 100U) {
+        size_t pair = (size_t)(v % 100U) * 2U;
+        v /= 100U;
+        start -= 2;
+        start[0] = ls_rt_digit_pairs[pair];
+        start[1] = ls_rt_digit_pairs[pair + 1U];
+    }
+    if (v < 10U) {
+        *--start = (char)('0' + (int)v);
+    } else {
+        size_t pair = (size_t)v * 2U;
+        start -= 2;
+        start[0] = ls_rt_digit_pairs[pair];
+        start[1] = ls_rt_digit_pairs[pair + 1U];
+    }
+    return start;
+}
+
 /* Decimal conversion without printf: digits are written back to front into a
  * fixed buffer, so the cost per value is a handful of divisions and one small
  * memcpy into the accumulator. */
 LsString* ls_fmt_u64(LsString* acc, uint64_t v) {
     char buffer[20];
     char* const end = buffer + sizeof buffer;
-    char* start = end;
+    char* start = ls_rt_fmt_u64_digits(end, v);
 
-    do {
-        *--start = (char)('0' + (int)(v % 10U));
-        v /= 10U;
-    } while (v != 0);
     return ls_fmt_append(acc, start, (size_t)(end - start));
 }
 
@@ -71,10 +106,7 @@ LsString* ls_fmt_i64(LsString* acc, int64_t v) {
     /* Negating INT64_MIN is not representable; the unsigned subtraction gives
      * the correct magnitude 2^63 for it. */
     magnitude = negative ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
-    do {
-        *--start = (char)('0' + (int)(magnitude % 10U));
-        magnitude /= 10U;
-    } while (magnitude != 0);
+    start = ls_rt_fmt_u64_digits(end, magnitude);
     if (negative) {
         *--start = '-';
     }

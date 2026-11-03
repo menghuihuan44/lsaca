@@ -11,13 +11,13 @@ use super::generics::{
     ImplMethod, StructInstance,
 };
 use super::itype::ITy;
-use super::modules::{Binding, DefRef, ModuleId};
+use super::modules::{Binding, BuiltinTypeKind, DefRef, ModuleId};
 use super::tree::TBlock;
 use crate::ast::{
     self, Block, EnumDecl, Expr, ExprKind, FieldDef, FnDecl, ImplBlock, Item, LetStmt, Program,
     Stmt, StructDecl, TraitRef, TypeAliasDecl, TypeExpr, VariantDef, VecLit, Visibility,
 };
-use crate::diag::Diagnostic;
+use crate::diag::{Diagnostic, Diagnostics};
 use crate::span::Span;
 use crate::types::{SelfKind, Ty};
 
@@ -145,6 +145,14 @@ pub struct FnInfo {
     pub origin: DefOrigin,
     /// Set for functions instantiated from a generic definition.
     pub generic: Option<FnInstance>,
+    /// User call-site span recorded when this instance was created with
+    /// unresolved type arguments.
+    ///
+    /// The body of such a standard-library instance cannot be checked: it calls
+    /// generic functions that need the missing arguments. The inference failure
+    /// belongs to the caller, so `check_fn` reports an ordinary E0282 at this
+    /// span instead of an internal standard-library error.
+    pub deferred_span: Option<Span>,
     /// Instantiated impl self type of a method, if any.
     pub self_ty: Option<ITy>,
     /// Monomorphization depth, used for the E0275 recursion limit.
@@ -208,10 +216,16 @@ pub fn sanitize_c_ident(name: &str) -> String {
 fn gather_item<'a>(item: &'a Item, out: &mut Vec<&'a Item>) {
     out.push(item);
     match item {
-        Item::Fn(decl) => scan_block(&decl.body, out),
+        Item::Fn(decl) => {
+            if let Some(body) = &decl.body {
+                scan_block(body, out);
+            }
+        }
         Item::Impl(block) => {
             for func in &block.fns {
-                scan_block(&func.body, out);
+                if let Some(body) = &func.body {
+                    scan_block(body, out);
+                }
             }
         }
         Item::Const(decl) => scan_expr(&decl.value, out),
@@ -270,6 +284,17 @@ fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
         ExprKind::Index { base, index } => {
             scan_expr(base, out);
             scan_expr(index, out);
+        }
+        ExprKind::Slice {
+            base, start, end, ..
+        } => {
+            scan_expr(base, out);
+            if let Some(start) = start {
+                scan_expr(start, out);
+            }
+            if let Some(end) = end {
+                scan_expr(end, out);
+            }
         }
         ExprKind::If(if_expr) => {
             scan_expr(&if_expr.cond, out);
@@ -380,10 +405,16 @@ impl<'a> Checker<'a> {
         let mut nested: Vec<&Item> = Vec::new();
         for item in &own {
             match item {
-                Item::Fn(decl) => scan_block(&decl.body, &mut nested),
+                Item::Fn(decl) => {
+                    if let Some(body) = &decl.body {
+                        scan_block(body, &mut nested);
+                    }
+                }
                 Item::Impl(block) => {
                     for func in &block.fns {
-                        scan_block(&func.body, &mut nested);
+                        if let Some(body) = &func.body {
+                            scan_block(body, &mut nested);
+                        }
                     }
                 }
                 Item::Const(decl) => scan_expr(&decl.value, &mut nested),
@@ -492,6 +523,45 @@ impl<'a> Checker<'a> {
             .map(|binding| binding.span)
         {
             self.report_duplicate_type(&decl.name, decl.name_span, previous);
+            return;
+        }
+        // The standard library declares the builtin types as marker structs so
+        // user code can name them; the declaration creates a builtin type
+        // definition instead of a user struct and its fields are ignored.
+        if let Some(kind) = BuiltinTypeKind::from_name(&decl.name) {
+            if self.collecting_origin.is_prelude() {
+                let expected = kind.arity();
+                if decl.generics.len() != expected {
+                    self.error_code(
+                        format!(
+                            "builtin type {} takes {} type argument{} but {} were supplied",
+                            decl.name,
+                            expected,
+                            if expected == 1 { "" } else { "s" },
+                            decl.generics.len()
+                        ),
+                        decl.name_span,
+                        "E0107",
+                    );
+                }
+                self.insert_type_binding(
+                    module,
+                    &decl.name,
+                    DefRef::BuiltinType(kind),
+                    decl.name_span,
+                    vis,
+                );
+                return;
+            }
+            self.error_code_note(
+                format!("the name '{}' is defined multiple times", decl.name),
+                decl.name_span,
+                "E0428",
+                format!(
+                    "builtin type '{}' is provided by the standard library and cannot be redefined",
+                    decl.name
+                ),
+            );
             return;
         }
         let prefix = self.module_prefix(module);
@@ -650,6 +720,16 @@ impl<'a> Checker<'a> {
     }
 
     fn register_free_fn(&mut self, decl: &FnDecl) {
+        if decl.is_extern && !self.collecting_origin.is_prelude() {
+            self.error_code_note(
+                "extern function declarations are only allowed in the standard library"
+                    .to_string(),
+                decl.name_span,
+                "E0001",
+                "extern functions belong to the standard library; user code cannot declare new intrinsics"
+                    .to_string(),
+            );
+        }
         let module = self.current_module;
         let vis = self.item_visibility(decl.vis);
         if let Some(previous) = self
@@ -697,6 +777,7 @@ impl<'a> Checker<'a> {
             decl: decl.clone(),
             origin: self.collecting_origin,
             generic: None,
+            deferred_span: None,
             self_ty: None,
             instantiation_depth: 0,
             owner: None,
@@ -749,7 +830,10 @@ impl<'a> Checker<'a> {
             }
             return;
         }
-        if !block.generics.is_empty() {
+        if !block.generics.is_empty()
+            || self.impl_target_builtin_kind(block).is_some()
+            || self.impl_target_unsized_builtin_kind(block)
+        {
             self.register_generic_inherent_impl(block);
             return;
         }
@@ -795,6 +879,7 @@ impl<'a> Checker<'a> {
                 decl: func.clone(),
                 origin: self.collecting_origin,
                 generic: None,
+                deferred_span: None,
                 self_ty: None,
                 instantiation_depth: 0,
                 owner: Some(owner),
@@ -812,7 +897,10 @@ impl<'a> Checker<'a> {
     /// Register a generic inherent impl block; its methods are instantiated on
     /// demand when a method or associated function is used.
     fn register_generic_inherent_impl(&mut self, block: &ImplBlock) {
-        if !self.impl_target_is_user_type(block) {
+        if !self.impl_target_is_user_type(block)
+            && self.impl_target_builtin_kind(block).is_none()
+            && !self.impl_target_unsized_builtin_kind(block)
+        {
             self.report_invalid_impl_target(block);
             return;
         }
@@ -1040,6 +1128,7 @@ impl<'a> Checker<'a> {
             decl: func.clone(),
             origin: self.collecting_origin,
             generic: None,
+            deferred_span: None,
             self_ty: None,
             instantiation_depth: 0,
             owner: Some(owner),
@@ -1144,6 +1233,56 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The builtin type targeted by an impl block, when the standard library
+    /// implements one of its marker types. Only the standard library may write
+    /// impls for builtin types; user crates keep E0118.
+    pub fn impl_target_builtin_kind(&mut self, block: &ImplBlock) -> Option<BuiltinTypeKind> {
+        if !self.collecting_origin.is_prelude() {
+            return None;
+        }
+        let TypeExpr::Path {
+            name, name_span, ..
+        } = &block.ty
+        else {
+            return None;
+        };
+        let name_span = *name_span;
+        let binding = if !name.contains("::") {
+            self.lookup_type_scoped(name)
+        } else {
+            let parts: Vec<&str> = name.split("::").collect();
+            let segments: Vec<(String, Span)> = parts[..parts.len() - 1]
+                .iter()
+                .map(|segment| ((*segment).to_string(), name_span))
+                .collect();
+            let (module, consumed) = self.resolve_leading_modules(&segments, false)?;
+            if consumed != segments.len() {
+                return None;
+            }
+            self.lookup_type_in(module, parts[parts.len() - 1])
+        };
+        if let Some(binding) = binding
+            && let DefRef::BuiltinType(kind) = binding.def
+        {
+            return Some(kind);
+        }
+        BuiltinTypeKind::from_name(name.rsplit("::").next().unwrap_or(name))
+    }
+
+    /// Is the impl block targeting one of the unsized builtin types, `[T]` or
+    /// `str`? Only the standard library may write such impls; user crates keep
+    /// E0118.
+    pub fn impl_target_unsized_builtin_kind(&mut self, block: &ImplBlock) -> bool {
+        if !self.collecting_origin.is_prelude() {
+            return false;
+        }
+        match &block.ty {
+            TypeExpr::Slice { .. } => true,
+            TypeExpr::Path { name, generics, .. } => generics.is_empty() && name == "str",
+            _ => false,
+        }
+    }
+
     /// Report an impl block whose target is not a user-defined struct or enum.
     pub fn report_invalid_impl_target(&mut self, block: &ImplBlock) {
         self.error_code(
@@ -1198,7 +1337,48 @@ impl<'a> Checker<'a> {
                     inner: Box::new(resolved),
                 })
             }
+            TypeExpr::Dyn(trait_ref) => self.resolve_dyn_type(trait_ref),
+            TypeExpr::Slice { elem, .. } => {
+                let resolved = self.resolve_ty(elem, self_key)?;
+                Some(ITy::slice(resolved))
+            }
         }
+    }
+
+    /// Resolve a trait-object type, dyn Trait or dyn Trait<Args>.
+    ///
+    /// The trait object is registered with the checker (object safety, method
+    /// signatures) and the returned [ITy::Dyn] stores its index.
+    fn resolve_dyn_type(&mut self, trait_ref: &crate::ast::TraitRef) -> Option<ITy> {
+        let Some(trait_id) = self.lookup_trait(&trait_ref.name) else {
+            self.error_code(
+                format!("cannot find trait '{}' in this scope", trait_ref.name),
+                trait_ref.name_span,
+                "E0405",
+            );
+            return None;
+        };
+        let expected = self.traits[trait_id].generics.len();
+        if trait_ref.args.len() != expected {
+            self.error_code(
+                format!(
+                    "trait {} takes {} type argument{} but {} were supplied",
+                    trait_ref.name,
+                    expected,
+                    if expected == 1 { "" } else { "s" },
+                    trait_ref.args.len()
+                ),
+                trait_ref.span,
+                "E0107",
+            );
+            return None;
+        }
+        let mut args = Vec::with_capacity(trait_ref.args.len());
+        for arg in &trait_ref.args {
+            args.push(self.resolve_ty(arg, None)?);
+        }
+        let object = self.register_trait_object(trait_id, args, trait_ref.span);
+        Some(ITy::dynamic(object))
     }
 
     fn resolve_type_path(
@@ -1249,7 +1429,8 @@ impl<'a> Checker<'a> {
             "bool" => self.simple_type(span, generics, ITy::bool_()),
             "char" => self.simple_type(span, generics, ITy::char_()),
             "String" => self.simple_type(span, generics, ITy::string()),
-            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => {
+            "str" => self.simple_type(span, generics, ITy::str_()),
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize" | "usize" => {
                 match crate::types::IntTy::from_name(name) {
                     Some(int_ty) => self.simple_type(span, generics, ITy::Int(int_ty)),
                     None => None,
@@ -1381,6 +1562,28 @@ impl<'a> Checker<'a> {
                     );
                 }
                 Some(ITy::Enum(id))
+            }
+            DefRef::BuiltinType(kind) => {
+                let expected = kind.arity();
+                if generics.len() != expected {
+                    self.error_code(
+                        format!(
+                            "builtin type {} takes {} type argument{} but {} were supplied",
+                            name,
+                            expected,
+                            if expected == 1 { "" } else { "s" },
+                            generics.len()
+                        ),
+                        span,
+                        "E0107",
+                    );
+                    return None;
+                }
+                let mut args = Vec::with_capacity(generics.len());
+                for arg in generics {
+                    args.push(self.resolve_ty(arg, self_key)?);
+                }
+                kind.resolve(&args)
             }
             DefRef::Trait(_) => {
                 self.error_code(
@@ -1692,6 +1895,8 @@ impl<'a> Checker<'a> {
         }
         let previous_module = self.current_module;
         self.current_module = self.fns[id].module;
+        let origin = self.fns[id].origin;
+        let diagnostics_before = self.diagnostics.len();
         let decl = self.fns[id].decl.clone();
         let owner = self.fns[id].owner;
         let mut params: Vec<ITy> = Vec::with_capacity(decl.params.len());
@@ -1871,6 +2076,24 @@ impl<'a> Checker<'a> {
             ret_ref_source,
         });
         self.fns[id].param_cnames = param_cnames;
+        if origin.is_prelude() {
+            // Signature checking of an instantiated standard-library function
+            // can rediscover a problem the user already sees at the call site
+            // (for example a reference stored in a container). Those messages
+            // carry standard-library spans, so report them as internal errors
+            // without a source location; duplicate diagnostics are dropped by
+            // the reporting layer, and a genuine library bug still surfaces.
+            let collected = std::mem::replace(&mut self.diagnostics, Diagnostics::new());
+            let mut items = collected.into_vec();
+            let tail = items.split_off(diagnostics_before.min(items.len()));
+            for diagnostic in items {
+                self.diagnostics.push(diagnostic);
+            }
+            for diagnostic in tail {
+                self.diagnostics
+                    .push(crate::stdlib::internal_error(diagnostic));
+            }
+        }
         self.current_module = previous_module;
     }
 

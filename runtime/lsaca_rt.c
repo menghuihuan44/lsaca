@@ -320,6 +320,129 @@ static LsRtHeader* ls_rt_stack_pop(LsRtStack* stack) {
     return stack->items[stack->count];
 }
 
+#if defined(LS_RT_POOLING)
+/* Release-mode block recycling.
+ *
+ * Programs allocate and free many short-lived payloads (every format!
+ * intermediate string, every tree node, every vector buffer). Handing each of
+ * those blocks back to malloc only to request the same size again on the next
+ * iteration costs two allocator round trips per payload. Release builds
+ * therefore keep freed blocks in per-size-class free lists and reuse them:
+ * a block total (header + payload) is rounded up to a 16-byte multiple, and
+ * every total up to LS_RT_POOL_MAX_BLOCK has its own list. Larger payloads
+ * still go to malloc directly.
+ *
+ * The class is remembered in the dead header (size_class always fits in the
+ * existing padding), and the free-list link reuses candidate_index, both of
+ * which are dead after ls_rt_poison_header(). Every reused block is
+ * re-initialized exactly like a fresh malloc block, including the payload
+ * zero-fill, so observable behaviour is identical to malloc.
+ *
+ * The pool retains at most the peak number of blocks per class; the shutdown
+ * path returns all of it, which keeps leak reports and heap checkers clean.
+ * Debug builds use the stale-handle quarantine instead (see
+ * LS_RT_LEAK_TRACKING), because reusing a block immediately would hide
+ * stale-handle use-after-free diagnostics. */
+#define LS_RT_POOL_MIN_BLOCK LS_RT_HEADER_SPACE
+#define LS_RT_POOL_MAX_BLOCK ((size_t)512)
+/* 8-byte classes: every payload struct is at most 8-byte aligned, so a class
+ * block of exactly the requested rounded size is always sufficiently aligned.
+ * Using 16-byte classes would round the request up for sizes like the 88-byte
+ * Box<Node> block (48 header + 40 payload), which asks the system allocator for
+ * a larger class than the non-pooled path and costs more than the pool saves. */
+#define LS_RT_POOL_GRANULARITY ((size_t)8)
+#define LS_RT_POOL_CLASS_COUNT \
+    (((LS_RT_POOL_MAX_BLOCK - LS_RT_POOL_MIN_BLOCK) / LS_RT_POOL_GRANULARITY) + 1u)
+#define LS_RT_POOL_NO_CLASS 0xFFu
+
+/* Total bytes the pool may retain. The pool exists to avoid allocator round
+ * trips for the live working set of short-lived temporaries; a huge one-shot
+ * free burst (tearing down a 131k-node tree, dropping a big document) must not
+ * pin that memory for the rest of the process, so blocks beyond the budget go
+ * straight back to free(). The budget is a global byte count rather than a
+ * per-class block count because bursty clone-then-free workloads (see
+ * benchmarks/programs/binary_trees.ls) temporarily need every block of one
+ * single class retained; a per-class count would evict the blocks that are
+ * about to be requested again. */
+#define LS_RT_POOL_MAX_RETAINED_BYTES ((size_t)32 << 20)
+
+static void* ls_rt_pool_free_lists[LS_RT_POOL_CLASS_COUNT];
+static size_t ls_rt_pool_retained_bytes = 0;
+
+static unsigned char ls_rt_pool_class_of(size_t total) {
+    size_t rounded =
+        (total + (LS_RT_POOL_GRANULARITY - 1u)) & ~(LS_RT_POOL_GRANULARITY - 1u);
+
+    if (rounded < LS_RT_POOL_MIN_BLOCK || rounded > LS_RT_POOL_MAX_BLOCK) {
+        return LS_RT_POOL_NO_CLASS;
+    }
+    return (unsigned char)((rounded - LS_RT_POOL_MIN_BLOCK) /
+                           LS_RT_POOL_GRANULARITY);
+}
+
+/* Bytes requested from malloc for a pooled class (the real block size, not the
+ * payload size: every block of a class must be the same size even though the
+ * concrete allocation request only needs to cover its header and payload). */
+static size_t ls_rt_pool_block_size(unsigned char pool_class) {
+    return LS_RT_POOL_MIN_BLOCK + (size_t)pool_class * LS_RT_POOL_GRANULARITY;
+}
+
+/* Pop a recycled block for the class of total (NULL when the class is empty or
+ * the payload is too large to pool). The block is at least total bytes big. */
+static LsRtHeader* ls_rt_pool_take(size_t total) {
+    unsigned char pool_class = ls_rt_pool_class_of(total);
+    LsRtHeader* header;
+
+    if (pool_class == LS_RT_POOL_NO_CLASS) {
+        return NULL;
+    }
+    header = (LsRtHeader*)ls_rt_pool_free_lists[pool_class];
+    if (header != NULL) {
+        ls_rt_pool_free_lists[pool_class] =
+            (void*)(uintptr_t)header->candidate_index;
+        ls_rt_pool_retained_bytes -= ls_rt_pool_block_size(pool_class);
+        header->size_class = pool_class;
+    }
+    return header;
+}
+
+/* Recycle one freed block instead of returning it to malloc. The caller has
+ * already poisoned the magic word and cleared the collector state. */
+static void ls_rt_pool_give(LsRtHeader* header) {
+    unsigned char pool_class = header->size_class;
+    size_t block_size = ls_rt_pool_block_size(pool_class);
+
+    if (ls_rt_pool_retained_bytes + block_size >
+        LS_RT_POOL_MAX_RETAINED_BYTES) {
+        free(header);
+        return;
+    }
+    header->candidate_index =
+        (size_t)(uintptr_t)ls_rt_pool_free_lists[pool_class];
+    ls_rt_pool_free_lists[pool_class] = (void*)header;
+    ls_rt_pool_retained_bytes += block_size;
+}
+
+/* Return the retained blocks at shutdown so that the process ends with the
+ * same heap state a pure malloc/free allocator would leave. */
+static void ls_rt_pool_release_all(void) {
+    size_t index;
+
+    for (index = 0; index < LS_RT_POOL_CLASS_COUNT; index += 1) {
+        void* block = ls_rt_pool_free_lists[index];
+
+        while (block != NULL) {
+            LsRtHeader* header = (LsRtHeader*)block;
+            void* next = (void*)(uintptr_t)header->candidate_index;
+            free(header);
+            block = next;
+        }
+        ls_rt_pool_free_lists[index] = NULL;
+        ls_rt_pool_retained_bytes = 0;
+    }
+}
+#endif /* LS_RT_POOLING */
+
 void* ls_rt_alloc_payload(size_t size, LsDropFn drop, LsTraceFn trace) {
     size_t total;
     LsRtHeader* header;
@@ -329,10 +452,37 @@ void* ls_rt_alloc_payload(size_t size, LsDropFn drop, LsTraceFn trace) {
         ls_rt_alloc_failure(size);
     }
     total = LS_RT_HEADER_SPACE + size;
+#if defined(LS_RT_POOLING)
+#if defined(LS_RT_POOL_UNMANAGED_ONLY)
+    /* Experiment: only recycle payloads that own no managed children. */
+    header = (drop == NULL && trace == NULL) ? ls_rt_pool_take(total) : NULL;
+#else
+    header = ls_rt_pool_take(total);
+#endif
+    if (header == NULL) {
+#if defined(LS_RT_POOL_UNMANAGED_ONLY)
+        unsigned char pool_class =
+            (drop == NULL && trace == NULL) ? ls_rt_pool_class_of(total)
+                                            : LS_RT_POOL_NO_CLASS;
+#else
+        unsigned char pool_class = ls_rt_pool_class_of(total);
+#endif
+        size_t block_size = pool_class == LS_RT_POOL_NO_CLASS
+                                ? total
+                                : ls_rt_pool_block_size(pool_class);
+
+        header = (LsRtHeader*)malloc(block_size);
+        if (header == NULL) {
+            ls_rt_alloc_failure(size);
+        }
+        header->size_class = pool_class;
+    }
+#else
     header = (LsRtHeader*)malloc(total);
     if (header == NULL) {
         ls_rt_alloc_failure(size);
     }
+#endif
     header->magic = LS_RT_LIVE_MAGIC;
     header->drop = drop;
     header->trace = trace;
@@ -388,6 +538,10 @@ void* ls_rt_alloc_immortal(size_t size) {
     header->candidate_index = 0;
     header->refcount = 1;
     header->state = (unsigned char)(LS_RT_COLOR_BLACK | LS_RT_FLAG_IMMORTAL);
+#if defined(LS_RT_POOLING)
+    /* Immortal blocks are never freed, so they are never pooled. */
+    header->size_class = LS_RT_POOL_NO_CLASS;
+#endif
 #if defined(LS_RT_LEAK_TRACKING)
     /* Not part of the leak list: initialize the fields for determinism and only
      * register the handle for stale-release diagnostics. */
@@ -509,9 +663,16 @@ static void ls_rt_free_header(LsRtHeader* header) {
 #endif
     ls_rt_poison_header(header);
     header->state = 0;
+    header->refcount = 0;
 #if defined(LS_RT_LEAK_TRACKING)
     /* Reserve the block for stale-handle diagnostics instead of freeing it. */
     ls_rt_quarantine_push(header);
+#elif defined(LS_RT_POOLING)
+    if (header->size_class == LS_RT_POOL_NO_CLASS) {
+        free(header);
+    } else {
+        ls_rt_pool_give(header);
+    }
 #else
     free(header);
 #endif
@@ -611,6 +772,17 @@ void ls_release(void* obj) {
     header->refcount = 0;
     if ((header->state & LS_RT_FLAG_QUEUED) != 0) {
         ls_rt_candidate_remove(header);
+    }
+    /* Untraced, dropless payloads (String, Vec data, plain structs) cannot own
+     * managed children, so there is no drop cascade to schedule: destroy on the
+     * spot and skip the heap worklist. This is the hot path of freeing every
+     * temporary String. */
+    if (header->trace == NULL && header->drop == NULL) {
+        ls_rt_free_header(header);
+        if (!ls_rt_collecting && ls_rt_free_depth == 0) {
+            ls_rt_maybe_collect();
+        }
+        return;
     }
     ls_rt_destroy(header);
 }
@@ -887,8 +1059,25 @@ static char** ls_rt_argv = NULL;
 
 int32_t ls_runtime_init(int argc, char** argv) {
     ls_rt_configure_stdio();
+    ls_rt_io_runtime_init();
     ls_rt_argc = argc > 0 ? argc : 0;
     ls_rt_argv = argv;
+#if defined(_WIN32)
+    /* MinGW/UCRT deliver argv[] in the ANSI code page, so a non-ASCII argument
+     * (a path, for example) would not be valid UTF-8 and the runtime rejects
+     * it. Rebuild the argument vector from GetCommandLineW(), which is the
+     * original UTF-16 command line, and convert every argument to UTF-8. The
+     * allocated vector lives for the rest of the process. */
+    {
+        int utf8_argc = 0;
+        char** utf8_argv = ls_rt_io_utf8_argv(&utf8_argc);
+
+        if (utf8_argv != NULL && utf8_argc > 0) {
+            ls_rt_argc = utf8_argc;
+            ls_rt_argv = utf8_argv;
+        }
+    }
+#endif
     return 0;
 }
 
@@ -909,6 +1098,9 @@ void ls_runtime_shutdown(void) {
         ls_collect_cycles();
     }
     ls_rt_collect_pending = 0;
+    /* Close file and socket handles the program left open, and release the
+     * platform resources (Winsock on Windows), before the leak report. */
+    ls_rt_io_runtime_shutdown();
 #if defined(LS_RT_LEAK_TRACKING)
     if (!ls_rt_leak_reported) {
         size_t count = ls_rt_live_count;
@@ -932,6 +1124,11 @@ void ls_runtime_shutdown(void) {
     /* The debug stale-handle quarantine reserved released blocks; give that
      * memory back once user code cannot run any more. */
     ls_rt_quarantine_release_all();
+#endif
+#if defined(LS_RT_POOLING)
+    /* Return every recycled block to malloc so a program that exits cleanly
+     * leaves no retained heap in the process. */
+    ls_rt_pool_release_all();
 #endif
     fflush(stdout);
     fflush(stderr);

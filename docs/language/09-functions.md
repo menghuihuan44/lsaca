@@ -189,7 +189,7 @@ Output:
 8 13
 ```
 
-One limitation remains in 1.7.0: function values do **not** support `==`, so
+One limitation remains in 2.0.0: function values do **not** support `==`, so
 comparing two of them is an error (`E0369`):
 
 ```ls,compile-fail
@@ -541,6 +541,26 @@ parameters and returns `()`. See
 messages when a program violates this. `main` is an ordinary function apart from
 those restrictions: it can call anything and declare nested items.
 
+## Extern functions
+
+Version 2.0 adds one function declaration form that has no body: `extern fn`.
+
+```text
+extern fn __str_len(text: &str) -> i64;
+```
+
+These declarations are the compiler's builtin intrinsics: the standard library
+declares them once and the compiler backend emits the corresponding machine
+code. Only the `std` crate may declare an `extern fn`; user code that writes
+one is rejected with `E0001` and a note that extern functions belong to the
+standard library. An `extern fn` is registered like an ordinary free function
+for type checking — it may be generic and has no `self` receiver — but it is not
+a first-class value: it cannot be stored, passed as a callback or called through
+a function-pointer type, and naming one in expression position is `E0425`. It
+is called by name like any other function. The standard library wraps every
+intrinsic in ordinary public functions and methods, so user code never calls an
+`extern fn` directly; see [The standard library](15-standard-library.md).
+
 ## What next
 
 * Closures and capture-by-value: [Closures](14-closures.md).
@@ -548,3 +568,5 @@ those restrictions: it can call anything and declare nested items.
 * Borrowing in parameters and return values: [References and
   borrowing](12-references-and-borrowing.md).
 * Recursion and control flow: [Statements and control flow](08-statements-and-control-flow.md).
+* Extern declarations, intrinsics and the std crate: [The standard
+  library](15-standard-library.md).

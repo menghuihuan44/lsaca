@@ -13,6 +13,8 @@
  *   lsaca_rt_vec.c     generic vector primitives, LsVec_String
  *   lsaca_rt_fmt.c     format builder, float formatting, output/printing
  *   lsaca_rt_map.c     hash map table, hashing/equality primitives
+ *   lsaca_rt_io.c      handle table, files/directories, TCP sockets, time,
+ *                      environment and process arguments (OS layer)
  */
 
 #ifndef LSACA_RT_INTERNAL_H
@@ -38,6 +40,15 @@
  * allocation/release). */
 #if defined(LSACA_DEBUG) || defined(LSACA_DEBUG_RC)
 #define LS_RT_LEAK_TRACKING 1
+#endif
+
+/* Release builds recycle freed payload blocks through per-size-class free
+ * lists instead of returning every block to malloc. The debug configurations
+ * keep the stale-handle quarantine instead (see lsaca_rt.c). Defining
+ * LS_RT_NO_POOLING builds a release runtime without the free lists; the smoke
+ * suite uses it to A/B the pool against plain malloc/free. */
+#if !defined(LS_RT_LEAK_TRACKING) && !defined(LS_RT_NO_POOLING)
+#define LS_RT_POOLING 1
 #endif
 
 /* ====================================================================== */
@@ -73,6 +84,12 @@ typedef struct LsRtHeader {
     size_t candidate_index; /* position in the candidate buffer while queued */
     uint32_t refcount;   /* live references (0 while the object is freed) */
     unsigned char state; /* collector color + flags, see lsaca_rt.c */
+#if defined(LS_RT_POOLING)
+    /* Release-build block pool class, or LS_RT_POOL_NO_CLASS. It fits in the
+     * padding that the struct already has, so the header size (and therefore
+     * LS_RT_HEADER_SPACE) is unchanged. */
+    unsigned char size_class;
+#endif
 #if defined(LS_RT_LEAK_TRACKING)
     size_t size; /* payload size in bytes, for the leak report */
     struct LsRtHeader* all_prev; /* intrusive live-object list, most recent first */
@@ -149,7 +166,52 @@ static inline LsString* ls_str_push_byte_fast(LsString* s, char c) {
     return ls_str_append_fast(s, &c, 1);
 }
 
+/* True when every byte of [data, data + len) is ASCII (below 0x80).
+ *
+ * The UTF-8 code-unit primitives have a cheap representation for pure ASCII
+ * text, but deciding that per scalar with the decoder costs one branchy
+ * iteration per character. Checking a machine word at a time turns the common
+ * all-ASCII case into a handful of loads, and mixed text short-circuits as soon
+ * as the first non-ASCII byte appears. Callers fall back to the generic UTF-8
+ * path when this returns false. */
+static inline bool ls_rt_all_ascii(const char* data, size_t len) {
+    size_t i = 0;
+
+    while (len - i >= sizeof(uint64_t)) {
+        uint64_t word;
+
+        memcpy(&word, data + i, sizeof word);
+        if ((word & UINT64_C(0x8080808080808080)) != 0) {
+            return false;
+        }
+        i += sizeof(uint64_t);
+    }
+    while (i < len) {
+        if ((unsigned char)data[i] >= 0x80u) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 /* lsaca_rt_vec.c. */
 void ls_vec_string_push_owned(LsVec_String* v, LsString* value);
+
+/* lsaca_rt_io.c. Called once by ls_runtime_init()/ls_runtime_shutdown() in the
+ * core unit: the init function creates the handle table and performs the
+ * platform one-time setup (WSAStartup on Windows); shutdown closes every
+ * remaining non-standard handle before the core leak report runs. */
+void ls_rt_io_runtime_init(void);
+void ls_rt_io_runtime_shutdown(void);
+
+/* Windows only (defined in lsaca_rt_io.c, called by ls_runtime_init()): rebuild
+ * the process argument vector as UTF-8 from GetCommandLineW(). MinGW's narrow
+ * argv[] is encoded in the ANSI code page, which mangles non-ASCII arguments
+ * such as paths. Returns a malloc'ed array of malloc'ed strings that live for
+ * the rest of the process (plain malloc, not a reference counted allocation;
+ * never reported as a leak), or NULL when the platform conversion is not
+ * possible - the caller then keeps the original argv[]. */
+char** ls_rt_io_utf8_argv(int* out_argc);
 
 #endif /* LSACA_RT_INTERNAL_H */

@@ -1,7 +1,9 @@
 // string_split: build a comma-separated string of 50,000 decimal numbers
 // (about 194,500 bytes), split it, parse every field and sum it.
 fn main() {
-    let tokens: i64 = 50000;
+    // Optional argument: token count; the default is the medium scale.
+    let all = args();
+    let tokens: i64 = if all.len() > 0 { all[0].clone().parse_i64().unwrap() } else { 50000 };
     let mut text = String::new();
     let mut i = 0;
     while i < tokens {

@@ -2,7 +2,9 @@
 """Run every runnable lsaca example in docs/ against a real compiler binary.
 
 Each fenced code block whose info string is exactly "ls" or starts with "ls,"
-is a runnable example. Examples are written to a scratch work directory and
+is a runnable example. Pages checked are docs/README.md, the language chapters
+(docs/language/*.md) and the standard-library reference (docs/stdlib/**.md).
+Examples are written to a scratch work directory and
 numbered in document order per page (example-01.ls, example-02.ls, ...), so
 diagnostics and panic messages in the documentation line up with the files
 that are executed.
@@ -31,6 +33,11 @@ Blank lines are ignored at both ends of the comparison; lines that a debug
 build prints to stderr and that start with "DEBUG " are dropped.
 
 Exit status: 0 when every example matches, 1 when any example fails.
+
+The compiler is selected with --bin, or the LSACA_DOCS_COMPILER environment
+variable, or LSACA_BIN; otherwise the first existing path in BIN_CANDIDATES is
+used. target/lead-rel2/release/lsaca.exe is preferred so the official 2.0.0
+release binary is what the examples are checked against.
 """
 
 from __future__ import annotations
@@ -48,8 +55,9 @@ DOCS = REPO_ROOT / "docs"
 DEFAULT_WORK = REPO_ROOT / "target" / "docs-tmp" / "work"
 DEFAULT_TMP = REPO_ROOT / "target" / "docs-tmp" / "tmp"
 BIN_CANDIDATES = (
-    REPO_ROOT / "target" / "v17" / "bin" / "lsaca.exe",
+    REPO_ROOT / "target" / "lead-rel2" / "release" / "lsaca.exe",
     REPO_ROOT / "target" / "release" / "lsaca.exe",
+    REPO_ROOT / "target" / "v17" / "bin" / "lsaca.exe",
     REPO_ROOT / "target" / "debug" / "lsaca.exe",
 )
 
@@ -310,6 +318,15 @@ def collect_pages(page_filter):
     language = DOCS / "language"
     if language.is_dir():
         pages.extend(sorted(language.glob("*.md")))
+    stdlib = DOCS / "stdlib"
+    if stdlib.is_dir():
+        stdlib_readme = stdlib / "README.md"
+        if stdlib_readme.is_file():
+            pages.append(stdlib_readme)
+        pages.extend(sorted(page for page in stdlib.glob("*.md") if page != stdlib_readme))
+        collections = stdlib / "collections"
+        if collections.is_dir():
+            pages.extend(sorted(collections.glob("*.md")))
     if page_filter:
         pages = [page for page in pages if page_filter in page.relative_to(REPO_ROOT).as_posix()]
     return pages
@@ -317,7 +334,11 @@ def collect_pages(page_filter):
 
 def main(argv):
     parser = argparse.ArgumentParser(description="Verify doc examples against the lsaca compiler.")
-    parser.add_argument("--bin", default=os.environ.get("LSACA_BIN"), help="lsaca compiler binary to test")
+    parser.add_argument(
+        "--bin",
+        default=os.environ.get("LSACA_DOCS_COMPILER") or os.environ.get("LSACA_BIN"),
+        help="lsaca compiler binary to test (or set LSACA_DOCS_COMPILER / LSACA_BIN)",
+    )
     parser.add_argument("--page", default=None, help="only check pages whose path contains this substring")
     parser.add_argument("--work", default=str(DEFAULT_WORK), help="scratch directory")
     parser.add_argument("--timeout", type=float, default=60.0, help="per-example timeout in seconds")
@@ -338,7 +359,10 @@ def main(argv):
                 binary_path = candidate
                 break
         if binary_path is None:
-            print("docs_verify: no lsaca binary found; pass --bin or set LSACA_BIN", file=sys.stderr)
+            print(
+                "docs_verify: no lsaca binary found; pass --bin or set LSACA_DOCS_COMPILER / LSACA_BIN",
+                file=sys.stderr,
+            )
             return 2
     if not binary_path.is_file():
         print("docs_verify: lsaca binary not found: " + str(binary_path), file=sys.stderr)

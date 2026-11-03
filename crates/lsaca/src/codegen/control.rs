@@ -1,6 +1,6 @@
 //! Statements and control flow: blocks, patterns, branching and loops.
 
-use crate::hir::{HBlock, HExpr, HLit, HPat, HPatKind, HStmt};
+use crate::hir::{HBlock, HExpr, HExprKind, HLit, HPat, HPatKind, HStmt};
 use crate::types::Ty;
 
 use super::emit::{BoundVar, Gen, LoopCtx};
@@ -45,6 +45,15 @@ impl<'a> Gen<'a> {
                         if init.is_place() && self.program.drop_hook(&init.ty).is_some() {
                             let place = self.gen_place(init);
                             self.bind_let_pattern(pat, init, &place);
+                        } else if self.let_pattern_consumes_owned_value(pat, init) {
+                            // A destructuring pattern that binds a Drop-hook
+                            // payload owns the initialiser: move it into a
+                            // temporary, steal the payload fields and mark the
+                            // temporary moved. Copying would run the Drop hook
+                            // for the binding and for the temporary.
+                            let value = self.gen_owned_move(init);
+                            self.bind_pattern_consume(pat, &value);
+                            self.mark_moved(&value);
                         } else {
                             let value = self.gen_owned(init);
                             self.bind_let_pattern(pat, init, &value);
@@ -207,14 +216,7 @@ impl<'a> Gen<'a> {
     /// reference to the selected place, and structural sub-patterns read
     /// through the dereferenced pointer instead of the pointer itself.
     fn bind_let_pattern(&mut self, pat: &HPat, init: &HExpr, value: &str) {
-        let mut source = value.to_string();
-        let mut scrutinee_ty = init.ty.clone();
-        let mut ref_mode = false;
-        while let Ty::Ref { inner, .. } = scrutinee_ty {
-            source = format!("(*({}))", source);
-            scrutinee_ty = *inner;
-            ref_mode = true;
-        }
+        let (source, _, ref_mode) = peel_match_references(value.to_string(), &init.ty);
         self.bind_pattern_mode(pat, &source, ref_mode, false);
     }
 
@@ -363,6 +365,227 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// True when the pattern binds a non-Copy value whose zero image would
+    /// still run a user Drop hook when released.
+    ///
+    /// Such a binding must move its payload: copying would deep-copy (or
+    /// retain) the payload into the binding while the source aggregate still
+    /// drops the original, running the Drop hook twice. The zero-release
+    /// property is exactly what [`Gen::zero_release_is_inert`] decides; every
+    /// container is walked so a hook buried in an enum variant or tuple field
+    /// is found as well.
+    fn pattern_moves_drop_payload(&self, pat: &HPat) -> bool {
+        match &pat.kind {
+            HPatKind::Bind { .. } => {
+                !self.is_trivial_copy(&pat.ty) && !self.zero_release_is_inert(&pat.ty)
+            }
+            HPatKind::Tuple(parts) => parts
+                .iter()
+                .any(|part| self.pattern_moves_drop_payload(part)),
+            HPatKind::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, part)| self.pattern_moves_drop_payload(part)),
+            HPatKind::Enum { args, .. } => args
+                .iter()
+                .any(|part| self.pattern_moves_drop_payload(part)),
+            HPatKind::OptionSome(inner)
+            | HPatKind::ResultOk(inner)
+            | HPatKind::ResultErr(inner) => self.pattern_moves_drop_payload(inner),
+            HPatKind::Or(alternatives) => alternatives
+                .iter()
+                .any(|alternative| self.pattern_moves_drop_payload(alternative)),
+            HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => false,
+        }
+    }
+
+    /// Whether `let <pat> = <init>` must bind by consuming the initialiser.
+    ///
+    /// Only whole-value initialisers can be consumed: a local variable is
+    /// moved out of with its liveness flag cleared, and a constructor is
+    /// materialised directly inside the temporary. Aggregate places (fields,
+    /// indexes, dereferences) and references are rejected here: moving out of
+    /// them is E0507, and the defensive copy emitted for those places would
+    /// leave two owners of the same payload.
+    fn let_pattern_consumes_owned_value(&self, pat: &HPat, init: &HExpr) -> bool {
+        if matches!(&init.ty, Ty::Ref { .. }) {
+            return false;
+        }
+        if init.is_place() && !matches!(&init.kind, HExprKind::Local { .. }) {
+            return false;
+        }
+        self.program.drop_hook(&init.ty).is_none() && self.pattern_moves_drop_payload(pat)
+    }
+    /// Move the value selected by a wildcard or ignored field into a released
+    /// temporary, clearing the source slot.
+    ///
+    /// Consuming patterns neutralise the source aggregate instead of releasing
+    /// it, so a part the pattern does not bind would otherwise leak. Moving it
+    /// into a temporary keeps the normal scope cleanup responsible: the value
+    /// is dropped exactly once, and an early `return` still releases it.
+    fn move_place_into_temp(&mut self, ty: &Ty, place: &str) {
+        let temp = self.declare_temp(ty);
+        self.w.line(format!("{} = {};", temp, place));
+        self.w
+            .line(format!("{} = {};", place, self.raw_zero_expr(ty)));
+    }
+
+    /// Bind the variables of a consuming pattern by moving the selected values.
+    ///
+    /// Rust pattern bindings move. Unlike [`Gen::bind_pattern_mode`] this path
+    /// takes ownership of every selected value instead of copying it, so a
+    /// Drop-hook payload is bound exactly once and never copied:
+    ///
+    /// * a non-Copy binding steals the value, clears the source slot and marks
+    ///   the binding live;
+    /// * Copy bindings copy;
+    /// * values selected by wildcards, literal tests or by aggregate fields
+    ///   the pattern does not name move into temporaries so they are still
+    ///   dropped exactly once.
+    ///
+    /// The caller must not release the source aggregate afterwards: nothing is
+    /// left to release. See the `let` and `match` callers.
+    fn bind_pattern_consume(&mut self, pat: &HPat, source: &str) {
+        match &pat.kind {
+            HPatKind::Wild | HPatKind::Lit(_) => {
+                if !self.is_trivial_copy(&pat.ty) {
+                    self.move_place_into_temp(&pat.ty, source);
+                }
+            }
+            HPatKind::Bind { c_name, .. } => {
+                if self.is_trivial_copy(&pat.ty) {
+                    self.w.line(format!("{} = {};", c_name, source));
+                } else {
+                    self.emit_release_guarded(&pat.ty, c_name, self.live_flag(c_name).as_deref());
+                    self.w.line(format!("{} = {};", c_name, source));
+                    self.w
+                        .line(format!("{} = {};", source, self.raw_zero_expr(&pat.ty)));
+                    self.set_live(c_name, true);
+                }
+            }
+            HPatKind::Tuple(parts) => {
+                for (index, part) in parts.iter().enumerate() {
+                    let sub = format!("({}).{}", source, types::positional_field(index));
+                    self.bind_pattern_consume(part, &sub);
+                }
+            }
+            HPatKind::Struct {
+                struct_id, fields, ..
+            } => {
+                for (index, part) in fields {
+                    let name = self
+                        .program
+                        .structs
+                        .get(*struct_id)
+                        .and_then(|item| item.fields.get(*index))
+                        .map(|field| field.name.clone())
+                        .unwrap_or_else(|| format!("field{}", index));
+                    let sub = format!("({}).{}", source, types::field_cname(&name));
+                    self.bind_pattern_consume(part, &sub);
+                }
+                // Fields the pattern does not name still belong to the value
+                // being consumed (`Struct { field, .. }`).
+                if let Some(item) = self.program.structs.get(*struct_id) {
+                    let named: Vec<usize> = fields.iter().map(|(index, _)| *index).collect();
+                    let remaining: Vec<(String, Ty)> = item
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !named.contains(index))
+                        .map(|(_, field)| (field.name.clone(), field.ty.clone()))
+                        .collect();
+                    for (name, ty) in remaining {
+                        if self.is_trivial_copy(&ty) {
+                            continue;
+                        }
+                        let sub = format!("({}).{}", source, types::field_cname(&name));
+                        self.move_place_into_temp(&ty, &sub);
+                    }
+                }
+            }
+            HPatKind::Enum {
+                enum_id,
+                variant,
+                args,
+            } => {
+                let matched_variant = self
+                    .program
+                    .enums
+                    .get(*enum_id)
+                    .and_then(|item| item.variants.get(*variant))
+                    .cloned();
+                let variant_name = matched_variant
+                    .as_ref()
+                    .map(|item| item.name.clone())
+                    .unwrap_or_else(|| format!("Variant{}", variant));
+                for (index, part) in args.iter().enumerate() {
+                    let sub = format!(
+                        "({}).{}.{}.{}",
+                        source,
+                        types::UNION_FIELD,
+                        types::variant_member(&variant_name),
+                        types::positional_field(index)
+                    );
+                    self.bind_pattern_consume(part, &sub);
+                }
+                // Payload fields the pattern does not name (`Variant(..)`).
+                if let Some(item) = matched_variant {
+                    for (index, ty) in item.fields.iter().enumerate() {
+                        if index < args.len() || self.is_trivial_copy(ty) {
+                            continue;
+                        }
+                        let sub = format!(
+                            "({}).{}.{}.{}",
+                            source,
+                            types::UNION_FIELD,
+                            types::variant_member(&variant_name),
+                            types::positional_field(index)
+                        );
+                        self.move_place_into_temp(ty, &sub);
+                    }
+                }
+            }
+            HPatKind::OptionSome(inner) => {
+                let sub = format!(
+                    "({}).{}.{}",
+                    source,
+                    types::UNION_FIELD,
+                    types::OPTION_SOME_MEMBER
+                );
+                self.bind_pattern_consume(inner, &sub);
+            }
+            HPatKind::OptionNone => {}
+            HPatKind::ResultOk(inner) => {
+                let sub = format!(
+                    "({}).{}.{}",
+                    source,
+                    types::UNION_FIELD,
+                    types::RESULT_OK_MEMBER
+                );
+                self.bind_pattern_consume(inner, &sub);
+            }
+            HPatKind::ResultErr(inner) => {
+                let sub = format!(
+                    "({}).{}.{}",
+                    source,
+                    types::UNION_FIELD,
+                    types::RESULT_ERR_MEMBER
+                );
+                self.bind_pattern_consume(inner, &sub);
+            }
+            HPatKind::Or(alternatives) => {
+                for alternative in alternatives {
+                    let matched = self.new_plain(&Ty::Bool, "o");
+                    self.w.line(format!("{} = true;", matched));
+                    self.gen_match_tests(alternative, source, &matched);
+                    self.w.line(format!("if ({}) {{", matched));
+                    self.w.indent();
+                    self.bind_pattern_consume(alternative, source);
+                    self.w.dedent();
+                    self.w.line("}");
+                }
+            }
+        }
+    }
     // ----- blocks and branches ---------------------------------------------
 
     pub(crate) fn gen_block_value(&mut self, block: &HBlock, target: &str) {
@@ -449,6 +672,105 @@ impl<'a> Gen<'a> {
         self.fn_terminated = then_fn_terminated && else_fn_terminated;
     }
 
+    /// Bind the values selected by a pattern without taking ownership of them.
+    ///
+    /// Guarded match arms need their bindings to be readable while the guard
+    /// runs but must not own the values yet: when the guard rejects the arm the
+    /// remaining arms still see an untouched scrutinee, so nothing may be
+    /// released. The bindings therefore only receive shallow aliases and stay
+    /// not live; once the guard accepts the arm `bind_pattern_consume` steals
+    /// the payloads for real.
+    fn bind_pattern_borrow(&mut self, pat: &HPat, source: &str) {
+        match &pat.kind {
+            HPatKind::Wild | HPatKind::Lit { .. } | HPatKind::OptionNone => {}
+            HPatKind::Bind { c_name, .. } => {
+                self.w.line(format!("{} = {};", c_name, source));
+            }
+            HPatKind::Tuple(parts) => {
+                for (index, part) in parts.iter().enumerate() {
+                    let sub = format!("({}).{}", source, types::positional_field(index));
+                    self.bind_pattern_borrow(part, &sub);
+                }
+            }
+            HPatKind::Struct {
+                struct_id, fields, ..
+            } => {
+                for (index, part) in fields {
+                    let name = self
+                        .program
+                        .structs
+                        .get(*struct_id)
+                        .and_then(|item| item.fields.get(*index))
+                        .map(|field| field.name.clone())
+                        .unwrap_or_else(|| format!("field{}", index));
+                    let sub = format!("({}).{}", source, types::field_cname(&name));
+                    self.bind_pattern_borrow(part, &sub);
+                }
+            }
+            HPatKind::Enum {
+                enum_id,
+                variant,
+                args,
+            } => {
+                let variant_name = self
+                    .program
+                    .enums
+                    .get(*enum_id)
+                    .and_then(|item| item.variants.get(*variant))
+                    .map(|item| item.name.clone())
+                    .unwrap_or_else(|| format!("Variant{}", variant));
+                for (index, part) in args.iter().enumerate() {
+                    let sub = format!(
+                        "({}).{}.{}.{}",
+                        source,
+                        types::UNION_FIELD,
+                        types::variant_member(&variant_name),
+                        types::positional_field(index)
+                    );
+                    self.bind_pattern_borrow(part, &sub);
+                }
+            }
+            HPatKind::OptionSome(inner) => {
+                let sub = format!(
+                    "({}).{}.{}",
+                    source,
+                    types::UNION_FIELD,
+                    types::OPTION_SOME_MEMBER
+                );
+                self.bind_pattern_borrow(inner, &sub);
+            }
+            HPatKind::ResultOk(inner) => {
+                let sub = format!(
+                    "({}).{}.{}",
+                    source,
+                    types::UNION_FIELD,
+                    types::RESULT_OK_MEMBER
+                );
+                self.bind_pattern_borrow(inner, &sub);
+            }
+            HPatKind::ResultErr(inner) => {
+                let sub = format!(
+                    "({}).{}.{}",
+                    source,
+                    types::UNION_FIELD,
+                    types::RESULT_ERR_MEMBER
+                );
+                self.bind_pattern_borrow(inner, &sub);
+            }
+            HPatKind::Or(alternatives) => {
+                for alternative in alternatives {
+                    let matched = self.new_plain(&Ty::Bool, "o");
+                    self.w.line(format!("{} = true;", matched));
+                    self.gen_match_tests(alternative, source, &matched);
+                    self.w.line(format!("if ({}) {{", matched));
+                    self.w.indent();
+                    self.bind_pattern_borrow(alternative, source);
+                    self.w.dedent();
+                    self.w.line("}");
+                }
+            }
+        }
+    }
     pub(crate) fn gen_match(
         &mut self,
         scrutinee: &HExpr,
@@ -495,14 +817,8 @@ impl<'a> Gen<'a> {
         // address of the matched place (see bind_pattern_mode). Nested
         // references are peeled one level per structure, which makes
         // `&&Option<T>` and `Option<T>` behave identically.
-        let mut scrutinee_ty = scrutinee.ty.clone();
-        let mut source = scrutinee_value.clone();
-        let mut ref_mode = false;
-        while let Ty::Ref { inner, .. } = scrutinee_ty {
-            source = format!("(*({}))", source);
-            scrutinee_ty = *inner;
-            ref_mode = true;
-        }
+        let (source, scrutinee_ty, ref_mode) =
+            peel_match_references(scrutinee_value.clone(), &scrutinee.ty);
         if self.fn_terminated {
             self.frame_cleanup(frame);
             self.pop_frame();
@@ -548,17 +864,43 @@ impl<'a> Gen<'a> {
                 }
                 _ => None,
             };
+            let mut guard_consume = false;
             if moved_whole.is_none() {
-                // A consuming arm without a guard binds by move: Rust pattern
-                // bindings take ownership of the matched values instead of
-                // cloning them. Guarded arms keep the copying form because
-                // their bindings exist before the guard result is known.
-                self.bind_pattern_mode(
-                    &arm.pat,
-                    &source,
-                    ref_mode,
-                    !ref_mode && arm.guard.is_none(),
-                );
+                // A pattern that binds a Drop-hook payload must move it out of
+                // the scrutinee: copying would leave the payload owned by the
+                // binding and by the aggregate at the same time, so the Drop
+                // hook would run twice (a File-like handle would close twice).
+                // Such patterns consume every selected value and the scrutinee
+                // local is marked moved, so its release helper does not drop the
+                // payload a second time.
+                let drop_hook_container = self.program.drop_hook(&scrutinee_ty).is_none();
+                let moves_payload = self.pattern_moves_drop_payload(&arm.pat);
+                let consume =
+                    !ref_mode && arm.guard.is_none() && drop_hook_container && moves_payload;
+                // A guarded arm cannot consume yet: the guard must be able to
+                // read the bindings first, and when it rejects the arm the
+                // payloads belong to the remaining arms. The arm binds shallow
+                // aliases now and steals the payloads once the guard accepts.
+                guard_consume =
+                    !ref_mode && arm.guard.is_some() && drop_hook_container && moves_payload;
+                if guard_consume {
+                    self.bind_pattern_borrow(&arm.pat, &source);
+                } else if consume {
+                    self.bind_pattern_consume(&arm.pat, &source);
+                    self.set_live(&scrutinee_value, false);
+                } else {
+                    // A consuming arm without a guard binds by move: Rust
+                    // pattern bindings take ownership of the matched values
+                    // instead of cloning them. Guarded arms keep the copying
+                    // form because their bindings exist before the guard
+                    // result is known.
+                    self.bind_pattern_mode(
+                        &arm.pat,
+                        &source,
+                        ref_mode,
+                        !ref_mode && arm.guard.is_none(),
+                    );
+                }
             }
             let guard_frame = self.frames.len();
             self.push_frame();
@@ -568,6 +910,13 @@ impl<'a> Gen<'a> {
             }
             self.w.line(format!("if ({}) {{", pass));
             self.w.indent();
+            if guard_consume {
+                // The guard accepted the arm, so the payloads can be moved
+                // into the bindings now. The scrutinee local gives up its
+                // ownership; nothing is released on the rejected path above.
+                self.bind_pattern_consume(&arm.pat, &source);
+                self.set_live(&scrutinee_value, false);
+            }
             let body_frame = self.frames.len();
             self.push_frame();
             self.gen_move_into(&arm.body, target);
@@ -1128,7 +1477,7 @@ impl<'a> Gen<'a> {
         self.block_terminated = false;
         self.fn_terminated = false;
     }
-    fn gen_loop_body(
+    pub(crate) fn gen_loop_body(
         &mut self,
         body: &HBlock,
         pat: Option<(&HPat, &str, bool)>,
@@ -1287,4 +1636,24 @@ fn pattern_binds_any(pat: &HPat) -> bool {
             pattern_binds_any(inner)
         }
     }
+}
+
+/// Peel the reference layers between a match scrutinee (or a let initialiser)
+/// and the place a pattern reads.
+///
+/// Match ergonomics make every binding a reference to the selected place, and
+/// nested structures peel one reference layer each. References to unsized
+/// referents stop the peeling: their fat values are already stored by value.
+fn peel_match_references(mut source: String, ty: &Ty) -> (String, Ty, bool) {
+    let mut scrutinee_ty = ty.clone();
+    let mut ref_mode = false;
+    while let Ty::Ref { inner, .. } = scrutinee_ty.clone() {
+        if inner.is_unsized() {
+            break;
+        }
+        source = format!("(*({}))", source);
+        scrutinee_ty = *inner;
+        ref_mode = true;
+    }
+    (source, scrutinee_ty, ref_mode)
 }

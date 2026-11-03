@@ -1,19 +1,69 @@
 # Standard library
 
-Everything in this page is a builtin of the prelude: it is in scope in every
-module of every crate without an import, whether or not the program uses `mod`
-or a package. Builtin generic types are `Vec<T>`, `HashMap<K, V>`, `Option<T>`,
-`Result<T, E>`, `Rc<T>` and `Box<T>`; `String` and the scalar types are
+Version 2.0 moves the standard library out of the compiler into a normal lsaca
+crate named `std` (see the [standard library reference](../stdlib/README.md)).
+The crate root re-exports the prelude with `pub use`, so unqualified names are
+in scope in every module of every crate without an import, whether or not the
+program uses `mod` or a package; the modules can also be named with `std::…`
+paths. In version 2.0.0 a qualified path resolves for
+functions, constructors and associated items (`std::fs::read_to_string`,
+`std::collections::HashMap::new()`, `std::io::ErrorKind::NotFound`), and
+`use std::…` imports of those items work (`use std::error::Error;`). Qualified
+type names in type position report `E0412` (`let m:
+std::collections::HashMap<i64, i64>`), and a trait impl needs an import plus a
+single identifier because trait paths in impl blocks are `E0001`; the
+[reference](../stdlib/README.md) records these known gaps.
+Builtin generic types are `Vec<T>`, `HashMap<K, V>`, `Option<T>`,
+`Result<T, E>`, `Rc<T>` and `Box<T>`; `String`, `char` and the scalar types are
 non-generic. The prelude also provides the generic functions behind the
 iterator adapters (see [Iterators](19-iterators.md)); those are ordinary public
-items of the standard library, not a source file you can edit. This page
-describes the library of version 1.7.0.
+items of the `std` crate. This page describes the language-level library
+behaviour of version 2.0.0; the API of each module is documented in the
+[standard library reference](../stdlib/README.md).
 
 The page is organised by builtin: formatting first, because every example in the
 documentation uses it, then `String`, `Vec`, iterators, `HashMap`, `Option`
 (including its combinators), `Result` (including its combinators and the `?`
 operator), `Rc`, `Box`, the free functions and finally the panic and exit-code
-rules.
+rules. Version 2.0 also adds the unsized slice types and `dyn` trait objects:
+`&[T]`, `&mut [T]`, `&str` and `&mut str` are documented in [Slices and
+str](26-slices-and-str.md), and `dyn Trait` in [Trait
+objects](25-trait-objects.md).
+
+## The std crate in 2.0
+
+The library source lives in `stdlib/src/` as one crate of ordinary lsaca code.
+It is embedded into the compiler at build time and parsed with a reserved
+`SourceMap` base, so a diagnostic or a panic inside the library is reported as
+`std/vec.ls:line:column`. The crate is written in safe lsaca and uses the same
+language as user code; only the `extern fn` intrinsics declared in it are
+implemented by code generation.
+
+| Module | Page | Status in 2.0.0 |
+| --- | --- | --- |
+| `std::core` (`Option`, `Result`, `Iterator`) | [core](../stdlib/core.md) | migrated from 1.7 |
+| `std::string` | [string](../stdlib/string.md) | migrated; `from_str`, `as_str`, `as_mut_str` and the `str` methods implemented in 2.0.0 |
+| `std::char` | [char](../stdlib/char.md) | ASCII classification methods implemented; Unicode classification not implemented in 2.0.0 |
+| `std::vec` | [vec](../stdlib/vec.md) | migrated; `sort`, `as_slice` and `as_mut_slice` implemented in 2.0.0 |
+| `std::iter` | [iter](../stdlib/iter.md) | migrated; `zip`, `chain`, `rev` and `flat_map` not implemented in 2.0.0 |
+| `std::fmt` | [fmt](../stdlib/fmt.md) | compiler-implemented |
+| `std::math` | [math](../stdlib/math.md) | migrated; `abs`/`min`/`max` remain compiler builtins in 2.0.0 |
+| `std::collections` | [collections](../stdlib/collections/README.md) | `HashMap` migrated; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented in 2.0.0 |
+| `std::io` | [io](../stdlib/io.md) | error types, `File` and stream handles implemented; the stream traits and `io::Result` alias not implemented in 2.0.0 |
+| `std::fs` | [fs](../stdlib/fs.md) | path, directory and metadata API implemented in 2.0.0 |
+| `std::net` | [net](../stdlib/net.md) | implemented in 2.0.0 (plain TCP) |
+| `std::time` | [time](../stdlib/time.md) | implemented in 2.0.0 |
+| `std::env` | [env](../stdlib/env.md) | implemented in 2.0.0 |
+| `std::process` | [process](../stdlib/process.md) | `args` implemented; `exit` not implemented in 2.0.0 |
+| `std::error` | [error](../stdlib/error.md) | the `Error` trait implemented in 2.0.0 |
+
+"Migrated from 1.7" means the surface described in this chapter is unchanged but
+the implementation now lives in the `std` crate. "Implemented" names what version
+2.0.0 provides; each module page lists it separately from the API that is not
+implemented in 2.0.0. Those remaining APIs are fixed by the 2.0 design and planned
+for a later release; the pages document the intended surface, not runnable
+behaviour. The whole library is versioned with the compiler (2.0.0) and cannot be
+replaced by a user package: the package name `std` is reserved.
 
 ## Formatting and printing
 
@@ -330,6 +380,14 @@ an integer in another base — write a helper function if you need one.
 | `Box<T>` | `Box::new(v)` | move-only owned box; `.clone()` deep-copies the value |
 | `HashMap<K, V>` | `HashMap::new()` | move-only table that owns its keys and values |
 
+Version 2.0 adds the pointer-sized scalars `isize` and `usize`, which behave
+like the other integer types, and the unsized types `dyn Trait`, `[T]` and
+`str`, which can only appear behind `Box`, `Rc`, `&` or `&mut`: `Box<dyn
+Trait>` and `Rc<dyn Trait>` are an owned box and a shared cell whose payload is
+a trait object, while `&dyn Trait`, `&[T]` and `&str` are non-owning fat
+references and `&mut` variants are their mutable forms. See [Trait
+objects](25-trait-objects.md) and [Slices and str](26-slices-and-str.md).
+
 ## String
 
 A `String` is an owned UTF-8 string. Literals have type `String` already, and
@@ -625,11 +683,20 @@ consume the iterator and produce a value.
 | `filter(p)` | keeps values for which `p: Fn(&T) -> bool` returns true |
 | `take(n)` / `skip(n)` | first `n` values / all but the first `n` values |
 | `enumerate()` | yields `(i64, T)` index/value pairs |
+| `zip(other)` | pairs the values of two iterators (added in 2.0.0) |
+| `chain(other)` | yields this iterator's values, then the other's (added in 2.0.0) |
+| `rev()` | yields the values in reverse; the adapter must be double-ended (added in 2.0.0) |
+| `flat_map(f)` | applies `f: Fn(T) -> I` and yields the values of every `I` in order (added in 2.0.0) |
 | `collect()` | collects into a `Vec<T>`; the target type must be known |
 | `fold(init, f)` | folds with `f: Fn(U, T) -> U` |
 | `count()` / `sum()` | number of values (i64) / sum of numbers |
 | `any(p)` / `all(p)` | short-circuit boolean tests with `p: Fn(&T) -> bool` |
 | `find(p)` | first value satisfying `p`, as `Option<T>` |
+
+Version 2.0.0 provides the 1.7 adapter set (`map`,
+`filter`, `take`, `skip`, `enumerate` and the terminals above); `zip`, `chain`,
+`rev` and `flat_map` are fixed by the 2.0 design but are not implemented in
+2.0.0 and are planned for a later release (see [iter](../stdlib/iter.md)).
 
 ```ls
 fn main() {
@@ -647,11 +714,11 @@ Output:
 Full details, user-defined iterators and the exact rules are on
 [Iterators](19-iterators.md).
 
-## HashMap<K, V>
+## HashMap
 
 A `HashMap` is a builtin map from keys to values added in 1.5. Keys are limited
-to `i64`, `u64`, `bool`, `String` and `char` (character keys since 1.6.0);
-values may be any value type. A map is move-only and owns its keys and values;
+to `i64`, `u64`, `bool`, `String` and `char` (character keys since 1.6.0; 2.0
+also accepts `isize` and `usize`); values may be any value type. A map is move-only and owns its keys and values;
 `.clone()` produces an independent copy when the key and value types are
 cloneable. Since 1.6.0 the implementation is a Swiss-Table-style open-addressed
 table with a deterministic, non-cryptographic 64-bit hash. The printed order is
@@ -1252,7 +1319,17 @@ independent after the struct is cloned. Boxes compose with `Vec` and `Rc`:
 
 ## Free functions
 
-These functions are always in scope.
+These are the legacy prelude helpers; in 2.0.0 they are items of the `std` crate
+root and stay in scope for every program. The richer per-module APIs — `std::io`,
+`std::fs`, `std::net`, `std::time`, `std::env` and `std::process` — are
+documented in the [standard library reference](../stdlib/README.md), which marks
+each item as implemented in 2.0.0 or not implemented in 2.0.0: the `io` error
+types, file and stream handles and text helpers, the full `fs` module, `net`
+(plain TCP), `time`, `env`, `process::args` and the `error` trait are implemented;
+the `io` stream traits and `io::Result` alias together with `process::exit` are
+not implemented in 2.0.0 and are planned for a later release. `std::fs` and
+`std::io` keep the same owned-`String` path convention as `read_file` and
+`write_file`.
 
 ### I/O and process
 
@@ -1444,7 +1521,7 @@ macros work on all of them; comparing function values is `E0369`.
 `assert_ne!` also accepts an optional message: `assert_ne!(left, right,
 "format", args…)` panics with the formatted message instead of the default
 `left`/`right` report. The message form of `assert_ne!` is the only one in
-1.7.0: `assert_eq!` and `assert!` take exactly the operands shown above.
+2.0.0: `assert_eq!` and `assert!` take exactly the operands shown above.
 
 The argument of `assert!` must be `bool`; `assert!(n)` for an integer `n` is a
 type error (`E0308`). Write the comparison explicitly: `assert!(n > 0)`.
@@ -1545,8 +1622,11 @@ the compiler is invoked with `LSACA_DEBUG_RC=1`; see
 
 ## What next
 
+* The module-by-module API reference: [Standard library reference](../stdlib/README.md).
 * How ownership, moves, Drop and ORC behave: [Memory model](05-memory-model.md).
 * Lazy iterators in depth: [Iterators](19-iterators.md).
+* Trait objects and dynamic dispatch: [Trait objects](25-trait-objects.md).
+* Slices, `str` and string slicing: [Slices and str](26-slices-and-str.md).
 * Hash maps in depth: [HashMap](20-hashmap.md).
 * User-defined generic types: [Generics](17-generics.md).
 * Formatting inside user types: [Structs, enums and impl](10-structs-enums-and-impl.md#printing-and-equality).

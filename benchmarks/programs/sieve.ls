@@ -1,7 +1,9 @@
 // sieve: count primes below 2,000,000 with a flat Vec<i64> flag array
 // (0 = still prime). The flag representation is the same in every language.
 fn main() {
-    let limit: i64 = 2000000;
+    // Optional argument: upper limit; the default is the medium scale.
+    let all = args();
+    let limit: i64 = if all.len() > 0 { all[0].clone().parse_i64().unwrap() } else { 2000000 };
     let mut flags = vec![0; limit + 1];
     let mut primes = 0;
     let mut i = 2;

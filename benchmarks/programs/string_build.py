@@ -1,5 +1,19 @@
+"""string_build: append numeric tokens to a string.
+
+Optional argument: token count; the default is the medium scale.
+"""
+
+import sys
+
+
+def arg_int(args, index, fallback):
+    if index < len(args):
+        return int(args[index])
+    return fallback
+
+
 def main():
-    tokens = 1000000
+    tokens = arg_int(sys.argv[1:], 0, 1000000)
     parts = []
     token_sum = 0
     for i in range(tokens):

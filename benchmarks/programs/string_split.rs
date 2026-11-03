@@ -1,10 +1,19 @@
-// string_split: build a comma-separated string of 50,000 decimal numbers
-// (about 194,500 bytes), split it, parse every field and sum it.
-const TOKENS: i64 = 50000;
+// string_split: build a comma-separated string of decimal numbers, split it,
+// parse every field and sum it.
+// Optional argument: token count (default 50,000, the medium scale).
+fn arg_i64(args: &[String], index: usize, fallback: i64) -> i64 {
+    if index < args.len() {
+        args[index].parse::<i64>().unwrap()
+    } else {
+        fallback
+    }
+}
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let tokens = arg_i64(&args, 0, 50_000);
     let mut text = String::new();
-    for i in 0..TOKENS {
+    for i in 0..tokens {
         text.push_str(&(i % 1000).to_string());
         text.push(',');
     }

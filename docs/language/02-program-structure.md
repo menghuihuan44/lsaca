@@ -18,8 +18,10 @@ line, or `src/main.ls` / `src/lib.ls` of a package (see
 A **program** is the crate graph of one package: the root crate plus every
 package in its `[dependencies]` table, compiled together into one executable. A
 single-file program is the smallest case, a root file with no external modules.
-The prelude from [Standard library](15-standard-library.md) is available in
-every module without an import.
+Since 2.0 the prelude is the crate root of the `std` crate, which re-exports the
+language's builtin types and functions with `pub use`; it is available in every
+module without an import (see [Standard library](15-standard-library.md) and the
+[standard library reference](../stdlib/README.md)).
 
 Whitespace is insignificant outside literals and comments. The parser processes
 each file from beginning to end. An empty file is a syntactically valid crate
@@ -37,10 +39,15 @@ There are exactly nine kinds:
 | Enum | `enum` | A tagged union of unit or tuple variants. |
 | Impl | `impl` | Methods and associated functions for a struct or enum type. |
 | Constant | `const` | A compile-time constant with a required type annotation. |
-| Trait | `trait` | A trait declaration: method signatures with receivers only; implemented for a user struct or enum with `impl Trait for Type`. Added in 1.5.0. |
+| Trait | `trait` | A trait declaration: method signatures with receivers, each optionally with a default body (2.0); implemented for a user struct or enum with `impl Trait for Type`. Added in 1.5.0. |
 | Type alias | `type` | A new name for an existing type. |
 | Module | `mod` | A nested module: `mod name;` loads a file, `mod name { … }` declares it inline. Added in 1.7.0. |
 | Import | `use` | Import names from a module or a dependency crate into the current module. Added in 1.7.0. |
+
+A function item may also be an `extern fn` declaration: it has parameters and a
+return type but no body, and only the `std` crate may declare one (user crates
+get error `E0001`). Extern declarations are the standard library's interface to
+compiler intrinsics; see [Functions](09-functions.md#extern-functions).
 
 Items may also appear **inside a block** — inside a function body, an `if`
 branch, a loop body, and so on. Such nested items are scoped to the block that
@@ -328,7 +335,7 @@ fn main() {
 
 Error:
 ```text
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod or use), found let
+error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found let
   --> example-07.ls:1:1
    |
  1 | let answer = 42;
@@ -410,17 +417,18 @@ visibility across crate boundaries.
 
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 1.7.0 parser. Optional parts
+The grammar below is the authoritative EBNF of the 2.0.0 parser. Optional parts
 are written with `[...]`, repetitions with `*` and `+`, and alternatives with
 `|`. It is reproduced here for reference; the individual pages explain each
 construct in detail.
 
 ```ebnf
 program      = item* EOF ;
-item         = fnItem | structItem | enumItem | implItem | traitItem | constItem | typeItem
-             | modItem | useItem ;
+item         = fnItem | externFnItem | structItem | enumItem | implItem | traitItem | constItem
+             | typeItem | modItem | useItem ;
 vis          = [ "pub" | "pub" "(" "crate" ")" ] ;
 fnItem       = vis "fn" IDENT genericParams? "(" params? ")" ( "->" type )? block ;
+externFnItem = vis "extern" "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
 genericParams= "<" genericParam ( "," genericParam )* ","? ">" ;
 genericParam = IDENT ( ":" bound ( "+" bound )* )? ;
 bound        = callableBound | pathType ;
@@ -435,7 +443,7 @@ variants     = variant ( "," variant )* ","? ;
 variant      = [ "pub" ] IDENT ( "(" typeArgs? ")" )? ;
 implItem     = vis "impl" genericParams? type ( "for" type )? "{" fnItem* "}" ;
 traitItem    = vis "trait" IDENT genericParams? "{" traitFnItem* "}" ;
-traitFnItem  = [ "pub" ] "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
+traitFnItem  = [ "pub" ] "fn" IDENT "(" params? ")" ( "->" type )? ( ";" | block ) ;
 constItem    = vis "const" IDENT ":" type "=" expr ";" ;
 typeItem     = vis "type" IDENT "=" type ";" ;
 modItem      = vis "mod" IDENT ( ";" | "{" item* "}" ) ;
@@ -465,7 +473,9 @@ addExpr      = mulExpr ( ( "+" | "-" ) mulExpr )* ;
 mulExpr      = castExpr ( ( "*" | "/" | "%" ) castExpr )* ;
 castExpr     = unaryExpr ( "as" type )* ;
 unaryExpr    = ( "-" | "!" | "*" | "&" [ "mut" ] ) unaryExpr | postfixExpr ;
-postfixExpr  = primary ( call | methodCall | "." IDENT | "." INT | "[" expr "]" | "?" )* ;
+postfixExpr  = primary ( call | methodCall | "." IDENT | "." INT | "[" indexOrSlice "]" | "?" )* ;
+indexOrSlice = expr | sliceRange ;
+sliceRange   = expr? ( ".." | "..=" ) expr? ;
 call         = "(" args? ")" ;
 methodCall   = "." IDENT ( "::" "<" typeArgs ">" )? "(" args? ")" ;
 args         = expr ( "," expr )* ","? ;
@@ -503,19 +513,21 @@ patternList  = pattern ( "," pattern )* ","? ;
 tuplePattern = "(" pattern "," ")" | "(" pattern ( "," pattern )+ ","? ")" ;
 fieldPat     = IDENT ( ":" pattern )? ;
 
-type         = refType | pathType | tupleType | fnType ;
+type         = refType | pathType | tupleType | fnType | dynType | sliceType ;
 refType      = "&" [ "mut" ] type ;
 pathType     = typeIdent ( "::" typeIdent )* ( "::" "<" typeArgs ">" | "<" typeArgs ">" )? ;
 typeIdent    = IDENT | "Self" ;
 tupleType    = "(" ")" | "(" type ")" | "(" type "," ")" | "(" type ( "," type )* ","? ")" ;
 fnType       = "fn" "(" typeArgs? ")" ( "->" type )? ;
+dynType      = "dyn" pathType ;
+sliceType    = "[" type "]" ;
 typeArgs     = type ( "," type )* ","? ;
 ```
 
 A few productions deserve a warning because the parser is more permissive than
 the type checker: `methodCall` parses `::<...>` (turbofish) after the method
 name, but the type checker rejects generic methods (traits have no generic
-methods in 1.7.0); and `break expr` / `return expr` parse even where a value
+methods in 2.0.0); and `break expr` / `return expr` parse even where a value
 cannot be carried. `CHAR` is a character literal such as `'a'` or `'\u{4F60}'`;
 it is accepted wherever a literal expression or a literal pattern is accepted.
 
@@ -542,12 +554,12 @@ Output:
 small big other
 ```
 
-## Syntax added in 1.5, 1.6 and 1.7
+## Syntax added in 1.5 to 2.0
 
 The grammar above already contains the productions added for generics, traits,
-character literals, modules and imports. This section collects those forms, the
-turbofish, and the syntax restrictions that the parser and the item collector
-enforce.
+character literals, modules and imports, slices and str, trait objects and
+extern declarations. This section collects those forms, the turbofish, and the
+syntax restrictions that the parser and the item collector enforce.
 
 ### Generic parameter lists and bounds
 
@@ -569,20 +581,25 @@ generic); type aliases are not generic.
 
 ### Trait declarations and implementations
 
-A trait declaration contains method signatures only:
+A trait declaration contains method signatures, and since 2.0 a method may also
+carry a default body:
 
 ```ebnf
 traitItem    = [ "pub" ] "trait" IDENT genericParams? "{" traitFnItem* "}" ;
-traitFnItem  = [ "pub" ] "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
+traitFnItem  = [ "pub" ] "fn" IDENT "(" params? ")" ( "->" type )? ( ";" | block ) ;
 ```
 
-Every method ends in `;` — there is no body — and its first parameter must be a
-receiver (`self`, `&self` or `&mut self`). `pub` before a trait or a method is
-accepted and ignored. The following shapes are rejected with `E0001`:
+A signature that ends in `;` is required: every implementation must provide it,
+and a missing method is error `E0046`. A method written with a body is a
+default: an implementation may override it, and overriding a method that the
+trait does not declare is error `E0407`; a method whose signature does not match
+the declaration is error `E0053`. Default bodies were added in 2.0.0; see
+[Traits](18-traits.md#default-method-bodies). Every method's first parameter
+must be a receiver (`self`, `&self` or `&mut self`). `pub` before a trait or a
+method is accepted and ignored. The following shapes are rejected with `E0001`:
 
 | Shape | Restriction |
 | --- | --- |
-| `fn greet(&self) -> String { … }` | default method bodies are not supported |
 | `fn name() -> String;` | trait methods must take a self receiver |
 | `fn convert<T>(&self, value: T) -> i64;` | trait methods cannot be generic |
 | `trait A: B { … }` | supertraits are not supported |
@@ -593,7 +610,9 @@ target must be a user struct or enum. Implementations may be generic
 (`impl<T> Iterator<T> for VecIter<T>`), and every signature must match the
 declaration. `impl Drop`, `impl Copy` and `impl Clone` keep their special
 forms (see [Ownership and moves](11-ownership-and-moves.md) and
-[Structs, enums and impl](10-structs-enums-and-impl.md#drop-hooks)).
+[Structs, enums and impl](10-structs-enums-and-impl.md#drop-hooks)). Since 2.0 a
+trait can also be used as a trait object behind `dyn`; see
+[Trait objects](25-trait-objects.md).
 
 ### Turbofish
 
@@ -604,7 +623,7 @@ Explicit type arguments are written with the Rust-style turbofish `::<…>`:
   `HashMap::<String, i64>::new()`;
 * a generic struct literal: `Pair::<i64> { first: 3, second: 4 }`;
 * a method call: `value.method::<i64>()` parses, but trait methods are not
-  generic in 1.7.0, so the type checker rejects the turbofish with `E0107`
+  generic in 2.0.0, so the type checker rejects the turbofish with `E0107`
   (`method get takes 0 generic arguments but 1 was supplied`).
 
 In expression position use the turbofish; in type position the arguments are
@@ -619,6 +638,33 @@ a string literal (`'a'`, `'\n'`, `'\u{4F60}'`, `'\''`). The type name
 patterns. There is no other new syntax: `char` values use the existing
 expression, pattern and type productions. See [Characters and
 Unicode](22-characters-and-unicode.md).
+
+### Trait objects, slices and extern declarations (2.0)
+
+Version 2.0.0 adds three type forms and one declaration form; the grammar above
+already shows them.
+
+**Trait objects.** `dyn Trait` is an unsized type, so it appears behind a
+pointer: `Box<dyn Greet>`, `Rc<dyn Greet>`, `&dyn Greet`, `&mut dyn Greet`.
+A `Box<T>`, `Rc<T>` or `&T` whose `T` implements `Trait` coerces to the
+corresponding `dyn` form; the vtable is filled per trait and concrete type.
+Object safety is checked with `E0038`, and `==`/`<` on trait objects are error
+`E0369`. See [Trait objects](25-trait-objects.md).
+
+**Slices and `str`.** `[T]` and `str` are unsized types used through
+references: `&[T]`, `&mut [T]`, `&str`, `&mut str`. Indexing with a range
+produces a slice, but the range must sit behind `&` or `&mut`:
+`&values[1..3]`, `&values[1..=2]`, `&values[..2]`, `&values[1..]`,
+`&values[..]`; on a `String` the same forms produce `&str` (the bracket
+production above is `indexOrSlice`). `&Vec<T>` coerces to `&[T]`, `&mut Vec<T>` to `&mut [T]`,
+`&String` to `&str` and `&mut String` to `&mut str`. See
+[Slices and str](26-slices-and-str.md).
+
+**Extern declarations.** `extern fn name(params) -> Type;` declares a function
+with no body. Only the `std` crate may do this — it is how the standard library
+connects to compiler intrinsics — and a user crate gets `E0001`. An extern
+function is not a value: using its name in expression position is `E0425`. See
+[Functions](09-functions.md#extern-functions).
 
 ### `Self` in expression position
 
@@ -720,3 +766,5 @@ Err("no")
 * What the type checker knows about types: [Types](04-types.md).
 * Define your own data: [Structs, enums and impl](10-structs-enums-and-impl.md).
 * Function values and recursion: [Functions](09-functions.md).
+* Sharing values of unknown concrete type: [Trait objects](25-trait-objects.md).
+* Borrowed sequences and text: [Slices and str](26-slices-and-str.md).

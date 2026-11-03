@@ -10,12 +10,12 @@ use std::collections::HashMap;
 
 use super::check::Checker;
 use super::items::{EnumInfo, FnInfo, FnSig, StructInfo, sanitize_c_ident};
-use super::itype::ITy;
+use super::itype::{ITy, VarKind};
 use super::modules::ModuleId;
 use crate::ast::{EnumDecl, FnDecl, GenericParam, StructDecl, TraitRef, TypeExpr, Visibility};
-use crate::diag::Diagnostic;
+use crate::diag::{Diagnostic, Diagnostics};
 use crate::span::Span;
-use crate::types::SelfKind;
+use crate::types::{FloatTy, IntTy, SelfKind};
 
 /// Where an item came from: the user program or the embedded standard library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,12 +198,63 @@ impl<'a> Checker<'a> {
                 }
                 super::itype::VarKind::General => return None,
             },
-            other => other,
+            other => self.default_literal_vars(&other),
         };
         if self.contains_unresolved(&resolved) {
             return None;
         }
         Some(resolved)
+    }
+
+    /// Replace integer and float literal variables nested inside a type with
+    /// their default concrete types. A generic argument such as the tuple type
+    /// of `Box::new((8, false))` must become fully concrete before the instance
+    /// is named, and literal variables always default during lowering anyway.
+    fn default_literal_vars(&mut self, ty: &ITy) -> ITy {
+        match self.infer.resolve(ty) {
+            ITy::Var(id) => match self.infer.var_kind(id) {
+                super::itype::VarKind::IntLiteral => {
+                    let _ = self.infer.unify(&ITy::Var(id), &ITy::i64());
+                    self.infer.resolve(&ITy::Var(id))
+                }
+                super::itype::VarKind::FloatLiteral => {
+                    let _ = self.infer.unify(&ITy::Var(id), &ITy::f64());
+                    self.infer.resolve(&ITy::Var(id))
+                }
+                super::itype::VarKind::General => self.infer.resolve(&ITy::Var(id)),
+            },
+            ITy::Vec(inner) => ITy::vec(self.default_literal_vars(&inner)),
+            ITy::Rc(inner) => ITy::rc(self.default_literal_vars(&inner)),
+            ITy::Box(inner) => ITy::box_(self.default_literal_vars(&inner)),
+            ITy::Option(inner) => ITy::option(self.default_literal_vars(&inner)),
+            ITy::Result(ok, err) => ITy::result(
+                self.default_literal_vars(&ok),
+                self.default_literal_vars(&err),
+            ),
+            ITy::HashMap(key, value) => ITy::hash_map(
+                self.default_literal_vars(&key),
+                self.default_literal_vars(&value),
+            ),
+            ITy::Tuple(elems) => ITy::tuple(
+                elems
+                    .iter()
+                    .map(|elem| self.default_literal_vars(elem))
+                    .collect(),
+            ),
+            ITy::Fn(params, ret) => ITy::function(
+                params
+                    .iter()
+                    .map(|param| self.default_literal_vars(param))
+                    .collect(),
+                self.default_literal_vars(&ret),
+            ),
+            ITy::Ref { mutable, inner } => ITy::Ref {
+                mutable,
+                inner: Box::new(self.default_literal_vars(&inner)),
+            },
+            ITy::Slice(inner) => ITy::slice(self.default_literal_vars(&inner)),
+            other => other,
+        }
     }
 
     /// Whether a type mentions an unresolved inference variable.
@@ -298,6 +349,9 @@ impl<'a> Checker<'a> {
                     format!("Ref_{}", self.mangle_ty(&inner))
                 }
             }
+            ITy::Slice(inner) => format!("Slice_{}", self.mangle_ty(&inner)),
+            ITy::Str => "str".to_string(),
+            ITy::Dyn(id) => format!("Dyn{}", id),
             ITy::Struct(id) => self
                 .structs
                 .get(id)
@@ -563,6 +617,7 @@ impl<'a> Checker<'a> {
             env.insert("Self".to_string(), self_ty.clone());
         }
         self.push_generic_env(env);
+        let diagnostics_before = self.diagnostics.len();
         let mut params: Vec<ITy> = Vec::with_capacity(def.decl.params.len());
         let mut seen: HashMap<String, Span> = HashMap::new();
         for param in &def.decl.params {
@@ -588,11 +643,6 @@ impl<'a> Checker<'a> {
             };
             params.push(ty);
         }
-        for (index, param) in def.decl.params.iter().enumerate() {
-            if let Some(param_ty) = params.get(index).cloned() {
-                self.validate_value_type(&param_ty, param.name_span);
-            }
-        }
         if let Some(kind) = def.decl.self_kind
             && let Some(receiver_ty) = params.first().cloned()
         {
@@ -606,6 +656,14 @@ impl<'a> Checker<'a> {
                     mutable,
                     inner: Box::new(receiver_ty),
                 };
+            }
+        }
+        // Validate parameter types after the receiver has been wrapped in its
+        // reference: `impl [T] { fn len(&self) }` has an unsized self type, so
+        // validating before the wrap would reject the receiver itself.
+        for (index, param) in def.decl.params.iter().enumerate() {
+            if let Some(param_ty) = params.get(index).cloned() {
+                self.validate_value_type(&param_ty, param.name_span);
             }
         }
         let ret = match &def.decl.ret {
@@ -685,6 +743,24 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        if def.origin.is_prelude() {
+            // An instantiated standard-library signature can rediscover a
+            // problem the user already sees at the call site (for example a
+            // reference stored in a container). Those messages carry
+            // standard-library spans, so report them as internal errors
+            // without a source location; duplicate diagnostics are dropped by
+            // the reporting layer, and a genuine library bug still surfaces.
+            let collected = std::mem::replace(&mut self.diagnostics, Diagnostics::new());
+            let mut items = collected.into_vec();
+            let tail = items.split_off(diagnostics_before.min(items.len()));
+            for diagnostic in items {
+                self.diagnostics.push(diagnostic);
+            }
+            for diagnostic in tail {
+                self.diagnostics
+                    .push(crate::stdlib::internal_error(diagnostic));
+            }
+        }
         self.pop_generic_env();
         self.current_module = previous_module;
         Some(FnSig {
@@ -701,16 +777,88 @@ impl<'a> Checker<'a> {
         args: Vec<ITy>,
         span: Span,
     ) -> Option<usize> {
-        let args = match self.normalize_args(&args) {
-            Some(args) => args,
-            None => {
-                self.error_code(
-                    "type annotations needed for generic arguments".to_string(),
-                    span,
-                    "E0283",
-                );
-                return None;
+        self.instantiate_generic_fn_inner(def_id, args, span, true)
+    }
+
+    /// Instantiate a generic function whose type arguments may still contain
+    /// inference variables.
+    ///
+    /// This is used for associated functions on builtin marker types, where
+    /// `Vec::new()` has to use the standard-library impl before the element type
+    /// is known. The instance signature keeps the inference variable, which the
+    /// rest of the caller resolves while it is checked; bodies of instantiated
+    /// generic functions are checked only after every concrete function, so by
+    /// then the variable is usually concrete.
+    pub fn instantiate_generic_fn_deferred(
+        &mut self,
+        def_id: usize,
+        args: Vec<ITy>,
+        span: Span,
+    ) -> Option<usize> {
+        self.instantiate_generic_fn_inner(def_id, args, span, false)
+    }
+
+    fn instantiate_generic_fn_inner(
+        &mut self,
+        def_id: usize,
+        args: Vec<ITy>,
+        span: Span,
+        require_concrete: bool,
+    ) -> Option<usize> {
+        let args = if require_concrete {
+            match self.normalize_args(&args) {
+                Some(args) => args,
+                None => {
+                    self.error_code(
+                        "type annotations needed for generic arguments".to_string(),
+                        span,
+                        "E0283",
+                    );
+                    return None;
+                }
             }
+        } else {
+            // Deferred instantiation: only literal inference variables are
+            // normalized (they have a fixed type); general variables are kept
+            // so the instance is shared and resolved once the caller settles.
+            let mut resolved = Vec::with_capacity(args.len());
+            for arg in &args {
+                let arg = self.infer.resolve(arg);
+                match &arg {
+                    ITy::Var(id) => match self.infer.var_kind(*id) {
+                        VarKind::IntLiteral => {
+                            let _ = self.unify_quiet(&arg, &ITy::Int(IntTy::I64));
+                            resolved.push(self.infer.resolve(&arg));
+                        }
+                        VarKind::FloatLiteral => {
+                            let _ = self.unify_quiet(&arg, &ITy::Float(FloatTy::F64));
+                            resolved.push(self.infer.resolve(&arg));
+                        }
+                        VarKind::General => resolved.push(arg),
+                    },
+                    _ => resolved.push(arg),
+                }
+            }
+            resolved
+        };
+        // Remember the user call site when the instance still has unresolved
+        // type arguments: its standard-library body calls generic functions that
+        // need those arguments, so it cannot be checked. The inference failure
+        // belongs to the caller, which gets an ordinary E0282 at this span
+        // instead of an internal standard-library error (see `check_fn`).
+        let caller_is_user = self
+            .fns
+            .get(self.current_fn)
+            .map(|info| !info.origin.is_prelude())
+            .unwrap_or(true);
+        let deferred_span = if require_concrete || !caller_is_user {
+            None
+        } else if self.normalize_args(&args).is_none() {
+            // At least one argument is still an open variable. Variables pinned
+            // to a literal normalize to i64/f64, so such instances stay checkable.
+            Some(span)
+        } else {
+            None
         };
         let def = {
             let def = self.generic_fns.get(def_id)?;
@@ -746,7 +894,12 @@ impl<'a> Checker<'a> {
             );
             return None;
         }
-        self.validate_generic_bounds(&def.generics, &args, span, def.module);
+        // Bounds are validated for concrete instantiations only: deferred
+        // arguments are still inference variables, so a bound check would be a
+        // spurious E0277 for a call that later infers a satisfying type.
+        if require_concrete {
+            self.validate_generic_bounds(&def.generics, &args, span, def.module);
+        }
         let self_ty = match def.owner {
             GenericOwner::InherentImpl(impl_id) | GenericOwner::TraitImpl(impl_id) => {
                 self.impl_self_ty(impl_id, &args)
@@ -798,6 +951,7 @@ impl<'a> Checker<'a> {
                 def_id,
                 args: args.clone(),
             }),
+            deferred_span,
             self_ty,
             instantiation_depth: depth,
             owner: owner_key,
@@ -1113,8 +1267,36 @@ impl<'a> Checker<'a> {
                         }
                         return ok_ok;
                     }
-                    "bool" | "String" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32"
-                    | "u64" | "f32" | "f64" => {
+                    "HashMap" => {
+                        let (key, value) = match &actual_resolved {
+                            ITy::HashMap(key, value) => ((**key).clone(), (**value).clone()),
+                            ITy::Var(_) => {
+                                let key = self.infer.fresh_var();
+                                let value = self.infer.fresh_var();
+                                let rebuilt = ITy::hash_map(key.clone(), value.clone());
+                                let _ = self.infer.unify(&actual_resolved, &rebuilt);
+                                (key, value)
+                            }
+                            _ => {
+                                self.report_pattern_mismatch(
+                                    pattern,
+                                    &actual_resolved,
+                                    report_span,
+                                );
+                                return false;
+                            }
+                        };
+                        let mut ok = true;
+                        if let Some(arg) = generics.first() {
+                            ok = self.infer_args_from_ty(arg, &key, env, report_span) && ok;
+                        }
+                        if let Some(arg) = generics.get(1) {
+                            ok = self.infer_args_from_ty(arg, &value, env, report_span) && ok;
+                        }
+                        return ok;
+                    }
+                    "bool" | "char" | "String" | "isize" | "usize" | "i8" | "i16" | "i32"
+                    | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" => {
                         let expected = match self.resolve_ty(pattern, None) {
                             Some(ty) => ty,
                             None => return false,
@@ -1161,6 +1343,25 @@ impl<'a> Checker<'a> {
                 }
                 let _ = name_span;
                 true
+            }
+            // A trait object is already a concrete type, so no generic
+            // arguments are inferred from its trait arguments in phase A.
+            TypeExpr::Dyn(_) => true,
+            TypeExpr::Slice { elem, .. } => {
+                let actual_inner = match &actual_resolved {
+                    ITy::Slice(inner) => (**inner).clone(),
+                    ITy::Var(_) => {
+                        let inner = self.infer.fresh_var();
+                        let rebuilt = ITy::slice(inner.clone());
+                        let _ = self.infer.unify(&actual_resolved, &rebuilt);
+                        inner
+                    }
+                    _ => {
+                        self.report_pattern_mismatch(pattern, &actual_resolved, report_span);
+                        return false;
+                    }
+                };
+                self.infer_args_from_ty(elem, &actual_inner, env, report_span)
             }
             TypeExpr::Tuple { elems, .. } => {
                 let actual_elems = match &actual_resolved {

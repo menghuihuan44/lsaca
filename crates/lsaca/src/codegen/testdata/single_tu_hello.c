@@ -63,6 +63,18 @@ uint64_t lsaca_cast_f2i_u64(double value) {
   if (value >= (double)UINT64_MAX) { return (uint64_t)UINT64_MAX; }
   return (uint64_t)value;
 }
+intptr_t lsaca_cast_f2i_isize(double value) {
+  if (value != value) { return (intptr_t)0; }
+  if (value >= (double)INT64_MAX) { return (intptr_t)INT64_MAX; }
+  if (value <= (double)INT64_MIN) { return (intptr_t)INT64_MIN; }
+  return (intptr_t)value;
+}
+uintptr_t lsaca_cast_f2i_usize(double value) {
+  if (value != value) { return (uintptr_t)0; }
+  if (value <= 0.0) { return (uintptr_t)0; }
+  if (value >= (double)UINT64_MAX) { return (uintptr_t)UINT64_MAX; }
+  return (uintptr_t)value;
+}
 
 void* lsaca_env_retain(void* env);
 void lsaca_env_release(void* env);

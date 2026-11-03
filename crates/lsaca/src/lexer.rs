@@ -55,6 +55,8 @@ pub enum TokenKind {
     KwMod,
     KwSuper,
     KwUse,
+    KwExtern,
+    KwDyn,
     // Punctuation
     LParen,
     RParen,
@@ -172,6 +174,8 @@ impl std::fmt::Display for TokenKind {
             TokenKind::KwMod => write!(f, "mod"),
             TokenKind::KwSuper => write!(f, "super"),
             TokenKind::KwUse => write!(f, "use"),
+            TokenKind::KwExtern => write!(f, "extern"),
+            TokenKind::KwDyn => write!(f, "dyn"),
             TokenKind::LParen => write!(f, "("),
             TokenKind::RParen => write!(f, ")"),
             TokenKind::LBrace => write!(f, "{{"),
@@ -488,6 +492,8 @@ impl<'a> Lexer<'a> {
             "mod" => TokenKind::KwMod,
             "super" => TokenKind::KwSuper,
             "use" => TokenKind::KwUse,
+            "extern" => TokenKind::KwExtern,
+            "dyn" => TokenKind::KwDyn,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Ident(text.to_string()),
         };
@@ -1254,7 +1260,7 @@ mod tests {
     fn identifiers_and_keywords() {
         let source = "fn let mut const struct enum impl type if else match while loop for in \
                       return break continue true false as self Self pub move trait \
-                      crate mod super use";
+                      crate mod super use extern dyn";
         let expected = vec![
             TokenKind::KwFn,
             TokenKind::KwLet,
@@ -1286,6 +1292,8 @@ mod tests {
             TokenKind::KwMod,
             TokenKind::KwSuper,
             TokenKind::KwUse,
+            TokenKind::KwExtern,
+            TokenKind::KwDyn,
             TokenKind::Eof,
         ];
         assert_eq!(kinds(source), expected);
@@ -1391,6 +1399,32 @@ mod tests {
         );
         assert_eq!(KwTrait.to_string(), "trait");
         assert_eq!(KwTrait.describe(), "trait");
+    }
+
+    #[test]
+    fn extern_and_dyn_keywords_are_reserved() {
+        use TokenKind::*;
+        // 'extern' and 'dyn' are keywords and can never be identifiers.
+        assert_eq!(kinds("extern dyn"), vec![KwExtern, KwDyn, Eof]);
+        // Words that merely contain the keywords stay identifiers.
+        assert_eq!(
+            kinds("externs dyns xextern xdyn extern_fn dyn_trait"),
+            vec![
+                Ident("externs".to_string()),
+                Ident("dyns".to_string()),
+                Ident("xextern".to_string()),
+                Ident("xdyn".to_string()),
+                Ident("extern_fn".to_string()),
+                Ident("dyn_trait".to_string()),
+                Eof,
+            ]
+        );
+        // The Display and describe text used in diagnostics match the keyword.
+        assert_eq!(KwExtern.to_string(), "extern");
+        assert_eq!(KwDyn.to_string(), "dyn");
+        for keyword in [KwExtern, KwDyn] {
+            assert_eq!(keyword.describe(), keyword.to_string());
+        }
     }
 
     #[test]
@@ -1832,6 +1866,10 @@ mod tests {
         assert_eq!(TokenKind::Shl.to_string(), "<<");
         assert_eq!(TokenKind::ShrEq.to_string(), ">>=");
         assert_eq!(TokenKind::Eof.to_string(), "end of file");
+        assert_eq!(TokenKind::KwExtern.to_string(), "extern");
+        assert_eq!(TokenKind::KwDyn.to_string(), "dyn");
+        assert_eq!(TokenKind::KwExtern.describe(), "extern");
+        assert_eq!(TokenKind::KwDyn.describe(), "dyn");
         assert!(
             TokenKind::Ident("foo".to_string())
                 .describe()

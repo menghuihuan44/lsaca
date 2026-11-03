@@ -7,8 +7,10 @@ fn fib(n: i64) -> i64 {
 }
 
 fn main() {
-    let n: i64 = 30;
-    let reps: i64 = 10;
+    // Optional arguments: n [repetitions]; defaults are the medium scale.
+    let all = args();
+    let n: i64 = if all.len() > 0 { all[0].clone().parse_i64().unwrap() } else { 30 };
+    let reps: i64 = if all.len() > 1 { all[1].clone().parse_i64().unwrap() } else { 10 };
     let mut checksum: i64 = 0;
     let mut i: i64 = 0;
     while i < reps {

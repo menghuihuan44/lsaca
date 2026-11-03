@@ -1,5 +1,7 @@
 /* lsaca C17 runtime: reference counting (ORC), strings, vectors, hash maps,
- * formatting, checked integer arithmetic, panics, process/IO and math helpers.
+ * formatting, checked integer arithmetic, panics, process/IO, handle based
+ * operating system I/O (files, directories, TCP, time, environment) and math
+ * helpers.
  *
  * This header is the ABI contract between generated C code and the runtime.
  * See README.md ("Memory management (ORC)") and the section comments below for
@@ -24,8 +26,12 @@
  *     that invariant: the character/String methods reject or split only at
  *     scalar boundaries, case conversion and trim use the full Unicode
  *     tables in lsaca_rt_unicode.c, and the IO entry points (read_line,
- *     ls_args, ls_read_file) validate whatever the process provides. Vectors
- *     and Options are plain byte/ownership containers for their element type.
+ *     ls_args, ls_read_file) validate whatever the process provides. On
+ *     Windows ls_args() rebuilds the argument vector from the wide command
+ *     line (GetCommandLineW) and converts it to UTF-8, because MinGW's narrow
+ *     argv[] uses the ANSI code page; non-ASCII arguments therefore arrive as
+ *     valid UTF-8. Vectors and Options are plain byte/ownership containers for
+ *     their element type.
  *   - The runtime is not thread safe (the language has no threads).
  *   - Define LSACA_DEBUG (any value) when compiling the runtime and generated
  *     code in a debug configuration to enable leak checking. The generated
@@ -773,6 +779,164 @@ LsRes_String_String ls_write_file(const LsString* path, const LsString* contents
 /* Flush stdout/stderr and exit with "code". Does not run ls_runtime_shutdown
  * (mirrors Rust process::exit). */
 LS_NORETURN void ls_exit(int32_t code);
+
+/* ====================================================================== */
+/* Operating system I/O                                                   */
+/* ====================================================================== */
+
+/* Errors reported by the operating system I/O functions below.
+ *
+ * Every function that can fail returns -1 (or NULL) and records the error for
+ * the calling thread. ls_io_last_error_kind() returns one of these values (it
+ * is LS_IO_ERROR_NONE after a call that succeeded) and
+ * ls_io_last_error_message() returns a fresh owned description such as
+ * "The system cannot find the file specified. (os error 2)". Error kinds are
+ * a stable cross-platform classification: the same failure reports the same
+ * kind on Windows and on POSIX systems. */
+typedef enum LsIoErrorKind {
+    LS_IO_ERROR_NONE = 0,
+    LS_IO_ERROR_NOT_FOUND = 1,
+    LS_IO_ERROR_PERMISSION_DENIED = 2,
+    LS_IO_ERROR_ALREADY_EXISTS = 3,
+    LS_IO_ERROR_INVALID_INPUT = 4,
+    LS_IO_ERROR_CONNECTION_REFUSED = 5,
+    LS_IO_ERROR_CONNECTION_RESET = 6,
+    LS_IO_ERROR_CONNECTION_ABORTED = 7,
+    LS_IO_ERROR_TIMED_OUT = 8,
+    LS_IO_ERROR_WOULD_BLOCK = 9,
+    LS_IO_ERROR_INTERRUPTED = 10,
+    LS_IO_ERROR_UNEXPECTED_EOF = 11,
+    LS_IO_ERROR_UNSUPPORTED = 12,
+    LS_IO_ERROR_ADDRESS_IN_USE = 13,
+    LS_IO_ERROR_ADDRESS_NOT_AVAILABLE = 14,
+    LS_IO_ERROR_BROKEN_PIPE = 15,
+    LS_IO_ERROR_OTHER = 16
+} LsIoErrorKind;
+
+/* Handles are int64_t indices into a runtime table shared by files and
+ * sockets. The standard streams always own the handles 0 (stdin), 1 (stdout)
+ * and 2 (stderr); they are valid for read/write/flush but cannot be closed.
+ * Handles are stable for the lifetime of the resource; a closed handle is
+ * never reused for a different kind until every reference to it is gone, and
+ * using an invalid or closed handle reports LS_IO_ERROR_INVALID_INPUT.
+ *
+ * All calls below are safe on invalid arguments (they fail with
+ * LS_IO_ERROR_INVALID_INPUT instead of crashing), reset the per-thread error
+ * before doing any work and never panic. Paths are LsString values containing
+ * UTF-8; embedded NUL bytes are rejected. Returned LsString* and
+ * LsVec_String* values are fresh owned objects managed by the reference
+ * counting runtime: release them with ls_release() (strings) or
+ * ls_vec_string_free() (the vector helper releases its elements too). */
+
+/* Standard stream handles: 0, 1 and 2. */
+int64_t ls_io_stdin(void);
+int64_t ls_io_stdout(void);
+int64_t ls_io_stderr(void);
+
+/* Open "path" for reading (the file must exist). Returns the handle or -1. */
+int64_t ls_io_open(const LsString* path);
+/* Create or truncate "path" for writing. Returns the handle or -1. */
+int64_t ls_io_create(const LsString* path);
+/* Close "handle". Closing a standard stream fails with
+ * LS_IO_ERROR_INVALID_INPUT and does not close it. Returns 0 on success. */
+int64_t ls_io_close(int64_t handle);
+
+/* Read up to "capacity" bytes into "buffer". Returns the number of bytes read
+ * (0 means end of file) or -1. Reading from a socket may report
+ * LS_IO_ERROR_WOULD_BLOCK once the socket is nonblocking. */
+int64_t ls_io_read(int64_t handle, void* buffer, int64_t capacity);
+/* Write "length" bytes; returns the number of bytes written or -1. A short
+ * write is possible for sockets, a regular file write either writes every
+ * byte or reports an error. */
+int64_t ls_io_write(int64_t handle, const void* buffer, int64_t length);
+/* Seek to "offset" relative to "whence" (0 = start, 1 = current, 2 = end);
+ * returns the new absolute position or -1. Files only: sockets and standard
+ * streams report LS_IO_ERROR_INVALID_INPUT (stdin) or
+ * LS_IO_ERROR_UNSUPPORTED. */
+int64_t ls_io_seek(int64_t handle, int64_t offset, int32_t whence);
+/* Flush buffered output. Returns 0 on success, -1 on error. */
+int64_t ls_io_flush(int64_t handle);
+/* Total size of a regular file in bytes, or -1 when the handle is not a
+ * seekable file. */
+int64_t ls_io_size(int64_t handle);
+/* Switch a socket between blocking (enabled = false) and nonblocking mode.
+ * Files and standard streams report LS_IO_ERROR_UNSUPPORTED. */
+int64_t ls_io_set_nonblocking(int64_t handle, bool enabled);
+
+/* The error kind recorded by the most recent failing call on this thread. */
+int64_t ls_io_last_error_kind(void);
+/* A fresh owned message describing the most recent failing call (an empty
+ * string when the last call succeeded). The caller owns the returned string. */
+LsString* ls_io_last_error_message(void);
+
+/* Read a directory. Returns a fresh owned vector of entry names (without any
+ * directory prefix, in ascending byte order) or NULL on error. The vector
+ * must be released with ls_vec_string_free(). */
+LsVec_String* ls_io_read_dir(const LsString* path);
+/* Query "path". On success writes the size in bytes, the modification time in
+ * milliseconds since the Unix epoch and the kind (0 regular file, 1
+ * directory, 2 something else) through the out parameters and returns 0. The
+ * out parameters may be NULL when a value is not needed. */
+int64_t ls_io_metadata(const LsString* path, int64_t* size, int64_t* mtime_ms,
+                       int64_t* kind);
+
+/* Remove a file, an empty directory or a directory tree (iteratively, with no
+ * recursion depth limit). Return 0 on success, -1 on error. */
+int64_t ls_io_remove_file(const LsString* path);
+int64_t ls_io_remove_dir(const LsString* path);
+int64_t ls_io_remove_dir_all(const LsString* path);
+/* Create a directory (the parent must exist), every missing parent directory,
+ * or rename "from" to "to" (the destination must not exist). Return 0 on
+ * success, -1 on error. */
+int64_t ls_io_create_dir(const LsString* path);
+int64_t ls_io_create_dir_all(const LsString* path);
+int64_t ls_io_rename(const LsString* from, const LsString* to);
+/* Resolve "path" to an absolute path with every ".." and symlink resolved.
+ * Returns a fresh owned string or NULL on error. */
+LsString* ls_io_canonicalize(const LsString* path);
+/* The current working directory (fresh owned string or NULL). */
+LsString* ls_io_current_dir(void);
+int64_t ls_io_set_current_dir(const LsString* path);
+/* The operating system temporary directory (fresh owned string). */
+LsString* ls_io_temp_dir(void);
+
+/* TCP networking. Addresses use the "host:port" form; the host may be an IPv4
+ * address, an IPv6 address in square brackets, or a name. Port 0 in
+ * ls_net_listen binds an ephemeral port (see ls_net_local_port). */
+int64_t ls_net_listen(const LsString* address);
+/* The local port a listener or connection is bound to, or -1. */
+int64_t ls_net_local_port(int64_t handle);
+/* Accept one connection on a listener; returns the connection handle or -1
+ * (LS_IO_ERROR_WOULD_BLOCK when the listener is nonblocking). */
+int64_t ls_net_accept(int64_t listener);
+int64_t ls_net_connect(const LsString* address);
+/* Set the receive/send timeout in milliseconds (0 = infinite). Returns 0 on
+ * success; failures report LS_IO_ERROR_UNSUPPORTED for non-sockets. */
+int64_t ls_net_set_timeout(int64_t handle, int64_t milliseconds);
+/* Shut down part of the connection: 0 = read, 1 = write, 2 = both. */
+int64_t ls_net_shutdown(int64_t handle, int32_t how);
+
+/* Wall clock and monotonic time, sleep and calendar breakdown. */
+int64_t ls_time_now_ms(void);
+int64_t ls_time_monotonic_ns(void);
+void ls_time_sleep_ms(int64_t milliseconds);
+/* Convert "unix_ms" and write the local calendar values through the out
+ * parameters (year, month 1-12, day 1-31, hour 0-23, minute 0-59, second 0-59,
+ * weekday 0 = Sunday, yearday 0-365). Out parameters may be NULL. Returns 0 on
+ * success and -1 when the timestamp cannot be represented. */
+int64_t ls_time_local_parts(int64_t unix_ms, int32_t* year, int32_t* month,
+                            int32_t* day, int32_t* hour, int32_t* minute,
+                            int32_t* second, int32_t* weekday,
+                            int32_t* yearday);
+int64_t ls_time_utc_parts(int64_t unix_ms, int32_t* year, int32_t* month,
+                          int32_t* day, int32_t* hour, int32_t* minute,
+                          int32_t* second, int32_t* weekday,
+                          int32_t* yearday);
+
+/* Environment variables and program arguments (excluding the executable). */
+LsString* ls_env_var(const LsString* name);
+LsVec_String* ls_env_vars(void);
+LsVec_String* ls_proc_args(void);
 
 /* ====================================================================== */
 /* Math helpers                                                           */

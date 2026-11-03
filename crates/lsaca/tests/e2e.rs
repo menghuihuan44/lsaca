@@ -5,8 +5,9 @@
 //! The tests are skipped when no C compiler is available, so cargo test works on
 //! machines without a C toolchain (the compiler unit tests still run).
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -583,6 +584,14 @@ fn cases() -> Vec<Case> {
             stderr_contains: &[],
         },
         Case {
+            name: "enumerate_pairs",
+            source: include_str!("programs/enumerate_pairs.ls"),
+            args: &[],
+            stdout: "17\n18\n12\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
             name: "iter_chain",
             source: include_str!("programs/iter_chain.ls"),
             args: &[],
@@ -1060,6 +1069,182 @@ fn cases() -> Vec<Case> {
             exit: 0,
             stderr_contains: &[],
         },
+        Case {
+            name: "isize_usize",
+            source: include_str!("programs/isize_usize.ls"),
+            args: &[],
+            stdout: "-5 7 -2 14\n42 42 85\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "trait_default",
+            source: include_str!("programs/trait_default.ls"),
+            args: &[],
+            stdout: "101 900\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "dyn_trait",
+            source: include_str!("programs/dyn_trait.ls"),
+            args: &[],
+            stdout: "rect=12\nsquare=25\n19\n49\n12\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "dyn_rc",
+            source: include_str!("programs/dyn_rc.ls"),
+            args: &[],
+            stdout: "meow tom\nMEOW TOM\n2\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "slices",
+            source: include_str!("programs/slices.ls"),
+            args: &[],
+            stdout: "90\n150\n120\n30\n[1, 3, 4]\n2 5\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "str_slice",
+            source: include_str!("programs/str_slice.ls"),
+            args: &[],
+            stdout: "h\u{e9}llo\nw\u{f6}rld\nh\nh\u{e9}llo w\u{f6}rld\n13 11\ntrue true\nH\u{c9}LLO W\u{d6}RLD\n7\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "panic_slice_bounds",
+            source: include_str!("programs/panic_slice_bounds.ls"),
+            args: &[],
+            stdout: "1\n",
+            exit: 101,
+            stderr_contains: &["range end index 5 out of range for slice of length 3"],
+        },
+        Case {
+            name: "panic_str_boundary",
+            source: include_str!("programs/panic_str_boundary.ls"),
+            args: &[],
+            stdout: "",
+            exit: 101,
+            stderr_contains: &["not a char boundary"],
+        },
+        Case {
+            name: "collections_basic",
+            source: include_str!("programs/collections_basic.ls"),
+            args: &[],
+            stdout: "true\nfalse\ntrue\ntrue\n3 true\n[3, 7, 5]\n[3, 7, 5, 9]\n[5]\n[3, 7]\ntrue false\ntrue\n[7, 5]\n[2, 5, 9]\ntrue 2\n9\ntrue\n[2, 5]\n[\"a\", \"b\"] [1, 20]\nSome(1)\ntrue\nSome(1)\n1\n[1, 2, 3] 3\nSome(1) Some(3)\nSome(2)\n[9, 5, 3] Some(9)\nSome(9) Some(5)\n1\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "char_classify",
+            source: include_str!("programs/char_classify.ls"),
+            args: &[],
+            stdout: "true true true false\ntrue false\ntrue false true\n2 1 1\n11\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "vec_sort",
+            source: include_str!("programs/vec_sort.ls"),
+            args: &[],
+            stdout: "[1, 3, 4, 5, 9]\n[\"apple\", \"fig\", \"pear\"]\n[0.5, 1.25, 2.5]\n0\n[7]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "mut_struct",
+            source: include_str!("programs/mut_struct.ls"),
+            args: &[],
+            stdout: "Ada!! 38\nGrace 38\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "vec_edge_cases",
+            source: include_str!("programs/vec_edge_cases.ls"),
+            args: &[],
+            stdout: "empty 0 true\npop none true\nfirst none true\nlast none true\nlen 4 empty false\nfirst 5 last 3\nget 0 5 get 3 3 get 4 true\ninserted [7, 5, 3, 9, 3, 1]\nremoved 7 [5, 3, 9, 3, 1]\nreversed [1, 3, 9, 3, 5]\nextended [1, 3, 9, 3, 5, 100, 200]\nslice len 7 empty false\nsorted single [1]\nsorted negatives [-4, -1, 0, 12]\nsorted names [\"ann\", \"ann\", \"bob\", \"zed\"]\nremoved name ann remaining 3\nsorted floats [0.5, 1.25, 2.5]\ncleared 0 true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "collections_edge_cases",
+            source: include_str!("programs/collections_edge_cases.ls"),
+            args: &[],
+            stdout: "insert true false true\nelements [\"beta\", \"alpha\"]\ncontains true false\nremove true false\nafter remove [\"beta\"] len 1\ncleared 0 true\nunion [1, 2, 3, 4]\nintersection [2, 3]\ndifference [1]\nsubset false false\nbtree empty true true\nbtree [-1, 2, 5, 9] first -1 last 9\nbtree contains true false\nbtree remove true false\nbtree after [-1, 5, 9]\nlabels [\"apple\", \"fig\", \"pear\"]\nmap insert None None Some(2)\nmap keys [\"a\", \"b\"] values [1, 20]\nmap get Some(1) None\nmap contains true false\nmap remove Some(1) None\nmap len 1 [\"b\"]\ndeque empty true true true\ndeque [0, 1, 2, 3] len 4\ndeque pop 0 3\ndeque get Some(1) Some(2) None\nheap [9, 5, 3, 3] peek Some(9)\nheap pop 9 5 3\nheap left 1 peek Some(3)\nheap cleared 0 true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "generic_ordered_set",
+            source: include_str!("programs/generic_ordered_set.ls"),
+            args: &[],
+            stdout: "insert true true false\nelements [\"beta\", \"alpha\"] len 2\ncontains true false\nremove true false\nafter remove [\"beta\"] len 1\nnumbers [4, 2, 7] len 3\nnumbers remove true [4, 7]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "mut_struct_nested",
+            source: include_str!("programs/mut_struct_nested.ls"),
+            args: &[],
+            stdout: "label outer:alpha\ntags [\"first\", \"second\"] count 4\nscores [10, 25] len 2\nafter ref tags 3 count 104\nreversed tags [\"third\", \"second\", \"first\"]\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "io_stdout_write",
+            source: include_str!("programs/io_stdout_write.ls"),
+            args: &[],
+            stdout: "raw line\nwrote 9\nhandles 0 1 2\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "io_error_kind",
+            source: include_str!("programs/io_error_kind.ls"),
+            args: &[],
+            stdout: "missing open is_err true\nkind NotFound\nmessage non empty true\nstdout handle 1\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "net_loopback",
+            source: include_str!("programs/net_loopback.ls"),
+            args: &[],
+            stdout: "port positive true\ntimeout ok true\nsent 4\nreceived 4\nreply sent 4\nshutdown ok true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "time_datetime",
+            source: include_str!("programs/time_datetime.ls"),
+            args: &[],
+            stdout: "now positive true\nyear range true\nmonth range true\nday range true\nhour range true\nweekday range true\ndate len true\ntime len true\ndatetime len true\nweekday name non empty true\nutc year range true\nmonotonic grows true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "time_format",
+            source: include_str!("programs/time_format.ls"),
+            args: &[],
+            stdout: "date dashes true true\ndate digits true true\ntime colons true true\nstamp len true\nstamp separator true\nweekday name true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "env_basic",
+            source: include_str!("programs/env_basic.ls"),
+            args: &[],
+            stdout: "path present true\nmissing absent true\nvars count positive true\nargs count 0\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
     ]
 }
 
@@ -1119,6 +1304,196 @@ fn release_builds_wrap_overflow() {
     }
 }
 
+/// A program that talks to the outside world: it runs in a private scratch
+/// directory, can receive stdin input and per-case environment variables.
+struct IoCase {
+    name: &'static str,
+    source: &'static str,
+    args: &'static [&'static str],
+    stdin: Option<&'static str>,
+    envs: &'static [(&'static str, &'static str)],
+    stdout: &'static str,
+    exit: i32,
+    stderr_contains: &'static [&'static str],
+}
+
+fn io_scratch_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os("LSACA_E2E_SCRATCH") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e-scratch")
+}
+
+fn run_io_case(case: &IoCase) -> Result<(), String> {
+    let executable = build_program(case.name, case.source, false)?;
+    let scratch = io_scratch_root().join(case.name);
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).map_err(|error| {
+        format!(
+            "could not create the scratch directory {}: {}",
+            scratch.display(),
+            error
+        )
+    })?;
+    let mut command = Command::new(&executable);
+    command.args(case.args);
+    command.current_dir(&scratch);
+    for (key, value) in case.envs {
+        command.env(key, value);
+    }
+    if case.stdin.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("could not run {}: {}", case.name, error))?;
+    if let Some(input) = case.stdin
+        && let Some(mut pipe) = child.stdin.take()
+    {
+        pipe.write_all(input.as_bytes())
+            .map_err(|error| format!("could not write to the stdin of {}: {}", case.name, error))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("could not wait for {}: {}", case.name, error))?;
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+    let exit = output.status.code().unwrap_or(-1);
+    let mut problems: Vec<String> = Vec::new();
+    if stdout != case.stdout {
+        problems.push(format!(
+            "stdout mismatch\n--- expected ---\n{:?}\n--- actual ---\n{:?}",
+            case.stdout, stdout
+        ));
+    }
+    if exit != case.exit {
+        problems.push(format!(
+            "exit code mismatch: expected {}, got {}",
+            case.exit, exit
+        ));
+    }
+    for needle in case.stderr_contains {
+        if !stderr.contains(needle) {
+            problems.push(format!(
+                "stderr does not contain {:?}\n--- stderr ---\n{}",
+                needle, stderr
+            ));
+        }
+    }
+    if stderr.contains("reference-counted allocation") {
+        problems.push(format!(
+            "the generated program leaked reference counted allocations\n--- stderr ---\n{}",
+            stderr
+        ));
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{}: {}", case.name, problems.join("\n")))
+    }
+}
+
+fn io_cases() -> Vec<IoCase> {
+    vec![
+        IoCase {
+            name: "fs_basic",
+            source: include_str!("programs/fs_basic.ls"),
+            args: &[],
+            stdin: None,
+            envs: &[],
+            stdout: "write ok\nread: hello file\nmissing failed\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        IoCase {
+            name: "io_file_roundtrip",
+            source: include_str!("programs/io_file_roundtrip.ls"),
+            args: &[],
+            stdin: None,
+            envs: &[],
+            stdout: "written 3\nflush ok true\nsize 3\nclose ok true\nseek 0\nread 3\nbytes [104, 105, 33]\nclose ok true\nremoved\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        IoCase {
+            name: "fs_metadata",
+            source: include_str!("programs/fs_metadata.ls"),
+            args: &[],
+            stdin: None,
+            envs: &[],
+            stdout: "create_dir_all ok true\nwrite ok\nread hello metadata\nsize 14\nis_file true is_dir false\nkind 0\ndir is_dir true\nexists true is_file true is_dir true\nmissing false\nentries [\"payload.txt\"]\nremove_file ok true\nremove_dir_all ok true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        IoCase {
+            name: "fs_paths",
+            source: include_str!("programs/fs_paths.ls"),
+            args: &[],
+            stdin: None,
+            envs: &[],
+            stdout: "write ok true\nappend ok true\nread after append abcdef\ncopy ok true\nread copy abcdef\ncanonicalize ok true\ncurrent dir ok true\ntemp dir non empty true\nread bytes 6\nremove from ok true\nremove to ok true\nexists after remove false\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        IoCase {
+            name: "fs_errors",
+            source: include_str!("programs/fs_errors.ls"),
+            args: &[],
+            stdin: None,
+            envs: &[],
+            stdout: "first create ok true\nsecond create is_err true\nsecond create kind AlreadyExists true\nremove dir ok true\nmissing remove is_err true\nmissing remove kind NotFound true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+    ]
+}
+
+/// Programs that touch the environment: files, environment variables and stdin.
+/// They run in private scratch directories so the workspace stays clean.
+#[test]
+fn compiled_io_programs() {
+    let cases = io_cases();
+    if cases.is_empty() {
+        return;
+    }
+    if let Err(error) = driver::find_c_compiler() {
+        eprintln!("skipping IO end-to-end tests: {}", error);
+        return;
+    }
+    let workers = 4.min(cases.len());
+    let next = AtomicUsize::new(0);
+    let failures: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    if index >= cases.len() {
+                        break;
+                    }
+                    if let Err(message) = run_io_case(&cases[index]) {
+                        failures.lock().unwrap().push(message);
+                    }
+                }
+            });
+        }
+    });
+    let mut failures = failures.into_inner().unwrap();
+    if !failures.is_empty() {
+        failures.sort();
+        panic!(
+            "{} of {} IO end-to-end programs failed:\n\n{}",
+            failures.len(),
+            cases.len(),
+            failures.join("\n\n")
+        );
+    }
+}
+
 #[test]
 fn frontend_rejects_invalid_programs() {
     let programs: &[(&str, &str)] = &[
@@ -1167,6 +1542,14 @@ fn frontend_rejects_invalid_programs() {
         (
             "bad_deep_nesting",
             include_str!("programs/bad_deep_nesting.ls"),
+        ),
+        (
+            "bad_extern_user",
+            include_str!("programs/bad_extern_user.ls"),
+        ),
+        (
+            "bad_dyn_unsized",
+            include_str!("programs/bad_dyn_unsized.ls"),
         ),
     ];
     let mut problems: Vec<String> = Vec::new();
@@ -1619,7 +2002,7 @@ fn v15_feature_errors_are_reported() {
             include_str!("programs/bad_hashmap_key.ls"),
             &[
                 "error[E0277]",
-                "HashMap keys must be one of i64, u64, bool, char or String, found f64",
+                "HashMap keys must be one of i64, u64, isize, usize, bool, char or String, found f64",
             ],
         ),
         (
@@ -1637,7 +2020,7 @@ fn v15_feature_errors_are_reported() {
             include_str!("programs/bad_store_hash_map_key_ref.ls"),
             &[
                 "error[E0277]",
-                "HashMap keys must be one of i64, u64, bool, char or String",
+                "HashMap keys must be one of i64, u64, isize, usize, bool, char or String",
             ],
         ),
         (

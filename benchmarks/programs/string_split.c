@@ -1,15 +1,22 @@
-/* string_split: build a comma-separated string of 50,000 decimal numbers
- * (about 194,500 bytes), split it by hand, parse each field and sum it. */
+/* string_split: build a comma-separated string of decimal numbers, split it by
+ * hand, parse each field and sum it.
+ * Optional argument: token count (default 50,000, the medium scale). */
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define TOKENS 50000
+static int64_t arg_i64(int argc, char **argv, int index, int64_t fallback) {
+    if (index < argc - 1) {
+        return strtoll(argv[index + 1], NULL, 10);
+    }
+    return fallback;
+}
 
-int main(void) {
-    size_t capacity = (size_t)TOKENS * 5 + 1;
+int main(int argc, char **argv) {
+    const int64_t tokens = arg_i64(argc, argv, 0, 50000);
+    size_t capacity = (size_t)tokens * 5 + 1;
     char *text = (char *)malloc(capacity);
     if (text == NULL) {
         fprintf(stderr, "allocation failed\n");
@@ -17,7 +24,7 @@ int main(void) {
     }
 
     size_t pos = 0;
-    for (int64_t i = 0; i < TOKENS; i++) {
+    for (int64_t i = 0; i < tokens; i++) {
         int written = snprintf(text + pos, capacity - pos, "%" PRId64 ",", i % 1000);
         if (written < 0) {
             fprintf(stderr, "formatting failed\n");

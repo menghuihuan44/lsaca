@@ -1,6 +1,6 @@
 //! Expressions: places, operators, casts, calls and aggregate literals.
 
-use crate::hir::{HBinaryOp, HExpr, HExprKind, HFieldRef, HUnaryOp};
+use crate::hir::{HBinaryOp, HExpr, HExprKind, HFieldRef, HLit, HUnaryOp};
 use crate::span::Span;
 use crate::types::{FloatTy, IntTy, SelfKind, Ty};
 
@@ -63,6 +63,11 @@ impl<'a> Gen<'a> {
         for _ in 0..8 {
             match &ty {
                 Ty::Ref { inner, .. } => {
+                    if inner.is_unsized() {
+                        // A reference to an unsized value is the fat value
+                        // itself: the data and length live in the descriptor.
+                        break;
+                    }
                     lvalue = format!("(*({}))", lvalue);
                     ty = (**inner).clone();
                 }
@@ -99,13 +104,15 @@ impl<'a> Gen<'a> {
             }
             HUnaryOp::Neg => match &inner.ty {
                 Ty::Int(int_ty) if int_ty.is_signed() => {
+                    let int_ty = *int_ty;
                     if self.debug_checks {
-                        format!(
+                        let call = format!(
                             "ls_neg_{}_checked({}, {})",
-                            int_ty.name(),
-                            value,
+                            util::runtime_int_suffix(int_ty),
+                            util::runtime_int_argument(int_ty, &value),
                             self.loc(span)
-                        )
+                        );
+                        util::runtime_int_result(int_ty, call)
                     } else {
                         unchecked_neg(&inner.ty, &value)
                     }
@@ -135,7 +142,20 @@ impl<'a> Gen<'a> {
         let right = self.gen_borrowed(rhs);
         let operand_ty = lhs.ty.clone();
         let result_ty = ty.clone();
-        let expression = self.binop_value(op, &operand_ty, &result_ty, &left, &right, span);
+        // Release builds keep division and remainder checked because the runtime
+        // reports division by zero, but a remainder by a positive constant can
+        // neither divide by zero nor overflow, so it lowers to the plain C
+        // operator. This keeps hot filters such as `x % 2` free of a runtime
+        // call while debug builds still report overflow.
+        let expression = match (op, &rhs.kind) {
+            (HBinaryOp::Rem, HExprKind::Lit(HLit::Int { value, .. }))
+                if !self.debug_checks && *value > 0 =>
+            {
+                let ctype = self.ctype(&result_ty);
+                format!("({})(({}) % ({}))", ctype, left, right)
+            }
+            _ => self.binop_value(op, &operand_ty, &result_ty, &left, &right, span),
+        };
         self.w.line(format!("{} = {};", target, expression));
     }
 
@@ -199,32 +219,26 @@ impl<'a> Gen<'a> {
             },
             Ty::Int(int_ty) => {
                 let int_ty = *int_ty;
+                let suffix = util::runtime_int_suffix(int_ty);
+                let left = util::runtime_int_argument(int_ty, lhs);
+                let right = util::runtime_int_argument(int_ty, rhs);
                 match op {
-                    HBinaryOp::Div => format!(
-                        "ls_div_{}_checked({}, {}, {})",
-                        int_ty.name(),
-                        lhs,
-                        rhs,
-                        loc
-                    ),
-                    HBinaryOp::Rem => format!(
-                        "ls_rem_{}_checked({}, {}, {})",
-                        int_ty.name(),
-                        lhs,
-                        rhs,
-                        loc
-                    ),
+                    HBinaryOp::Div | HBinaryOp::Rem => {
+                        let op_name = if op == HBinaryOp::Div { "div" } else { "rem" };
+                        let call = format!(
+                            "ls_{}_{}_checked({}, {}, {})",
+                            op_name, suffix, left, right, loc
+                        );
+                        util::runtime_int_result(int_ty, call)
+                    }
                     _ => {
                         let op_name = arithmetic_name(op);
                         if self.debug_checks {
-                            format!(
+                            let call = format!(
                                 "ls_{}_{}_checked({}, {}, {})",
-                                op_name,
-                                int_ty.name(),
-                                lhs,
-                                rhs,
-                                loc
-                            )
+                                op_name, suffix, left, right, loc
+                            );
+                            util::runtime_int_result(int_ty, call)
                         } else {
                             unchecked_arithmetic(op, int_ty, lhs, rhs)
                         }
@@ -268,14 +282,15 @@ impl<'a> Gen<'a> {
         let is_left = op == HBinaryOp::Shl;
         if self.debug_checks {
             let op_name = if is_left { "shl" } else { "shr" };
-            return format!(
+            let call = format!(
                 "ls_{}_{}_checked({}, (int64_t)({}), {})",
                 op_name,
-                int_ty.name(),
-                lhs,
+                util::runtime_int_suffix(int_ty),
+                util::runtime_int_argument(int_ty, lhs),
                 rhs,
                 loc
             );
+            return util::runtime_int_result(int_ty, call);
         }
         let ctype = int_ty.c_type();
         let mask = int_ty.bits().saturating_sub(1);
@@ -372,9 +387,18 @@ impl<'a> Gen<'a> {
     // ----- calls -----------------------------------------------------------
 
     pub(crate) fn gen_call(&mut self, callee: &HExpr, args: &[HExpr], ty: &Ty, target: &str) {
-        // Calling a function value does not consume it: the handle is copied
-        // (retained) and released by the enclosing statement.
-        let function = self.gen_owned(callee);
+        // Calling a function value does not consume it. When the callee is a
+        // place (a local binding, a field of a struct, an indexed slot, ...)
+        // the two fields can be read straight from its C lvalue: emitting an
+        // owned temporary would copy (retain) the closure environment before
+        // every call and release it again afterwards for no gain. A non-place
+        // callee still needs the temporary so that the expression is evaluated
+        // exactly once.
+        let function = if callee.is_place() {
+            self.gen_place(callee)
+        } else {
+            self.gen_owned(callee)
+        };
         let param_types: Vec<Ty> = match &callee.ty {
             Ty::Fn(params, _) => params.clone(),
             _ => Vec::new(),
@@ -422,7 +446,7 @@ impl<'a> Gen<'a> {
         args: &[HExpr],
         ty: &Ty,
         target: &str,
-        _span: Span,
+        span: Span,
     ) {
         let item = match self.program.fns.get(fn_id) {
             Some(item) => item.clone(),
@@ -432,6 +456,58 @@ impl<'a> Gen<'a> {
                 return;
             }
         };
+        // Intrinsic functions have no emitted definition: the call is expanded
+        // inline by the intrinsic table instead.
+        if item.intrinsic {
+            self.gen_intrinsic_call(&item, receiver, args, ty, target, span);
+            return;
+        }
+        // A standard-library forwarding wrapper is expanded at the call site:
+        // its body only forwards its own parameters to an intrinsic, so the
+        // intrinsic emitter produces the specialised code directly and no dead
+        // wrapper function is emitted.
+        if let Some(intrinsic_id) = self.inline_plan.inline_target(fn_id) {
+            let intrinsic = self.program.fns[intrinsic_id].clone();
+            let self_param = self.program.fns[fn_id]
+                .params
+                .first()
+                .map(|parameter| parameter.ty.clone());
+            // The borrow conversion intrinsics read the declared reference
+            // type (they return a view of the receiver), so their call sites
+            // need an explicit borrow of a by-value receiver. The other
+            // forwarding wrappers hand the receiver to the legacy builtin
+            // emitters, which accept the value form directly and avoid an
+            // extra pointer temporary.
+            let full_name = intrinsic.name.as_str();
+            let bare_name = full_name.split('<').next().unwrap_or(full_name).trim();
+            let needs_reference = matches!(
+                bare_name,
+                "__string_as_str" | "__string_as_mut_str" | "__vec_as_slice" | "__vec_as_mut_slice"
+            );
+            let mut call_args: Vec<HExpr> = Vec::with_capacity(args.len() + 1);
+            if let Some(receiver) = receiver {
+                let mut argument = (*receiver).clone();
+                if needs_reference
+                    && let Some(param_ty) = self_param.clone()
+                    && let Ty::Ref { inner, mutable } = &param_ty
+                    && argument.ty == **inner
+                {
+                    let mutable = *mutable;
+                    argument = HExpr::new(
+                        param_ty,
+                        HExprKind::Ref {
+                            mutable,
+                            expr: Box::new(argument),
+                        },
+                        span,
+                    );
+                }
+                call_args.push(argument);
+            }
+            call_args.extend(args.iter().cloned());
+            self.gen_intrinsic_call(&intrinsic, None, &call_args, ty, target, span);
+            return;
+        }
         let mut arguments: Vec<String> = Vec::new();
         // Values whose ownership is transferred to the callee: the caller must
         // not release them. These are the by-value receiver and the arguments.
@@ -455,9 +531,30 @@ impl<'a> Gen<'a> {
                 .unwrap_or(Ty::Unit);
             match item.self_kind {
                 Some(SelfKind::Ref) | Some(SelfKind::RefMut) => {
-                    let pointer_ctype = format!("{}*", self.ctype(&self_ty));
-                    let pointer = self.receiver_pointer(receiver_expr, &self_ty, &pointer_ctype);
-                    arguments.push(pointer);
+                    if self_ty.is_unsized() {
+                        // Unsized receivers are fat descriptors passed by
+                        // value: the receiver expression already produces one.
+                        let value = self.gen_borrowed(receiver_expr);
+                        arguments.push(value);
+                    } else {
+                        // A shared receiver whose pointee is a pointer keeps the
+                        // reference type's const qualification (see
+                        // fn_param_declarations).
+                        let pointee_ctype = self.ctype(&self_ty);
+                        let pointer_ctype = if matches!(item.self_kind, Some(SelfKind::Ref))
+                            && pointee_ctype.ends_with('*')
+                        {
+                            item.params
+                                .first()
+                                .map(|parameter| self.ctype(&parameter.ty))
+                                .unwrap_or_else(|| format!("{}*", pointee_ctype))
+                        } else {
+                            format!("{}*", pointee_ctype)
+                        };
+                        let pointer =
+                            self.receiver_pointer(receiver_expr, &self_ty, &pointer_ctype);
+                        arguments.push(pointer);
+                    }
                 }
                 _ => {
                     if receiver_ty.is_ref() {

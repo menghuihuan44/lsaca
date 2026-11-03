@@ -1,9 +1,21 @@
-# hashmap_wordcount: count 200,000 deterministic words (4,096 distinct) in a
-# dict keyed by the word text, then print a checksum over the frequencies, the
-# number of distinct keys and the highest frequency. The checksum (sum of
-# squared counts) is independent of dict iteration order.
+"""hashmap_wordcount: count deterministic words (4,096 distinct) in a dict
+keyed by the word text, then print a checksum over the frequencies, the number
+of distinct keys and the highest frequency.
+
+Optional argument: token count (default 200,000, the medium scale).
+"""
+
+import sys
+
+
+def arg_int(args, index, fallback):
+    if index < len(args):
+        return int(args[index])
+    return fallback
+
+
 def main():
-    tokens = 200000
+    tokens = arg_int(sys.argv[1:], 0, 200_000)
     distinct = 4096
     counts = {}
     for i in range(tokens):

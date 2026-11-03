@@ -1,17 +1,20 @@
 # Traits
 
-Version 1.5.0 adds user-defined traits. A trait declares a set of method
-signatures that a type can implement; traits are used as bounds on generic
-parameters (see [Generics](17-generics.md)) and are resolved entirely at
-compile time. There are no trait objects and no dynamic dispatch in 1.7.0.
+Version 1.5.0 adds user-defined traits. A trait declares a set of methods that a
+type can implement; traits are used as bounds on generic parameters (see
+[Generics](17-generics.md)) and are resolved at compile time. Version 2.0 adds
+*trait objects*: since 2.0 a trait can also be used as a type behind `dyn`, and
+method calls through such a value dispatch at runtime (see [Trait
+objects](25-trait-objects.md) and [Default method bodies](#default-method-bodies)).
 
 ## Declaring a trait
 
-A trait declaration contains method signatures only, each ending with a
-semicolon. Every method takes a receiver: `self`, `&self` or `&mut self`. For
-example, a trait that describes drawable values would be declared as
-`trait Describe { fn describe(&self) -> String; }` — the declaration names the
-methods but provides no bodies; an impl block supplies them.
+A trait declaration contains method signatures, each ending with a semicolon,
+plus optionally default method bodies (see [Default method
+bodies](#default-method-bodies)). Every method takes a receiver: `self`, `&self`
+or `&mut self`. For example, a trait that describes drawable values would be
+declared as `trait Describe { fn describe(&self) -> String; }` — the declaration
+names the method without a body; an impl block supplies it.
 
 A trait may have type parameters; the standard library uses this for
 `Iterator<T>`.
@@ -261,6 +264,42 @@ Some(1)
 The standard library's `Iterator<T>` is a trait of exactly this shape: one
 method, `next(&mut self) -> Option<T>`. See [Iterators](19-iterators.md).
 
+## Default method bodies
+
+Since 2.0 a trait method may have a body. The body is the *default*
+implementation: an impl block may provide its own version, or omit the method
+and inherit the default.
+
+```ls
+trait Greet {
+    fn greet(&self) -> String {
+        String::from("hello")
+    }
+}
+
+struct Person {
+    name: String,
+}
+
+impl Greet for Person {}
+
+fn main() {
+    let person = Person { name: String::from("a") };
+    println!("{}", person.greet());
+}
+```
+
+Output:
+```text
+hello
+```
+
+A method without a body is still *required*: the impl must provide it or the
+error is `E0046`. An impl method that overrides a default wins, and an impl
+method that does not exist in the trait is still `E0407`. A default body may call
+the other methods of the trait on `self`; for an explicit impl those calls go to
+the implementation's version of the method.
+
 ## Generic impls
 
 An impl block can be generic, and a trait impl can implement a trait on a
@@ -315,8 +354,9 @@ An impl is checked for coherence when a call resolves to it. The checks are:
 
 * **Duplicate implementations** (`E0119`): the same trait cannot be implemented
   twice for the same type.
-* **Missing methods** (`E0046`): an impl must provide every method declared by
-  the trait.
+* **Missing methods** (`E0046`): an impl must provide every *required* method
+  declared by the trait. A method with a default body (see [Default method
+  bodies](#default-method-bodies)) may be omitted.
 * **Extra methods** (`E0407`): an impl cannot add methods that the trait does
   not declare.
 * **Signature mismatch** (`E0053`): an impl method's receiver and parameter
@@ -356,12 +396,12 @@ fn main() {
 Error:
 ```text
 error[E0119]: conflicting implementations of trait (Greet) for type (Person)
-   --> example-08.ls:23:27
+   --> example-09.ls:23:27
     |
  23 |     println!("{}", person.greet());
     |                           ^^^^^
 
-lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
+lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
 ```
 
 A missing method is reported when the impl is used:
@@ -391,66 +431,47 @@ fn main() {
 Error:
 ```text
 error[E0046]: not all trait items implemented, missing: farewell
-   --> example-09.ls:18:27
+   --> example-10.ls:18:27
     |
  18 |     println!("{}", person.greet());
     |                           ^^^^^
 
-lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
-```
-
-## No trait objects
-
-A trait is not a type. It cannot be used as a value type, as a parameter type,
-or with `dyn`; there is no dynamic dispatch in 1.7.0. Generic bounds are the
-only way to write code over "any type that implements a trait":
-
-```ls,compile-fail
-trait Greet {
-    fn greet(&self) -> String;
-}
-
-struct Person {
-    name: String,
-}
-
-impl Greet for Person {
-    fn greet(&self) -> String {
-        String::from("hi")
-    }
-}
-
-fn call(greeter: Greet) -> String {
-    greeter.greet()
-}
-
-fn main() {
-    let person = Person { name: String::from("a") };
-    println!("{}", call(person));
-}
-```
-
-Error:
-```text
-error[E0412]: trait (Greet) cannot be used as a type; trait objects are not supported
-   --> example-10.ls:15:18
-    |
- 15 | fn call(greeter: Greet) -> String {
-    |                  ^^^^^
-
 lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
 ```
 
+## Trait objects
+
+A bare trait name is still not a type: `dyn` is required. Since 2.0 a trait can
+be used as the inner type of `Box`, `Rc`, `&` or `&mut`, and the resulting
+*trait object* holds a value of any type implementing the trait and dispatches
+its methods at runtime:
+
+```text
+Box<dyn Greet>     Rc<dyn Greet>     &dyn Greet     &mut dyn Greet
+```
+
+Writing `fn call(greeter: Greet)` is still an error (`E0412`), and so is using
+`dyn Greet` outside a `Box`/`Rc`/`&`/`&mut` (`E0001`). A trait can be made into a
+trait object only if it is *object safe* (`E0038`): every method takes `&self` or
+`&mut self`, there are no generic methods and no associated items. Generic
+bounds remain the static alternative, and they also work for traits that are not
+object safe.
+
+Conversion from a concrete value to a trait object is one of the standard
+coercions — `&T` to `&dyn Trait`, `Box<T>` to `Box<dyn Trait>`, and so on — so
+`let greeter: Box<dyn Greet> = Box::new(person);` works when `impl Greet for
+Person` exists. See [Trait objects](25-trait-objects.md) for the full rules.
+
 ## What traits do not include
 
-* No default method bodies; every method is a signature and every impl must
-  provide it.
 * No associated functions (`Trait::method()` without a receiver), no associated
   types, no constants and no generic methods.
 * No supertraits and no `where` clauses; bounds are written inline.
 * `impl Trait for Type` only for user-defined structs and enums; a
   builtin target is `E0118`.
-* No trait objects, `dyn`, or dynamic dispatch.
+* No associated items or generic methods, so only *object safe* traits can be
+  used as trait objects; a trait object requires the `dyn` keyword, and `dyn`
+  is valid only behind `Box`, `Rc`, `&` or `&mut`.
 * `Copy`, `Clone` and `Drop` are not ordinary implementable traits: `Copy` and
   `Clone` are derived automatically, and `Drop` has its own special impl form.
 
@@ -458,21 +479,25 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 
 ## Summary
 
-* A trait declares method signatures with `self`/`&self`/`&mut self`
-  receivers; the only allowed body is `;`.
+* A trait declares methods with `self`/`&self`/`&mut self` receivers. A method
+  ends with `;` (required) or carries a default body (since 2.0); an impl may
+  omit methods that have a default.
 * `impl Trait for Type` implements a trait for a user struct or enum; a
   builtin target is `E0118`. Impls may be generic and traits may have type
   parameters.
 * Method dispatch checks inherent methods first, then trait impls; two
   matching trait impls report `E0034`.
 * Traits are used as generic bounds, and a bound violation reports `E0277`.
-* Coherence reports `E0119` (duplicate impl), `E0046` (missing method),
-  `E0407` (extra method) and `E0053` (signature mismatch).
-* There are no trait objects; a trait cannot be used as a type (`E0412`).
+* Coherence reports `E0119` (duplicate impl), `E0046` (missing required
+  method), `E0407` (extra method) and `E0053` (signature mismatch).
+* A bare trait is not a type (`E0412`). Since 2.0 an object-safe trait can be a
+  trait object behind `dyn` and `Box`/`Rc`/`&`/`&mut`, with dynamic dispatch;
+  `==` and `<` on trait objects are `E0369`.
 
 ## What next
 
 * Type parameters and bounds: [Generics](17-generics.md).
+* Trait objects and dynamic dispatch: [Trait objects](25-trait-objects.md).
 * The standard library's `Iterator<T>` trait: [Iterators](19-iterators.md).
 * Special `Drop` rules: [Ownership and moves](11-ownership-and-moves.md#the-drop-trait).
 * Deviations and limitations: [Roadmap and deviations from Rust](16-roadmap.md).

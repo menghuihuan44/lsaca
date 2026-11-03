@@ -4,6 +4,7 @@
 mod builtins;
 mod check;
 mod consts;
+mod dyn_traits;
 mod exhaust;
 mod exprs;
 mod generics;
@@ -16,6 +17,7 @@ mod modules;
 mod ownership;
 mod patterns;
 mod refs;
+mod slices;
 mod traits;
 mod tree;
 
@@ -387,6 +389,61 @@ mod tests {
         );
         let prelude = crate::prelude::program().expect("the embedded prelude must parse");
         check_with_prelude(&program, Some(prelude), &file)
+    }
+
+    /// Type check a user program against a hand-written standard library.
+    fn check_source_with_stdlib(
+        source: &str,
+        stdlib_source: &str,
+    ) -> Result<hir::Program, Diagnostics> {
+        let (program, file, diagnostics) = parse_source(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected parse errors: {:?}",
+            messages(&diagnostics)
+        );
+        let stdlib_file = SourceFile::new("stdlib.ls", stdlib_source);
+        let (tokens, mut stdlib_diagnostics) = crate::lexer::tokenize(stdlib_source);
+        let (stdlib, more) = crate::parser::parse(&tokens, &stdlib_file);
+        stdlib_diagnostics.extend(more);
+        assert!(
+            !stdlib_diagnostics.has_errors(),
+            "unexpected standard library parse errors: {:?}",
+            messages(&stdlib_diagnostics)
+        );
+        check_with_prelude(&program, Some(&stdlib), &file)
+    }
+
+    /// Type check against the embedded standard library, exactly like the
+    /// compiler driver does.
+    fn expect_errors_with_stdlib_program(source: &str) -> Diagnostics {
+        let (program, file, diagnostics) = parse_source(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected parse errors: {:?}",
+            messages(&diagnostics)
+        );
+        let prelude = crate::stdlib::program().expect("the embedded standard library must parse");
+        match check_with_prelude(&program, Some(prelude), &file) {
+            Ok(_) => panic!("expected type errors, but the program type checked"),
+            Err(diagnostics) => diagnostics,
+        }
+    }
+    fn expect_ok_with_stdlib(source: &str, stdlib_source: &str) -> hir::Program {
+        match check_source_with_stdlib(source, stdlib_source) {
+            Ok(program) => program,
+            Err(diagnostics) => panic!(
+                "expected the program to type check, got: {:?}",
+                messages(&diagnostics)
+            ),
+        }
+    }
+
+    fn expect_errors_with_stdlib(source: &str, stdlib_source: &str) -> Diagnostics {
+        match check_source_with_stdlib(source, stdlib_source) {
+            Ok(_) => panic!("expected type errors, but the program type checked"),
+            Err(diagnostics) => diagnostics,
+        }
     }
 
     fn expect_ok_with_prelude(source: &str) -> hir::Program {
@@ -1415,20 +1472,44 @@ fn main() {
     }
 
     #[test]
-    fn checks_try_operator_payload_types() {
-        let diagnostics = expect_errors(
-            r#"fn first(opt: Option<i64>) -> Option<String> {
-    let value = opt?;
-    Some(value)
+    fn try_operator_unwraps_the_operand_payload_independently_of_the_return_type() {
+        // `?` unwraps the operand and yields that operand's Ok/Some payload; the
+        // Ok/Some type of the enclosing function is unrelated to it.
+        expect_ok(
+            r#"fn greeting() -> Result<String, String> {
+    return Ok(String::from("hello"));
+}
+
+fn collect_values() -> Result<Vec<i64>, String> {
+    return Ok(vec![1, 2, 3]);
+}
+
+struct Payload {
+    id: i64,
+}
+
+fn payload() -> Result<Payload, String> {
+    return Ok(Payload { id: 4 });
+}
+
+fn combine(text_value: Option<String>, number: Option<i64>) -> Option<i64> {
+    let text: String = text_value?;
+    let value: i64 = number?;
+    Some(text.len() as i64 + value)
 }
 
 fn main() {
-    let _ = first(Some(1));
+    let text: String = greeting().unwrap();
+    let values: Vec<i64> = collect_values().unwrap();
+    let item: Payload = payload().unwrap();
+    let sum: i64 = combine(Some(text), Some(item.id)).unwrap();
+    println!("{} {} {} {}", values.len(), item.id, sum, values[0]);
 }"#,
         );
-        assert!(has_code(&diagnostics, "E0308"));
-        assert!(has_message(&diagnostics, "mismatched types"));
+    }
 
+    #[test]
+    fn reports_try_operator_error_type_mismatches() {
         let diagnostics = expect_errors(
             r#"fn convert(res: Result<i64, i64>) -> Result<i64, String> {
     let value = res?;
@@ -3314,8 +3395,10 @@ fn main() {
     // -----------------------------------------------------------------
 
     #[test]
-    fn rejects_drop_glue_bindings_in_tuple_patterns() {
-        let diagnostics = expect_errors(
+    fn allows_moving_drop_values_out_of_tuple_patterns() {
+        // A tuple does not implement Drop, so its parts may be moved out of it
+        // by a pattern even when a part has its own Drop impl.
+        expect_ok(
             r#"struct Tracked {
     value: i64,
 }
@@ -3330,17 +3413,11 @@ fn main() {
     println!("{} {}", left.value, right.value);
 }"#,
         );
-        let count = diagnostics
-            .as_slice()
-            .iter()
-            .filter(|diagnostic| diagnostic.code == Some("E0509"))
-            .count();
-        assert_eq!(count, 2, "{:?}", messages(&diagnostics));
     }
 
     #[test]
-    fn rejects_drop_glue_bindings_in_struct_patterns() {
-        let diagnostics = expect_errors(
+    fn allows_moving_drop_fields_out_of_non_drop_structs() {
+        expect_ok(
             r#"struct Tracked {
     value: i64,
 }
@@ -3363,17 +3440,12 @@ fn main() {
     println!("{}", tracker.value + count);
 }"#,
         );
-        assert!(
-            has_code(&diagnostics, "E0509"),
-            "{:?}",
-            messages(&diagnostics)
-        );
-        assert!(has_message(&diagnostics, "implements Drop"));
     }
 
     #[test]
-    fn rejects_drop_glue_bindings_in_variant_patterns() {
-        let diagnostics = expect_errors(
+    fn allows_moving_drop_payloads_out_of_variant_patterns() {
+        // Option does not implement Drop: the whole Tracked payload moves out.
+        expect_ok(
             r#"struct Tracked {
     value: i64,
 }
@@ -3389,11 +3461,6 @@ fn main() {
         None => println!("none"),
     }
 }"#,
-        );
-        assert!(
-            has_code(&diagnostics, "E0509"),
-            "{:?}",
-            messages(&diagnostics)
         );
     }
 
@@ -3601,8 +3668,10 @@ fn main() {
     }
 
     #[test]
-    fn rejects_mutable_references_to_non_heap_user_values() {
-        let diagnostics = expect_errors(
+    fn allows_mutable_references_to_user_structs_containing_heap_values() {
+        // Every sized user struct, enum and tuple is a valid mutable target:
+        // the borrow checker enforces exclusive access.
+        expect_ok(
             r#"struct Packet {
     body: String,
 }
@@ -3619,12 +3688,6 @@ fn main() {
     println!("{}", packet.body);
 }"#,
         );
-        assert!(
-            has_code(&diagnostics, "E0498"),
-            "{:?}",
-            messages(&diagnostics)
-        );
-        assert!(has_message(&diagnostics, "mutable references to"));
     }
 
     #[test]
@@ -3746,8 +3809,8 @@ fn main() {
     }
 
     #[test]
-    fn rejects_if_let_bindings_of_drop_glue_payloads() {
-        let diagnostics = expect_errors(
+    fn allows_if_let_bindings_of_drop_glue_payloads() {
+        expect_ok(
             r#"struct Tracked {
     value: i64,
 }
@@ -3764,16 +3827,6 @@ fn main() {
         println!("{}", tracked.value);
     }
 }"#,
-        );
-        assert!(
-            has_code(&diagnostics, "E0509"),
-            "{:?}",
-            messages(&diagnostics)
-        );
-        assert!(
-            has_message(&diagnostics, "implements Drop"),
-            "{:?}",
-            messages(&diagnostics)
         );
     }
 
@@ -4211,6 +4264,480 @@ fn main() {
         );
     }
 
+    /// A minimal standard library that declares the builtin marker types and
+    /// implements methods for them, mirroring the real stdlib layout.
+    const STANDARD_LIBRARY: &str = r#"pub struct Vec<T> { internal: () }
+pub struct String { internal: () }
+pub struct Option<T> { internal: () }
+pub struct Result<T, E> { internal: () }
+pub struct Rc<T> { internal: () }
+pub struct Box<T> { internal: () }
+pub struct HashMap<K, V> { internal: () }
+
+impl<T> Vec<T> {
+    pub fn push(&mut self, value: T) {
+        return;
+    }
+
+    pub fn len(&self) -> i64 {
+        return 0;
+    }
+}
+
+impl String {
+    pub fn is_empty(&self) -> bool {
+        return false;
+    }
+}
+
+impl char {
+    pub fn is_digit(&self) -> bool {
+        return false;
+    }
+}
+
+impl<T> Option<T> {
+    pub fn present(&self) -> bool {
+        return true;
+    }
+}
+
+impl<T, E> Result<T, E> {
+    pub fn failed(&self) -> bool {
+        return false;
+    }
+}
+
+impl<T> Rc<T> {
+    pub fn rc_count(&self) -> i64 {
+        return 1;
+    }
+}
+
+impl<T> Box<T> {
+    pub fn box_count(&self) -> i64 {
+        return 1;
+    }
+}
+
+impl<K, V> HashMap<K, V> {
+    pub fn entry_count(&self) -> i64 {
+        return 0;
+    }
+}"#;
+
+    /// A minimal standard library with a trait implemented for a builtin type.
+    const STANDARD_LIBRARY_WITH_TRAITS: &str = r#"pub struct Vec<T> { internal: () }
+pub trait Countable {
+    fn count_things(&self) -> i64;
+}
+impl<T> Countable for Vec<T> {
+    fn count_things(&self) -> i64 {
+        return 0;
+    }
+}"#;
+
+    #[test]
+    fn stdlib_impls_for_builtin_markers_resolve() {
+        expect_ok_with_stdlib(
+            r#"fn main() {
+    let mut values: Vec<i64> = Vec::new();
+    values.push(1);
+    let count = values.len();
+    let name = String::new();
+    let empty = name.is_empty();
+    let digit = '7'.is_digit();
+    let maybe: Option<i64> = None;
+    let present = maybe.present();
+    let result: Result<i64, String> = Err(String::new());
+    let failed = result.failed();
+    let shared: Rc<i64> = Rc::new(1);
+    let shared_count = shared.rc_count();
+    let boxed: Box<i64> = Box::new(2);
+    let box_count = boxed.box_count();
+    let mut map: HashMap<i64, i64> = HashMap::new();
+    map.insert(1, 2);
+    let entries = map.entry_count();
+    println!("{} {} {}", count, digit, shared_count);
+    println!("{} {}", box_count, entries);
+    if empty || present || failed {
+        println!("flags");
+    }
+}"#,
+            STANDARD_LIBRARY,
+        );
+    }
+
+    #[test]
+    fn stdlib_trait_impls_for_builtin_markers_resolve() {
+        expect_ok_with_stdlib(
+            r#"fn main() {
+    let values: Vec<i64> = Vec::new();
+    println!("{}", values.count_things());
+}"#,
+            STANDARD_LIBRARY_WITH_TRAITS,
+        );
+    }
+
+    #[test]
+    fn stdlib_constructors_are_used_instead_of_legacy_builtins() {
+        let program = expect_ok_with_stdlib(
+            r#"fn main() {
+    let values: Vec<i64> = Vec::new();
+    let mut capacity: Vec<i64> = Vec::with_capacity(4);
+    capacity.push(1);
+    let names: Vec<String> = Vec::<String>::new();
+    let buffer = String::new();
+    let text = String::from(&buffer);
+    let shared: Rc<i64> = Rc::new(1);
+    let boxed: Box<i64> = Box::new(2);
+    let mut map: HashMap<i64, String> = HashMap::new();
+    println!("{}", buffer.is_empty());
+}"#,
+            STANDARD_LIBRARY_WITH_CONSTRUCTORS,
+        );
+        // Instances are named after the display form, e.g. `Vec<i64>::new`.
+        let concrete: Vec<&str> = program
+            .fns
+            .iter()
+            .filter(|function| !function.intrinsic)
+            .map(|function| function.name.as_str())
+            .collect();
+        assert!(
+            concrete
+                .iter()
+                .any(|name| name.ends_with("::with_capacity")),
+            "the stdlib `Vec::with_capacity` impl must be instantiated, got {:?}",
+            concrete
+        );
+        assert!(
+            concrete.iter().any(|name| name.ends_with("::from")),
+            "the stdlib `String::from` impl must be instantiated, got {:?}",
+            concrete
+        );
+        let new_instances = concrete
+            .iter()
+            .filter(|name| name.ends_with("::new"))
+            .count();
+        assert_eq!(
+            new_instances, 6,
+            "every marker constructor must resolve through its stdlib impl, got {:?}",
+            concrete
+        );
+        let intrinsics: Vec<&str> = program
+            .fns
+            .iter()
+            .filter(|function| function.intrinsic)
+            .map(|function| function.name.as_str())
+            .collect();
+        assert!(
+            intrinsics.iter().any(|name| name.starts_with("__vec_new")),
+            "the constructor impl must call the frozen intrinsic, got {:?}",
+            intrinsics
+        );
+    }
+
+    #[test]
+    fn stdlib_constructors_infer_from_use_after_the_call() {
+        let program = expect_ok_with_stdlib(
+            r#"fn main() {
+    let mut values = Vec::new();
+    values.push(1);
+    let mut names = Vec::new();
+    names.push(String::new());
+}"#,
+            STANDARD_LIBRARY_WITH_CONSTRUCTORS,
+        );
+        assert!(
+            program
+                .fns
+                .iter()
+                .any(|function| function.name.ends_with("::new") && !function.intrinsic),
+            "the deferred constructor instance must be checked and lowered, got {:?}",
+            program
+                .fns
+                .iter()
+                .map(|function| function.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stdlib_constructor_errors_are_not_hidden_by_legacy_builtins() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"fn main() {
+    let values: Vec<String> = Vec::new(1);
+}"#,
+            STANDARD_LIBRARY_WITH_CONSTRUCTORS,
+        );
+        assert!(
+            has_code(&diagnostics, "E0061"),
+            "a stdlib constructor with the wrong signature must report its own error, got {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn stdlib_constructors_check_struct_arguments_in_the_caller_module() {
+        // The argument expression belongs to the call site: a struct literal
+        // and a local function name must resolve in the caller's module, not in
+        // the standard-library impl module the constructor was declared in.
+        expect_ok_with_stdlib(
+            r#"struct S { v: i64 }
+
+fn main() {
+    let boxed = Box::new(S { v: 1 });
+}"#,
+            STANDARD_LIBRARY_WITH_CONSTRUCTORS,
+        );
+    }
+
+    #[test]
+    fn stdlib_constructors_check_function_arguments_in_the_caller_module() {
+        expect_ok_with_stdlib(
+            r#"fn node() -> i64 {
+    return 1;
+}
+
+fn main() {
+    let boxed = Box::new(node());
+}"#,
+            STANDARD_LIBRARY_WITH_CONSTRUCTORS,
+        );
+    }
+
+    #[test]
+    fn stdlib_constructors_infer_tuple_arguments_in_the_caller_module() {
+        expect_ok_with_stdlib(
+            r#"fn main() {
+    let pair_boxed = Box::new((8, false));
+}"#,
+            STANDARD_LIBRARY_WITH_CONSTRUCTORS,
+        );
+    }
+
+    #[test]
+    fn stdlib_constructors_with_a_hint_check_arguments_in_the_caller_module() {
+        expect_ok_with_stdlib(
+            r#"struct S { v: i64 }
+
+fn main() {
+    let boxed: Box<S> = Box::new(S { v: 2 });
+    let shared = Rc::new(S { v: 3 });
+}"#,
+            STANDARD_LIBRARY_WITH_CONSTRUCTORS,
+        );
+    }
+
+    /// A minimal standard library whose marker impls provide constructors and
+    /// call the frozen intrinsic ABI.
+    const STANDARD_LIBRARY_WITH_CONSTRUCTORS: &str = r#"pub struct Vec<T> { internal: () }
+pub struct String { internal: () }
+pub struct Rc<T> { internal: () }
+pub struct Box<T> { internal: () }
+pub struct HashMap<K, V> { internal: () }
+
+extern fn __vec_new<T>() -> Vec<T>;
+extern fn __vec_with_capacity<T>(capacity: i64) -> Vec<T>;
+extern fn __string_new() -> String;
+extern fn __string_from_str(value: &String) -> String;
+extern fn __rc_new<T>(value: T) -> Rc<T>;
+extern fn __box_new<T>(value: T) -> Box<T>;
+extern fn __map_new<K, V>() -> HashMap<K, V>;
+
+impl<T> Vec<T> {
+    pub fn new() -> Vec<T> {
+        return __vec_new::<T>();
+    }
+
+    pub fn with_capacity(capacity: i64) -> Vec<T> {
+        return __vec_with_capacity::<T>(capacity);
+    }
+
+    pub fn push(&mut self, value: T) {
+        return;
+    }
+}
+
+impl String {
+    pub fn new() -> String {
+        return __string_new();
+    }
+
+    pub fn from(value: &String) -> String {
+        return __string_from_str(value);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        return false;
+    }
+}
+
+impl<T> Rc<T> {
+    pub fn new(value: T) -> Rc<T> {
+        return __rc_new::<T>(value);
+    }
+}
+
+impl<T> Box<T> {
+    pub fn new(value: T) -> Box<T> {
+        return __box_new::<T>(value);
+    }
+}
+
+impl<K, V> HashMap<K, V> {
+    pub fn new() -> HashMap<K, V> {
+        return __map_new::<K, V>();
+    }
+}"#;
+
+    #[test]
+    fn stdlib_marker_reexports_from_modules_work() {
+        let stdlib = r#"
+mod vec {
+    pub struct Vec<T> {
+        internal: (),
+    }
+    impl<T> Vec<T> {
+        pub fn push(&mut self, value: T) {
+            return;
+        }
+        pub fn len(&self) -> i64 {
+            return 0;
+        }
+    }
+}
+mod ops {
+    use super::vec::Vec;
+    impl<T> Vec<T> {
+        pub fn peek(&self) -> i64 {
+            return 3;
+        }
+    }
+}
+pub use vec::Vec;
+"#;
+        let program = expect_ok_with_stdlib(
+            r#"fn main() {
+    let mut values: Vec<i64> = Vec::new();
+    values.push(1);
+    println!("{}", values.len());
+    println!("{}", values.peek());
+}"#,
+            stdlib,
+        );
+        assert!(
+            program.structs.is_empty(),
+            "builtin marker structs must not lower to HIR structs"
+        );
+    }
+
+    #[test]
+    fn stdlib_crate_paths_resolve() {
+        let stdlib = r#"
+pub mod vec {
+    pub struct Vec<T> {
+        internal: (),
+    }
+    impl<T> Vec<T> {
+        pub fn push(&mut self, value: T) {
+            return;
+        }
+        pub fn len(&self) -> i64 {
+            return 0;
+        }
+    }
+}
+pub mod collections {
+    pub struct HashMap<K, V> {
+        internal: (),
+    }
+    pub use crate::vec::Vec;
+}
+pub use vec::Vec;
+"#;
+        expect_ok_with_stdlib(
+            r#"use std::vec::Vec;
+use std::collections::HashMap;
+fn main() {
+    let mut values: Vec<i64> = Vec::new();
+    values.push(1);
+    println!("{}", values.len());
+    let mut map: HashMap<i64, i64> = HashMap::new();
+    map.insert(1, 2);
+    println!("{}", map.len());
+}"#,
+            stdlib,
+        );
+    }
+
+    #[test]
+    fn inherent_methods_take_priority_over_trait_methods() {
+        expect_ok(
+            r#"trait Describe { fn describe(&self) -> i64; }
+struct Boxed<T> { inner: T }
+impl<T> Boxed<T> {
+    fn describe(&self) -> i64 { return 1; }
+}
+impl<T> Describe for Boxed<T> {
+    fn describe(&self) -> i64 { return 2; }
+}
+fn main() {
+    let boxed: Boxed<i64> = Boxed { inner: 5 };
+    println!("{}", boxed.describe());
+}"#,
+        );
+    }
+
+    #[test]
+    fn reports_builtin_marker_arity_errors() {
+        let diagnostics =
+            expect_errors_with_stdlib("fn main() {}", "pub struct Vec { internal: () }");
+        assert!(has_code(&diagnostics, "E0107"));
+        assert!(has_message(
+            &diagnostics,
+            "builtin type Vec takes 1 type argument but 0 were supplied"
+        ));
+    }
+
+    #[test]
+    fn rejects_user_redefinition_of_builtin_markers() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"struct Vec<T> { inner: T }
+struct String { text: i64 }
+fn main() {}"#,
+            STANDARD_LIBRARY,
+        );
+        assert!(has_code(&diagnostics, "E0428"));
+        assert!(has_message(
+            &diagnostics,
+            "the name 'Vec' is defined multiple times"
+        ));
+        assert!(has_message(
+            &diagnostics,
+            "the name 'String' is defined multiple times"
+        ));
+        // The names stay reserved even without a standard library loaded.
+        let diagnostics = expect_errors(
+            r#"struct Vec<T> { inner: T }
+fn main() {}"#,
+        );
+        assert!(has_code(&diagnostics, "E0428"));
+    }
+
+    #[test]
+    fn user_crates_cannot_impl_builtin_markers() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"impl<T> Vec<T> {
+    pub fn extra(&self) -> i64 { return 1; }
+}
+fn main() {}"#,
+            STANDARD_LIBRARY,
+        );
+        assert!(has_code(&diagnostics, "E0118"));
+        assert!(has_message(&diagnostics, "found Vec<T>"));
+    }
+
     #[test]
     fn rejects_turbofish_on_non_generic_methods() {
         let diagnostics = expect_errors(
@@ -4271,7 +4798,7 @@ fn main() {
         assert!(has_code(&diagnostics, "E0277"));
         assert!(has_message(
             &diagnostics,
-            "HashMap keys must be one of i64, u64, bool, char or String, found Vec<i64>"
+            "HashMap keys must be one of i64, u64, isize, usize, bool, char or String, found Vec<i64>"
         ));
         assert!(has_note(
             &diagnostics,
@@ -4280,7 +4807,9 @@ fn main() {
         let key_errors = messages(&diagnostics)
             .iter()
             .filter(|message| {
-                message.contains("HashMap keys must be one of i64, u64, bool, char or String")
+                message.contains(
+                    "HashMap keys must be one of i64, u64, isize, usize, bool, char or String",
+                )
             })
             .count();
         assert_eq!(
@@ -4891,7 +5420,7 @@ fn main() {
         );
         assert!(has_message(
             &diagnostics,
-            "HashMap keys must be one of i64, u64, bool, char or String, found f64"
+            "HashMap keys must be one of i64, u64, isize, usize, bool, char or String, found f64"
         ));
     }
 
@@ -5034,6 +5563,38 @@ fn main() {
         );
         assert!(
             has_code(&diagnostics, "E0498"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn reports_reference_map_keys_once_without_standard_library_spans() {
+        let diagnostics = expect_errors_with_stdlib_program(
+            r#"fn main() {
+    let text = String::from("key");
+    let mut map: HashMap<&String, i64> = HashMap::new();
+    map.insert(&text, 1);
+    println!("{}", map.len());
+}"#,
+        );
+        // The instantiated standard-library signature reports the same
+        // problem at its own declaration; only the user-facing diagnostic may
+        // survive.
+        let reference_storage = messages(&diagnostics)
+            .iter()
+            .filter(|message| message.contains("references cannot be stored in this type"))
+            .count();
+        assert_eq!(
+            reference_storage,
+            1,
+            "expected exactly one user-facing diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            !messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("internal standard library error")),
             "{:?}",
             messages(&diagnostics)
         );
@@ -5313,6 +5874,68 @@ mod holder {
 use holder::inner;
 fn main() { println!("{}", inner::value()); }
 "#,
+        );
+    }
+
+    #[test]
+    fn imported_generic_functions_are_callable() {
+        // A generic function belongs to the value namespace: importing it must
+        // bind it where lookup_fn/lookup_generic_fn expect it, both in the root
+        // module and inside nested modules.
+        expect_ok(
+            r#"
+mod m {
+    pub fn plain() -> i64 { 7 }
+    pub fn g<T>(value: T) -> T { value }
+}
+use m::plain;
+use m::g;
+mod nested {
+    use crate::m::g;
+    pub fn call() -> i64 { g(2) }
+}
+fn main() {
+    println!("{} {}", plain(), g(3));
+    println!("{}", nested::call());
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn imported_generic_functions_are_callable_from_the_standard_library_root() {
+        // The standard library root re-exports its generic helper functions
+        // with "pub use"; the prelude lookup must find them as values.
+        expect_ok_with_stdlib(
+            r#"
+fn main() {
+    println!("{}", identity(3));
+    println!("{}", identity("text"));
+}
+"#,
+            r#"
+mod utils {
+    pub fn identity<T>(value: T) -> T { value }
+}
+pub use utils::identity;
+"#,
+        );
+    }
+
+    #[test]
+    fn imported_generic_function_conflicts_with_a_value_binding() {
+        let diagnostics = expect_errors(
+            r#"
+mod a { pub fn g<T>(value: T) -> T { value } }
+fn g() -> i64 { 1 }
+use a::g;
+fn main() { println!("{}", g()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0255"),
+            "{:?}",
+            messages(&diagnostics)
         );
     }
 
@@ -5896,10 +6519,14 @@ fn main() { println!("{}", value()); }
             "expected the e2e fixture corpus, found {} files",
             paths.len()
         );
-        let prelude = match crate::prelude::program() {
+        // The fixture gate runs the same front-end entry point as the driver:
+        // the embedded standard library is the prelude crate, so fixtures that
+        // use slice/str/trait-object APIs resolve here exactly as they do in
+        // a real compilation.
+        let prelude = match crate::stdlib::program() {
             Ok(prelude) => prelude,
             Err(diagnostics) => panic!(
-                "the embedded prelude must parse: {:?}",
+                "the embedded standard library must parse: {:?}",
                 messages(&diagnostics)
             ),
         };
@@ -6048,5 +6675,1266 @@ fn main() { println!("{}", value()); }
             ),
             "&& must yield false when the left operand is false"
         );
+    }
+
+    // -- v2.0 standard library migration regressions -------------------------
+
+    #[test]
+    fn mutable_references_to_hash_maps_are_allowed() {
+        const STDLIB: &str = r#"
+pub struct String { internal: () }
+pub struct HashMap<K, V> { internal: () }
+"#;
+        expect_ok_with_stdlib(
+            r#"
+fn fill(map: &mut HashMap<String, i64>) {
+    let _ = map;
+}
+
+fn main() {
+    let mut map: HashMap<String, i64> = HashMap::new();
+    fill(&mut map);
+}
+"#,
+            STDLIB,
+        );
+    }
+
+    #[test]
+    fn local_bindings_shadow_prelude_generic_functions() {
+        const STDLIB: &str = r#"
+pub extern fn max<T>(a: T, b: T) -> T;
+pub extern fn min<T>(a: T, b: T) -> T;
+pub extern fn abs<T>(value: T) -> T;
+pub extern fn sqrt<T>(value: T) -> T;
+"#;
+        expect_ok_with_stdlib(
+            r#"
+fn main() {
+    let max: i64 = 9223372036854775807;
+    println!("{}", max + 1);
+    let min: i64 = -9223372036854775807;
+    println!("{}", min - 1);
+    let abs: i64 = 7;
+    println!("{}", abs * 2);
+    let sqrt: f64 = 9.0;
+    println!("{}", sqrt);
+}
+"#,
+            STDLIB,
+        );
+    }
+
+    #[test]
+    fn module_items_shadow_prelude_generic_functions() {
+        const STDLIB: &str = r#"
+pub extern fn max<T>(a: T, b: T) -> T;
+"#;
+        expect_ok_with_stdlib(
+            r#"
+fn max(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn main() {
+    println!("{}", max(1, 2));
+}
+"#,
+            STDLIB,
+        );
+    }
+    #[test]
+    fn mutable_references_to_user_structs_allow_field_mutation() {
+        let source = r#"
+struct Person {
+    age: i64,
+    height: i64,
+}
+
+fn birthday(person: &mut Person) {
+    person.age = person.age + 1;
+}
+
+fn grow(person: &mut Person, amount: i64) {
+    person.height = person.height + amount;
+}
+
+fn main() {
+    let mut person = Person { age: 36, height: 170 };
+    birthday(&mut person);
+    grow(&mut person, 2);
+    println!("{} {}", person.age, person.height);
+}
+"#;
+        expect_ok(source);
+    }
+
+    #[test]
+    fn mutable_references_to_enums_and_tuples_are_allowed() {
+        let source = r#"
+enum State {
+    Idle,
+    Running(i64),
+}
+
+fn start(state: &mut State) {
+    *state = State::Running(1);
+}
+
+fn reset(pair: &mut (i64, i64)) {
+    pair.0 = 0;
+}
+
+fn main() {
+    let mut state = State::Idle;
+    start(&mut state);
+    let mut pair = (1, 2);
+    reset(&mut pair);
+    println!("{} {}", pair.0, pair.1);
+}
+"#;
+        expect_ok(source);
+    }
+
+    #[test]
+    fn mutable_reference_targets_keep_the_place_rules() {
+        let source = r#"
+struct Holder {
+    value: i64,
+}
+
+fn mutate(holder: &mut Holder) {
+    holder.value = 1;
+}
+
+fn main() {
+    let holder = Holder { value: 0 };
+    mutate(&mut holder);
+}
+"#;
+        let diagnostics = expect_errors(source);
+        assert!(
+            has_code(&diagnostics, "E0596"),
+            "expected E0596 for a mutable borrow of an immutable binding: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "not declared as mutable"),
+            "expected the mutable-borrow message: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    // -- v2.0 phase B: trait objects, slices and str -------------------------
+
+    const PHASE_B_STDLIB: &str = r#"pub struct Vec<T> { internal: () }
+pub struct String { internal: () }
+pub struct Rc<T> { internal: () }
+pub struct Box<T> { internal: () }
+pub struct HashMap<K, V> { internal: () }
+
+extern fn __vec_new<T>() -> Vec<T>;
+extern fn __vec_push<T>(values: &mut Vec<T>, value: T);
+extern fn __vec_as_slice<Z>(values: &Vec<Z>) -> &[Z];
+extern fn __slice_len<Z>(values: &[Z]) -> i64;
+extern fn __slice_get<Z>(values: &[Z], index: i64) -> Option<Z>;
+extern fn __string_new() -> String;
+extern fn __string_from_str(value: String) -> String;
+extern fn __string_as_str(value: &String) -> &str;
+extern fn __rc_new<T>(value: T) -> Rc<T>;
+extern fn __rc_get<T>(cell: &Rc<T>) -> T;
+extern fn __box_new<T>(value: T) -> Box<T>;
+extern fn __box_get<T>(cell: &Box<T>) -> T;
+extern fn __map_new<K, V>() -> HashMap<K, V>;
+extern fn __str_len(value: &str) -> i64;
+extern fn __str_contains(value: &str, needle: &str) -> bool;
+
+impl<T> Vec<T> {
+    pub fn new() -> Vec<T> {
+        return __vec_new::<T>();
+    }
+    pub fn push(&mut self, value: T) {
+        return __vec_push::<T>(self, value);
+    }
+    pub fn len(&self) -> i64 {
+        return __slice_len(__vec_as_slice(self));
+    }
+}
+
+impl<T> [T] {
+    pub fn len(&self) -> i64 {
+        return __slice_len(self);
+    }
+    pub fn get(&self, index: i64) -> Option<T> {
+        return __slice_get(self, index);
+    }
+}
+
+impl str {
+    pub fn len(&self) -> i64 {
+        return __str_len(self);
+    }
+    pub fn contains(&self, needle: String) -> bool {
+        return __str_contains(self, &needle);
+    }
+}
+
+impl String {
+    pub fn new() -> String {
+        return __string_new();
+    }
+    pub fn from(value: String) -> String {
+        return __string_from_str(value);
+    }
+    pub fn as_str(&self) -> &str {
+        return __string_as_str(self);
+    }
+}
+
+impl<T> Rc<T> {
+    pub fn new(value: T) -> Rc<T> {
+        return __rc_new::<T>(value);
+    }
+    pub fn get(&self) -> T {
+        return __rc_get(self);
+    }
+}
+
+impl<T> Box<T> {
+    pub fn new(value: T) -> Box<T> {
+        return __box_new::<T>(value);
+    }
+    pub fn get(&self) -> T {
+        return __box_get(self);
+    }
+}
+
+impl<K, V> HashMap<K, V> {
+    pub fn new() -> HashMap<K, V> {
+        return __map_new::<K, V>();
+    }
+}
+"#;
+
+    fn pb_walk_block<'a>(block: &'a crate::hir::HBlock, visit: &mut impl FnMut(&'a HExpr)) {
+        for stmt in &block.stmts {
+            match stmt {
+                HStmt::Let { init, .. } => {
+                    if let Some(init) = init {
+                        pb_walk_expr(init, visit);
+                    }
+                }
+                HStmt::Expr(expr) => pb_walk_expr(expr, visit),
+            }
+        }
+        if let Some(tail) = &block.tail {
+            pb_walk_expr(tail, visit);
+        }
+    }
+
+    fn pb_walk_expr<'a>(expr: &'a HExpr, visit: &mut impl FnMut(&'a HExpr)) {
+        visit(expr);
+        match &expr.kind {
+            HExprKind::Block(block) => pb_walk_block(block, visit),
+            HExprKind::Ref { expr, .. } | HExprKind::Deref { expr } | HExprKind::Cast { expr } => {
+                pb_walk_expr(expr, visit);
+            }
+            HExprKind::Unary { expr, .. } => pb_walk_expr(expr, visit),
+            HExprKind::Binary { lhs, rhs, .. } => {
+                pb_walk_expr(lhs, visit);
+                pb_walk_expr(rhs, visit);
+            }
+            HExprKind::Assign { target, value, .. } => {
+                pb_walk_expr(target, visit);
+                pb_walk_expr(value, visit);
+            }
+            HExprKind::Call { callee, args } => {
+                pb_walk_expr(callee, visit);
+                for arg in args {
+                    pb_walk_expr(arg, visit);
+                }
+            }
+            HExprKind::DirectCall { receiver, args, .. } => {
+                if let Some(receiver) = receiver {
+                    pb_walk_expr(receiver, visit);
+                }
+                for arg in args {
+                    pb_walk_expr(arg, visit);
+                }
+            }
+            HExprKind::BuiltinMethod { receiver, args, .. } => {
+                pb_walk_expr(receiver, visit);
+                for arg in args {
+                    pb_walk_expr(arg, visit);
+                }
+            }
+            HExprKind::BuiltinAssoc { args, .. } | HExprKind::BuiltinCall { args, .. } => {
+                for arg in args {
+                    pb_walk_expr(arg, visit);
+                }
+            }
+            HExprKind::Field { base, .. } => pb_walk_expr(base, visit),
+            HExprKind::Index { base, index } => {
+                pb_walk_expr(base, visit);
+                pb_walk_expr(index, visit);
+            }
+            HExprKind::StructLit { fields, .. } => {
+                for (_, value) in fields {
+                    pb_walk_expr(value, visit);
+                }
+            }
+            HExprKind::Tuple(elems) | HExprKind::VecLit { elems } => {
+                for elem in elems {
+                    pb_walk_expr(elem, visit);
+                }
+            }
+            HExprKind::VecRepeat { value, count } => {
+                pb_walk_expr(value, visit);
+                pb_walk_expr(count, visit);
+            }
+            HExprKind::EnumLit { args, .. } => {
+                for arg in args {
+                    pb_walk_expr(arg, visit);
+                }
+            }
+            HExprKind::OptionSome(value)
+            | HExprKind::ResultOk(value)
+            | HExprKind::ResultErr(value)
+            | HExprKind::Return(Some(value)) => pb_walk_expr(value, visit),
+            HExprKind::Format { parts } => {
+                for part in parts {
+                    if let crate::hir::HFormatPartKind::Arg { expr, .. } = &part.kind {
+                        pb_walk_expr(expr, visit);
+                    }
+                }
+            }
+            HExprKind::Macro(call) => {
+                for part in &call.parts {
+                    if let crate::hir::HFormatPartKind::Arg { expr, .. } = &part.kind {
+                        pb_walk_expr(expr, visit);
+                    }
+                }
+                for arg in &call.args {
+                    pb_walk_expr(arg, visit);
+                }
+            }
+            HExprKind::DynCoerce { value, .. } => pb_walk_expr(value, visit),
+            HExprKind::DynCall { object, args, .. } => {
+                pb_walk_expr(object, visit);
+                for arg in args {
+                    pb_walk_expr(arg, visit);
+                }
+            }
+            HExprKind::Slice {
+                base, start, end, ..
+            } => {
+                pb_walk_expr(base, visit);
+                if let Some(start) = start {
+                    pb_walk_expr(start, visit);
+                }
+                if let Some(end) = end {
+                    pb_walk_expr(end, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn pb_find_fn<'a>(program: &'a hir::Program, name: &str) -> &'a crate::hir::HFn {
+        program
+            .fns
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("missing function {}", name))
+    }
+
+    fn pb_exprs<'a>(
+        program: &'a hir::Program,
+        function: &str,
+        mut want: impl FnMut(&HExpr) -> bool,
+    ) -> Vec<&'a HExpr> {
+        let target = pb_find_fn(program, function);
+        let mut found = Vec::new();
+        pb_walk_block(&target.body, &mut |expr| {
+            if want(expr) {
+                found.push(expr);
+            }
+        });
+        found
+    }
+
+    fn pb_ref_ty(inner: Ty) -> Ty {
+        Ty::Ref {
+            mutable: false,
+            inner: Box::new(inner),
+        }
+    }
+
+    fn pb_mut_ref_ty(inner: Ty) -> Ty {
+        Ty::Ref {
+            mutable: true,
+            inner: Box::new(inner),
+        }
+    }
+
+    fn pb_box_ty(inner: Ty) -> Ty {
+        Ty::Box(Box::new(inner))
+    }
+
+    fn pb_rc_ty(inner: Ty) -> Ty {
+        Ty::Rc(Box::new(inner))
+    }
+
+    fn pb_i64() -> Ty {
+        Ty::Int(IntTy::I64)
+    }
+
+    fn pb_slice_ty() -> Ty {
+        Ty::Slice(Box::new(pb_i64()))
+    }
+
+    #[test]
+    fn dyn_trait_objects_register_once_and_share_a_vtable() {
+        let program = expect_ok_with_stdlib(
+            r#"
+trait Shape {
+    fn area(&self) -> i64;
+    fn label(&self) -> String;
+}
+
+struct Rect {
+    width: i64,
+    height: i64,
+}
+
+impl Shape for Rect {
+    fn area(&self) -> i64 {
+        return self.width * self.height;
+    }
+    fn label(&self) -> String {
+        return String::from("rect");
+    }
+}
+
+fn describe(shape: &dyn Shape) -> String {
+    return format!("{}={}", shape.label(), shape.area());
+}
+
+fn main() {
+    let rect = Rect { width: 2, height: 5 };
+    println!("{}", describe(&rect));
+    let boxed: Box<dyn Shape> = Box::new(Rect { width: 3, height: 4 });
+    println!("{}", boxed.area());
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert_eq!(program.trait_objects.len(), 1);
+        let object = &program.trait_objects[0];
+        assert_eq!(object.name, "Shape");
+        assert!(object.args.is_empty());
+        assert!(
+            object.c_name.starts_with("LsVTable_Shape"),
+            "unexpected vtable C name: {}",
+            object.c_name
+        );
+        assert_eq!(object.methods.len(), 2);
+        assert_eq!(object.methods[0].name, "area");
+        assert_eq!(object.methods[0].receiver, SelfKind::Ref);
+        assert!(object.methods[0].params.is_empty());
+        assert_eq!(object.methods[0].ret, pb_i64());
+        assert_eq!(object.methods[1].name, "label");
+        assert_eq!(object.methods[1].ret, Ty::String);
+        assert_eq!(program.vtables.len(), 1);
+        assert_eq!(program.vtables[0].trait_object, 0);
+        assert_eq!(program.vtables[0].self_ty, Ty::Struct(0));
+        assert_eq!(program.vtables[0].methods.len(), 2);
+        let coercions = pb_exprs(&program, "main", |expr| {
+            matches!(expr.kind, HExprKind::DynCoerce { .. })
+        });
+        assert_eq!(coercions.len(), 2, "expected two trait-object coercions");
+        let HExprKind::DynCoerce { value, vtable } = &coercions[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(*vtable, 0);
+        assert_eq!(coercions[0].ty, pb_ref_ty(Ty::Dyn(0)));
+        assert_eq!(value.ty, pb_ref_ty(Ty::Struct(0)));
+        let HExprKind::DynCoerce { value, vtable } = &coercions[1].kind else {
+            unreachable!()
+        };
+        assert_eq!(*vtable, 0);
+        assert_eq!(coercions[1].ty, pb_box_ty(Ty::Dyn(0)));
+        assert_eq!(value.ty, pb_box_ty(Ty::Struct(0)));
+        let calls = pb_exprs(&program, "describe", |expr| {
+            matches!(expr.kind, HExprKind::DynCall { .. })
+        });
+        let mut slots: Vec<usize> = calls
+            .iter()
+            .map(|expr| match &expr.kind {
+                HExprKind::DynCall { slot, .. } => *slot,
+                _ => unreachable!(),
+            })
+            .collect();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![0, 1]);
+        assert_eq!(calls[0].ty, Ty::String);
+    }
+
+    #[test]
+    fn dyn_method_calls_select_slots_in_declaration_order() {
+        let program = expect_ok_with_stdlib(
+            r#"
+trait Grow {
+    fn grow(&mut self);
+    fn value(&self) -> i64;
+}
+
+struct Cell {
+    value: i64,
+}
+
+impl Grow for Cell {
+    fn grow(&mut self) {
+        self.value = self.value + 1;
+    }
+    fn value(&self) -> i64 {
+        return self.value;
+    }
+}
+
+fn bump(cell: &mut dyn Grow) {
+    cell.grow();
+}
+
+fn read(cell: &dyn Grow) -> i64 {
+    return cell.value();
+}
+
+fn main() {
+    let mut cell = Cell { value: 1 };
+    bump(&mut cell);
+    println!("{}", read(&cell));
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert_eq!(program.trait_objects.len(), 1);
+        assert_eq!(program.trait_objects[0].methods[0].name, "grow");
+        assert_eq!(
+            program.trait_objects[0].methods[0].receiver,
+            SelfKind::RefMut
+        );
+        assert_eq!(program.trait_objects[0].methods[1].receiver, SelfKind::Ref);
+        let bump_calls = pb_exprs(&program, "bump", |expr| {
+            matches!(expr.kind, HExprKind::DynCall { .. })
+        });
+        assert_eq!(bump_calls.len(), 1);
+        let HExprKind::DynCall {
+            object,
+            trait_object,
+            slot,
+            args,
+        } = &bump_calls[0].kind
+        else {
+            unreachable!()
+        };
+        assert_eq!(*trait_object, 0);
+        assert_eq!(*slot, 0);
+        assert!(args.is_empty());
+        assert_eq!(object.ty, pb_mut_ref_ty(Ty::Dyn(0)));
+        assert_eq!(bump_calls[0].ty, Ty::Unit);
+        let read_calls = pb_exprs(&program, "read", |expr| {
+            matches!(expr.kind, HExprKind::DynCall { .. })
+        });
+        assert_eq!(read_calls.len(), 1);
+        let HExprKind::DynCall { slot, object, .. } = &read_calls[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(*slot, 1);
+        assert_eq!(object.ty, pb_ref_ty(Ty::Dyn(0)));
+        assert_eq!(read_calls[0].ty, pb_i64());
+    }
+
+    #[test]
+    fn dyn_box_and_rc_handles_share_one_vtable() {
+        let program = expect_ok_with_stdlib(
+            r#"
+trait Speak {
+    fn say(&self) -> String;
+}
+
+struct Dog {
+    name: String,
+}
+
+impl Speak for Dog {
+    fn say(&self) -> String {
+        return String::from("woof");
+    }
+}
+
+fn main() {
+    let boxed: Box<dyn Speak> = Box::new(Dog { name: String::from("rex") });
+    let shared: Rc<dyn Speak> = Rc::new(Dog { name: String::from("rex") });
+    println!("{} {}", boxed.say(), shared.say());
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert_eq!(program.vtables.len(), 1);
+        assert_eq!(program.vtables[0].self_ty, Ty::Struct(0));
+        assert_eq!(program.vtables[0].methods.len(), 1);
+        let coercions = pb_exprs(&program, "main", |expr| {
+            matches!(expr.kind, HExprKind::DynCoerce { .. })
+        });
+        assert_eq!(coercions.len(), 2);
+        let HExprKind::DynCoerce { value, .. } = &coercions[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(coercions[0].ty, pb_box_ty(Ty::Dyn(0)));
+        assert_eq!(value.ty, pb_box_ty(Ty::Struct(0)));
+        let HExprKind::DynCoerce { value, .. } = &coercions[1].kind else {
+            unreachable!()
+        };
+        assert_eq!(coercions[1].ty, pb_rc_ty(Ty::Dyn(0)));
+        assert_eq!(value.ty, pb_rc_ty(Ty::Struct(0)));
+        let calls = pb_exprs(&program, "main", |expr| {
+            matches!(expr.kind, HExprKind::DynCall { .. })
+        });
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|expr| match &expr.kind {
+                    HExprKind::DynCall { object, .. } => object.ty.clone(),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<Ty>>(),
+            vec![pb_box_ty(Ty::Dyn(0)), pb_rc_ty(Ty::Dyn(0))]
+        );
+    }
+
+    #[test]
+    fn explicit_slice_expressions_lower_to_reference_slice_nodes() {
+        let program = expect_ok_with_stdlib(
+            r#"
+fn total(values: &[i64]) -> i64 {
+    return values.len();
+}
+
+fn main() {
+    let values = vec![10, 20, 30, 40, 50];
+    println!("{}", total(&values[1..4]));
+    println!("{}", total(&values[2..]));
+    println!("{}", total(&values[..]));
+    println!("{}", total(&values[..=1]));
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        let refs = pb_exprs(&program, "main", |expr| {
+            matches!(
+                &expr.kind,
+                HExprKind::Ref { expr, .. } if matches!(expr.kind, HExprKind::Slice { .. })
+            )
+        });
+        assert_eq!(
+            refs.len(),
+            4,
+            "expected four reference-to-slice expressions"
+        );
+        let mut shapes = Vec::new();
+        for expr in &refs {
+            assert_eq!(expr.ty, pb_ref_ty(pb_slice_ty()));
+            let HExprKind::Ref {
+                mutable,
+                expr: inner,
+            } = &expr.kind
+            else {
+                unreachable!()
+            };
+            assert!(!mutable);
+            assert_eq!(inner.ty, pb_slice_ty());
+            let HExprKind::Slice {
+                base,
+                start,
+                end,
+                inclusive,
+            } = &inner.kind
+            else {
+                unreachable!()
+            };
+            assert_eq!(base.ty, Ty::Vec(Box::new(pb_i64())));
+            shapes.push((start.is_some(), end.is_some(), *inclusive));
+        }
+        assert_eq!(
+            shapes,
+            vec![
+                (true, true, false),
+                (true, false, false),
+                (false, false, false),
+                (false, true, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn borrows_of_vectors_and_strings_coerce_to_slices_and_str() {
+        let program = expect_ok_with_stdlib(
+            r#"
+fn main() {
+    let values = vec![1, 2, 3];
+    let text = String::from("hello");
+    let part: &[i64] = &values;
+    let view: &str = &text;
+    println!("{} {}", part.len(), view.len());
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        let slices = pb_exprs(&program, "main", |expr| {
+            matches!(
+                &expr.kind,
+                HExprKind::Ref { expr, .. } if matches!(expr.kind, HExprKind::Slice { start: None, end: None, .. })
+            )
+        });
+        assert_eq!(slices.len(), 2);
+        let HExprKind::Ref { expr: part, .. } = &slices[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(slices[0].ty, pb_ref_ty(pb_slice_ty()));
+        assert_eq!(part.ty, pb_slice_ty());
+        let HExprKind::Slice { base, .. } = &part.kind else {
+            unreachable!()
+        };
+        assert_eq!(base.ty, Ty::Vec(Box::new(pb_i64())));
+        let HExprKind::Ref { expr: view, .. } = &slices[1].kind else {
+            unreachable!()
+        };
+        assert_eq!(slices[1].ty, pb_ref_ty(Ty::Str));
+        assert_eq!(view.ty, Ty::Str);
+        let HExprKind::Slice { base, .. } = &view.kind else {
+            unreachable!()
+        };
+        assert_eq!(base.ty, Ty::String);
+        let direct = pb_exprs(&program, "main", |expr| {
+            matches!(expr.kind, HExprKind::DirectCall { .. })
+        });
+        let names: Vec<String> = direct
+            .iter()
+            .map(|expr| match &expr.kind {
+                HExprKind::DirectCall { fn_id, .. } => program.fns[*fn_id].name.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name.ends_with("::len")),
+            "expected a slice/str len call, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn trait_object_coercions_without_an_impl_are_rejected() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"
+trait Named {
+    fn name(&self) -> String;
+}
+
+struct Plain {
+    value: i64,
+}
+
+fn main() {
+    let value: Box<dyn Named> = Box::new(Plain { value: 1 });
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert!(has_code(&diagnostics, "E0277"));
+        assert!(
+            has_message(&diagnostics, "is not implemented for"),
+            "expected a missing-impl diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn bare_trait_object_and_slice_values_are_unsized_placements() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"
+trait Shape {
+    fn area(&self) -> i64;
+}
+
+struct Rect {
+    width: i64,
+}
+
+impl Shape for Rect {
+    fn area(&self) -> i64 {
+        return self.width;
+    }
+}
+
+fn take_shape(shape: dyn Shape) -> i64 {
+    return 0;
+}
+
+fn main() {
+    let values = vec![1, 2, 3];
+    let text = String::from("hello");
+    let slice = values[1..2];
+    let part = text[..2];
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert!(
+            has_message(&diagnostics, "trait objects are unsized"),
+            "expected the trait-object unsized diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "slices are unsized"),
+            "expected the slice unsized diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "str is unsized"),
+            "expected the str unsized diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn object_unsafe_traits_are_reported_only_when_used() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"
+trait ByValue {
+    fn consume(self) -> i64;
+}
+
+struct Thing {
+    value: i64,
+}
+
+impl ByValue for Thing {
+    fn consume(self) -> i64 {
+        return self.value;
+    }
+}
+
+fn static_use() -> i64 {
+    let thing = Thing { value: 1 };
+    return thing.consume();
+}
+
+fn main() {
+    println!("{}", static_use());
+    let boxed: Box<dyn ByValue> = Box::new(Thing { value: 2 });
+    println!("{}", boxed.consume());
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert!(
+            has_code(&diagnostics, "E0038"),
+            "expected the object-safety diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "cannot be made into an object"),
+            "expected the object-safety message: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_note(&diagnostics, "by value"),
+            "expected the object-safety note: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn mutating_through_a_shared_trait_object_is_rejected() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"
+trait Grow {
+    fn grow(&mut self);
+}
+
+struct Cell {
+    value: i64,
+}
+
+impl Grow for Cell {
+    fn grow(&mut self) {
+        self.value = self.value + 1;
+    }
+}
+
+fn touch(cell: &dyn Grow) {
+    cell.grow();
+}
+
+fn main() {
+    let mut cell = Cell { value: 1 };
+    touch(&cell);
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert!(has_code(&diagnostics, "E0596"));
+        assert!(
+            has_message(&diagnostics, "cannot mutate through a shared reference"),
+            "expected the shared-receiver diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn equality_on_trait_objects_is_rejected() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"
+trait Same {
+    fn value(&self) -> i64;
+}
+
+struct Item {
+    value: i64,
+}
+
+impl Same for Item {
+    fn value(&self) -> i64 {
+        return self.value;
+    }
+}
+
+fn same(left: &dyn Same, right: &dyn Same) -> bool {
+    return left == right;
+}
+
+fn main() {
+    let item = Item { value: 1 };
+    println!("{}", same(&item, &item));
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert!(has_code(&diagnostics, "E0369"));
+        assert!(
+            has_message(&diagnostics, "binary operation =="),
+            "expected the equality diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn user_crates_cannot_implement_slice_or_str() {
+        let diagnostics = expect_errors(
+            r#"
+impl [i64] {
+    fn first(&self) -> i64 {
+        return 0;
+    }
+}
+
+impl str {
+    fn first_char(&self) -> char {
+        return 'a';
+    }
+}
+
+fn main() {
+}
+"#,
+        );
+        assert!(
+            has_message(&diagnostics, "found [i64]"),
+            "expected the slice impl-target diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "found str"),
+            "expected the str impl-target diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_code(&diagnostics, "E0118"));
+    }
+
+    #[test]
+    fn slice_bounds_must_be_i64() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"
+fn main() {
+    let values = vec![1, 2, 3];
+    let part = &values[0..true];
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert!(has_code(&diagnostics, "E0308"));
+        assert!(
+            has_message(&diagnostics, "mismatched types"),
+            "expected the slice-bound diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn vec_push_coerces_concrete_boxes_into_trait_objects() {
+        let program = expect_ok_with_stdlib(
+            r#"
+trait Shape {
+    fn area(&self) -> i64;
+}
+
+struct Rect {
+    width: i64,
+    height: i64,
+}
+
+impl Shape for Rect {
+    fn area(&self) -> i64 {
+        return self.width * self.height;
+    }
+}
+
+fn main() {
+    let mut shapes: Vec<Box<dyn Shape>> = Vec::<Box<dyn Shape>>::new();
+    shapes.push(Box::new(Rect { width: 2, height: 3 }));
+    shapes.push(Box::new(Rect { width: 4, height: 5 }));
+    println!("{}", shapes[0].area());
+}
+"#,
+            PHASE_B_STDLIB,
+        );
+        assert_eq!(program.vtables.len(), 1);
+        assert_eq!(program.vtables[0].self_ty, Ty::Struct(0));
+        let coercions = pb_exprs(&program, "main", |expr| {
+            matches!(expr.kind, HExprKind::DynCoerce { .. })
+        });
+        assert_eq!(coercions.len(), 2);
+        for coercion in &coercions {
+            let HExprKind::DynCoerce { value, vtable } = &coercion.kind else {
+                unreachable!()
+            };
+            assert_eq!(*vtable, 0);
+            assert_eq!(coercion.ty, pb_box_ty(Ty::Dyn(0)));
+            assert_eq!(value.ty, pb_box_ty(Ty::Struct(0)));
+        }
+        let calls = pb_exprs(&program, "main", |expr| {
+            matches!(expr.kind, HExprKind::DynCall { .. })
+        });
+        assert_eq!(calls.len(), 1);
+        let HExprKind::DynCall { slot, object, .. } = &calls[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(*slot, 0);
+        assert_eq!(object.ty, pb_box_ty(Ty::Dyn(0)));
+        assert_eq!(calls[0].ty, pb_i64());
+    }
+
+    // -- v2.0 phase B: standard library module origins ----------------------
+
+    #[test]
+    fn stdlib_extern_functions_inside_modules_are_accepted() {
+        let stdlib = r#"
+pub mod vec {
+    pub struct Vec<T> {
+        internal: (),
+    }
+    pub extern fn __vec_new<T>() -> Vec<T>;
+    impl<T> Vec<T> {
+        pub fn new() -> Vec<T> {
+            return __vec_new::<T>();
+        }
+    }
+}
+pub use vec::Vec;
+"#;
+        let program = expect_ok_with_stdlib(
+            r#"fn main() {
+    let values: Vec<i64> = Vec::new();
+    println!("{}", values.len());
+}"#,
+            stdlib,
+        );
+        assert!(
+            program.structs.is_empty(),
+            "builtin marker structs must not lower to HIR structs"
+        );
+    }
+
+    #[test]
+    fn user_crates_cannot_declare_extern_functions_in_modules() {
+        let diagnostics = expect_errors(
+            r#"mod inner {
+    extern fn __fake_abs(value: i64) -> i64;
+}
+fn main() {}"#,
+        );
+        assert!(has_code(&diagnostics, "E0001"));
+        assert!(has_message(
+            &diagnostics,
+            "extern function declarations are only allowed in the standard library"
+        ));
+        assert!(has_note(
+            &diagnostics,
+            "extern functions belong to the standard library"
+        ));
+    }
+
+    #[test]
+    fn allows_moving_drop_payloads_out_of_result_values() {
+        // Phase C standard library pattern: `match File::open(path) { Ok(file) => ... }`.
+        // Result does not implement Drop, so the whole File value moves out of
+        // the payload and File's own destructor still runs exactly once.
+        expect_ok(
+            r#"struct File {
+    handle: i64,
+}
+
+impl Drop for File {
+    fn drop(&mut self) {}
+}
+
+fn open() -> Result<File, String> {
+    return Ok(File { handle: 1 });
+}
+
+fn main() {
+    match open() {
+        Ok(file) => { println!("{}", file.handle); }
+        Err(error) => { println!("{}", error); }
+    }
+    if let Ok(other) = open() {
+        println!("{}", other.handle);
+    }
+}"#,
+        );
+    }
+
+    // -- v2.0 task-72: deferred standard-library instances -------------------
+
+    /// Minimal standard library whose constructors are generic impl methods.
+    /// A call without type information defers instantiation until every user
+    /// body has been checked.
+    const DEFERRED_E0282_STDLIB: &str = r#"
+pub struct Vec<T> { internal: () }
+pub struct Box<T> { internal: () }
+pub struct String { internal: () }
+
+pub extern fn __vec_new<T>() -> Vec<T>;
+pub extern fn __box_new<T>(value: T) -> Box<T>;
+pub extern fn __string_new() -> String;
+
+impl<T> Vec<T> {
+    pub fn new() -> Vec<T> {
+        return __vec_new::<T>();
+    }
+}
+
+impl<T> Box<T> {
+    pub fn new(value: T) -> Box<T> {
+        return __box_new::<T>(value);
+    }
+}
+
+impl String {
+    pub fn new() -> String {
+        return __string_new();
+    }
+
+    pub fn buggy() -> String {
+        let value: i64 = __string_new();
+        let _ = value;
+        return String::new();
+    }
+}
+"#;
+
+    #[test]
+    fn unconstrained_stdlib_constructor_reports_a_user_e0282() {
+        let source = r#"fn main() {
+    let v = Vec::new();
+    println!("{}", 1);
+}"#;
+        let diagnostics = expect_errors_with_stdlib(source, DEFERRED_E0282_STDLIB);
+        let errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "exactly one error expected, got {:?}",
+            messages(&diagnostics)
+        );
+        assert_eq!(errors[0].code, Some("E0282"));
+        assert_eq!(errors[0].message, "type annotations needed");
+        let start = source.find("Vec::new()").expect("call site") as u32;
+        assert_eq!(errors[0].span().start, start);
+        assert_eq!(errors[0].span().end, start + "Vec::new()".len() as u32);
+        assert!(
+            !messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("internal standard library error")),
+            "a user inference failure must not be reported as an internal error"
+        );
+    }
+
+    #[test]
+    fn annotated_stdlib_constructor_calls_are_accepted() {
+        expect_ok_with_stdlib(
+            r#"fn main() {
+    let v: Vec<i64> = Vec::new();
+    let _ = v;
+}"#,
+            DEFERRED_E0282_STDLIB,
+        );
+    }
+
+    #[test]
+    fn concrete_stdlib_constructor_arguments_are_accepted() {
+        expect_ok_with_stdlib(
+            r#"fn main() {
+    let b = Box::new(5);
+    let _ = b;
+}"#,
+            DEFERRED_E0282_STDLIB,
+        );
+    }
+
+    #[test]
+    fn late_annotations_resolve_deferred_constructor_instances() {
+        expect_ok_with_stdlib(
+            r#"fn main() {
+    let v = Vec::new();
+    let _w: Vec<i64> = v;
+}"#,
+            DEFERRED_E0282_STDLIB,
+        );
+    }
+
+    #[test]
+    fn genuine_stdlib_body_errors_remain_internal_errors() {
+        let diagnostics = expect_errors_with_stdlib(
+            r#"fn main() {
+    let value = String::buggy();
+    let _ = value;
+}"#,
+            DEFERRED_E0282_STDLIB,
+        );
+        assert!(
+            has_message(&diagnostics, "internal standard library error"),
+            "stdlib body errors must keep the internal wrapper: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_code(&diagnostics, "E0308"));
     }
 }

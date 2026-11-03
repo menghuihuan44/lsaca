@@ -414,12 +414,12 @@ impl<'a> Checker<'a> {
                 "E0596",
             );
         }
-        let value_expr = self.check_expr(value, Some(&target_expr.ty));
-        if !self.unify_quiet(&target_expr.ty, &value_expr.ty) {
-            let expected = self.infer.resolve(&target_expr.ty);
-            let found = self.infer.resolve(&value_expr.ty);
-            self.report_mismatch(&expected, &found, value.span);
-        }
+        let target_ty = self.infer.resolve(&target_expr.ty);
+        let value_expr = self.check_expr(value, Some(&target_ty));
+        // Route the assigned value through coerce_to so that trait-object and
+        // slice/str coercions are available on assignment as well. coerce_to
+        // reports its own mismatch diagnostic.
+        let value_expr = self.coerce_to(value_expr, &target_ty, value.span);
         let hop = match op {
             Some(ast_op) => {
                 if matches!(ast_op, AstBinaryOp::And | AstBinaryOp::Or) {

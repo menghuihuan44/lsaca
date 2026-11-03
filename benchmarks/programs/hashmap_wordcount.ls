@@ -3,7 +3,9 @@
 // the number of distinct keys and the highest frequency. The checksum (sum of
 // squared counts) is independent of hash-map iteration order.
 fn main() {
-    let tokens = 200000;
+    // Optional argument: token count; the default is the medium scale.
+    let all = args();
+    let tokens: i64 = if all.len() > 0 { all[0].clone().parse_i64().unwrap() } else { 200000 };
     let distinct = 4096;
     let mut counts: HashMap<String, i64> = HashMap::new();
     let mut i = 0;

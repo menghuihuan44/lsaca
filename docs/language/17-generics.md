@@ -4,9 +4,12 @@ Version 1.5.0 adds user-defined generics. Structs, enums, free functions and
 impl blocks can take type parameters, so one definition can be used with
 several concrete types. Traits are covered on the [next page](18-traits.md); a trait can carry type
 parameters (as `Iterator<T>` does), but a trait method cannot itself be
-generic. There is no dynamic dispatch: every use of a generic item is instantiated with concrete types,
-checked, and compiled separately (see [How generics are
-compiled](#how-generics-are-compiled)).
+generic. Generic code is monomorphized: every use of a generic item is
+instantiated with concrete types, checked, and compiled separately (see [How
+generics are compiled](#how-generics-are-compiled)). Version 2.0 adds runtime
+dynamic dispatch through trait objects as well — `Box<dyn Trait>`, `Rc<dyn
+Trait>` and `&dyn Trait` — but that is a separate mechanism, covered on
+[Trait objects](25-trait-objects.md); generics themselves stay static.
 
 ## Generic structs
 
@@ -258,7 +261,11 @@ Output:
 Generics in lsaca are **monomorphized**: each concrete instantiation of a
 generic function produces its own checked function and its own C function,
 with a deterministic mangled name such as `Pair_i64` or `Tree_String`. There
-is no runtime type information and no dynamic dispatch.
+is no runtime type information for generic instantiations and no dynamic
+dispatch *through them*. A `dyn Trait` value is the exception: a call through a
+trait object dispatches at runtime through that object's vtable (see [Trait
+objects](25-trait-objects.md)), even when the object type itself appears inside
+a generic type such as `Vec<Box<dyn Trait>>`.
 
 Instantiation is **late-checked**, in the style of C++ templates:
 
@@ -412,8 +419,10 @@ lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 
 * No `where` clauses; bounds are written inline in the parameter list.
 * No associated types, no generic type aliases, no generic constants.
-* No `dyn`, no trait objects, and no dynamic dispatch; every generic use is
-  monomorphic.
+* Dynamic dispatch exists since 2.0, but only through trait objects
+  (`Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait` and `&mut dyn Trait`), not
+  through generic parameters: a generic use is always monomorphic. A trait
+  object can be stored inside a generic type, as in `Vec<Box<dyn Trait>>`.
 * No const generics, no default type parameters, no specialization.
 * A generic function's body only has to be valid for the instantiations that
   are actually used; invalid unused instantiations are not diagnosed.
@@ -433,12 +442,14 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
   checked once, never-used instantiations are never checked, and an
   instantiation chain deeper than 128 is `E0275`.
 * Unused type parameters are accepted, unlike Rust.
-* There are no `where` clauses, associated types, const generics, defaults or
-  trait objects.
+* There are no `where` clauses, associated types, const generics or defaults.
+* Dynamic dispatch is available through trait objects since 2.0; generics
+  themselves are always monomorphized.
 
 ## What next
 
 * Traits and bounds on user types: [Traits](18-traits.md).
 * Iterators are built on generic structs: [Iterators](19-iterators.md).
 * The standard library: [Standard library](15-standard-library.md).
+* Dynamic dispatch with trait objects: [Trait objects](25-trait-objects.md).
 * Deviations and limitations: [Roadmap and deviations from Rust](16-roadmap.md).

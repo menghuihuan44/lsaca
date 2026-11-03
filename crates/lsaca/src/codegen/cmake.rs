@@ -92,6 +92,14 @@ pub fn render(program_name: &str, fallback: &str, translation_units: &[String]) 
     out.push_str("if(UNIX AND NOT APPLE)\n");
     out.push_str(&format!("  target_link_libraries({} PRIVATE m)\n", name));
     out.push_str("endif()\n");
+    // The runtime uses Winsock for its networking primitives, so every Windows
+    // build has to link ws2_32.
+    out.push_str("if(WIN32)\n");
+    out.push_str(&format!(
+        "  target_link_libraries({} PRIVATE ws2_32)\n",
+        name
+    ));
+    out.push_str("endif()\n");
     out
 }
 
@@ -121,6 +129,8 @@ mod tests {
         assert!(text.contains("target_compile_definitions(hello PRIVATE LSACA_DEBUG_RC)"));
         assert!(text.contains("if(UNIX AND NOT APPLE)"));
         assert!(text.contains("target_link_libraries(hello PRIVATE m)"));
+        assert!(text.contains("if(WIN32)"));
+        assert!(text.contains("target_link_libraries(hello PRIVATE ws2_32)"));
         assert_eq!(text, render("hello", "program", &[]));
     }
 
