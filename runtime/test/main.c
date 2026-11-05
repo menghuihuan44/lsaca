@@ -3399,10 +3399,17 @@ static void test_format_float_shortest(void) {
     CHECK_RENDER(render_f32(123456789.0f), "123456790");
 }
 
+/* Keeps the interned literal reachable at process exit so LeakSanitizer
+ * reports real leaks instead of the intentionally immortal allocation. The
+ * external linkage is deliberate: it stops the compiler from discarding the
+ * store that makes the allocation reachable. */
+LsString* interned_literal_anchor;
+
 static void test_str_static(void) {
     static const char literal[] = {'l', 'i', 't', 0x00, 'x'}; /* embedded NUL */
     size_t live_before = ls_rt_test_live_allocations();
     LsString* interned = ls_str_static(literal, sizeof literal);
+    interned_literal_anchor = interned;
 
     CHECK(interned != NULL);
     CHECK(ls_str_len(interned) == sizeof literal);

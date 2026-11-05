@@ -145,8 +145,13 @@ jobs:
         with:
           key: test-${{ matrix.os }}
 
+      # Capture the full test output so the failure diagnostics artifact below
+      # contains every failing case, not just the tail GitHub shows in the UI.
       - name: Run the workspace tests
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          mkdir -p target
+          cargo test --workspace 2>&1 | tee target/test.log
 
       # End-to-end module and package workflow: scaffold a project, build and
       # run it through the package manager path (lsaca.toml discovery), compile
@@ -184,6 +189,19 @@ jobs:
           printf 'use dep_lib::greeting;\n\nfn main() {\n    println!("{}", greeting());\n}\n' > "$APP/src/main.ls"
           (cd "$APP" && "$LSACA_BIN" run) | grep -F "hello from a dependency"
           (cd "$APP" && "$LSACA_BIN" check)
+      # Keep the compiler and test logs as an artifact when anything fails, so
+      # a failing CI run can be diagnosed without reproducing it locally.
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-test-${{ matrix.os }}
+          path: |
+            target/test.log
+            target/*.log
+            target/*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   docs:
     name: Rustdoc
@@ -201,7 +219,18 @@ jobs:
         with:
           key: docs
       - name: Build the API documentation
-        run: cargo doc --workspace --no-deps
+        shell: bash
+        run: |
+          mkdir -p target
+          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps 2>&1 | tee target/rustdoc.log
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-rustdoc
+          path: target/rustdoc.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   runtime:
     name: C runtime smoke test
@@ -275,6 +304,17 @@ jobs:
             exit 1
           fi
           grep -F "reference-counted allocation(s) leaked" leak.txt
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-runtime
+          path: |
+            panic.txt
+            leak.txt
+            *.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   sanitizers:
     name: Address and UB sanitizers
@@ -310,7 +350,10 @@ jobs:
             runtime/lsaca_rt_unicode.c -lm -o rt-test-san
           ./rt-test-san
           ./rt-test-san --orc-shutdown
-          ./rt-test-san --leak
+          # --leak deliberately leaks raw allocations so the runtime's own leak
+          # reporting runs; LeakSanitizer would flag those leaks by design, so
+          # only this invocation disables its detection.
+          ASAN_OPTIONS=detect_leaks=0 ./rt-test-san --leak
       # Panics call exit(101); check the diagnostics still reach stderr cleanly
       # while ASan intercepts the allocator.
       - name: Check the panic path under the sanitizers
@@ -344,6 +387,16 @@ jobs:
               -lm -o "$out/$name"
             "$out/$name" > /dev/null
           done
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-sanitizers
+          path: |
+            panic.txt
+            target/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   generated-c:
     name: Generated C is warning-free
@@ -412,10 +465,22 @@ jobs:
       - name: Emit, compile and run every program in both profiles
         run: |
           set -euo pipefail
+          mkdir -p target
           python scripts/check_generated_c.py \
             --bin ./target/release/lsaca \
             --profile both \
-            --json target/generated-c-report.json
+            --json target/generated-c-report.json 2>&1 | tee target/generated-c.log
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-generated-c
+          path: |
+            target/generated-c.log
+            target/generated-c-report.json
+            target/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   docs-examples:
     name: Documentation examples
@@ -442,7 +507,22 @@ jobs:
       # optimisations and args/stdin examples get the documented input, so a
       # stale expected output or a semantic regression fails this job.
       - name: Run every documentation example
-        run: python scripts/docs_verify.py --bin ./target/release/lsaca
+        run: |
+          mkdir -p target
+          python scripts/docs_verify.py \
+            --bin ./target/release/lsaca \
+            --max-report 200 2>&1 | tee target/docs-verify.log
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-docs-examples
+          path: |
+            target/docs-verify.log
+            target/*.log
+            target/*.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   site:
     name: Documentation site
@@ -455,16 +535,36 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The documented version and help text checks execute the real compiler,
+      # so this job builds the release CLI before checking prose claims.
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: site
+      - name: Build the release CLI
+        run: cargo build --release -p lsaca-cli
       - name: Validate the documentation links
-        run: python scripts/docsite.py --check
+        run: |
+          mkdir -p target
+          python scripts/docsite.py --check 2>&1 | tee target/docsite-check.log
       - name: Check every markdown link
-        run: python scripts/linkcheck.py
+        run: python scripts/linkcheck.py 2>&1 | tee target/linkcheck.log
       - name: Check documented version claims
-        run: python scripts/prose_check.py
+        run: python scripts/prose_check.py --bin ./target/release/lsaca 2>&1 | tee target/prose-check.log
       - name: Validate the published benchmark tables
-        run: python scripts/check_bench21.py
+        run: python scripts/check_bench21.py 2>&1 | tee target/check-bench21.log
       - name: Build the static site
         run: python scripts/docsite.py --output _site
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-site
+          path: target/*.log
+          if-no-files-found: ignore
+          retention-days: 7
       # Prove the generator actually produced a browsable tree before uploading.
       - name: Sanity check the generated site
         shell: bash

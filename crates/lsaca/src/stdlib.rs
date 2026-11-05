@@ -1,7 +1,7 @@
 //! The embedded standard library.
 //!
 //! The standard library (stdlib/src) is written in lsaca itself. Its sources
-//! are embedded into the compiler by [crate::stdlib_embed] and loaded here as
+//! are embedded into the compiler by `crate::stdlib_embed` and loaded here as
 //! one parsed crate: the crate root is stdlib/src/lib.ls and every external
 //! module it declares is resolved against the embedded files and turned into
 //! an inline module, exactly like the driver does for user crates.
@@ -9,7 +9,7 @@
 //! Standard library sources occupy their own global offset range starting at
 //! [BASE], far above the offsets the driver assigns to user code, so a span can
 //! never be ambiguous between the library and the program. Diagnostics that
-//! point into the library name the file std/<path>. A failure while parsing the
+//! point into the library name the file `std/<path>`. A failure while parsing the
 //! library is a compiler bug, so it is reported as an internal error.
 
 use std::collections::HashMap;

@@ -897,6 +897,12 @@ are executed against the real compiler by `scripts/docs_verify.py` (every
 anchor, and the prose claims. The complete CI definition is in
 [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
+Every CI job captures its output in a log file and, when a step fails, uploads a
+`diagnostics-*` artifact containing that log, the generated-C report and the
+documentation verification output. A red run can therefore be inspected from the
+Actions page or downloaded with `gh run download <run-id>` instead of being
+reproduced locally.
+
 CI also builds emitted projects through CMake. In a confined environment where
 child processes cannot spawn CMake/Ninja, set `LSACA_SKIP_CMAKE_TESTS=1` to skip
 only that CLI test; the dedicated CI job still covers the CMake backend.

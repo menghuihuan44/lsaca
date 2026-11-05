@@ -863,7 +863,14 @@ fn temporary_path(dir: &Path, name: &str) -> PathBuf {
 /// Concurrent builds may race to install the same file. Each build compiles to
 /// its own temporary path, so a rename that loses the race can be discarded as
 /// soon as the destination is a complete file.
+///
+/// A rename only works inside one file system. The direct backend compiles into
+/// the build tree while cached runtime objects may live in the system temporary
+/// directory, and on Windows those are often on different drives, so a failed
+/// rename falls back to copying through a staging file in the destination
+/// directory. The final rename keeps the install atomic for concurrent readers.
 fn install_built_file(temp: &Path, destination: &Path, what: &str) -> io::Result<()> {
+    let mut last_error = None;
     for attempt in 0..5 {
         match fs::rename(temp, destination) {
             Ok(()) => return Ok(()),
@@ -872,27 +879,66 @@ fn install_built_file(temp: &Path, destination: &Path, what: &str) -> io::Result
                     let _ = fs::remove_file(temp);
                     return Ok(());
                 }
-                if attempt == 4 {
-                    let _ = fs::remove_file(temp);
-                    return Err(io::Error::new(
-                        error.kind(),
-                        format!(
-                            "could not install the {} at {}: {}",
-                            what,
-                            destination.display(),
-                            error
-                        ),
-                    ));
+                match copy_into_place(temp, destination) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(temp);
+                        return Ok(());
+                    }
+                    Err(copy_error) => {
+                        if is_non_empty_file(destination) {
+                            let _ = fs::remove_file(temp);
+                            return Ok(());
+                        }
+                        last_error = Some(io::Error::new(
+                            copy_error.kind(),
+                            format!("{} (the rename failed first: {})", copy_error, error),
+                        ));
+                    }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
             }
         }
+        if attempt < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+        }
     }
-    Err(io::Error::other(format!(
-        "could not install the {} at {}",
-        what,
-        destination.display()
-    )))
+    let _ = fs::remove_file(temp);
+    let error = last_error.unwrap_or_else(|| io::Error::other("unknown error"));
+    Err(io::Error::new(
+        error.kind(),
+        format!(
+            "could not install the {} at {}: {}",
+            what,
+            destination.display(),
+            error
+        ),
+    ))
+}
+
+/// Copy a finished file into place through a staging file in the destination
+/// directory.
+///
+/// The copy exists for file systems a rename cannot cross. The staging file is
+/// unique per process and installed with a rename, so concurrent readers only
+/// ever observe a complete file.
+fn copy_into_place(temp: &Path, destination: &Path) -> io::Result<()> {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let staging = temporary_path(parent, name);
+    if let Err(error) = fs::copy(temp, &staging) {
+        let _ = fs::remove_file(&staging);
+        return Err(error);
+    }
+    match fs::rename(&staging, destination) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&staging);
+            Err(error)
+        }
+    }
 }
 
 /// Result of a successful native build.
@@ -1959,6 +2005,35 @@ mod tests {
         let candidates = runtime_cache_root_candidates();
         let cwd = env::current_dir().expect("the current directory should be available");
         assert_eq!(candidates.last(), Some(&cwd.join(".lsaca-runtime-cache")));
+    }
+
+    #[test]
+    fn copy_into_place_installs_complete_files() {
+        let dir = scratch_dir("install-copy");
+        let source_dir = dir.join("source");
+        let destination_dir = dir.join("destination");
+        fs::create_dir_all(&source_dir).expect("could not create the source directory");
+        let source = source_dir.join("lsaca_rt.o");
+        fs::write(&source, b"object bytes").expect("could not write the source file");
+        let destination = destination_dir.join("nested").join("lsaca_rt.o");
+        copy_into_place(&source, &destination).expect("the copy fallback should install the file");
+        assert!(
+            source.exists(),
+            "the caller removes the source after installing"
+        );
+        assert_eq!(
+            fs::read(&destination).expect("could not read the installed file"),
+            b"object bytes"
+        );
+        let staging: Vec<PathBuf> =
+            fs::read_dir(destination.parent().expect("the file has a parent"))
+                .expect("could not list the destination directory")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+                .collect();
+        assert!(staging.is_empty(), "staging files were left behind");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

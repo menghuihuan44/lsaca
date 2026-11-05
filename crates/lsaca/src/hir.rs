@@ -48,7 +48,7 @@ pub struct Program {
     pub drop_structs: Vec<Option<FnId>>,
     /// The Drop::drop hook of each enum, if it implements the trait.
     pub drop_enums: Vec<Option<FnId>>,
-    /// Registered trait object types (dyn Trait<Args>), indexed by Ty::Dyn.
+    /// Registered trait object types (`dyn Trait<Args>`), indexed by Ty::Dyn.
     pub trait_objects: Vec<HTraitObject>,
     /// One vtable per (trait object, concrete self type) pair, indexed by the
     /// vtable id stored in HExprKind::DynCoerce.
@@ -360,7 +360,7 @@ pub struct HVariant {
     pub fields: Vec<Ty>,
 }
 
-/// A registered trait object type: dyn Trait<Args>.
+/// A registered trait object type: `dyn Trait<Args>`.
 #[derive(Debug, Clone)]
 pub struct HTraitObject {
     /// Display name of the trait, for example Display or Iterator.
@@ -675,7 +675,7 @@ pub enum HExprKind {
         expr: Box<HExpr>,
     },
     /// Implicit coercion of a concrete value into a trait object value.
-    /// The value is either a reference (&T, &mut T) or a Box<T>/Rc<T> handle.
+    /// The value is either a reference (`&T`, `&mut T`) or a `Box<T>/Rc<T>` handle.
     /// The vtable id indexes Program::vtables.
     DynCoerce {
         value: Box<HExpr>,

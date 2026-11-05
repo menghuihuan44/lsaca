@@ -836,10 +836,10 @@ pub enum TypeExpr {
         inner: Box<TypeExpr>,
         span: Span,
     },
-    /// A dynamically dispatched trait object type: dyn Trait or dyn Trait<Args>.
+    /// A dynamically dispatched trait object type: `dyn Trait` or `dyn Trait<Args>`.
     /// The inner [TraitRef] carries the trait name, its arguments and the span.
     Dyn(TraitRef),
-    /// A slice type: [T]. Unsized; only usable behind a reference.
+    /// A slice type: `[T]`. Unsized; only usable behind a reference.
     Slice { elem: Box<TypeExpr>, span: Span },
 }
 

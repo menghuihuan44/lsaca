@@ -2473,6 +2473,12 @@ static void ls_rt_io_close_descriptor(intptr_t native) {
     }
 }
 
+/* Close a native resource without touching the handle table. */
+static void ls_rt_io_native_close(intptr_t native, unsigned char kind) {
+    (void)kind;
+    ls_rt_io_close_descriptor(native);
+}
+
 /* Build a fresh owned string from bytes that are known to be valid UTF-8. */
 static LsString* ls_rt_io_string_from_valid(const char* bytes, size_t len) {
     return ls_str_alloc_from(bytes, len);
@@ -2757,6 +2763,14 @@ LsVec_String* ls_io_read_dir(const LsString* path) {
         int code = errno;
 
         free(text);
+        if (code == ENOTDIR) {
+            /* Match the Windows implementation and the documented contract:
+             * a path that exists but is not a directory is invalid input, not
+             * a missing path. */
+            (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                                "the path is not a directory");
+            return NULL;
+        }
         (void)ls_rt_io_fail_errno(code);
         return NULL;
     }

@@ -16,10 +16,10 @@
 //! loop head on later iterations. Code after a terminating statement (return,
 //! break, continue) is unreachable and produces no diagnostics.
 //!
-//! Phase B adds trait object coercions and slice expressions: a Box<T> to
-//! Box<dyn Trait> coercion moves the box handle, an Rc<T> to Rc<dyn Trait>
-//! coercion shares the handle (so Rc<dyn Trait> is classified as Copy even
-//! though plain Rc<T> stays move-only), a reference coercion only borrows its
+//! Phase B adds trait object coercions and slice expressions: a `Box<T>` to
+//! `Box<dyn Trait>` coercion moves the box handle, an `Rc<T>` to `Rc<dyn Trait>`
+//! coercion shares the handle (so `Rc<dyn Trait>` is classified as Copy even
+//! though plain `Rc<T>` stays move-only), a reference coercion only borrows its
 //! referent, a dynamic method call auto-derefs and borrows its object, and a
 //! slice expression implicitly borrows its base.
 //!

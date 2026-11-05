@@ -246,7 +246,22 @@ static char dir_b[1200];
 
 static void build_path(char* out, size_t capacity, const char* base,
                        const char* suffix) {
-    (void)snprintf(out, capacity, "%s/%s", base, suffix);
+    size_t base_length = strlen(base);
+    size_t suffix_length = strlen(suffix);
+    size_t total = base_length + 1 + suffix_length + 1;
+
+    /* Copy explicitly instead of using snprintf: GCC's -Wformat-truncation
+     * flags the old call when the compiler cannot prove that base fits, and
+     * the suite is built with -Werror in CI. */
+    if (total > capacity) {
+        (void)fprintf(stderr,
+                      "io_tests: path '%s/%s' does not fit in %zu bytes\n",
+                      base, suffix, capacity);
+        exit(2);
+    }
+    memcpy(out, base, base_length);
+    out[base_length] = '/';
+    memcpy(out + base_length + 1, suffix, suffix_length + 1);
 }
 
 int main(int argc, char** argv) {

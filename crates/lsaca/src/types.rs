@@ -236,13 +236,13 @@ pub enum Ty {
         mutable: bool,
         inner: Box<Ty>,
     },
-    /// A slice type [T]. Unsized: a slice value can only live behind a
+    /// A slice type `[T]`. Unsized: a slice value can only live behind a
     /// reference, and its C representation is a fat pointer struct.
     Slice(Box<Ty>),
     /// The unsized builtin UTF-8 string slice type str. Only usable behind a
     /// reference: &str and &mut str.
     Str,
-    /// A dynamically dispatched trait object type dyn Trait<Args>, referenced
+    /// A dynamically dispatched trait object type `dyn Trait<Args>`, referenced
     /// by index into the HIR trait object table. Unsized: only usable behind
     /// Box, Rc, & or &mut.
     Dyn(usize),
@@ -346,7 +346,7 @@ impl Ty {
         Ty::Fn(params, Box::new(ret))
     }
 
-    /// The slice type [T] built from an element type.
+    /// The slice type `[T]` built from an element type.
     pub fn slice(elem: Ty) -> Ty {
         Ty::Slice(Box::new(elem))
     }
@@ -356,7 +356,7 @@ impl Ty {
         Ty::Str
     }
 
-    /// A trait object type dyn Trait<Args> for a registered trait object.
+    /// A trait object type `dyn Trait<Args>` for a registered trait object.
     pub fn dynamic(trait_object: usize) -> Ty {
         Ty::Dyn(trait_object)
     }
@@ -457,7 +457,7 @@ impl Ty {
         matches!(self, Ty::Dyn(_))
     }
 
-    /// True for unsized types: [T], str and dyn Trait. Values of these types
+    /// True for unsized types: `[T]`, `str` and `dyn Trait`. Values of these types
     /// may only appear behind a reference or one of the owning indirections.
     pub fn is_unsized(&self) -> bool {
         matches!(self, Ty::Slice(_) | Ty::Str | Ty::Dyn(_))
