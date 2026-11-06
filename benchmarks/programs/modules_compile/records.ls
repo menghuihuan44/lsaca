@@ -42,7 +42,7 @@ pub fn status_code(status: Status) -> i64 {
     match status {
         Status::Active => 1,
         Status::Paused => 2,
-        Status::Closed(reason) => 3 + reason.len(),
+        Status::Closed(reason) => 3 + reason.len() as i64,
     }
 }
 
@@ -50,7 +50,7 @@ pub fn status_label(status: Status) -> String {
     match status {
         Status::Active => String::from("active"),
         Status::Paused => String::from("paused"),
-        Status::Closed(reason) => String::from("closed") + reason,
+        Status::Closed(reason) => String::from("closed") + reason.as_str(),
     }
 }
 
@@ -102,7 +102,7 @@ impl Address {
     }
 
     pub fn city_length(&self) -> i64 {
-        self.city.len()
+        self.city.len() as i64
     }
 
     pub fn postal_checksum(&self) -> i64 {
@@ -126,7 +126,7 @@ impl Customer {
     }
 
     pub fn weight(&self) -> i64 {
-        self.name.len() * 10 + self.address.city_length() + self.orders
+        (self.name.len() as i64) * 10 + self.address.city_length() + self.orders
     }
 
     pub fn describe(&self) -> String {
@@ -156,7 +156,7 @@ impl Registry {
     }
 
     pub fn len(&self) -> i64 {
-        self.employees.len()
+        self.employees.len() as i64
     }
 
     pub fn total_added(&self) -> i64 {
@@ -197,7 +197,7 @@ impl Registry {
         if self.employees.len() == 0 {
             return 0;
         }
-        self.total_salary() / self.employees.len()
+        self.total_salary() / self.employees.len() as i64
     }
 
     pub fn highest_salary(&self) -> i64 {
@@ -266,7 +266,7 @@ impl Registry {
         while index < self.employees.len() {
             let current = format!("{}", self.employees[index].name);
             if current == wanted_text {
-                return index;
+                return index as i64;
             }
             index += 1;
         }
@@ -319,7 +319,7 @@ impl Registry {
         }
         let mut step = 0;
         while step < self.employees.len() {
-            let index = (step + offset) % self.employees.len();
+            let index = (step + (offset as usize)) % self.employees.len();
             let name = format!("{}", self.employees[index].name);
             let department = self.employees[index].department;
             let salary = self.employees[index].salary;
@@ -342,7 +342,7 @@ impl Registry {
             let employee = &self.employees[index];
             total = (total * 31 + employee.salary) % MODULUS;
             total = (total * 31 + department_weight(employee.department)) % MODULUS;
-            total = (total * 31 + employee.name.len()) % MODULUS;
+            total = (total * 31 + employee.name.len() as i64) % MODULUS;
             index += 1;
         }
         total
@@ -400,7 +400,7 @@ impl ReviewBoard {
             total += self.reviews[index].rating;
             index += 1;
         }
-        total / self.reviews.len()
+        total / self.reviews.len() as i64
     }
 
     pub fn total_weight(&self) -> i64 {
@@ -420,7 +420,7 @@ impl ReviewBoard {
             total += self.reviews[index].comment.len();
             index += 1;
         }
-        total
+        total as i64
     }
 }
 
@@ -452,7 +452,7 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + registry.total_salary()) % MODULUS;
     acc = (acc * 31 + registry.average_salary()) % MODULUS;
     acc = (acc * 31 + registry.highest_salary()) % MODULUS;
-    acc = (acc * 31 + registry.best_paid_name().len()) % MODULUS;
+    acc = (acc * 31 + registry.best_paid_name().len() as i64) % MODULUS;
     acc = (acc * 31 + registry.count_department(Department::Engineering)) % MODULUS;
     acc = (acc * 31 + registry.highest_level()) % MODULUS;
     acc = (acc * 31 + registry.total_cost()) % MODULUS;
@@ -469,7 +469,7 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + registry.find_by_name(&wanted)) % MODULUS;
 
     let names = registry.department_names();
-    acc = (acc * 31 + names.len()) % MODULUS;
+    acc = (acc * 31 + names.len() as i64) % MODULUS;
 
     let status = Status::Closed(String::from("moved"));
     acc = (acc * 31 + status_code(status)) % MODULUS;
@@ -484,7 +484,7 @@ pub fn checksum(seed: i64) -> i64 {
     );
     acc = (acc * 31 + customer.weight()) % MODULUS;
     acc = (acc * 31 + customer.address.postal_checksum()) % MODULUS;
-    acc = (acc * 31 + customer.describe().len()) % MODULUS;
+    acc = (acc * 31 + customer.describe().len() as i64) % MODULUS;
 
     let mut board = ReviewBoard::new();
     board.add(Review::new(8, String::from("solid")));

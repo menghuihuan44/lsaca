@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-200), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-210), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 2.0.0 are:
+The pattern forms available in 2.1.0 are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -45,13 +45,16 @@ The pattern forms available in 2.0.0 are:
 | Unit | `()` | the unit value |
 | Tuple | `(a, b)`, `()` | a tuple of that length; tuple patterns may nest |
 | Struct | `Point { x, y }`, `Point { x, .. }` | a struct with those fields |
+| Tuple and unit struct | `Meters(value)`, `Pair(x, y)`, `Marker` | a tuple struct or unit struct of that type |
 | Enum variant | `Shape::Empty`, `Shape::Circle(r)` | that variant, binding the payload |
 | Or-pattern | `0 \| 1`, `E::A(x) \| E::B(x)` | at least one alternative matches; every alternative binds the same names |
 
 Patterns nest: a variant pattern can contain a struct pattern, a struct pattern
-can contain tuple patterns, and so on. String and character literals are
-supported as patterns and match the exact string content or Unicode scalar;
-or-patterns (`p | q`) and match
+can contain tuple patterns, and so on. Tuple struct patterns (`Meters(value)`)
+and unit struct patterns (`Marker`) were added in 2.1.0; they destructure and
+name tuple structs and unit structs declared with the same syntax. String and
+character literals are supported as patterns and match the exact string content
+or Unicode scalar; or-patterns (`p | q`) and match
 guards (`pattern if condition`) are fully supported. There are no range, slice,
 `@`-binding or `ref` patterns, and a reference scrutinee is matched with
 *match ergonomics* rather than a `&`-pattern — see
@@ -269,6 +272,62 @@ Output:
 corner
 ```
 
+### Tuple and unit struct patterns
+
+A tuple struct is matched by naming the struct and listing one pattern per
+field; a unit struct is matched by naming it:
+
+```ls
+struct Meters(i64);
+struct Pair(i64, String);
+struct Marker;
+
+fn main() {
+    let distance = Meters(42);
+    match distance {
+        Meters(value) => println!("{}", value),
+    }
+
+    let pair = Pair(1, String::from("one"));
+    match pair {
+        Pair(number, text) => println!("{} {}", number, text),
+    }
+
+    let marker = Marker;
+    match marker {
+        Marker => println!("marker"),
+    }
+}
+```
+
+Output:
+```text
+42
+1 one
+marker
+```
+
+Tuple struct patterns nest like any other pattern, so `Some(Meters(value))`
+matches an `Option` that holds a newtype, and a tuple field may be a tuple
+struct pattern:
+
+```ls
+struct Meters(i64);
+struct Reading(Meters, bool);
+
+fn main() {
+    let reading = Reading(Meters(7), true);
+    match reading {
+        Reading(Meters(value), flag) => println!("{} {}", value, flag),
+    }
+}
+```
+
+Output:
+```text
+7 true
+```
+
 ### Enum variant patterns
 
 Variant patterns use `Enum::Variant`; tuple variants take a pattern per payload
@@ -435,18 +494,18 @@ fn main() {
 Error:
 ```text
 error[E0408]: variable x is not bound in all patterns of this or-pattern
-  --> example-14.ls:8:9
+  --> example-16.ls:8:9
    |
  8 |         E::A(x) | E::B(y) => x,
    |         ^^^^^^^^^^^^^^^^^
 
 error[E0408]: variable y is not bound in all patterns of this or-pattern
-  --> example-14.ls:8:9
+  --> example-16.ls:8:9
    |
  8 |         E::A(x) | E::B(y) => x,
    |         ^^^^^^^^^^^^^^^^^
 
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 ```
 
 Or-patterns also nest inside other patterns: a struct field or a tuple component
@@ -630,13 +689,13 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: 0 not covered
-  --> example-21.ls:3:5
+  --> example-23.ls:3:5
    |
  3 |     match n {
    |     ^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
+lsaca: example-23.ls: could not compile example-23.ls due to previous error(s)
 ```
 
 The guard itself is an ordinary expression, so it must have type `bool`. An
@@ -656,13 +715,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-22.ls:4:14
+  --> example-24.ls:4:14
    |
  4 |         n if n => println!("guard"),
    |              ^
    = note: expected bool, found {integer}
 
-lsaca: example-22.ls: could not compile example-22.ls due to previous error(s)
+lsaca: example-24.ls: could not compile example-24.ls due to previous error(s)
 ```
 
 ### Nested patterns
@@ -762,7 +821,7 @@ Output:
 7
 ```
 
-Bindings from a `&mut` *aggregate* pattern are writable in version 2.0.0: a struct
+Bindings from a `&mut` *aggregate* pattern are writable in version 2.1.0: a struct
 pattern with several bindings behaves like a single binding, and assignments such as
 `match &mut maybe { Some(value) => { *value = 9; } ... }` compile and update the
 referent (see [References and
@@ -817,13 +876,13 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: 2 not covered
-  --> example-27.ls:3:16
+  --> example-29.ls:3:16
    |
  3 |     let text = match n {
    |                ^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
+lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -838,13 +897,13 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: None not covered
-  --> example-28.ls:3:5
+  --> example-30.ls:3:5
    |
  3 |     match maybe {
    |     ^^^^^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-28.ls: could not compile example-28.ls due to previous error(s)
+lsaca: example-30.ls: could not compile example-30.ls due to previous error(s)
 ```
 
 A wildcard `_` or a binding covers everything and silences the exhaustiveness
@@ -869,13 +928,13 @@ fn main() {
 Error:
 ```text
 error[E0005]: refutable pattern in local binding: patterns in this position must be irrefutable
-  --> example-29.ls:3:9
+  --> example-31.ls:3:9
    |
  3 |     let Some(value) = maybe;
    |         ^^^^^^^^^^^
    = note: only wildcards, bindings and single-variant destructuring are allowed here
 
-lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
+lsaca: example-31.ls: could not compile example-31.ls due to previous error(s)
 ```
 
 The irrefutable forms `if let` and `while let` are described in
@@ -903,10 +962,11 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 2.0.0
+## Known limitations in 2.1.0
 
-Or-patterns, match guards and string-literal patterns are fully supported. The
-pattern restrictions that remain in 2.0.0 are:
+Or-patterns, match guards and string-literal patterns are fully supported, and
+2.1.0 adds tuple struct and unit struct patterns. The pattern restrictions that
+remain in 2.1.0 are:
 
 * **Guards only in `match`** — `if let` and `while let` take a pattern but no
   guard; nest an `if` inside the body instead.

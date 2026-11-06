@@ -10,11 +10,11 @@ fn main() {
     println!("{}", even.is_some());
     let error = missing.ok_or(String::from("nothing"));
     println!("{}", error.is_err());
-    let parsed: Result<i64, String> = "21".parse_i64();
+    let parsed: Result<i64, ParseIntError> = "21".parse_i64();
     let bumped = parsed.map(|number| number + 1);
     println!("{}", bumped.unwrap());
-    let broken: Result<i64, String> = "x".parse_i64();
-    let described = broken.map_err(|message| message.to_uppercase());
+    let broken: Result<i64, ParseIntError> = "x".parse_i64();
+    let described = broken.map_err(|error| error.message().to_uppercase());
     match described {
         Ok(number) => println!("ok {}", number),
         Err(message) => println!("err {}", message),

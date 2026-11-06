@@ -10,18 +10,18 @@ fn value_b(i: i64, j: i64) -> i64 {
 }
 
 fn main() {
-    let n: i64 = 160;
-    let cells: i64 = n * n;
-    let mut a = vec![0; cells];
-    let mut b = vec![0; cells];
-    let mut c = vec![0; cells];
+    let n: usize = 160;
+    let cells: usize = n * n;
+    let mut a: Vec<i64> = vec![0; cells];
+    let mut b: Vec<i64> = vec![0; cells];
+    let mut c: Vec<i64> = vec![0; cells];
 
     let mut i = 0;
     while i < n {
         let mut j = 0;
         while j < n {
-            a[i * n + j] = value_a(i, j);
-            b[i * n + j] = value_b(i, j);
+            a[i * n + j] = value_a(i as i64, j as i64);
+            b[i * n + j] = value_b(i as i64, j as i64);
             j += 1;
         }
         i += 1;

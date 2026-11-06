@@ -295,6 +295,7 @@ impl<'a> Checker<'a> {
             params.push(ast::Param {
                 name: param.name.clone(),
                 name_span: param.name_span,
+                mutable: param.mutable,
                 ty,
             });
         }
@@ -439,7 +440,12 @@ impl<'a> Checker<'a> {
         if failed {
             return None;
         }
-        self.normalize_args(&out)
+        // Keep inference variables open: callers (for example the iterator
+        // sugar) discover the item type of an adapter while the surrounding
+        // method chain is still being checked, so a literal variable must not
+        // be pinned to its default type here. Normalization happens at the
+        // call site when a concrete instantiation is required.
+        Some(out.iter().map(|ty| self.infer.resolve(ty)).collect())
     }
 
     // -----------------------------------------------------------------------
@@ -824,24 +830,30 @@ impl<'a> Checker<'a> {
         let trait_id = self.lookup_trait(trait_name)?;
         let trait_arity = self.traits[trait_id].generics.len();
         let impl_count = self.impls.len();
+        // Deferred signature inference can mint several nominal instances of
+        // one generic definition before their arguments resolve; once they do,
+        // those instances denote the same type and matching must agree on one.
+        let receiver = self.canonical_instance_ty(receiver);
         for impl_id in 0..impl_count {
             let info = match self.impls.get(impl_id) {
                 Some(info) => info.clone(),
                 None => continue,
             };
-            match &info.trait_ref {
-                Some(trait_ref) if trait_ref.name == trait_name => {}
-                _ => continue,
+            let name_match =
+                matches!(&info.trait_ref, Some(trait_ref) if trait_ref.name == trait_name);
+            if !name_match {
+                continue;
             }
-            let args = match self.match_impl_self(impl_id, receiver) {
+            let args = match self.match_impl_self(impl_id, &receiver) {
                 Some(args) => args,
                 None => continue,
             };
-            let trait_args = match self.trait_impl_args(impl_id, &args) {
-                Some(trait_args) if trait_args.len() == trait_arity => trait_args,
+            // The trait arguments only need to agree with the trait arity here;
+            // callers work with the impl's own generic arguments.
+            match self.trait_impl_args(impl_id, &args) {
+                Some(trait_args) if trait_args.len() == trait_arity => {}
                 _ => continue,
-            };
-            let _ = trait_args;
+            }
             return Some((impl_id, args));
         }
         None

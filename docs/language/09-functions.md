@@ -22,6 +22,13 @@ Parameter types are mandatory, and a parameter must be a simple name — pattern
 such as `(x, y): (i64, i64)` are not allowed in a parameter position. The return
 type may be omitted; a function without `-> T` returns `()`.
 
+A parameter may be marked `mut` to allow reassignment inside the function body:
+`fn count(mut n: i64) -> i64 { n += 1; n }`. The mutability is local to the
+called function — callers are unaffected and pass the argument exactly as
+before. An unmarked parameter cannot be reassigned. A `self` parameter cannot
+be marked `mut`: `impl` and trait methods report `E0001`, because mutability of
+the receiver is expressed by the receiver type (`&mut self`, not `mut self`).
+
 ```ls
 fn greet(name: String) {
     println!("hello, {}", name);
@@ -38,6 +45,25 @@ fn main() {
 Output:
 ```text
 hello, lsaca
+```
+
+The `mut` affects only the local copy of the parameter:
+
+```ls
+fn count(mut n: i64) -> i64 {
+    n += 1;
+    n
+}
+
+fn main() {
+    let value = 41;
+    println!("{} {}", count(value), value);
+}
+```
+
+Output:
+```text
+42 41
 ```
 
 ## Return values
@@ -81,13 +107,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-04.ls:1:31
+  --> example-05.ls:1:31
    |
  1 | fn add(a: i64, b: i64) -> i64 {
    |                               ^
    = note: expected i64, found ()
 
-lsaca: example-04.ls: could not compile example-04.ls due to previous error(s)
+lsaca: example-05.ls: could not compile example-05.ls due to previous error(s)
 ```
 
 A bare `return;` and `return expr;` follow the same rules as the return type; a
@@ -189,7 +215,7 @@ Output:
 8 13
 ```
 
-One limitation remains in 2.0.0: function values do **not** support `==`, so
+One limitation remains in 2.1.0: function values do **not** support `==`, so
 comparing two of them is an error (`E0369`):
 
 ```ls,compile-fail
@@ -206,12 +232,12 @@ fn main() {
 Error:
 ```text
 error[E0369]: binary operation == cannot be applied to type fn(i64) -> i64
-  --> example-08.ls:7:20
+  --> example-09.ls:7:20
    |
  7 |     println!("{}", a == b);
    |                    ^^^^^^
 
-lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
+lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
 ```
 
 ## Generic functions
@@ -271,11 +297,11 @@ types exactly — there are no default arguments, no variadic functions, no
 implicit conversions and no overloading.
 
 ```ls
-fn take(text: String) -> i64 {
+fn take(text: String) -> usize {
     text.len()
 }
 
-fn peek(text: &String) -> i64 {
+fn peek(text: &str) -> usize {
     text.len()
 }
 
@@ -306,12 +332,12 @@ fn main() {
 Error:
 ```text
 error[E0061]: this function takes 2 argument(s) but 1 were supplied
-  --> example-11.ls:6:20
+  --> example-12.ls:6:20
    |
  6 |     println!("{}", add(1));
    |                    ^^^^^^
 
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -327,13 +353,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-12.ls:6:27
+  --> example-13.ls:6:27
    |
  6 |     println!("{}", add(1, 2.5));
    |                           ^^^
    = note: expected i64, found {float}
 
-lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
 ```
 
 Calling something that is not a function is a compile error as well:
@@ -348,12 +374,12 @@ fn main() {
 Error:
 ```text
 error[E0618]: call expression requires a function, found {integer}
-  --> example-13.ls:3:20
+  --> example-14.ls:3:20
    |
  3 |     println!("{}", n());
    |                    ^^^
 
-lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
 Similarly, two functions with the same name are rejected even when their
@@ -371,13 +397,13 @@ fn main() {
 Error:
 ```text
 error[E0428]: the name 'double' is defined multiple times
-  --> example-14.ls:2:4
+  --> example-15.ls:2:4
    |
  2 | fn double(f: f64) -> f64 { f * 2.0 }
    |    ^^^^^^
-   = note: example-14.ls:1:4: previous definition of 'double' here
+   = note: example-15.ls:1:4: previous definition of 'double' here
 
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
 ```
 
 ## Reference parameters and returns
@@ -444,7 +470,7 @@ syntax, the returned reference's source is inferred by elision:
   specifier).
 
 ```ls
-fn first(values: &Vec<i64>) -> &i64 {
+fn first(values: &[i64]) -> &i64 {
     &values[0]
 }
 
@@ -480,13 +506,13 @@ fn main() {
 Error:
 ```text
 error[E0106]: missing lifetime specifier
-  --> example-18.ls:1:41
+  --> example-19.ls:1:41
    |
  1 | fn choose(first: &i64, second: &i64) -> &i64 {
    |                                         ^
    = note: this function's return type contains a borrowed value, but the signature does not say which parameter it is borrowed from
 
-lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
+lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
 ```
 
 At calls, returns and `let` bindings, a few reference coercions happen
@@ -494,7 +520,10 @@ implicitly:
 
 * `&mut T` coerces to `&T`;
 * `&Rc<T>` coerces to `&T`;
-* `&Box<T>` coerces to `&T`.
+* `&Box<T>` coerces to `&T`;
+* `&Vec<T>` coerces to `&[T]` and `&mut Vec<T>` to `&mut [T]`;
+* `&String` coerces to `&str` and `&mut String` to `&mut str`;
+* a string literal is compiled as a static `&str` where a `&str` is expected.
 
 Methods with `&self`/`&mut self` receivers are covered in [Structs, enums and
 impl](10-structs-enums-and-impl.md#methods-and-associated-functions-with-impl);

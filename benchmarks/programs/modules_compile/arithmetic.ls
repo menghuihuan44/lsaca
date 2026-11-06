@@ -113,7 +113,7 @@ pub fn primes_upto(limit: i64) -> Vec<i64> {
 
 pub fn prime_count(limit: i64) -> i64 {
     let primes = primes_upto(limit);
-    primes.len()
+    primes.len() as i64
 }
 
 // mod_pow: base ** exponent modulo modulus, using square-and-multiply.
@@ -304,7 +304,7 @@ impl FactorSet {
     }
 
     pub fn len(&self) -> i64 {
-        self.numbers.len()
+        self.numbers.len() as i64
     }
 
     pub fn total(&self) -> i64 {
@@ -460,7 +460,7 @@ pub fn digit_histogram(value: i64) -> Vec<i64> {
     }
     while rest > 0 {
         let index = rest % 10;
-        counts[index] = counts[index] + 1;
+        counts[index as usize] = counts[index as usize] + 1;
         rest = rest / 10;
     }
     counts

@@ -1,6 +1,6 @@
 fn main() {
     let path: String = String::from("io_fixture_scratch.txt");
-    let created = std::io::File::create(path.clone());
+    let created = std::io::File::create(&path);
     if created.is_err() {
         println!("create failed");
         return;
@@ -20,7 +20,7 @@ fn main() {
     let size = file.size();
     println!("size {}", size.unwrap());
     println!("close ok {}", file.close().is_ok());
-    let opened = std::io::File::open(path.clone());
+    let opened = std::io::File::open(&path);
     if opened.is_err() {
         println!("open failed");
         return;
@@ -35,14 +35,14 @@ fn main() {
     let count = reader.read(buffer.as_mut_slice()).unwrap();
     println!("read {}", count);
     data.clear();
-    let mut index: i64 = 0;
+    let mut index: usize = 0;
     while index < count {
         data.push(buffer.get(index).unwrap());
         index = index + 1;
     }
     println!("bytes {:?}", data);
     println!("close ok {}", reader.close().is_ok());
-    match std::fs::remove_file(path.clone()) {
+    match std::fs::remove_file(&path) {
         Ok(unit) => { println!("removed"); }
         Err(error) => { println!("remove failed"); }
     }

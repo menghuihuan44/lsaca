@@ -1012,11 +1012,17 @@ impl BuildOptions {
 /// is configured and built instead. The build tree is created in
 /// project_dir/build.
 pub fn build_project(project_dir: &Path, options: &BuildOptions) -> io::Result<BuiltExecutable> {
-    let cache_root = project_dir.parent().unwrap_or(project_dir);
+    // Resolve the project directory before deriving any child path from it.
+    // Child toolchains run with the project directory as their working
+    // directory and receive the scratch directory through TEMP/TMP/TMPDIR, so a
+    // relative project path would be resolved twice (once by the parent, once
+    // by the child) and point at a directory that does not exist.
+    let project_dir = std::path::absolute(project_dir)?;
+    let cache_root = project_dir.parent().unwrap_or(&project_dir).to_path_buf();
     if options.use_cmake {
-        build_project_with_cmake(project_dir, options)
+        build_project_with_cmake(&project_dir, options)
     } else {
-        build_project_direct(project_dir, cache_root, options)
+        build_project_direct(&project_dir, &cache_root, options)
     }
 }
 
@@ -1539,6 +1545,10 @@ pub fn build_with_cache(
     options: &BuildOptions,
     cache_root: &Path,
 ) -> io::Result<BuiltExecutable> {
+    // Accept relative cache roots (LSACA_CACHE_DIR may be relative) by
+    // resolving them against the current directory once, up front. Every path
+    // handed to a child toolchain must be absolute; see [build_project].
+    let cache_root = std::path::absolute(cache_root)?;
     let compiler = find_c_compiler()?;
     let key = cache_key(generated, options, &compiler);
     let project_dir = cache_root.join(format!("{:016x}", key));
@@ -1562,7 +1572,7 @@ pub fn build_with_cache(
     let result = if options.use_cmake {
         build_project_with_cmake(&project_dir, options)
     } else {
-        build_project_direct(&project_dir, cache_root, options)
+        build_project_direct(&project_dir, &cache_root, options)
     };
     result.map_err(|error| {
         io::Error::new(
@@ -1650,8 +1660,9 @@ pub fn copy_executable(executable: &Path, destination: &Path) -> io::Result<()> 
 
 /// Directory for cached build trees and intermediates.
 ///
-/// The returned directory is created when necessary and is guaranteed to be
-/// writable. The candidates are, in order:
+/// The returned directory is created when necessary, is absolute (so child
+/// toolchains can use paths derived from it) and is guaranteed to be writable.
+/// The candidates are, in order:
 ///
 /// 1. `LSACA_CACHE_DIR`, when set. An unusable value is an error instead of a
 ///    silent fallback, because the user asked for it explicitly;
@@ -1662,14 +1673,15 @@ pub fn copy_executable(executable: &Path, destination: &Path) -> io::Result<()> 
 ///    system temporary directory is not writable.
 pub fn cache_root() -> io::Result<PathBuf> {
     if let Some(configured) = env::var_os("LSACA_CACHE_DIR") {
-        let dir = PathBuf::from(configured);
+        let requested = PathBuf::from(configured);
+        let dir = std::path::absolute(&requested)?;
         return match probe_cache_dir(&dir) {
             Ok(()) => Ok(dir),
             Err(error) => Err(io::Error::new(
                 error.kind(),
                 format!(
                     "LSACA_CACHE_DIR ({}) is not usable as a build cache: {}",
-                    dir.display(),
+                    requested.display(),
                     error
                 ),
             )),
@@ -1678,7 +1690,7 @@ pub fn cache_root() -> io::Result<PathBuf> {
     let mut failures: Vec<String> = Vec::new();
     for candidate in cache_root_candidates() {
         match probe_cache_dir(&candidate) {
-            Ok(()) => return Ok(candidate),
+            Ok(()) => return std::path::absolute(&candidate),
             Err(error) => failures.push(format!("{}: {}", candidate.display(), error)),
         }
     }

@@ -20,12 +20,12 @@ impl FibTable {
         if n < 2 {
             return n;
         }
-        let cached = self.values[n];
+        let cached = self.values[n as usize];
         if cached >= 0 {
             return cached;
         }
         let value = self.compute(n - 1) + self.compute(n - 2);
-        self.values[n] = value;
+        self.values[n as usize] = value;
         value
     }
 }

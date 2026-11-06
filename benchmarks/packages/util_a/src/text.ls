@@ -6,7 +6,7 @@ pub fn word_lengths(text: &String) -> Vec<i64> {
     let mut lengths: Vec<i64> = Vec::new();
     for word in text.split(" ") {
         if word.len() > 0 {
-            lengths.push(word.len());
+            lengths.push(word.len() as i64);
         }
     }
     return lengths;
@@ -16,7 +16,7 @@ pub fn list_words(text: &String) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
     for word in text.split(" ") {
         if word.len() > 0 {
-            words.push(word.trim());
+            words.push(format!("{}", word.trim()));
         }
     }
     return words;
@@ -25,13 +25,13 @@ pub fn list_words(text: &String) -> Vec<String> {
 pub fn word_total(words: Vec<String>) -> i64 {
     let mut total = 0;
     for word in words {
-        total = total + word.len();
+        total = total + word.len() as i64;
     }
     return total;
 }
 
 pub fn repeat(text: &String, times: i64) -> String {
-    return text.repeat(times);
+    return text.repeat(times as usize);
 }
 
 pub fn shout(text: &String) -> String {
@@ -98,9 +98,9 @@ pub fn join_words(words: Vec<String>, separator: &String) -> String {
         if first {
             first = false;
         } else {
-            out = out + separator.clone();
+            out = out + separator.as_str();
         }
-        out = out + word;
+        out = out + word.as_str();
     }
     return out;
 }
@@ -109,17 +109,17 @@ pub fn first_letters(words: Vec<String>) -> String {
     let mut out = String::new();
     for word in words {
         if word.len() > 0 {
-            out = out + word.substring(0, 1);
+            out = out + word.substring(0, 1).as_str();
         }
     }
     return out;
 }
 
 pub fn longest_word(words: Vec<String>) -> i64 {
-    let mut longest = 0;
+    let mut longest: i64 = 0;
     for word in words {
-        if word.len() > longest {
-            longest = word.len();
+        if word.len() as i64 > longest {
+            longest = word.len() as i64;
         }
     }
     return longest;
@@ -129,14 +129,14 @@ pub fn checksum(seed: i64) -> i64 {
     let mut acc = seed % MODULUS;
     let sample = String::from("the quick brown fox jumps over the lazy dog");
     let lengths = word_lengths(&sample);
-    acc = (acc * 31 + lengths.len()) % MODULUS;
+    acc = (acc * 31 + lengths.len() as i64) % MODULUS;
     let words = list_words(&sample);
     let total = word_total(words.clone());
     acc = (acc * 31 + total) % MODULUS;
     let doubled = repeat(&sample, 2);
-    acc = (acc * 31 + doubled.len()) % MODULUS;
-    acc = (acc * 31 + shout(&sample).len()) % MODULUS;
-    acc = (acc * 31 + whisper(&sample).len()) % MODULUS;
+    acc = (acc * 31 + doubled.len() as i64) % MODULUS;
+    acc = (acc * 31 + shout(&sample).len() as i64) % MODULUS;
+    acc = (acc * 31 + whisper(&sample).len() as i64) % MODULUS;
     let csv = String::from("1,2,3,4,5");
     acc = (acc * 31 + csv_total(&csv)) % MODULUS;
     let sparse = String::from("1,2,,3");
@@ -145,12 +145,12 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + digit_total_text(&noisy)) % MODULUS;
     acc = (acc * 31 + count_digits(&noisy)) % MODULUS;
     let prefix = String::from("id");
-    acc = (acc * 31 + decorate(&prefix, 42).len()) % MODULUS;
+    acc = (acc * 31 + decorate(&prefix, 42).len() as i64) % MODULUS;
     let letters = first_letters(words.clone());
-    acc = (acc * 31 + letters.len()) % MODULUS;
+    acc = (acc * 31 + letters.len() as i64) % MODULUS;
     acc = (acc * 31 + longest_word(words.clone())) % MODULUS;
     let dash = String::from("-");
     let glued = join_words(words, &dash);
-    acc = (acc * 31 + glued.len()) % MODULUS;
+    acc = (acc * 31 + glued.len() as i64) % MODULUS;
     return acc;
 }

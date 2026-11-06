@@ -26,7 +26,7 @@ fn main() {
 
     // .collect() needs a known target type; here it comes from the annotation.
     let words: Vec<String> = vec![String::from("alpha"), String::from("beta")];
-    let lengths: Vec<i64> = words.iter().map(|word| word.len()).collect();
+    let lengths: Vec<usize> = words.iter().map(|word| word.len()).collect();
     println!("lengths: {:?}", lengths);
 
     // Any type implementing Iterator can be used in a for loop.
@@ -38,6 +38,6 @@ fn main() {
     println!("countdown sum: {}", count);
 
     // fold threads an accumulator through the items.
-    let joined = vec![String::from("a"), String::from("b")].iter().fold(String::from(""), |acc, item| acc + item);
+    let joined = vec![String::from("a"), String::from("b")].iter().fold(String::from(""), |acc, item| acc + item.as_str());
     println!("joined: {}", joined);
 }

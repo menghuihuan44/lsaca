@@ -21,6 +21,24 @@ pub struct TypeNames {
     pub enums: Vec<String>,
 }
 
+/// The C name of a user defined type, without the generated `Ls` tag prefix.
+///
+/// The tag of a user type is `Ls` + this name. Two user visible type names
+/// would collide with the tags of compiler generated types: `Unit` with the
+/// tag of `()` (`LsUnit`) and `Str` with the tag of the `str` value
+/// (`LsStr`). Every other primitive type name is reserved by the front end,
+/// so only these two need a distinguishing suffix. All later uses go through
+/// the same registry, which keeps definitions, field accesses and helper
+/// names in sync.
+fn user_type_c_name(name: &str) -> String {
+    let sanitized = crate::codegen::util::sanitize_ident(name);
+    if sanitized == "Unit" || sanitized == "Str" {
+        format!("{}Value", sanitized)
+    } else {
+        sanitized
+    }
+}
+
 impl TypeNames {
     pub fn from_program(program: &hir::Program) -> TypeNames {
         TypeNames {
@@ -34,14 +52,14 @@ impl TypeNames {
 
     fn user_struct(&self, index: usize) -> String {
         match self.structs.get(index) {
-            Some(name) => crate::codegen::util::sanitize_ident(name),
+            Some(name) => user_type_c_name(name),
             None => format!("Struct{}", index),
         }
     }
 
     fn user_enum(&self, index: usize) -> String {
         match self.enums.get(index) {
-            Some(name) => crate::codegen::util::sanitize_ident(name),
+            Some(name) => user_type_c_name(name),
             None => format!("Enum{}", index),
         }
     }
@@ -816,7 +834,32 @@ impl TypeRegistry {
 
 /// C name of a struct field (also used for enum payload structs).
 pub fn field_cname(name: &str) -> String {
+    // Tuple structs name their fields after the declaration position ("0",
+    // "1", ...), which identifiers cannot spell. Mapping those names onto the
+    // same positional field name tuple element access uses keeps the struct
+    // definition, literals, field access, patterns and generated helpers in
+    // agreement. Named struct fields can never collide because identifiers
+    // cannot start with a digit.
+    if let Some(index) = positional_field_index(name) {
+        return positional_field(index);
+    }
     format!("f_{}", crate::codegen::util::sanitize_ident(name))
+}
+
+/// Index of a canonical positional field name: "0", "1", ... without leading
+/// zeros.
+///
+/// Tuple structs and tuple values share this naming scheme in HIR (the field
+/// name of position n is the decimal index), so the name alone identifies the
+/// position.
+pub fn positional_field_index(name: &str) -> Option<usize> {
+    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if name.len() > 1 && name.starts_with('0') {
+        return None;
+    }
+    name.parse::<usize>().ok()
 }
 
 /// C name of the payload aggregate of an enum variant inside the enum union.

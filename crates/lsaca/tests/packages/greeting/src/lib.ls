@@ -1,5 +1,5 @@
 pub fn greet(name: String) -> String {
-    String::from("hello, ") + name
+    String::from("hello, ") + &name
 }
 
 pub const ANSWER: i64 = 42;

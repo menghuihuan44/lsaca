@@ -21,7 +21,7 @@ fn main() {
     grow(&mut values);
     println!("{:?}", values);
 
-    let mut cell = Rc::new(5);
+    let mut cell = Rc::new(5i64);
     bump(&mut cell);
     println!("{}", cell.get());
 }

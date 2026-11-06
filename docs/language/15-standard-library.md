@@ -1,12 +1,13 @@
 # Standard library
 
-Version 2.0 moves the standard library out of the compiler into a normal lsaca
-crate named `std` (see the [standard library reference](../stdlib/README.md)).
-The crate root re-exports the prelude with `pub use`, so unqualified names are
-in scope in every module of every crate without an import, whether or not the
-program uses `mod` or a package; the modules can also be named with `std::…`
-paths. In version 2.0.0 a qualified path resolves for
-functions, constructors and associated items (`std::fs::read_to_string`,
+Version 2.0 moved the standard library out of the compiler into a normal lsaca
+crate named `std`, and version 2.1.0 expands its surface and aligns it with
+Rust (see the [standard library reference](../stdlib/README.md)). The crate
+root re-exports the prelude with `pub use`, so unqualified names are in scope in
+every module of every crate without an import, whether or not the program uses
+`mod` or a package; the modules can also be named with `std::…` paths. In
+version 2.1.0 a qualified path resolves for functions, constructors and
+associated items (`std::fs::read_to_string`,
 `std::collections::HashMap::new()`, `std::io::ErrorKind::NotFound`), and
 `use std::…` imports of those items work (`use std::error::Error;`). Qualified
 type names in type position report `E0412` (`let m:
@@ -18,8 +19,19 @@ Builtin generic types are `Vec<T>`, `HashMap<K, V>`, `Option<T>`,
 non-generic. The prelude also provides the generic functions behind the
 iterator adapters (see [Iterators](19-iterators.md)); those are ordinary public
 items of the `std` crate. This page describes the language-level library
-behaviour of version 2.0.0; the API of each module is documented in the
+behaviour of version 2.1.0; the API of each module is documented in the
 [standard library reference](../stdlib/README.md).
+
+The 2.1.0 changes you meet on every page are: a bare integer literal defaults
+to `i32` and lengths, indices, counts and capacities are `usize`; standard-
+library text parameters take `&str`, and a string literal in a `&str` position
+is a static slice that allocates nothing; concatenation is `String + &str`;
+`parse` is typed and returns `ParseIntError`/`ParseFloatError`; the new
+`Option`, `Result`, iterator, `str` and `char` methods are available;
+`time` gains `Duration`, `Instant`, `SystemTime` and `unix_epoch()`, `env` gains
+`VarError`, `net` gains `Shutdown`, `math` gains the floating-point constants,
+and the file and metadata APIs return integer-sized values. The 1.5–2.0
+sections below still describe the unchanged core.
 
 The page is organised by builtin: formatting first, because every example in the
 documentation uses it, then `String`, `Vec`, iterators, `HashMap`, `Option`
@@ -30,7 +42,7 @@ rules. Version 2.0 also adds the unsized slice types and `dyn` trait objects:
 str](26-slices-and-str.md), and `dyn Trait` in [Trait
 objects](25-trait-objects.md).
 
-## The std crate in 2.0
+## The std crate in 2.1
 
 The library source lives in `stdlib/src/` as one crate of ordinary lsaca code.
 It is embedded into the compiler at build time and parsed with a reserved
@@ -39,31 +51,31 @@ It is embedded into the compiler at build time and parsed with a reserved
 language as user code; only the `extern fn` intrinsics declared in it are
 implemented by code generation.
 
-| Module | Page | Status in 2.0.0 |
+| Module | Page | Status in 2.1.0 |
 | --- | --- | --- |
-| `std::core` (`Option`, `Result`, `Iterator`) | [core](../stdlib/core.md) | migrated from 1.7 |
-| `std::string` | [string](../stdlib/string.md) | migrated; `from_str`, `as_str`, `as_mut_str` and the `str` methods implemented in 2.0.0 |
-| `std::char` | [char](../stdlib/char.md) | ASCII classification methods implemented; Unicode classification not implemented in 2.0.0 |
-| `std::vec` | [vec](../stdlib/vec.md) | migrated; `sort`, `as_slice` and `as_mut_slice` implemented in 2.0.0 |
-| `std::iter` | [iter](../stdlib/iter.md) | migrated; `zip`, `chain`, `rev` and `flat_map` not implemented in 2.0.0 |
+| `std::core` (`Option`, `Result`, `Iterator`) | [core](../stdlib/core.md) | migrated; 2.1.0 adds the new `Option`/`Result` combinators and iterator methods |
+| `std::string` | [string](../stdlib/string.md) | migrated; `&str` parameters, the typed `parse` surface and the `String` forwarders for the `str` methods |
+| `std::char` | [char](../stdlib/char.md) | ASCII classification methods; 2.1.0 adds `is_ascii`, the `to_ascii_*` conversions and `to_digit`; Unicode classification is not implemented |
+| `std::vec` | [vec](../stdlib/vec.md) | migrated; `sort`, `as_slice` and `as_mut_slice` implemented; 2.1.0 adds `truncate`, `swap` and `contains` |
+| `std::iter` | [iter](../stdlib/iter.md) | migrated; 2.1.0 adds `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by`, `position`, `last`, `nth`, `reduce`, `product`, `inspect` and `for_each`; `rev` and `flat_map` remain planned |
 | `std::fmt` | [fmt](../stdlib/fmt.md) | compiler-implemented |
-| `std::math` | [math](../stdlib/math.md) | migrated; `abs`/`min`/`max` remain compiler builtins in 2.0.0 |
-| `std::collections` | [collections](../stdlib/collections/README.md) | `HashMap` migrated; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented in 2.0.0 |
-| `std::io` | [io](../stdlib/io.md) | error types, `File` and stream handles implemented; the stream traits and `io::Result` alias not implemented in 2.0.0 |
-| `std::fs` | [fs](../stdlib/fs.md) | path, directory and metadata API implemented in 2.0.0 |
-| `std::net` | [net](../stdlib/net.md) | implemented in 2.0.0 (plain TCP) |
-| `std::time` | [time](../stdlib/time.md) | implemented in 2.0.0 |
-| `std::env` | [env](../stdlib/env.md) | implemented in 2.0.0 |
-| `std::process` | [process](../stdlib/process.md) | `args` implemented; `exit` not implemented in 2.0.0 |
-| `std::error` | [error](../stdlib/error.md) | the `Error` trait implemented in 2.0.0 |
+| `std::math` | [math](../stdlib/math.md) | migrated; `abs`/`min`/`max` remain compiler builtins; 2.1.0 adds the `f64` constants |
+| `std::collections` | [collections](../stdlib/collections/README.md) | `HashMap` migrated; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented; 2.1.0 follows the `usize` and `&str` rules |
+| `std::io` | [io](../stdlib/io.md) | error types, `File` and stream handles implemented; 2.1.0 adds `io::Result`, `Error::new`/`other` and the integer-shaped read/write/seek results; the stream traits are not implemented |
+| `std::fs` | [fs](../stdlib/fs.md) | path, directory and metadata API implemented; 2.1.0 returns `u64` sizes and `SystemTime` modification times |
+| `std::net` | [net](../stdlib/net.md) | implemented (plain TCP); 2.1.0 adds `Shutdown` |
+| `std::time` | [time](../stdlib/time.md) | implemented; 2.1.0 adds `Duration`, `Instant`, `SystemTime`, `unix_epoch()` and `sleep` |
+| `std::env` | [env](../stdlib/env.md) | implemented; 2.1.0 changes `var` to `Result<String, VarError>` |
+| `std::process` | [process](../stdlib/process.md) | `args` implemented; `exit` remains the compiler builtin, now taking `i32` |
+| `std::error` | [error](../stdlib/error.md) | the `Error` trait implemented; 2.1.0 adds the `io::Error` and parse-error implementations |
 
 "Migrated from 1.7" means the surface described in this chapter is unchanged but
-the implementation now lives in the `std` crate. "Implemented" names what version
-2.0.0 provides; each module page lists it separately from the API that is not
-implemented in 2.0.0. Those remaining APIs are fixed by the 2.0 design and planned
-for a later release; the pages document the intended surface, not runnable
-behaviour. The whole library is versioned with the compiler (2.0.0) and cannot be
-replaced by a user package: the package name `std` is reserved.
+the implementation now lives in the `std` crate. "Implemented" names what
+version 2.1.0 provides; each module page lists it separately from the API that
+is not implemented in 2.1.0. Those remaining APIs are fixed by the 2.1 design
+and planned for a later release; the pages document the intended surface, not
+runnable behaviour. The whole library is versioned with the compiler (2.1.0) and
+cannot be replaced by a user package: the package name `std` is reserved.
 
 ## Formatting and printing
 
@@ -388,42 +400,58 @@ a trait object, while `&dyn Trait`, `&[T]` and `&str` are non-owning fat
 references and `&mut` variants are their mutable forms. See [Trait
 objects](25-trait-objects.md) and [Slices and str](26-slices-and-str.md).
 
+Since 2.1.0 a bare integer literal is `i32` and the length and capacity values,
+the indices and the counts of these types are `usize`: `String::len`, `Vec::len`,
+`Vec::with_capacity`, every index parameter, and the counts returned by iterators.
+A `usize` value prints, compares and hashes like any other integer.
+
 ## String
 
-A `String` is an owned UTF-8 string. Literals have type `String` already, and
-`String::from` accepts a string literal (or another `String`). String
-concatenation uses `+` and `+=`; see [Operators](07-operators.md#strings-concatenation-and-comparison).
+A `String` is an owned UTF-8 string. A string literal has type `String` by
+default, but in a `&str` position it is emitted as a static slice without
+allocating (see [Slices and str](26-slices-and-str.md)); `String::from` takes
+an owned `String` (a literal is one), and `String::from_str` builds a fresh
+owned string from a `&str`. Concatenation is `String + &str` and
+`String += &str`; see [Operators](07-operators.md#strings-concatenation-and-comparison).
 Since 1.6.0 every `String` value is guaranteed valid UTF-8. The methods below
 split into the byte-oriented API (`len`, `find`, `substring` and the other
 byte-indexed operations) and the character-oriented API (`char_count`, `chars`,
-`char_at`, `is_char_boundary`, `push(char)`, `pop`, `String::from_char`).
+`char_at`, `is_char_boundary`, `push(char)`, `pop`, `String::from_char`). In
+2.1.0 every length, offset, count and index is a `usize`, the read-only text
+parameters are `&str`, and every `str` method is also available as a `String`
+method (the `String` receiver forwards to the `str` implementation).
 
 | Method | Signature (informal) | Description |
 | --- | --- | --- |
-| `len` | `→ i64` | length in **bytes**, not characters |
+| `len` | `→ usize` | length in **bytes**, not characters |
 | `is_empty` | `→ bool` | true when the byte length is 0 |
-| `push_str` | `(text) ` | appends text, mutating in place |
+| `push_str` | `(text: &str)` | appends text, mutating in place |
 | `clear` | `()` | removes all contents |
-| `contains` | `(needle) → bool` | substring test |
-| `starts_with` | `(prefix) → bool` | prefix test |
-| `ends_with` | `(suffix) → bool` | suffix test |
-| `find` | `(needle) → Option<i64>` | byte index of the first occurrence |
-| `replace` | `(from, to) → String` | replaces every occurrence, returns a new string |
+| `contains` | `(needle: &str) → bool` | substring test |
+| `starts_with` | `(prefix: &str) → bool` | prefix test |
+| `ends_with` | `(suffix: &str) → bool` | suffix test |
+| `find` | `(needle: &str) → Option<usize>` | byte index of the first occurrence |
+| `replace` | `(from: &str, to: &str) → String` | replaces every occurrence, returns a new string |
 | `to_uppercase` | `→ String` | Unicode default uppercasing (can change the character count) |
 | `to_lowercase` | `→ String` | Unicode default lowercasing |
 | `trim` | `→ String` | strips leading/trailing Unicode whitespace |
-| `split` | `(separator) → Vec<String>` | splits on every occurrence |
-| `substring` | `(start, len) → String` | byte-based slice; panics unless both boundaries are character boundaries |
-| `repeat` | `(n) → String` | concatenates `n` copies |
-| `parse_i64` | `→ Result<i64, String>` | decimal parse |
-| `parse_f64` | `→ Result<f64, String>` | decimal float parse |
-| `char_count` | `→ i64` | number of Unicode scalar values |
+| `trim_start` / `trim_end` | `→ String` | strips leading / trailing Unicode whitespace (added in 2.1.0) |
+| `split` | `(separator: &str) → Vec<String>` | splits on every occurrence |
+| `split_whitespace` / `lines` | `→ Vec<String>` | splits on runs of whitespace / on line breaks (added in 2.1.0) |
+| `substring` | `(start: usize, len: usize) → String` | byte-based slice; panics unless both boundaries are character boundaries |
+| `repeat` | `(n: usize) → String` | concatenates `n` copies |
+| `parse_i64` | `→ Result<i64, ParseIntError>` | decimal integer parse (error type since 2.1.0) |
+| `parse_f64` | `→ Result<f64, ParseFloatError>` | decimal float parse (error type since 2.1.0) |
+| `parse<T>` | `→ Result<T, …>` | generic parse: `ParseIntError` for integer `T`, `ParseFloatError` for float `T` (added in 2.1.0) |
+| `char_count` | `→ usize` | number of Unicode scalar values |
 | `chars` | `→ Vec<char>` | every scalar value, in order (eager) |
-| `char_at` | `(i) → Option<char>` | the `i`-th scalar value; `None` when out of range |
-| `is_char_boundary` | `(i) → bool` | whether byte index `i` starts a character |
-| `push` | `(c)` | appends one character, mutating in place |
+| `char_at` | `(i: usize) → Option<char>` | the `i`-th scalar value; `None` when out of range |
+| `is_char_boundary` | `(i: usize) → bool` | whether byte index `i` starts a character |
+| `push` | `(c: char)` | appends one character, mutating in place |
 | `pop` | `→ Option<char>` | removes and returns the last character |
-| `String::from_char` | `(c) → String` | a new one-character string |
+| `String::from_char` | `(c: char) → String` | a new one-character string |
+
+
 
 Because the byte-oriented methods use byte offsets, `len` of a non-ASCII string
 is larger than its character count and `find` returns a byte offset; the
@@ -519,17 +547,22 @@ abcd false
 ababab
 ```
 
-Parsing returns a `Result` that carries a message describing the failure; the
-message is a `String` and can be printed:
+Parsing returns a typed `Result`. `parse_i64` returns
+`Result<i64, ParseIntError>` and `parse_f64` returns
+`Result<f64, ParseFloatError>`; the generic form `parse::<T>()` takes its target
+type from the turbofish and accepts `i64` and `f64` in 2.1.0 (other numeric
+target types are rejected with `E0107`). The error values implement
+`error::Error`, whose `message()` method returns the diagnostic text:
 
 ```ls
 fn main() {
     println!("{:?}", "42".parse_i64());
     println!("{:?}", "-17".parse_i64());
-    println!("{:?}", "4x2".parse_i64());
-    println!("{:?}", " 42".parse_i64());
     println!("{:?}", "2.5".parse_f64());
-    println!("{:?}", "nope".parse_f64());
+    println!("{:?}", "42".parse::<i64>());
+    println!("{:?}", "2.5".parse::<f64>());
+    println!("{}", "4x2".parse_i64().err().unwrap().message());
+    println!("{}", "nope".parse_f64().err().unwrap().message());
 }
 ```
 
@@ -537,15 +570,18 @@ Output:
 ```text
 Ok(42)
 Ok(-17)
-Err("invalid integer")
-Err("invalid integer")
 Ok(2.5)
-Err("invalid float")
+Ok(42)
+Ok(2.5)
+invalid digit found in string
+invalid float literal
 ```
 
 Parsing is strict: no leading or trailing whitespace, no suffixes, no hex. A
-successful parse returns `Ok(value)`; a failure returns `Err(message)` where the
-message is `"invalid integer"` or `"invalid float"`.
+successful parse returns `Ok(value)`; a failure returns `Err(e)` where
+`e.message()` is `"invalid digit found in string"` or `"invalid float literal"`.
+Printing the error with `{:?}` shows the error struct (`ParseIntError { internal: () }`
+and `ParseFloatError { internal: () }`), so print `message()` for users.
 
 ## Vec
 
@@ -590,6 +626,11 @@ so the reservation is only observable as avoided reallocations.
 | `first()` / `last()` | first/last element as `Option<T>` |
 | `get(i)` | element at `i` as `Option<T>`, or `None` for an out-of-range index |
 | `extend(other)` | appends all elements of another vector |
+| `truncate(n)` | keeps only the first `n` elements, dropping the rest (added in 2.1.0) |
+| `swap(i, j)` | exchanges the elements at two indices (added in 2.1.0) |
+| `contains(v)` | true when some element equals `v`; takes `&T` (added in 2.1.0) |
+| `sort()` | sorts the elements in place, ascending |
+| `as_slice()` / `as_mut_slice()` | borrows all elements as `&[T]` / `&mut [T]` |
 | `reverse()` | reverses in place |
 | `v[i]` | element copy; **panics** when `i` is out of bounds |
 | `v[i] = value` | replaces an element; panics when out of bounds |
@@ -681,26 +722,43 @@ consume the iterator and produce a value.
 | `.iter()` | consumes a `Vec<T>` and returns an iterator over its elements |
 | `map(f)` | applies `f: Fn(T) -> U`, producing `U` values |
 | `filter(p)` | keeps values for which `p: Fn(&T) -> bool` returns true |
-| `take(n)` / `skip(n)` | first `n` values / all but the first `n` values |
-| `enumerate()` | yields `(i64, T)` index/value pairs |
-| `zip(other)` | pairs the values of two iterators (added in 2.0.0) |
-| `chain(other)` | yields this iterator's values, then the other's (added in 2.0.0) |
-| `rev()` | yields the values in reverse; the adapter must be double-ended (added in 2.0.0) |
-| `flat_map(f)` | applies `f: Fn(T) -> I` and yields the values of every `I` in order (added in 2.0.0) |
+| `take(n)` / `skip(n)` | first `n` values / all but the first `n` values; `n` is a `usize` |
+| `enumerate()` | yields `(usize, T)` index/value pairs |
+| `zip(other)` | pairs the values of two iterators (added in 2.1.0) |
+| `chain(other)` | yields this iterator's values, then the other's (added in 2.1.0) |
+| `filter_map(f)` | applies `f: Fn(T) -> Option<U>` and yields the `Some` values (added in 2.1.0) |
+| `take_while(p)` / `skip_while(p)` | yields while `p: Fn(&T) -> bool` is true / drops while it is true (added in 2.1.0) |
+| `step_by(n)` | yields every `n`-th value, starting with the first; `n` is a `usize` (added in 2.1.0) |
+| `rev()` | yields the values in reverse; the adapter must be double-ended — planned, not in 2.1.0 |
+| `flat_map(f)` | applies `f: Fn(T) -> I` and yields the values of every `I` in order — planned, not in 2.1.0 |
 | `collect()` | collects into a `Vec<T>`; the target type must be known |
 | `fold(init, f)` | folds with `f: Fn(U, T) -> U` |
-| `count()` / `sum()` | number of values (i64) / sum of numbers |
+| `count()` / `sum()` | number of values (`usize`) / sum of numbers (`i32`, `i64`, `usize` or `f64`) |
+| `product()` | product of the numbers (`i32`, `i64`, `usize` or `f64`) |
 | `any(p)` / `all(p)` | short-circuit boolean tests with `p: Fn(&T) -> bool` |
 | `find(p)` | first value satisfying `p`, as `Option<T>` |
+| `position(p)` | `Option<usize>` of the first value satisfying `p` |
+| `last()` | the final value, as `Option<T>` |
+| `nth(n)` | `Option<T>` at zero-based position `n` (`usize`) |
+| `reduce(f)` | `Option<T>`: like `fold` without an initial value |
+| `inspect(f)` / `for_each(f)` | trace each value (`f: Fn(&T)`) / consume each value (`f: Fn(T)`) |
 
-Version 2.0.0 provides the 1.7 adapter set (`map`,
-`filter`, `take`, `skip`, `enumerate` and the terminals above); `zip`, `chain`,
-`rev` and `flat_map` are fixed by the 2.0 design but are not implemented in
-2.0.0 and are planned for a later release (see [iter](../stdlib/iter.md)).
+Version 2.1.0 provides the 2.0 adapter set (`map`, `filter`, `take`, `skip`,
+`enumerate`) plus `zip`, `chain`, `filter_map`, `take_while`, `skip_while` and
+`step_by`, and the terminals `collect`, `fold`, `count`, `sum`, `product`,
+`any`, `all`, `find`, `position`, `last`, `nth`, `reduce`, `inspect` and
+`for_each`. `rev` and `flat_map` are fixed by the design but are not
+implemented in 2.1.0 and are planned for a later release (see
+[iter](../stdlib/iter.md)).
+
+`sum` and `product` dispatch on the iterator item type: `i32`, `i64`, `usize`
+and `f64` items are supported, and any other item type is `E0277`. An
+unannotated integer vector has `i32` items, so `vec![1, 2, 3].iter().sum()` sums
+`i32` values.
 
 ```ls
 fn main() {
-    let values = vec![1, 2, 3, 4, 5, 6];
+    let values: Vec<i64> = vec![1, 2, 3, 4, 5, 6];
     let even_squares: Vec<i64> = values.iter().filter(|value| *value % 2 == 0).map(|value| value * value).collect();
     println!("{:?}", even_squares);
 }
@@ -717,8 +775,10 @@ Full details, user-defined iterators and the exact rules are on
 ## HashMap
 
 A `HashMap` is a builtin map from keys to values added in 1.5. Keys are limited
-to `i64`, `u64`, `bool`, `String` and `char` (character keys since 1.6.0; 2.0
-also accepts `isize` and `usize`); values may be any value type. A map is move-only and owns its keys and values;
+to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and `char` (character keys
+since 1.6.0, the pointer-sized integer keys since 2.0.0). The list is exhaustive:
+`i32` and the narrower integer types are not key types in 2.1.0, so a map with
+an `i32` key is rejected with `E0277` — use `i64`. Values may be any value type. A map is move-only and owns its keys and values;
 `.clone()` produces an independent copy when the key and value types are
 cloneable. Since 1.6.0 the implementation is a Swiss-Table-style open-addressed
 table with a deterministic, non-cryptographic 64-bit hash. The printed order is
@@ -766,12 +826,14 @@ Full details, ownership rules and limitations are on [HashMap](20-hashmap.md).
 | `is_some()` / `is_none()` | tests for the variant |
 | `unwrap()` | returns the value, panics on `None` |
 | `unwrap_or(default)` | returns the value or the default |
-| `expect(message)` | returns the value, panics with the message on `None` |
+| `expect(message)` | returns the value, panics with the message on `None`; `message` is a `&str` |
 | `map(f)` | applies `f` to the value: `Some(f(v))`, or `None` |
 | `map_or(default, f)` | applies `f` to the value, or returns `default` |
 | `and_then(f)` | chains a function that itself returns an `Option` |
 | `filter(pred)` | keeps `Some(v)` only when `pred(v)` is `true`, else `None` |
 | `ok_or(err)` | converts to `Result<T, E>`: `Ok(v)` or `Err(err)` |
+| `or(other)` | returns the option when it is `Some`, otherwise `other` (added in 2.1.0) |
+| `xor(other)` | `Some` only when exactly one of the two options holds a value (added in 2.1.0) |
 
 ```ls
 fn main() {
@@ -858,9 +920,10 @@ independent copy of both variants, so `good.clone().unwrap()` and
 | `is_ok()` / `is_err()` | tests for the variant |
 | `unwrap()` | returns the value, panics on `Err` |
 | `unwrap_or(default)` | returns the value or the default |
-| `expect(message)` | returns the value, panics with the message on `Err` |
+| `expect(message)` | returns the value, panics with the message on `Err`; `message` is a `&str` |
 | `ok()` | converts to `Option<T>`, discarding the error |
 | `err()` | converts to `Option<E>`, discarding the value |
+| `unwrap_err()` | returns the error, panics on `Ok` (added in 2.1.0) |
 | `map(f)` | applies `f` to the `Ok` value: `Ok(f(v))` or the original `Err` |
 | `map_err(f)` | applies `f` to the `Err` value: `Err(f(e))` or the original `Ok` |
 | `and_then(f)` | chains a function that itself returns a `Result` |
@@ -923,8 +986,8 @@ Err("boom")
 ```
 
 `Result::map` leaves an `Err` untouched and `Result::map_err` leaves an `Ok`
-untouched. Unlike `Option`, `Result` has no `map_or` method (Rust does not
-have one either); match on the result, or use `map`/`map_err`/`and_then`.
+untouched. `Result` has no `map_or` method in 2.1.0; match on the result, or use
+`map`/`map_err`/`and_then`, e.g. `result.map(|v| v + 1).unwrap_or(0)`.
 Error values are not modified by `map`, so the error type of `good.map(double)`
 stays `String`.
 
@@ -990,7 +1053,7 @@ fn pick(values: Vec<i64>, counter: Rc<i64>) -> Option<i64> {
 }
 
 fn main() {
-    let counter = Rc::new(0);
+    let counter = Rc::new(0i64);
     let empty: Vec<i64> = Vec::new();
     println!("{:?}", pick(empty, counter.clone()));
     println!("{}", counter.get());
@@ -1013,7 +1076,7 @@ Wrapping a block-like operand in parentheses usually reads better:
 The same works for `Result`; an error early-return keeps its type:
 
 ```ls
-fn parse_pair(a: String, b: String) -> Result<i64, String> {
+fn parse_pair(a: String, b: String) -> Result<i64, ParseIntError> {
     let x = a.parse_i64()?;
     let y = b.parse_i64()?;
     Ok(x + y)
@@ -1021,14 +1084,14 @@ fn parse_pair(a: String, b: String) -> Result<i64, String> {
 
 fn main() {
     println!("{:?}", parse_pair(String::from("20"), String::from("22")));
-    println!("{:?}", parse_pair(String::from("20"), String::from("x")));
+    println!("{}", parse_pair(String::from("20"), String::from("x")).is_err());
 }
 ```
 
 Output:
 ```text
 Ok(42)
-Err("invalid integer")
+true
 ```
 
 A method may use `?` on its receiver data, as long as the method itself returns
@@ -1319,17 +1382,16 @@ independent after the struct is cloned. Boxes compose with `Vec` and `Rc`:
 
 ## Free functions
 
-These are the legacy prelude helpers; in 2.0.0 they are items of the `std` crate
-root and stay in scope for every program. The richer per-module APIs — `std::io`,
+These are the legacy prelude helpers; they are items of the `std` crate root and
+stay in scope for every program. The richer per-module APIs — `std::io`,
 `std::fs`, `std::net`, `std::time`, `std::env` and `std::process` — are
 documented in the [standard library reference](../stdlib/README.md), which marks
-each item as implemented in 2.0.0 or not implemented in 2.0.0: the `io` error
-types, file and stream handles and text helpers, the full `fs` module, `net`
-(plain TCP), `time`, `env`, `process::args` and the `error` trait are implemented;
-the `io` stream traits and `io::Result` alias together with `process::exit` are
-not implemented in 2.0.0 and are planned for a later release. `std::fs` and
-`std::io` keep the same owned-`String` path convention as `read_file` and
-`write_file`.
+each item as implemented in 2.1.0 or planned. In 2.1.0 the `fs` functions and the
+`read_file`/`write_file` helpers take `&str` paths and contents, `io` has
+`io::Result`, `io::Error::new`/`other` and integer-sized `read`/`write`/`seek`,
+`process::exit` is implemented, and `time`, `env` and `net` gain the new types
+described in the reference; only the `io` stream traits (`Read`, `Write`,
+`BufRead`) are still planned.
 
 ### I/O and process
 
@@ -1338,8 +1400,8 @@ not implemented in 2.0.0 and are planned for a later release. `std::fs` and
 | `read_line()` | `→ Option<String>` | one line from stdin, newline stripped; `None` at EOF |
 | `args()` | `→ Vec<String>` | command-line arguments after the program name |
 | `exit(code)` | `(i32)` | terminates immediately with the exit code |
-| `read_file(path)` | `→ Result<String, String>` | reads a file as UTF-8; invalid bytes become `Err` |
-| `write_file(path, contents)` | `→ Result<(), String>` | writes a text file |
+| `read_file(path)` | `(&str) → Result<String, String>` | reads a file as UTF-8; invalid bytes become `Err` |
+| `write_file(path, contents)` | `(&str, &str) → Result<(), String>` | writes a text file |
 
 `read_line` returns lines without the trailing newline and `None` once the input
 is exhausted, so a read loop is naturally `while let Some(line) = read_line()`:
@@ -1414,16 +1476,16 @@ on success:
 
 ```ls
 fn main() {
-    let written = write_file(String::from("note.txt"), String::from("hello file"));
+    let written = write_file("note.txt", "hello file");
     println!("{}", written.is_ok());
 
-    let read = read_file(String::from("note.txt"));
+    let read = read_file("note.txt");
     println!("{}", read.is_ok());
     if let Ok(text) = read {
         println!("{}", text);
     }
 
-    let missing = read_file(String::from("does-not-exist.txt"));
+    let missing = read_file("does-not-exist.txt");
     println!("{}", missing.is_err());
 }
 ```
@@ -1447,6 +1509,7 @@ true
 | `floor(x)` / `ceil(x)` / `round(x)` | `f64 → f64` | rounding |
 | `sin(x)` `cos(x)` `tan(x)` | `f64 → f64` | trigonometry |
 | `ln(x)` / `log10(x)` / `exp(x)` | `f64 → f64` | natural log, base-10 log, exponential |
+| `PI` `E` `TAU` … | `f64` constants | Rust-compatible floating-point constants (added in 2.1.0): `PI`, `E`, `TAU`, `SQRT_2`, `FRAC_1_SQRT_2`, `FRAC_1_PI`, `FRAC_2_PI`, `FRAC_2_SQRT_PI`, `LN_2`, `LN_10`, `LOG2_E`, `LOG10_E`, `PHI`, `FRAC_PI_2`, `FRAC_PI_3`, `FRAC_PI_4` |
 
 `abs`, `min` and `max` accept integers as well as floats, but each call must be
 consistent: mixing integer and float arguments is a type error. `pow` is
@@ -1521,7 +1584,7 @@ macros work on all of them; comparing function values is `E0369`.
 `assert_ne!` also accepts an optional message: `assert_ne!(left, right,
 "format", args…)` panics with the formatted message instead of the default
 `left`/`right` report. The message form of `assert_ne!` is the only one in
-2.0.0: `assert_eq!` and `assert!` take exactly the operands shown above.
+2.1.0: `assert_eq!` and `assert!` take exactly the operands shown above.
 
 The argument of `assert!` must be `bool`; `assert!(n)` for an integer `n` is a
 type error (`E0308`). Write the comparison explicitly: `assert!(n > 0)`.

@@ -755,7 +755,11 @@ impl<'a> Gen<'a> {
         lvalue
     }
 
-    pub(crate) fn literal(&mut self, lit: &HLit) -> String {
+    /// Value of a literal expression of type `ty`.
+    ///
+    /// The type matters for string literals: the front end may hand over an
+    /// owned `String` literal or a borrowed `&str` literal for the same text.
+    pub(crate) fn literal(&mut self, lit: &HLit, ty: &Ty) -> String {
         match lit {
             HLit::Int { value, int_ty } => util::int_literal(*value, *int_ty),
             HLit::Float { value, float_ty } => util::float_literal(*value, *float_ty),
@@ -766,10 +770,34 @@ impl<'a> Gen<'a> {
                     "false".to_string()
                 }
             }
-            HLit::Str(value) => self.interned_owned(value),
+            HLit::Str(value) => self.string_literal(value, ty),
             HLit::Char(value) => util::char_literal(*value),
             HLit::Unit => "((LsUnit){0})".to_string(),
         }
+    }
+
+    /// Value of a string literal: an owned interned `String` or a borrowed
+    /// fat view of the interned bytes when the expression is a `&str`.
+    fn string_literal(&mut self, value: &str, ty: &Ty) -> String {
+        if is_borrowed_str(ty) {
+            self.interned_static_str(value, ty)
+        } else {
+            self.interned_owned(value)
+        }
+    }
+
+    /// Statically borrowed slice of an interned string literal.
+    ///
+    /// The interned bytes are immortal and live in the generated data table,
+    /// so a `&str` value is just a by-value fat view over them: no allocation
+    /// and no reference count traffic.
+    fn interned_static_str(&mut self, value: &str, ty: &Ty) -> String {
+        let handle = self.interned_address(value);
+        let ctype = self.ctype(ty);
+        format!(
+            "(({}){{ .data = ((uint8_t*)(({})->data)), .len = (({})->len) }})",
+            ctype, handle, handle
+        )
     }
 
     pub(crate) fn const_expr(&mut self, c_name: &str, ty: &Ty) -> Option<String> {
@@ -785,7 +813,7 @@ impl<'a> Gen<'a> {
                             "false".to_string()
                         }
                     }
-                    hir::ConstValue::Str(value) => self.interned_owned(value),
+                    hir::ConstValue::Str(value) => self.string_literal(value, ty),
                     hir::ConstValue::Char(value) => util::char_literal(*value),
                     hir::ConstValue::Unit => "((LsUnit){0})".to_string(),
                 });
@@ -799,7 +827,7 @@ impl<'a> Gen<'a> {
     pub(crate) fn gen_into(&mut self, expr: &HExpr, target: &str) {
         match &expr.kind {
             HExprKind::Lit(lit) => {
-                let value = self.literal(lit);
+                let value = self.literal(lit, &expr.ty);
                 self.w.line(format!("{} = {};", target, value));
             }
             HExprKind::Local { c_name, .. } => {
@@ -1035,6 +1063,12 @@ impl<'a> Gen<'a> {
             target, fn_ctype, env_name, closure_id
         ));
     }
+}
+
+/// Whether a value of this type is a borrowed `&str` slice rather than an
+/// owned `String`.
+pub(crate) fn is_borrowed_str(ty: &Ty) -> bool {
+    matches!(ty, Ty::Ref { inner, .. } if inner.is_str())
 }
 
 /// Integer type of a constant expression when the HIR type is missing.

@@ -2,7 +2,9 @@
 
 Every expression in lsaca has a statically known type, checked before any C is
 generated. This page lists the complete type language, explains each builtin
-type, and describes inference and conversions.
+type, and describes inference and conversions. It describes lsaca 2.1.0, where
+unannotated integer literals are `i32` by default, number literals accept
+Rust-style type suffixes, and lengths and indices are `usize`.
 
 ## The type table
 
@@ -10,30 +12,32 @@ type, and describes inference and conversions.
 | --- | --- | --- |
 | `()` | Unit. | The result of expressions that produce nothing; can be stored and printed. |
 | `bool` | Boolean. | `true` / `false`. |
-| `i8` `i16` `i32` `i64` | Signed integers. | Two's complement; `i64` is the default integer type and the type of all lengths and indices. |
+| `i8` `i16` `i32` `i64` | Signed integers. | Two's complement; `i32` is the default integer type. Lengths and indices are `usize`. |
 | `u8` `u16` `u32` `u64` | Unsigned integers. | Values are kept in the corresponding C unsigned type. |
-| `isize` `usize` | Pointer-sized signed / unsigned integers. | Added in 2.0.0; C `intptr_t`/`uintptr_t`, 64 bits on every supported target; integer literals still infer `i64`; see [Integers](#integers). |
+| `isize` `usize` | Pointer-sized signed / unsigned integers. | Added in 2.0.0; C `intptr_t`/`uintptr_t`, 64 bits on every supported target; `usize` is the standard length, index and count type; see [Integers](#integers). |
 | `f32` `f64` | IEEE-754 binary floating point. | `f64` is the default float type. |
 | `char` | Unicode scalar value. | Added in 1.6.0; written with single quotes; a `Copy` scalar stored as a 32-bit value; see [Characters and Unicode](22-characters-and-unicode.md). |
-| `String` | Owned UTF-8 string. | Move-only refcounted buffer; `.clone()` produces an independent copy; `len()` is a byte count. |
+| `String` | Owned UTF-8 string. | Move-only refcounted buffer; `.clone()` produces an independent copy; `len()` is a byte count (`usize`). A string literal is a `String` by default but is compiled as a static `&str` slice in `&str` contexts, with no allocation. |
 | `Vec<T>` | Growable array. | Builtin generic, move-only; `.clone()` deep-copies. |
-| `HashMap<K, V>` | Hash table. | Added in 1.5.0; builtin generic, move-only; keys are `i64`, `u64`, `bool`, `String` or `char`; `==` compares contents. |
+| `HashMap<K, V>` | Hash table. | Added in 1.5.0; builtin generic, move-only; keys are the integer types, `bool`, `char` or `String`; `==` compares contents. |
 | `Option<T>` | `Some(T)` or `None`. | Builtin generic. |
 | `Result<T, E>` | `Ok(T)` or `Err(E)`. | Builtin generic. |
 | `Rc<T>` | Shared, mutable heap cell. | Move-only handle; `.clone()` shares one payload; `get()`/`set()`. |
 | `Box<T>` | Owned heap indirection. | Added in 1.1.0; move-only; `.clone()` deep-copies the payload. |
 | `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. Cannot be stored in aggregates (mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4); see [References and borrowing](12-references-and-borrowing.md). |
-| `&[T]` / `&mut [T]` / `&str` / `&mut str` | References to an unsized slice or UTF-8 text value. | Added in 2.0.0; `&[T]` is a `Copy` fat reference (data pointer plus length); produced by coercions from `Vec`/`String` and by slicing a place with `&`/`&mut`; see [Slices and str](26-slices-and-str.md). |
+| `&[T]` / `&mut [T]` / `&str` / `&mut str` | References to an unsized slice or UTF-8 text value. | Added in 2.0.0; `&[T]` is a `Copy` fat reference (data pointer plus length); produced by coercions from `Vec`/`String`, by slicing a place with `&`/`&mut`, and for string literals in `&str` contexts; see [Slices and str](26-slices-and-str.md). |
 | `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; tuples can nest. |
 | `fn(A, B) -> R` | Function type. | Values of this type are first-class but move-only; since 1.5 they can be stored in aggregates. See [Functions](09-functions.md). |
 | `dyn Trait` | Trait object (unsized). | Added in 2.0.0; only behind a pointer: `Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait`, `&mut dyn Trait`; see [Trait objects](25-trait-objects.md). |
-| `Name` | User struct or enum. | Declared with `struct`/`enum`; generic types are written `Name<T, ...>` since 1.5. `Copy` when every kind of field is `Copy` and there is no `Drop` impl; otherwise move-only. `.clone()` is derived automatically unless the type implements `Drop`; `impl Drop for Name` adds a destructor hook. |
+| `Name` | User struct or enum. | Declared with `struct`/`enum` — named, tuple (`struct Pair(i32, String);`) and unit (`struct Marker;`) structs since 2.1.0; generic types are written `Name<T, ...>` since 1.5. `Copy` when every kind of field is `Copy` and there is no `Drop` impl; otherwise move-only. `.clone()` is derived automatically unless the type implements `Drop`; `impl Drop for Name` adds a destructor hook. |
 | `Alias` | Type alias. | `type Alias = T;` introduces no new type. |
 
 `isize` and `usize` are the pointer-sized integer types: their C types are
 `intptr_t` and `uintptr_t`, and on every supported 64-bit target their ranges
-equal `i64` and `u64`. They are distinct types like every other integer type,
-and an unannotated integer literal still infers `i64`; see [Integers](#integers).
+equal `i64` and `u64`. They are distinct types like every other integer type.
+An unannotated integer literal is an `i32` by default, but it takes the
+type required by its context — including `usize` in a length, index or explicit
+`usize` position; see [Integers](#integers).
 There is no raw pointer type and no array type. `[T]` and `str` are *unsized*
 types: they have no values of their own, and the only usable forms are the
 references `&[T]`, `&mut [T]`, `&str` and `&mut str` (see
@@ -54,7 +58,9 @@ enums and impl](10-structs-enums-and-impl.md)).
 
 The integer types differ only in width and signedness, and they are **distinct
 types**: there are no implicit conversions between them. Arithmetic requires
-both operands to have the same type; to change the type, use `as`.
+both operands to have the same type; to change the type, use `as`. A literal
+can spell its type with a suffix (`1u8`, `42i64`, `0xFFusize`); an unsuffixed
+literal defaults to `i32`, or takes the type that context requires.
 
 | Type | Range |
 | --- | --- |
@@ -69,9 +75,14 @@ both operands to have the same type; to change the type, use `as`.
 | `isize` | same range as `i64` on every supported (64-bit) target |
 | `usize` | same range as `u64` on every supported (64-bit) target |
 
-The type of an unannotated integer literal is `i64` unless context determines a
-different integer type. Debug builds check overflow and division by zero at run
-time; release builds wrap. This is described in
+The type of an unannotated integer literal is `i32` unless context determines
+a different integer type. The integer type names are the same as in Rust except
+that lsaca has no `i128`/`u128` types: `i8`, `i16`, `i32`, `i64`, `isize` and
+`u8`, `u16`, `u32`, `u64`, `usize`. A suffix fixes the type exactly (`1i64`,
+`1u8`, `1usize`, `1isize`); it must be a legal number suffix, so `1.5u8`,
+`1i32f`, `1i128` and `1u128` are rejected while lexing.
+Debug builds check overflow and division by zero at run time; release builds
+wrap. This is described in
 [Operators](07-operators.md), and the compile-time literal range check is
 covered in [Lexical structure](03-lexical-structure.md).
 
@@ -96,6 +107,43 @@ Output:
 127 -32767 2147483647
 9223372036854775807 255 65535 4294967295
 18446744073709551615
+```
+
+Literals can carry a suffix instead of relying on an annotation, and all the
+usual bases with `_` separators are accepted:
+
+```ls
+fn main() {
+    println!("{} {}", 1u8, 42i64);
+    println!("{} {}", 0xFFu16, 0b1010u32);
+    println!("{} {}", 0o755u32, 1_000_000usize);
+    println!("{}", 1.5f32);
+}
+```
+
+Output:
+```text
+1 42
+255 10
+493 1000000
+1.5
+```
+
+An unsuffixed literal takes the type its context requires, including `usize`
+for lengths and indices:
+
+```ls
+fn main() {
+    let values = vec![10, 20, 30];
+    let index = 1;
+    let count = 0;
+    println!("{} {}", values[index], count + values.len());
+}
+```
+
+Output:
+```text
+20 3
 ```
 
 ## Floats
@@ -139,11 +187,13 @@ is occasionally useful in generic-looking code.
 are **move-only**: assigning or passing one by value moves it, so clone first
 when both sides must stay usable. `.clone()` produces an independent copy (the
 runtime may share storage internally until one side is modified, but you cannot
-observe that). They are addressed with `i64` indices and lengths. Since 1.6.0
+observe that). They are addressed with `usize` indices and lengths. Since 1.6.0
 every `String` is guaranteed valid UTF-8: the byte-oriented methods keep byte
 semantics (`len`, `find`, `substring`), while `char_count`, `chars`, `char_at`,
 `push(char)`, `pop` and `is_char_boundary` work with Unicode scalar values (see
-[Characters and Unicode](22-characters-and-unicode.md)). They are described in
+[Characters and Unicode](22-characters-and-unicode.md)). A string literal is a
+`String` by default, but where a `&str` is expected it is compiled as a static
+UTF-8 slice with no allocation. They are described in
 [Memory model](05-memory-model.md) and their full API is in
 [Standard library](15-standard-library.md).
 
@@ -352,13 +402,16 @@ Output:
 
 ## Structs, enums and type aliases
 
-A `struct` introduces a record type with named fields; an `enum` introduces a
-tagged union whose variants carry no payload or a tuple of payloads. Both must be
-declared before use in a *type position* only in the sense of item order: item
-order does not matter, as described in [Program structure](02-program-structure.md).
-A `type Alias = T;` gives an alternative name to an existing type; aliases are
-transparent (the alias and the underlying type are the same type, not distinct
-newtypes).
+A `struct` introduces a record type with named fields, a tuple struct
+(`struct Pair(i32, String);`), or a unit struct (`struct Marker;`). Tuple structs
+construct like functions — `Pair(1, String::from("one"))` — expose their fields
+as `.0`, `.1`, ... and destructure like tuples; a one-field tuple struct is the
+idiomatic *newtype* (`struct Meters(i64);`) and is a distinct type, unlike an
+alias. An `enum` introduces a tagged union whose variants carry no payload or a
+tuple of payloads. Item order does not matter, as described in
+[Program structure](02-program-structure.md). A `type Alias = T;` gives an
+alternative name to an existing type; aliases are transparent (the alias and the
+underlying type are the same type, not distinct newtypes).
 
 ```ls
 struct Point {
@@ -393,6 +446,34 @@ Output:
 90 degrees
 ```
 
+Tuple and unit structs are declared and used like this:
+
+```ls
+struct Meters(i64);
+struct Pair(i32, String);
+struct Marker;
+
+fn main() {
+    let m = Meters(42);
+    println!("{}", m.0);
+    let copy = m;
+    let Meters(value) = copy;
+    println!("{}", value);
+
+    let p = Pair(1, String::from("one"));
+    println!("{} {}", p.0, p.1);
+
+    let _unit = Marker;
+}
+```
+
+Output:
+```text
+42
+42
+1 one
+```
+
 ## Type inference
 
 Types are inferred locally by unification: the compiler propagates the expected
@@ -403,8 +484,13 @@ variable's type is fixed by its initializer and annotation, not by later uses.
 
 Rules that matter in practice:
 
-* An unannotated integer literal defaults to `i64`; an unannotated float
+* An unannotated integer literal defaults to `i32`; an unannotated float
   literal defaults to `f64`.
+* A literal suffix fixes the type: `1u8`, `1i64`, `1usize`. An unsuffixed
+  literal takes the type its context requires, so `0` is accepted as a `usize`
+  index or in a comparison with a length.
+* A string literal is a `String` unless a `&str` is expected, in which case it
+  is a static slice.
 * Context can force a narrower type: `let x: u8 = 1;` makes the literal `u8`.
 * A generic constructor without arguments has no payload type to infer.
   `Vec::new()`, `None`, `Rc::new(None)` and `String::from` need context:
@@ -447,20 +533,20 @@ fn main() {
 Error:
 ```text
 error[E0282]: type annotations needed
-  --> example-11.ls:2:13
+  --> example-14.ls:2:13
    |
  2 |     let v = Vec::new();
    |             ^^^^^^^^^^
    = note: cannot infer the type arguments for this call; annotate the binding or the expected type
 
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
 Inference works from context too, including in arguments and returns:
 
 ```ls
 fn sum(values: Vec<i64>) -> i64 {
-    let mut total = 0;
+    let mut total: i64 = 0;
     for value in values {
         total += value;
     }
@@ -560,12 +646,12 @@ Error:
 
 ```text
 error[E0605]: non-primitive cast: {integer} as bool
-  --> example-15.ls:2:16
+  --> example-18.ls:2:16
    |
  2 |     let flag = 1 as bool;
    |                ^^^^^^^^^
 
-lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
+lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
 ```
 
 There are no implicit conversions, so the following is rejected:
@@ -582,17 +668,18 @@ Error:
 
 ```text
 error[E0308]: mismatched types
-  --> example-16.ls:3:18
+  --> example-19.ls:3:18
    |
  3 |     let y: f64 = x;
    |                  ^
    = note: expected f64, found i64
 
-lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
+lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
 ```
 
-Since 2.0.0 `isize` and `usize` are ordinary integer types, so they print and
-cast like the others:
+Since 2.0.0 `isize` and `usize` are ordinary integer types, and since 2.1.0
+`usize` is the type of lengths and indices. They print and cast like the
+others:
 
 ```ls
 fn main() {
@@ -623,18 +710,18 @@ Error:
 
 ```text
 error[E0412]: cannot find type 'Widget' in this scope
-  --> example-18.ls:2:17
+  --> example-21.ls:2:17
    |
  2 |     let widget: Widget = Widget { value: 1 };
    |                 ^^^^^^
 
 error[E0412]: cannot find struct Widget in this scope
-  --> example-18.ls:2:26
+  --> example-21.ls:2:26
    |
  2 |     let widget: Widget = Widget { value: 1 };
    |                          ^^^^^^
 
-lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
+lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
 ```
 
 ## What next

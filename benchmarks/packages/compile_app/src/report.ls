@@ -81,12 +81,12 @@ pub fn build_report(seed: i64) -> Report {
     let base = String::from("report");
     let loud = shout(&base);
     let label = decorate(&loud, seed);
-    acc = (acc * 31 + label.len()) % MODULUS;
+    acc = (acc * 31 + label.len() as i64) % MODULUS;
     let span = Span::new(seed, 5);
     acc = (acc * 31 + span.checksum()) % MODULUS;
     let kind = Format::Text;
     let name = format_name(kind);
-    acc = (acc * 31 + name.len()) % MODULUS;
+    acc = (acc * 31 + name.len() as i64) % MODULUS;
     let metrics = stats.count * 10 + stats.range();
     return Report::new(acc, metrics, label);
 }

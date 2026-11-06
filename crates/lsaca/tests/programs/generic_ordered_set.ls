@@ -26,7 +26,7 @@ impl<K> OrderedSet<K> {
             return false;
         }
         let mut remaining: Vec<K> = Vec::new();
-        let mut index: i64 = 0;
+        let mut index: usize = 0;
         while index < self.order.len() {
             let current: K = self.order.get(index).unwrap();
             if current != key.clone() {
@@ -39,7 +39,7 @@ impl<K> OrderedSet<K> {
     }
 
     fn len(&self) -> i64 {
-        return self.order.len();
+        return self.order.len() as i64;
     }
 
     fn elements(&self) -> Vec<K> {

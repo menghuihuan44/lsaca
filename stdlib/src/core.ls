@@ -4,6 +4,8 @@
 // claims the name for the standard library. Methods are inherent impls backed
 // by extern intrinsics, mirroring the legacy builtin signatures exactly.
 
+use crate::error::Error as ErrorTrait;
+
 pub struct Option<T> {
     internal: (),
 }
@@ -33,8 +35,29 @@ impl<T> Option<T> {
         return __opt_unwrap_or(self, fallback);
     }
 
-    pub fn expect(self, message: String) -> T {
-        return __opt_expect(self, message);
+    pub fn expect(self, message: &str) -> T {
+        return __opt_expect(self, String::from_str(message));
+    }
+
+    /// Returns this option if it holds a value, otherwise `other`.
+    pub fn or(self, other: Option<T>) -> Option<T> {
+        match self {
+            Some(value) => { return Some(value); }
+            None => { return other; }
+        }
+    }
+
+    /// Returns a value only when exactly one of the two options holds one.
+    pub fn xor(self, other: Option<T>) -> Option<T> {
+        match self {
+            Some(left) => {
+                match other {
+                    Some(_right) => { return None; }
+                    None => { return Some(left); }
+                }
+            }
+            None => { return other; }
+        }
     }
 }
 
@@ -69,8 +92,8 @@ impl<T, E> Result<T, E> {
         return __res_unwrap_or(self, fallback);
     }
 
-    pub fn expect(self, message: String) -> T {
-        return __res_expect(self, message);
+    pub fn expect(self, message: &str) -> T {
+        return __res_expect(self, String::from_str(message));
     }
 
     pub fn ok(self) -> Option<T> {
@@ -79,6 +102,45 @@ impl<T, E> Result<T, E> {
 
     pub fn err(self) -> Option<E> {
         return __res_err_value(self);
+    }
+
+    /// Returns the error value, panicking when the result is `Ok`.
+    pub fn unwrap_err(self) -> E {
+        return __res_err_value(self).unwrap();
+    }
+}
+
+/// Error returned when a string cannot be parsed as an integer.
+pub struct ParseIntError {
+    internal: (),
+}
+
+impl ParseIntError {
+    pub fn __new() -> ParseIntError {
+        return ParseIntError { internal: () };
+    }
+}
+
+impl ErrorTrait for ParseIntError {
+    fn message(&self) -> String {
+        return "invalid digit found in string";
+    }
+}
+
+/// Error returned when a string cannot be parsed as a float.
+pub struct ParseFloatError {
+    internal: (),
+}
+
+impl ParseFloatError {
+    pub fn __new() -> ParseFloatError {
+        return ParseFloatError { internal: () };
+    }
+}
+
+impl ErrorTrait for ParseFloatError {
+    fn message(&self) -> String {
+        return "invalid float literal";
     }
 }
 
@@ -104,8 +166,8 @@ impl<T> Rc<T> {
         __rc_set(self, value);
     }
 
-    pub fn strong_count(&self) -> i64 {
-        return __rc_strong_count(self);
+    pub fn strong_count(&self) -> usize {
+        return __rc_strong_count(self) as usize;
     }
 }
 

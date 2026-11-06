@@ -99,7 +99,7 @@ pub fn first_index_of(values: &Vec<i64>, wanted: i64) -> i64 {
     let mut index = 0;
     while index < values.len() {
         if values[index] == wanted {
-            return index;
+            return index as i64;
         }
         index += 1;
     }
@@ -110,7 +110,7 @@ pub fn last_index_of(values: &Vec<i64>, wanted: i64) -> i64 {
     let mut index = values.len() - 1;
     while index >= 0 {
         if values[index] == wanted {
-            return index;
+            return index as i64;
         }
         index -= 1;
     }
@@ -125,7 +125,7 @@ pub fn binary_search(sorted: &Vec<i64>, target: i64) -> i64 {
         let middle = low + (high - low) / 2;
         let value = sorted[middle];
         if value == target {
-            return middle;
+            return middle as i64;
         }
         if value < target {
             low = middle + 1;
@@ -343,7 +343,7 @@ pub fn sorted_checksum(values: &Vec<i64>) -> i64 {
     let mut total = 0;
     let mut index = 0;
     while index < sorted.len() {
-        total += sorted[index] * (index + 1);
+        total += sorted[index] * ((index as i64) + 1);
         index += 1;
     }
     total % MODULUS
@@ -374,7 +374,7 @@ impl IntList {
     }
 
     pub fn len(&self) -> i64 {
-        self.values.len()
+        self.values.len() as i64
     }
 
     pub fn total(&self) -> i64 {
@@ -393,7 +393,7 @@ impl IntList {
         if self.values.len() == 0 {
             return 0;
         }
-        self.total() / self.values.len()
+        self.total() / self.values.len() as i64
     }
 
     pub fn sorted(&self) -> Vec<i64> {
@@ -467,7 +467,7 @@ pub struct Grid {
 
 impl Grid {
     pub fn new(rows: i64, cols: i64) -> Grid {
-        let mut cells: Vec<i64> = Vec::with_capacity(rows * cols);
+        let mut cells: Vec<i64> = Vec::with_capacity((rows * cols) as usize);
         let mut index = 0;
         while index < rows * cols {
             cells.push(0);
@@ -489,11 +489,11 @@ impl Grid {
     }
 
     pub fn get(&self, row: i64, col: i64) -> i64 {
-        self.cells[row * self.cols + col]
+        self.cells[(row * self.cols + col) as usize]
     }
 
     pub fn set(&mut self, row: i64, col: i64, value: i64) {
-        self.cells[row * self.cols + col] = value;
+        self.cells[(row * self.cols + col) as usize] = value;
     }
 
     pub fn total(&self) -> i64 {
@@ -544,7 +544,7 @@ impl Grid {
     }
 
     pub fn transpose_cells(&self) -> Vec<i64> {
-        let mut result: Vec<i64> = Vec::with_capacity(self.rows * self.cols);
+        let mut result: Vec<i64> = Vec::with_capacity((self.rows * self.cols) as usize);
         let mut col = 0;
         while col < self.cols {
             let mut row = 0;
@@ -583,7 +583,7 @@ pub fn enumerate_checksum(values: Vec<i64>) -> i64 {
     let mut total = 0;
     for pair in values.iter().enumerate() {
         let (index, value) = pair;
-        total += (index + 1) * value;
+        total += ((index as i64) + 1) * value;
     }
     total % MODULUS
 }

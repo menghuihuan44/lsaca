@@ -5,19 +5,20 @@
 fn insertion_sort(values: Vec<i64>) -> Vec<i64> {
     let mut data = values;
     let n = data.len();
-    let mut i: i64 = 1;
+    let mut i: usize = 1;
     while i < n {
         let key = data[i];
-        let mut j: i64 = i - 1;
-        while j >= 0 {
-            if data[j] > key {
-                data[j + 1] = data[j];
-                j = j - 1;
+        let mut j: usize = i;
+        while j > 0 {
+            let previous = j - 1;
+            if data[previous] > key {
+                data[j] = data[previous];
+                j = previous;
             } else {
                 break;
             }
         }
-        data[j + 1] = key;
+        data[j] = key;
         i = i + 1;
     }
     data
@@ -36,10 +37,10 @@ fn main() {
     }
     let sorted = insertion_sort(values);
     let mut sum: i64 = 0;
-    let mut k: i64 = 0;
-    while k < n {
+    let mut k: usize = 0;
+    while k < sorted.len() {
         sum = sum + sorted[k];
         k = k + 1;
     }
-    println!("checksum={},{},{}", sorted[0], sorted[n - 1], sum);
+    println!("checksum={},{},{}", sorted[0], sorted[(n - 1) as usize], sum);
 }

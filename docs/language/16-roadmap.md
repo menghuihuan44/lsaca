@@ -3,7 +3,7 @@
 lsaca borrows Rust's surface syntax and some of its semantics, but it is a
 smaller language with an explicitly different memory model. This page lists the
 intentional differences, the known gaps in the current release, and what is
-planned next. It describes lsaca **2.0.0**.
+planned next. It describes lsaca **2.1.0**.
 
 ## Intentional deviations from Rust
 
@@ -82,19 +82,28 @@ these areas.
    `Rc<T>`. Closures and function values are move-only; since 1.5 they can be
    stored in structs, enums, tuples, `Vec`, `Box` and as HashMap values. See
    [Closures](14-closures.md).
-7. **Pointer-sized integers exist since 2.0.** `isize` and `usize` are
-   pointer-sized (64 bits on every supported target), convert with `as` like
-   other integers and print like them. Ordinary lengths, indices and counts are
-   still `i64`: slice indices and the standard library's lengths are `i64`, and
-   integer literals still infer `i64` (there are no suffixes), so annotate or
-   cast when a pointer-sized value is wanted.
+7. **Integer defaults, suffixes and pointer-sized types.** The integer types are
+   `i8`, `i16`, `i32`, `i64`, `isize`, `u8`, `u16`, `u32`, `u64` and `usize`
+   (there are no `i128`/`u128`). An unsuffixed integer literal has type `i32`
+   and an unsuffixed float literal has type `f64`; a literal may carry a type
+   suffix (`1i64`, `0xFFu8`, `1_000_000usize`, `1.5f32`), and a suffixed literal
+   is checked to fit its type. `usize` is the standard type for lengths,
+   indices and counts: collection and slice lengths and capacities, indexing,
+   `find` offsets, iterator `count` and `enumerate` and `Rc::strong_count` are
+   `usize`. An unsuffixed literal in a `usize` context (an index, a `len()`
+   comparison, a `usize` parameter) is `usize`, elsewhere it is `i32`. `isize`
+   and `usize` are pointer-sized (64 bits on every supported target), cast with
+   `as` and print like the other integers.
 8. **Characters are scalars; strings are UTF-8.** Since 1.6.0 `char` is a
    `Copy` 32-bit Unicode scalar value with character literals and
    character-literal patterns, and `String` is always valid UTF-8. The string
    API keeps byte-oriented methods (`len`, `find`, `substring`, whose offsets
-   are byte indices) next to character-oriented ones (`char_count`, `chars`,
-   `char_at`, `push`, `pop`, `is_char_boundary`). There is no `u8` byte-string
-   type and no byte-string literal. See
+   are byte indices and whose lengths and indices are `usize`) next to
+   character-oriented ones (`char_count`, `chars`, `char_at`, `push`, `pop`,
+   `is_char_boundary`). String concatenation borrows its right operand: only
+   `String + &str` and `String += &str` are supported, while `String + String`
+   and `&str + &str` are rejected. There is no `u8` byte-string type and no
+   byte-string literal. See
    [Characters and Unicode](22-characters-and-unicode.md) and
    [Standard library](15-standard-library.md#string).
 9. **No arrays; slices exist only behind references.** There is no array type
@@ -106,60 +115,80 @@ these areas.
    [Slices and str](26-slices-and-str.md).
 10. **Restricted patterns.** No `@` bindings, no `ref` patterns, no slice and no
     range patterns. String-literal and character-literal patterns are supported,
-    or-patterns (`p | q`) and match guards are fully supported, and a reference
-    scrutinee is matched with match ergonomics rather than a `&` pattern. See
+    tuple struct and unit struct patterns were added in 2.1.0, or-patterns
+    (`p | q`) and match guards are fully supported, and a reference scrutinee is
+    matched with match ergonomics rather than a `&` pattern. See
     [Pattern matching](13-pattern-matching.md).
-11. **No values out of `break`/`continue`.** Loops have type `()`; `break
-    value` is a compile error. Use a mutable accumulator variable instead.
-12. **No numeric literal suffixes.** There is no `1i32`, `1u8` or `2.0f32`;
-    the literal type comes from context or defaults to `i64`/`f64`, and `as`
-    converts. NaN and infinity have no literals.
-13. **A standard library crate with iterators and collections.** The 1.5
+11. **No loop labels and no values out of `break`/`continue`.** Loops have
+    type `()`; `break value` is a compile error, and `break`/`continue` always
+    target the innermost loop — labelled loops are not in 2.1.0. Use a mutable
+    accumulator variable, a flag or a helper function instead.
+12. **A standard library crate with iterators and collections.** The 1.5
     release added lazy iterators and the builtin `HashMap<K, V>`; version 2.0
-    moves the whole standard library into a normal `std` crate that is embedded
-    in the compiler (`stdlib/src/lib.ls`, parsed as `std/*.ls`) and grows it:
-    `core` (`Option`, `Result`, `Iterator`), `string`, `char`, `fmt`,
+    moved the whole standard library into a normal `std` crate that is embedded
+    in the compiler (`stdlib/src/lib.ls`, parsed as `std/*.ls`). In 2.1.0 it
+    covers `core` (`Option`, `Result`, `Iterator`), `string`, `char`, `fmt`,
     `math`, `vec`, `iter`, `collections` (`HashSet`, `BTreeSet`,
-    `BTreeMap`, `VecDeque`, `BinaryHeap`), `io` (`File`, `Read`,
-    `Write`, `BufRead`, `BufReader`, `Error`/`ErrorKind`), `fs`, `net`
+    `BTreeMap`, `VecDeque`, `BinaryHeap`), `io` (`File`, `Error`/`ErrorKind`; the `Read`/`Write`/`Seek`/
+    `BufRead` traits and `BufReader` are planned), `fs`, `net`
     (plain TCP), `time`, `env`, `process` and `error` (the `Error` trait).
-    Iterators add `zip`, `chain`, `rev` and `flat_map` next to `map`,
-    `filter`, `take`, `skip` and `enumerate`, with the terminals
-    `collect`, `fold`, `count`, `sum`, `any`, `all` and `find`.
-    `HashMap` is still the hash map (keys `i64`, `u64`, `isize`, `usize`,
-    `bool`, `String`, `char`) and still cannot be iterated with `for` — use `keys()` or
-    `values()`; asking a vector for an iterator with `.iter()` still
-    **consumes** the vector. Formatting still has no named or indexed arguments
-    and no integer bases. The `?` operator is supported for `Option` and
-    `Result`; the combinators are limited to `Option::map`, `Option::map_or`,
-    `Option::and_then`, `Option::filter`, `Option::ok_or` and
-    `Result::map`, `Result::map_err`, `Result::and_then` (no
-    `Result::map_or`, matching Rust). The design is fixed; which parts the
-    what version 2.0.0 implements is recorded module by
-    module in the [standard library reference](../stdlib/README.md). What
-    exists is documented in
+    Iterators provide `zip`, `chain`, `filter_map`, `take_while`, `skip_while`
+    and `step_by` next to `map`, `filter`, `take`, `skip` and `enumerate`, with
+    the terminals `collect`, `fold`, `count`, `sum`, `product`, `any`, `all`,
+    `find`, `position`, `last`, `nth`, `reduce`, `inspect` and `for_each`;
+    the `rev` and `flat_map` adapters remain planned for a later release. `HashMap` is still the hash map
+    (keys are the integer types, `bool`, `char` and `String`) and still cannot
+    be iterated with `for` — use `keys()` or `values()`; asking a vector for
+    an iterator with `.iter()` still **consumes** the vector. Formatting still
+    has no named or indexed arguments and no integer bases. The `?` operator is
+    supported for `Option` and `Result`. The 2.1.0 standard library adds
+    `Option::or`, `Option::xor` and `Result::unwrap_err`; the other Rust
+    combinators (`Option::or_else`/`map_or_else`/`ok_or_else`/
+    `unwrap_or_else`/`unwrap_or_default`/`is_some_and`/`is_none_or`/`and`,
+    `Result::map_or`/`map_or_else`/`or`/`or_else`/`is_ok_and`/`is_err_and`/
+    `inspect`/`inspect_err`) are not implemented in 2.1.0. Text parameters of
+    the standard library take `&str` instead of an owned `String` (`env::var`
+    is the one exception: `&str` in, `Result<String, VarError>` out;
+    `io::Error::new`/`other` also keep taking an owned `String` message), while
+    constructors such as `String::from` keep taking an owned `String`, and a
+    string literal in a `&str` position is a static slice that does not
+    allocate. The design is fixed; which parts the 2.1.0 compiler implements is
+    recorded module by module in the [standard library
+    reference](../stdlib/README.md). What exists is documented in
     [Standard library](15-standard-library.md),
     [Standard library reference](../stdlib/README.md),
     [Iterators](19-iterators.md) and [HashMap](20-hashmap.md).
-14. **Equality is structural for most values, identity for `Rc`.** Since 1.5,
+13. **Equality is structural for most values, identity for `Rc`.** Since 1.5,
     `==` works for `Vec`, `Option`, `Result`, tuples, user structs and enums,
     references and `HashMap` as well; structs and enums compare field by field,
     references compare the pointed-to values, and maps compare contents ignoring
     insertion order. `Rc<T>` equality remains identity (same cell), `Box<T>`
     compares structurally, characters compare by scalar value, and function
     values and trait objects have no `==` or `<` (`E0369`).
-15. **No unsafety.** There is no `unsafe`, no FFI and no threads. The generated
-    C is not exposed to the language. The 2.0 `extern fn` declaration is not an
-    FFI mechanism: it declares the compiler's own intrinsics, only the `std`
-    crate may write one (user code is `E0001`), and it is not a first-class
-    value (`E0425`).
+14. **No unsafety.** There is no `unsafe`, no FFI and no threads. The generated
+    C is not exposed to the language. The `extern fn` declaration added in 2.0
+    is not an FFI mechanism: it declares the compiler's own intrinsics, only the
+    `std` crate may write one (user code is `E0001`), and it is not a
+    first-class value (`E0425`).
+15. **Aggregate patterns copy instead of moving.** A `let` pattern that
+    destructures a tuple or struct copies the value into the new bindings:
+    `Copy` parts are copied, and `String`, `Vec`, `Rc` and `Box` parts are
+    deep-copied (an `Rc`/`Box` binding still points at the same cell or heap
+    value, and the reference count is retained). The source value remains fully
+    usable after the pattern. This differs from Rust, where destructuring moves
+    non-`Copy` fields out; partial moves are planned for v2.2. Values with a
+    `Drop` implementation keep their move-only pattern behaviour (a `Drop`
+    type's own fields stay `E0509`). `match` is unaffected and still moves its
+    scrutinee. See
+    [Variables](06-variables-and-mutability.md#destructuring-bindings) and
+    [Ownership and moves](11-ownership-and-moves.md).
 
-## Known limitations in 2.0.0
+## Known limitations in 2.1.0
 
 The following are implementation gaps or deliberate restrictions, verified
-against the 2.0.0 compiler. They are expected to be fixed in
-later releases; avoid them in code you intend to keep. Where a 2.0 module or API
-is fixed by the design but not implemented in 2.0.0, the [standard library
+against the 2.1.0 compiler. They are expected to be fixed in later releases;
+avoid them in code you intend to keep. Where a module or API is fixed by the
+design but not implemented in 2.1.0, the [standard library
 reference](../stdlib/README.md) and the module pages mark it *planned* for a
 later release.
 
@@ -167,20 +196,19 @@ later release.
 | --- | --- | --- |
 | Casts to `bool` | An integer or a float cannot be cast to `bool` (`E0605`); only `bool` values are booleans and conditions never convert numbers | Compare explicitly, for example `value != 0` |
 | Loop variables | `for mut i in …` parses and lets you reassign `i` | Keep loop variables immutable |
-| Literals | The most negative value of a type cannot be written as a negative literal (`E0080` applies to the token before the sign) | Write `-127 - 1`, `-32_767 - 1` and so on |
-| Constants | Constant types are restricted to scalars (including `char`) and `String`; constant expressions allow arithmetic but not comparisons or function calls | Use a `let` or compute at runtime |
-| Parameters | `mut` on a parameter parses but has no effect; parameters are immutable | Copy the parameter into a local `let mut` |
+| Constants | Constant types are restricted to scalars (including `char`) and `String`; constant expressions allow arithmetic but not comparisons or function calls. This is why the epoch is the function `time::unix_epoch()` rather than a `UNIX_EPOCH` constant | Use a `let` or compute at runtime |
 | String indexing | `text[i]` is rejected (`E0608`) | Use `char_at`, `substring`, `find` or `split` |
-| Character classification | A `char` supports comparison, patterns, casts, formatting and the string APIs. The 2.0 `std::char` module provides the eight ASCII classification methods (`is_ascii_alphabetic`, `is_ascii_digit`, `is_ascii_whitespace` and so on); the Unicode helpers (`is_alphabetic`, `is_numeric`, `is_whitespace`, case conversion) and numeric `char` methods are not implemented in 2.0.0 and are planned for a later release, and there are no `std::char` free functions in 2.0.0 | Use the ASCII predicates for ASCII input; compare against character ranges or use casts and the provided string methods for the rest |
+| Character classification | A `char` supports comparison, patterns, casts, formatting and the string APIs. The 2.1.0 `std::char` module provides the ASCII classification methods (`is_ascii_alphabetic`, `is_ascii_digit`, `is_ascii_whitespace`, `is_ascii_punctuation` and so on), the `to_ascii_uppercase`/`to_ascii_lowercase` conversions and `to_digit`; the Unicode helpers (`is_alphabetic`, `is_numeric`, `is_whitespace`, Unicode case conversion) are not implemented in 2.1.0 and are planned for a later release, and there are no `std::char` free functions in 2.1.0 | Use the ASCII predicates for ASCII input; compare against character ranges or use casts and the provided string methods for the rest |
 | Unicode properties | Case mapping and whitespace trimming use the generated Unicode tables; there is no general Unicode property or normalisation API | Precompute the characters you need |
 | Formatting | Width, fill and alignment apply to a user struct/enum as a whole, but the `+`/`0` flags and precision are rejected for them (`E0001`); character precision and the `+`/`0` flags are also rejected; no named or indexed arguments | Format fields individually, or apply width/fill/alignment to the whole value |
 | Numbers | `pow` is float-only; no integer exponentiation builtin | Convert to `f64` or write a loop |
+| Generic `parse` | `parse::<T>()` accepts only `i64` and `f64` as the target type in 2.1.0; any other numeric target is `E0107` | Use `parse_i64()`/`parse_f64()`; for another integer type parse an `i64` and cast |
 | Patterns | No `@`/`ref`/slice/range patterns, and a reference pattern like `let &x = r` is rejected | Match a reference scrutinee directly: the ergonomic bindings are references, so read and write through `*binding` |
 | Reference storage | References cannot be fields, tuple elements, `Vec` elements, `Option`/`Result` payloads, `Box` payloads or closure captures (`E0498`) | Keep references in locals, parameters and return values |
 | Mutable references | `&mut` to a user struct/enum containing a heap field is rejected (`E0498`); mutable references to scalars, `Copy` aggregates, `char`, `String`, `Vec<T>`, `Rc<T>` and `Box<T>` work | Take `&T` or restructure the code |
 | Method receivers | A by-value `self` method cannot return a reference (`E0106`), and a `&self` method can only return shared references (`E0596`) | Return shared references from `&self` methods, mutable references from `&mut self` methods, and owned values from by-value methods |
 | Return elision | No lifetime syntax; a free function returning a reference needs exactly one reference parameter, otherwise `E0106` | Pass exactly one reference parameter or return an owned value |
-| Moves | No partial moves: reading a `Copy` field is fine, but moving a non-`Copy` field, element or dereferenced value out of a bigger value is rejected (`E0507`) | `.clone()` the field, or restructure the value |
+| Moves | No partial moves: reading a `Copy` field is fine, but moving a non-`Copy` field, element or dereferenced value out of a bigger value is rejected (`E0507`); a `let` pattern that destructures a whole tuple or struct copies it instead of moving parts out (deviation 15) | `.clone()` the field, or restructure the value |
 | Move checking | Moving a value while a live borrow exists is rejected (`E0505`); using a value after a move is rejected (`E0382`) | Order borrows and moves explicitly, or `.clone()` before the move |
 | Drop in patterns | A value whose type implements `Drop` cannot be destructured by its own fields by value (`E0509`); moving the whole value, a tuple element or an enum payload through a pattern is allowed and drops it exactly once | Match a reference (`match &value`) or restructure the value |
 | Cloning | A type that implements `Drop` cannot be cloned (`E0277`) | Use references, or restructure so the value is not cloned |
@@ -191,20 +219,20 @@ later release.
 | Borrow checker in one expression | Passing two mutable borrows as the two arguments of one call, or combining them with `+`, is rejected (`E0499`); the short-circuit operators `&&` and `\|\|` accept them because each operand becomes its own condition | Bind each result to a local, then combine the locals |
 | `for` over references | `for x in &vec` is rejected (`E0277`); loops iterate over a `Vec<T>` value, an integer range or an iterator | Iterate by value, use `.iter()`, or use an index loop over a `&Vec` |
 | Reference casts | References have no `as` conversion (`E0605`) | Convert the pointed-to value with `*r` |
-| UTF-8 input | `read_line()` and `args()` panic on invalid UTF-8 (`exit 101`); `read_file()` returns `Err("stream did not contain valid UTF-8")` | Feed the program valid UTF-8, or check the `Result` from `read_file` |
+| UTF-8 input | `read_line()` and `args()` panic on invalid UTF-8 (`exit 101`); `read_file()` returns an `Err` instead (the invalid-data kind) | Feed the program valid UTF-8, or check the `Result` from `read_file` |
 | Trait objects | `dyn Trait` values exist only behind `Box`, `Rc`, `&` or `&mut` (bare `dyn Trait` is `E0001`); the trait must be object-safe (`E0038`: every method `&self`/`&mut self`, no generics, no associated items, no `Self` outside the receiver); there is no upcasting between trait objects; `Box<dyn Trait>` has no `get`/`set` (`E0001`) and `==`/`<` are `E0369`; a non-object-safe trait still works for generic/static dispatch | Make the trait object-safe, or use generic bounds when the concrete type is known |
 | Trait shape | No associated functions, generic methods, supertraits, associated types or constants; default method bodies are supported since 2.0; `impl Trait for Type` only for user structs and enums (a builtin target is `E0118`, except in the `std` crate) | Implement every required method explicitly; use generic bounds for the rest |
-| Slices and `str` | `[T]` and `str` are unsized and exist only behind `&`/`&mut` (`E0001` otherwise); there is no array type `[T; N]`; slice indices are `i64`, not `usize`; references still cannot be stored in aggregates; user crates cannot write `impl [T]` or `impl str` (`E0118`) | Use `Vec<T>`/`String` for storage and take `&[T]`/`&str` parameters for borrowing |
-| Pointer-sized integers | `isize`/`usize` exist, but integer literals still infer `i64` (there are no suffixes) and slice/collection lengths and indices are `i64` | Annotate the type or cast with `as` |
+| Slices and `str` | `[T]` and `str` are unsized and exist only behind `&`/`&mut` (`E0001` otherwise); there is no array type `[T; N]`; slice indices are `usize`, so an `i32`/`i64` index is a type error (`E0308`) — cast with `as`; references still cannot be stored in aggregates; user crates cannot write `impl [T]` or `impl str` (`E0118`) | Use `Vec<T>`/`String` for storage and take `&[T]`/`&str` parameters for borrowing |
+| Integer types | There are no `i128`/`u128` types, and their literal suffixes are rejected while lexing; an unsuffixed integer literal is `i32`, so a value outside that range needs a suffix or an annotation (a suffixed literal that does not fit its type is `E0080`) | Write `1i64` or annotate the binding; use `i64`/`u64` for very large values |
 | Extern functions | `extern fn` declarations are accepted only in the `std` crate (user code is `E0001`) and are not first-class values (`E0425`) | Call the public `std` function or method instead |
-| Standard library status | The `std` crate is implemented module by module in 2.0.0: `core`, `string`, `char` (ASCII), `vec`, `fmt`, `math`, `collections` (`HashMap` and the five new containers), the `io` error types, file and stream handles and text helpers, the full `fs` module, `net` (plain TCP), `time`, `env`, `process::args` and the `error` trait are implemented; not implemented in 2.0.0 and planned for a later release: the `io` stream traits and `io::Result` alias, `process::exit`, the new iterator adapters, `[T]::get`/`first`/`last`, `Vec::retain`/`extend_from_slice`, iteration over slices and Unicode `char` classification; `use std::…` imports work, while qualified type names in type position do not resolve (`E0412`) and trait paths in `impl` blocks are rejected (`E0001`, import the trait instead) | Read the module page for what exists in 2.0.0; `net` is plain TCP without TLS, `time` reads the system clock with no time-zone database, every text parameter including `env::var` takes an owned `String`, and OS failures return a `Result` and never panic |
+| Standard library status | The `std` crate is implemented module by module in 2.1.0; the [standard library reference](../stdlib/README.md) marks every page *implemented* or *planned*. Remaining gaps in 2.1.0: `io` has the error types, `File` and the byte/text helpers but not the `Read`/`Write`/`Seek`/`BufRead` traits or `BufReader`; `fs` lacks `PathBuf`/`Path` and directory iteration; `net` is plain TCP without TLS, UDP, DNS or `SocketAddr`; `time` has the clocks, `Duration`, `Instant` and `SystemTime` but no time-zone database; there is no `Command`, `Ordering` or `FromUtf8Error`; `parse::<T>()` accepts only `i64` and `f64` targets in 2.1.0; iteration over `&[T]` and a few `str`/`Vec` helpers are still planned. `use std::…` imports work, while qualified type names in type position do not resolve (`E0412`) and trait paths in `impl` blocks are rejected (`E0001`, import the trait instead) | Read the module page for what exists in 2.1.0; OS failures return a `Result` and never panic |
 | Generic shapes | No `where` clauses, associated types, const generics, default type parameters, specialization or generic type aliases/constants | Write bounds inline; name the concrete types |
 | Generic checking | Generic bodies are late-checked once per instantiation; a never-used instantiation is never checked and its errors never appear; instantiating more than 128 levels deep is `E0275` | Instantiate the types you rely on; watch the recursion limit |
 | Monomorphization | Each instantiation is its own checked function and C function; generic code is not shared between instantiations | Keep the number of instantiations small |
 | Compiler scaling | Type checking one very large function is superlinear in its statement count: about 5,000 `let` statements take 1.1 s, 10,000 take 4.5 s, 20,000 take 17 s and 50,000 do not finish within a minute; a 100,000-element `vec![…]` literal is similarly slow | Split huge functions into helpers and build large vectors with a loop |
 | Expression nesting | The parser accepts at most 128 levels of nested expressions, types and patterns. Deeper code is rejected with `E0001` "this code is nested too deeply" (the compiler runs its recursive passes on a large stack so accepted programs cannot overflow it). Ordinary code is unaffected: 100-term arithmetic chains, 100 chained method calls and flat literals of 8,000 or more elements all compile | Split pathological machine-generated code into smaller statements or helpers |
-| Iterators | `.iter()` consumes a `Vec`; `rev`, `zip`, `chain`, `flat_map` are fixed by the 2.0 design but are not implemented in 2.0.0 and are planned for a later release; `for_each` and `size_hint` are not planned; there is no `into_iter`/`iter_mut`; iteration over `&[T]` is not implemented in 2.0.0; `collect` needs a known target type (`E0282`); `sum` supports `i64`/`f64` only (`E0277`) | Use the provided adapters; annotate `collect` results |
-| HashMap | Keys are limited to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and `char`; no `for`-loop iteration, no entry API and no `HashMap::from`; `get`/`values()` clone the value (`keys()` always clones the keys); printed order is slot order (deterministic for a given sequence of operations, but not insertion order and not guaranteed) | Use `keys()`/`values()` into a `Vec`; use `get_with` for non-cloneable values |
+| Iterators | `.iter()` consumes a `Vec`; there is no `into_iter`/`iter_mut`; iteration over `&[T]` is not implemented in 2.1.0; `size_hint` is not planned; `collect` needs a known target type (`E0282`); `sum` and `product` accept `i32`, `i64`, `usize` and `f64` items (`E0277` for any other item type) | Use the provided adapters; annotate `collect` results |
+| HashMap | Keys are limited to the integer types, `bool`, `String` and `char`; no `for`-loop iteration, no entry API and no `HashMap::from`; `get`/`values()` clone the value (`keys()` always clones the keys); printed order is slot order (deterministic for a given sequence of operations, but not insertion order and not guaranteed) | Use `keys()`/`values()` into a `Vec`; use `get_with` for non-cloneable values |
 | HashMap hashing | The hash is deterministic and non-cryptographic; it is not designed to resist adversarial inputs | Do not expose a map directly to untrusted keys |
 | Module files | A module is found only by the `name.ls` / `name/mod.ls` rule: no path attributes, no conditional compilation, no directory scan and no include mechanism; a module file must be valid UTF-8 (`E0583` otherwise) | Keep the conventional layout; rename or move files instead of annotating them |
 | Module cycles | The tree of `mod` declarations must be acyclic: circular module files are `E0001` | Move shared items down into a module that does not depend back |
@@ -217,17 +245,22 @@ later release.
 | Separate compilation | The whole crate graph is resolved, checked and emitted as one program on every build; there is no per-module or per-package incremental artifact | Rely on the build cache, which skips a whole unchanged program |
 | Function values | Function and closure values are move-only and have no `==` (`E0369`); `.clone()` on a value holding a closure shares the captured environment instead of copying it | Storing them in aggregates works since 1.5; clone when the shared environment is intended |
 
-## Not in version 2.0.0
+## Not in version 2.1.0
 
 The roadmap items that are still open:
 
 * references stored inside aggregates or captured by closures;
 * lifetime annotations and generic lifetimes;
 * array types (`[T; N]`);
+* loop labels (`'outer: loop` with `break 'outer`) and values out of `break`/`continue`;
 * `where` clauses, associated types, supertraits, generic methods, associated
   functions and const generics;
-* iterator adapters beyond `zip`, `chain`, `rev` and `flat_map`, and
-  `for_each`/`size_hint`;
+* operator traits, `derive` attributes, `Display`/`Debug`/`Default`/`From`/`Ord`/
+  `Hash` protocols, associated types on traits and `impl Trait`;
+* iterator adapters that need `&[T]` iteration, `size_hint`, `into_iter` and
+  `iter_mut`;
+* the `io` stream traits (`Read`/`Write`/`Seek`/`BufRead`), `BufReader` and
+  `PathBuf`/`Path`;
 * glob imports, restricted visibility (`pub(super)`, `pub(in path)`) and module
   aliases;
 * registry dependencies, git dependencies, workspaces, features, lockfiles and
@@ -239,8 +272,11 @@ The roadmap items that are still open:
 
 A plausible order for closing these gaps:
 
-* **v2.1** — a language server, a formatter and incremental compilation; array
-  types and the remaining trait and iterator surface as separate steps.
+* **v2.2** — loop labels, `break` values, partial moves (a `let` pattern
+  destructuring an aggregate currently copies it), references in aggregates and
+  the remaining standard-library system interfaces; array types and the trait
+  protocol surface as separate steps. Further out: a language server, a
+  formatter and incremental compilation.
 
 Items already delivered, intentionally no longer on the list:
 
@@ -299,16 +335,70 @@ Items already delivered, intentionally no longer on the list:
   `Drop`-containing tuple element or enum payload are accepted and the moved
   value is dropped exactly once; destructuring a `Drop` type's own fields by
   value stays `E0509` — **delivered in 2.0.0**;
-* iterator adapters `zip`, `chain`, `rev` and `flat_map` — **delivered in
-  2.0.0**.
+* iterator adapters `zip`, `chain`, `filter_map`, `take_while`,
+  `skip_while` and `step_by`, and the terminal operations `position`, `last`,
+  `nth`, `reduce`, `product`, `inspect` and `for_each` — **delivered in 2.1.0**;
+  `rev` and `flat_map` remain planned;
+* `i32` default integers, literal suffixes and `usize` lengths, indices and
+  counts — **delivered in 2.1.0**;
+* `&str` text parameters, the zero-allocation string-literal-to-`&str`
+  conversion and the `String + &str` concatenation rule — **delivered in
+  2.1.0**;
+* tuple structs, unit structs and effective `mut` parameters — **delivered in
+  2.1.0**;
+* `ParseIntError`/`ParseFloatError` and the typed `parse` surface, the new
+  iterator/`str`/`char` methods, `Option::or`/`xor`, `Result::unwrap_err`, and
+  the `error::Error` implementations — **delivered in 2.1.0**;
+* the 2.1 system types: `time::Duration`/`Instant`/`SystemTime` and the
+  `unix_epoch()` function, `env::VarError`, `net::Shutdown`, the `math`
+  constants, and the integer-shaped file and metadata return types —
+  **delivered in 2.1.0**.
 
-## Language and runtime in 2.0.0
+## Language and runtime in 2.1.0
 
-Version 2.0.0 is a **standard library and dynamic dispatch release**: it moves
-the standard library into a normal `std` crate, adds the types that library
-needs (trait objects, slices and `str`, `isize`/`usize`, default method bodies
-and `extern fn` intrinsics), and fills in the collections, I/O, filesystem,
-network, time, environment and process modules. It adds:
+Version 2.1.0 is a **Rust-alignment release**: it keeps the 2.0 standard-library
+crate and dynamic-dispatch surface and aligns the numeric and text defaults with
+Rust, filling in the standard library where 2.0 was thin. It adds:
+
+* **Default integers, literal suffixes and `usize` lengths.** An
+  unsuffixed integer literal is `i32` in ordinary context and `usize` where a
+  length, index, count or capacity is expected; a suffix picks any integer type
+  (`1i64`, `0xFFu8`, `1_000_000usize`, `1.5f32`) and an out-of-range literal is
+  rejected (`E0080`). `len()`, indexing, `find()` offsets, `count()`,
+  `enumerate()` and `Rc::strong_count()` return `usize`. See
+  [Types](04-types.md#integers) and [Lexical
+  structure](03-lexical-structure.md#integer-literals).
+* **`&str` text parameters and a single concatenation rule.** Read-only text
+  parameters of the standard library take `&str`, while constructors and
+  replacements keep returning `String`; a string literal in a `&str` position
+  becomes a statically allocated slice with no allocation, and a `String`
+  variable is passed as `&owned`. `String + &str` and `String += &str` are the
+  only concatenation forms. See [Slices and str](26-slices-and-str.md) and the
+  [standard library reference](../stdlib/README.md).
+* **Tuple and unit structs, and effective `mut` parameters.**
+  `struct Meters(i64);`, `struct Pair(i32, String);` and `struct Marker;` are
+  legal, with `.0` fields and matching patterns; `fn f(mut x: i64)` really
+  enables reassignment inside the function. See
+  [Structs](10-structs-enums-and-impl.md#tuple-and-unit-structs),
+  [Patterns](13-pattern-matching.md) and [Functions](09-functions.md).
+* **Typed parse errors and the new combinator surface.** `str::parse_i64` and
+  `str::parse_f64` return `Result<_, ParseIntError>` and
+  `Result<_, ParseFloatError>`, the generic `parse::<T>()` is available with
+  `i64` and `f64` as targets in 2.1.0, the iterator adapters, `str` and `char`
+  gain the 2.1 methods, `Option` gains `or`/`xor`, `Result` gains `unwrap_err`,
+  and `io::Error`/`env::VarError` implement `error::Error`. See the
+  [standard library reference](../stdlib/README.md).
+* **New system types.** `time` gains `Duration`, `Instant`, `SystemTime` and
+  `unix_epoch()` (the epoch is a function because a constant cannot have a
+  `SystemTime` type); `env` gains `VarError`; `net` gains `Shutdown`; `math` exposes
+  the `f64` constants; `File::read`/`write` return `Result<usize, Error>`,
+  `File::seek` returns `Result<u64, Error>`, `fs::Metadata::size()` returns
+  `u64` and `fs::Metadata::modified()` returns `Result<SystemTime, Error>`.
+  OS failures still return a `Result` and never panic.
+
+### The 2.0 foundation
+
+The 2.0 surface remains the base of 2.1.0:
 
 * **A standard library crate.** `stdlib/src/lib.ls` is a normal lsaca crate: its
   modules use the ordinary module rules, its root re-exports the prelude names
@@ -327,10 +417,12 @@ network, time, environment and process modules. It adds:
   `std` crate implements their methods. See [Slices and str](26-slices-and-str.md).
 * **Pointer-sized integers.** `isize` and `usize` are 64 bits on every supported
   target and behave like the other integer types for casts, comparison,
-  formatting and hash-map keys; literals still infer `i64`.
+  formatting and hash-map keys; since 2.1.0 `usize` is the length, index, count
+  and capacity type.
 * **The larger collections surface.** `HashSet` (insertion ordered),
   `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` join `HashMap`, and the
-  iterators gain `zip`, `chain`, `rev` and `flat_map`. See
+  iterators gain `zip`, `chain`, `filter_map`, `take_while`, `skip_while` and
+  `step_by`; `rev` and `flat_map` remain planned. See
   [Standard library reference](../stdlib/README.md).
 * **`extern fn` intrinsics.** The compiler's builtin operations are now declared
   in the `std` crate as body-less `extern fn` declarations implemented by
@@ -339,15 +431,17 @@ network, time, environment and process modules. It adds:
   the whole crate graph is still type-checked and emitted as one C project; the
   value ABI of the pre-2.0 types is unchanged.
 
-The language surface added in 2.0 is implemented in the 2.0.0
-compiler: `dyn` trait objects, slices and `str`, `isize`/`usize`, default method
-bodies and `extern fn` declarations all work, including trait-object dispatch,
+The 2.0 surface (`dyn` trait objects, slices and `str`, `isize`/`usize`, default
+method bodies, `extern fn` declarations) and the 2.1 surface (literal suffixes,
+`i32` defaults, `usize` lengths, `&str` parameters, tuple and unit structs,
+`mut` parameters, the new standard-library methods and error types) are
+implemented in the 2.1.0 compiler, including trait-object dispatch,
 `Box<dyn Trait>`/`Rc<dyn Trait>` coercion and the `&Vec<T>`/`&String`
 coercions (see [25-trait-objects](25-trait-objects.md) and
 [26-slices-and-str](26-slices-and-str.md)). Library gaps are listed module by
-module in the [standard library reference](../stdlib/README.md); the new
-iterator adapters, slice iteration, the `io` stream traits and a few `std`
-helpers are not implemented in 2.0.0 and are planned for a later release.
+module in the [standard library reference](../stdlib/README.md); slice
+iteration, the `io` stream traits and a few `std` helpers are not implemented in
+2.1.0 and are planned for a later release.
 
 The compiler and runtime organization keeps the v1.7 shape:
 
@@ -386,7 +480,7 @@ The compiler and runtime organization keeps the v1.7 shape:
   Qualified `std::…` paths work for functions, constructors and associated
   items, and `use std::…` imports work. Qualified type names in type position
   (`E0412`) and trait paths in `impl` blocks (`E0001`: import the trait and use
-  its single identifier) are known gaps in 2.0.0.
+  its single identifier) are known gaps in 2.1.0.
 
 Compile-time, runtime and memory measurements are republished with each
 release; see [Benchmarks](21-benchmarks.md), alongside the comparison with C,
@@ -394,40 +488,57 @@ Rust, Python and Node.
 
 ## Compatibility
 
-lsaca 2.0.0 is partly additive and partly a new surface: existing 1.7.0
-single-file programs and multi-file packages keep compiling, but the release
-reserves two keywords and adds syntax that was previously an error:
+lsaca 2.1.0 breaks programs that relied on 2.0's numeric and text defaults; the
+rest of the standard-library surface is additive. The main incompatibilities:
 
-* `dyn` and `extern` are now keywords, so code that used them as identifiers
-  must rename those bindings;
-* `extern fn` declarations are new; they are accepted only in the `std` crate
-  (user code is `E0001`), and an `extern fn` is not a first-class value
-  (`E0425`);
-* trait declarations may now give a method a default body; a trait that
-  previously had only signatures keeps compiling, and `impl` blocks may omit a
-  method with a default body;
-* `dyn Trait` is new type syntax, and `[T]`/`str` are new type forms; an unsized
-  type outside `Box`/`Rc`/`&`/`&mut` (or an array type) is `E0001`;
-* `isize` and `usize` join the integer types (with `as` casts, ranges and
-  formatting like the rest), while integer literals still infer `i64`;
-* the `std` crate is embedded in the compiler and its root re-exports the
-  prelude names; `use std::…` paths are new, and a user package named `std` is
-  rejected (`E0001`);
-* by-value destructuring of a `Drop`-containing tuple element or enum payload is
-  accepted again and drops the moved value exactly once (in 1.7.0 it was
-  rejected with `E0509`); destructuring a `Drop` type's own fields by value still
-  reports `E0509`;
-* new diagnostics for the new rules: `E0038` (trait not object-safe), `E0046`
-  (missing required trait method), `E0407` (method not in the trait), `E0053`
-  (trait method signature mismatch), `E0118` (impl on a builtin type, including
-  user `impl [T]`/`impl str`), and `E0369` for `==`/`<` on trait objects.
+* **Integer literals default to `i32`.** Code that let an unsuffixed literal or
+  a `0` initializer infer `i64` needs a suffix (`1i64`, `1_000_000_000i64`) or an
+  annotation, and an accumulator such as `let mut total = 0;` now counts in
+  `i32`.
+* **Lengths, indices and counts are `usize`.** `len()`, indexing, `find()`
+  offsets, `count()`, `enumerate()`, the `with_capacity` argument and the
+  truncation and swap arguments are `usize`; combine them with arithmetic
+  values through `as`.
+* **Text parameters take `&str`.** Standard-library methods that used to take a
+  `String` (`contains`, `starts_with`, `ends_with`, `find`, `split`,
+  `split_whitespace`, `trim_start`, `trim_end`, `replace`, `push_str`, …) now take
+  `&str`: pass a literal directly or `&owned` for a `String` variable. A string
+  literal in a `&str` position is sliced statically with no allocation.
+* **Owned text constructors stay owned.** `String::from` and `String::from_str`
+  return `String`, `replace` returns `String`, and concatenation is limited to
+  `String + &str` and `String += &str` (no `String + String`, no
+  `&str + &str`).
+* **New error types.** `str::parse_i64` and `str::parse_f64` return
+  `Result<_, ParseIntError>` and `Result<_, ParseFloatError>` instead of a
+  `String` error; `env::var` returns `Result<String, VarError>`; `io::Error` and
+  `env::VarError` implement `error::Error`.
+* **Time, file and network API shapes.** `time` gains
+  `Duration`/`Instant`/`SystemTime` and the epoch function `unix_epoch()`;
+  `File::read`/`write` return
+  `Result<usize, Error>`, `File::seek` returns `Result<u64, Error>`,
+  `fs::Metadata::size()` returns `u64`, `fs::Metadata::modified()` returns
+  `Result<SystemTime, Error>`, and `TcpStream::shutdown` takes a `Shutdown`
+  value.
+* **Tuple structs are legal syntax** (`struct Meters(i64);`) and `mut` on a
+  parameter now has an effect; both were previously an error or ignored.
+* **There are no `i128`/`u128` types**, and their literal suffixes are rejected
+  by the lexer.
+* **New diagnostics**: a literal that does not fit its type is `E0080`, and an
+  `i32`/`i64` used as an index or length is a type mismatch (`E0308`) — use
+  `as `usize`.
+
+The 2.0 changes (`dyn` and `extern` keywords, trait objects and slices, the
+embedded `std` crate, the new `E0038`/`E0046`/`E0407`/`E0053`/`E0118`/`E0369`
+diagnostics) still apply when upgrading directly from 1.7.0.
 
 ## Benchmarks
 
-The published tables carry the official **2.0.0** run — compile time, runtime and
-peak memory on the runtime workloads plus compile-only scaling workloads that cover
-multi-file crates and path-dependency packages, compared with C, Rust, Python and
-Node. See [Benchmarks](21-benchmarks.md).
+The published tables carry the official **2.1.0** run, measured on 2026-11-06:
+compile time, runtime and peak memory on the runtime workloads plus compile-only
+scaling workloads that cover multi-file crates and path-dependency packages,
+compared with C, Rust, Python and Node. The previous 2.0.0 run (2026-11-03) is kept
+in the results archive and is used for the explicit before/after comparison in the
+analysis. See [Benchmarks](21-benchmarks.md).
 
 ## What next
 

@@ -12,23 +12,37 @@
 //! builtin method table. Every sugar method consumes its receiver by value.
 
 use super::check::Checker;
-use super::itype::ITy;
+use super::itype::{ITy, VarKind};
 use super::tree::{TExpr, TExprKind};
 use crate::ast;
 use crate::span::Span;
+use crate::types::{FloatTy, IntTy};
 
 /// The method names resolved by the iterator sugar.
-pub const SUGAR_METHODS: [&str; 13] = [
+pub const SUGAR_METHODS: [&str; 26] = [
     "iter",
     "map",
     "filter",
+    "filter_map",
     "take",
+    "take_while",
     "skip",
+    "skip_while",
+    "step_by",
     "enumerate",
+    "inspect",
+    "zip",
+    "chain",
     "collect",
     "fold",
     "count",
+    "for_each",
+    "position",
+    "last",
+    "nth",
+    "reduce",
     "sum",
+    "product",
     "any",
     "all",
     "find",
@@ -52,6 +66,82 @@ impl<'a> Checker<'a> {
         self.validate_generic_bounds(&info.generics, &impl_args, span, info.module);
         let trait_args = self.trait_impl_args(impl_id, &impl_args)?;
         trait_args.first().cloned()
+    }
+
+    /// Report the usual E0061 arity error for a sugar method and type check
+    /// the supplied arguments so their own errors are still reported. Returns
+    /// false when the arity does not match.
+    fn sugar_arity(&mut self, expected: usize, args: &[ast::Expr], span: Span) -> bool {
+        if expected == args.len() {
+            return true;
+        }
+        self.error_code(
+            format!(
+                "this function takes {} argument(s) but {} were supplied",
+                expected,
+                args.len()
+            ),
+            span,
+            "E0061",
+        );
+        for arg in args {
+            let _ = self.check_expr(arg, None);
+        }
+        false
+    }
+
+    /// The element type of the second argument of .zip()/.chain(), together
+    /// with its resolved type. Reports E0277 when the argument does not
+    /// implement Iterator.
+    fn other_iterator_item(
+        &mut self,
+        other: &TExpr,
+        span: Span,
+        method: &str,
+    ) -> Option<(ITy, ITy)> {
+        let other_ty = self.infer.resolve(&other.ty);
+        match self.iterator_item_type(&other_ty, span) {
+            Some(item) => Some((item, other_ty)),
+            None => {
+                let described = self.describe_resolved(&other_ty);
+                self.error_code(
+                    format!(
+                        "the trait bound ({}: Iterator<_>) is not satisfied; .{}() needs an iterator argument",
+                        described, method
+                    ),
+                    span,
+                    "E0277",
+                );
+                None
+            }
+        }
+    }
+
+    /// The numeric specialization used by .sum()/.product().
+    ///
+    /// Unannotated integer literals take their i32 default; every other
+    /// supported numeric item type picks its matching helper. The returned
+    /// string is the helper suffix (i32/i64/usize/f64).
+    fn numeric_terminal_suffix(&mut self, item: &ITy) -> Option<&'static str> {
+        let resolved = self.infer.resolve(item);
+        match &resolved {
+            ITy::Int(IntTy::I32) => Some("i32"),
+            ITy::Int(IntTy::I64) => Some("i64"),
+            ITy::Int(IntTy::Usize) => Some("usize"),
+            ITy::Float(FloatTy::F64) => Some("f64"),
+            ITy::Var(id) => match self.infer.var_kind(*id) {
+                VarKind::IntLiteral => {
+                    let _ = self.infer.unify(&resolved, &ITy::i32());
+                    Some("i32")
+                }
+                VarKind::FloatLiteral => {
+                    let _ = self.infer.unify(&resolved, &ITy::f64());
+                    Some("f64")
+                }
+                VarKind::General => None,
+            },
+            _ => None,
+        }
     }
 
     /// Check an argument list for a sugar call. Reports the usual E0061 arity
@@ -118,7 +208,24 @@ impl<'a> Checker<'a> {
         span: Span,
         hint: Option<&ITy>,
     ) -> TExpr {
-        match self.instantiate_generic_fn(def_id, args, span) {
+        // Keep inference variables open while the surrounding method chain is
+        // still being checked: an expected type or a turbofish further out
+        // (for example `.collect::<Vec<i64>>()`) may still determine them.
+        // Literal variables fall back to their default type when the instance
+        // body is finally checked.
+        // A struct instance keeps its type arguments in the instance table,
+        // not in the ITy node, so both checks are required to notice an open
+        // argument (for example an iterator adapter over an unannotated
+        // vector literal).
+        let open = args
+            .iter()
+            .any(|arg| self.contains_unresolved(arg) || self.ty_has_open_args(arg));
+        let instantiated = if open {
+            self.instantiate_generic_fn_deferred(def_id, args, span)
+        } else {
+            self.instantiate_generic_fn(def_id, args, span)
+        };
+        match instantiated {
             Some(fn_id) => self.finish_sugar_call(fn_id, receiver, extra, span, hint),
             None => self.never_expr(span),
         }
@@ -196,9 +303,25 @@ impl<'a> Checker<'a> {
                     hint,
                 ))
             }
-            "filter" | "any" | "all" | "find" => {
+            "filter_map" => {
+                let def_id = self.prelude_fn("__lsaca_it_filter_map")?;
+                let u = self.infer.fresh_var();
+                let closure_ty = ITy::function(vec![item.clone()], ITy::option(u.clone()));
+                let extra = self.sugar_args(std::slice::from_ref(&closure_ty), args, span)?;
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, u, receiver_ty, closure_ty],
+                    receiver_expr,
+                    extra,
+                    span,
+                    hint,
+                ))
+            }
+            "filter" | "take_while" | "skip_while" | "any" | "all" | "find" => {
                 let name = match method {
                     "filter" => "__lsaca_it_filter",
+                    "take_while" => "__lsaca_it_take_while",
+                    "skip_while" => "__lsaca_it_skip_while",
                     "any" => "__lsaca_it_any",
                     "all" => "__lsaca_it_all",
                     _ => "__lsaca_it_find",
@@ -228,7 +351,19 @@ impl<'a> Checker<'a> {
                     "__lsaca_it_skip"
                 };
                 let def_id = self.prelude_fn(name)?;
-                let extra = self.sugar_args(&[ITy::i64()], args, span)?;
+                let extra = self.sugar_args(&[ITy::usize()], args, span)?;
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty],
+                    receiver_expr,
+                    extra,
+                    span,
+                    hint,
+                ))
+            }
+            "step_by" => {
+                let def_id = self.prelude_fn("__lsaca_it_step_by")?;
+                let extra = self.sugar_args(&[ITy::usize()], args, span)?;
                 Some(self.instantiate_sugar_fn(
                     def_id,
                     vec![item, receiver_ty],
@@ -248,6 +383,90 @@ impl<'a> Checker<'a> {
                     vec![item, receiver_ty],
                     receiver_expr,
                     Vec::new(),
+                    span,
+                    hint,
+                ))
+            }
+            "inspect" => {
+                let def_id = self.prelude_fn("__lsaca_it_inspect")?;
+                let observer_ty = ITy::function(
+                    vec![ITy::Ref {
+                        mutable: false,
+                        inner: Box::new(item.clone()),
+                    }],
+                    ITy::unit(),
+                );
+                let extra = self.sugar_args(std::slice::from_ref(&observer_ty), args, span)?;
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty, observer_ty],
+                    receiver_expr,
+                    extra,
+                    span,
+                    hint,
+                ))
+            }
+            "position" => {
+                let def_id = self.prelude_fn("__lsaca_it_position")?;
+                let pred_ty = ITy::function(vec![item.clone()], ITy::bool_());
+                let extra = self.sugar_args(std::slice::from_ref(&pred_ty), args, span)?;
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty, pred_ty],
+                    receiver_expr,
+                    extra,
+                    span,
+                    hint,
+                ))
+            }
+            "for_each" => {
+                let def_id = self.prelude_fn("__lsaca_it_for_each")?;
+                let callback_ty = ITy::function(vec![item.clone()], ITy::unit());
+                let extra = self.sugar_args(std::slice::from_ref(&callback_ty), args, span)?;
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty, callback_ty],
+                    receiver_expr,
+                    extra,
+                    span,
+                    hint,
+                ))
+            }
+            "reduce" => {
+                let def_id = self.prelude_fn("__lsaca_it_reduce")?;
+                let combine_ty = ITy::function(vec![item.clone(), item.clone()], item.clone());
+                let extra = self.sugar_args(std::slice::from_ref(&combine_ty), args, span)?;
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty, combine_ty],
+                    receiver_expr,
+                    extra,
+                    span,
+                    hint,
+                ))
+            }
+            "last" => {
+                let def_id = self.prelude_fn("__lsaca_it_last")?;
+                if self.sugar_args(&[], args, span).is_none() {
+                    return Some(self.never_expr(span));
+                }
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty],
+                    receiver_expr,
+                    Vec::new(),
+                    span,
+                    hint,
+                ))
+            }
+            "nth" => {
+                let def_id = self.prelude_fn("__lsaca_it_nth")?;
+                let extra = self.sugar_args(&[ITy::usize()], args, span)?;
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty],
+                    receiver_expr,
+                    extra,
                     span,
                     hint,
                 ))
@@ -311,6 +530,49 @@ impl<'a> Checker<'a> {
                     hint,
                 ))
             }
+            "zip" => {
+                let def_id = self.prelude_fn("__lsaca_it_zip")?;
+                if !self.sugar_arity(1, args, span) {
+                    return Some(self.never_expr(span));
+                }
+                let other = self.check_expr(&args[0], None);
+                let (other_item, other_ty) =
+                    match self.other_iterator_item(&other, args[0].span, method) {
+                        Some(pair) => pair,
+                        None => return Some(self.never_expr(span)),
+                    };
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, other_item, receiver_ty, other_ty],
+                    receiver_expr,
+                    vec![other],
+                    span,
+                    hint,
+                ))
+            }
+            "chain" => {
+                let def_id = self.prelude_fn("__lsaca_it_chain")?;
+                if !self.sugar_arity(1, args, span) {
+                    return Some(self.never_expr(span));
+                }
+                let other = self.check_expr(&args[0], None);
+                let (other_item, other_ty) =
+                    match self.other_iterator_item(&other, args[0].span, method) {
+                        Some(pair) => pair,
+                        None => return Some(self.never_expr(span)),
+                    };
+                if self.infer.unify(&item, &other_item).is_err() {
+                    self.report_mismatch(&item, &other_item, args[0].span);
+                }
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty, other_ty],
+                    receiver_expr,
+                    vec![other],
+                    span,
+                    hint,
+                ))
+            }
             "fold" => {
                 let def_id = self.prelude_fn("__lsaca_it_fold")?;
                 if args.len() != 2 {
@@ -342,17 +604,18 @@ impl<'a> Checker<'a> {
                     hint,
                 ))
             }
-            "sum" => {
-                let resolved_item = self.infer.resolve(&item);
-                let name = match &resolved_item {
-                    ITy::Int(crate::types::IntTy::I64) => "__lsaca_it_sum_i64",
-                    ITy::Float(crate::types::FloatTy::F64) => "__lsaca_it_sum_f64",
-                    _ => {
+            "sum" | "product" => {
+                let suffix = match self.numeric_terminal_suffix(&item) {
+                    Some(suffix) => suffix,
+                    None => {
+                        let resolved_item = self.infer.resolve(&item);
                         let described = self.describe_resolved(&resolved_item);
                         self.error_code(
                             format!(
-                                "cannot sum an iterator of type {}; .sum() is only supported for iterators of i64 or f64",
-                                described
+                                "cannot {} an iterator of type {}; .{}() is only supported for iterators of i32, i64, usize or f64",
+                                if method == "sum" { "sum" } else { "multiply" },
+                                described,
+                                method
                             ),
                             method_span,
                             "E0277",
@@ -363,7 +626,8 @@ impl<'a> Checker<'a> {
                         return Some(self.never_expr(span));
                     }
                 };
-                let def_id = self.prelude_fn(name)?;
+                let name = format!("__lsaca_it_{}_{}", method, suffix);
+                let def_id = self.prelude_fn(&name)?;
                 if self.sugar_args(&[], args, span).is_none() {
                     return Some(self.never_expr(span));
                 }

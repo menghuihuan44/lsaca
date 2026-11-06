@@ -1,5 +1,5 @@
 // The try operator forwards the Ok payload and any Err value.
-fn parse_plus(text: String) -> Result<i64, String> {
+fn parse_plus(text: String) -> Result<i64, ParseIntError> {
     let value = text.parse_i64()?;
     Ok(value + 1)
 }

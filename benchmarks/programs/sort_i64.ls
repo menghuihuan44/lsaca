@@ -29,20 +29,20 @@ fn main() {
             continue;
         }
         let mid = lo + (hi - lo) / 2;
-        let pivot = values[mid];
+        let pivot = values[mid as usize];
         let mut left = lo;
         let mut right = hi;
         while left <= right {
-            while values[left] < pivot {
+            while values[left as usize] < pivot {
                 left += 1;
             }
-            while values[right] > pivot {
+            while values[right as usize] > pivot {
                 right -= 1;
             }
             if left <= right {
-                let tmp = values[left];
-                values[left] = values[right];
-                values[right] = tmp;
+                let tmp = values[left as usize];
+                values[left as usize] = values[right as usize];
+                values[right as usize] = tmp;
                 left += 1;
                 right -= 1;
             }
@@ -58,7 +58,7 @@ fn main() {
     }
 
     let first = values[0];
-    let last = values[n - 1];
+    let last = values[(n - 1) as usize];
     let mut sum: i64 = 0;
     for v in values {
         sum += v;

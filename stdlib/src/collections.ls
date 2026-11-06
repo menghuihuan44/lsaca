@@ -8,10 +8,13 @@
 //
 // All containers are pure lsaca code. The ordering containers require the key
 // type K to support ==, < and > (the language defers generic comparisons to the
-// instantiation), so instantiate them with i64, u64, isize, usize or String.
-// The clone based methods require K (and V) to be cloneable, which the compiler
-// checks when the generic impl is instantiated.
-
+// instantiation), so instantiate them with i32, i64, u64, isize, usize or
+// String. The clone based methods require K (and V) to be cloneable, which the
+// compiler checks when the generic impl is instantiated.
+//
+// Since 2.1.0 the lengths, capacities and positions are usize like the rest of
+// the standard library, so len() and get() use the language's index type.
+//
 /// An insertion ordered set of unique values, backed by a hash map plus a
 /// vector that preserves insertion order.
 pub struct HashSet<K> {
@@ -57,7 +60,7 @@ impl<K> HashSet<K> {
     }
 
     /// The number of values in the set.
-    pub fn len(&self) -> i64 {
+    pub fn len(&self) -> usize {
         return self.order.len();
     }
 
@@ -145,7 +148,7 @@ impl<K> BTreeSet<K> {
 
     /// Inserts a value and returns true when it was not present yet.
     pub fn insert(&mut self, key: K) -> bool {
-        let mut index = 0;
+        let mut index: usize = 0;
         while index < self.items.len() {
             let current = self.items.get(index).unwrap().clone();
             if current == key {
@@ -162,7 +165,7 @@ impl<K> BTreeSet<K> {
 
     /// Returns true when the set contains the value.
     pub fn contains(&self, key: K) -> bool {
-        let mut index = 0;
+        let mut index: usize = 0;
         while index < self.items.len() {
             let current = self.items.get(index).unwrap().clone();
             if current == key {
@@ -178,25 +181,25 @@ impl<K> BTreeSet<K> {
 
     /// Removes a value and returns true when it was present.
     pub fn remove(&mut self, key: K) -> bool {
-        let mut found = -1;
-        let mut index = 0;
+        let mut index: usize = 0;
+        let mut present: bool = false;
         while index < self.items.len() {
             let current = self.items.get(index).unwrap().clone();
             if current == key {
-                found = index;
+                present = true;
                 break;
             }
             index = index + 1;
         }
-        if found < 0 {
+        if !present {
             return false;
         }
-        self.items.remove(found);
+        self.items.remove(index);
         return true;
     }
 
     /// The number of values in the set.
-    pub fn len(&self) -> i64 {
+    pub fn len(&self) -> usize {
         return self.items.len();
     }
 
@@ -245,8 +248,8 @@ impl<K, V> BTreeMap<K, V> {
     }
 
     /// Finds the insertion position of key and whether it is already present.
-    fn find(&self, key: K) -> (i64, bool) {
-        let mut index = 0;
+    fn find(&self, key: K) -> (usize, bool) {
+        let mut index: usize = 0;
         while index < self.keys.len() {
             let current = self.keys.get(index).unwrap().clone();
             if current == key {
@@ -263,7 +266,7 @@ impl<K, V> BTreeMap<K, V> {
     /// Inserts a value, returning the previous value when the key was present.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let position = self.find(key.clone());
-        let index = position.0;
+        let index: usize = position.0;
         if position.1 {
             let old = self.values.remove(index);
             self.values.insert(index, value);
@@ -293,7 +296,7 @@ impl<K, V> BTreeMap<K, V> {
     pub fn remove(&mut self, key: K) -> Option<V> {
         let position = self.find(key);
         if position.1 {
-            let index = position.0;
+            let index: usize = position.0;
             self.keys.remove(index);
             return Some(self.values.remove(index));
         }
@@ -301,7 +304,7 @@ impl<K, V> BTreeMap<K, V> {
     }
 
     /// The number of entries in the map.
-    pub fn len(&self) -> i64 {
+    pub fn len(&self) -> usize {
         return self.keys.len();
     }
 
@@ -370,7 +373,7 @@ impl<T> VecDeque<T> {
     }
 
     /// The number of values in the queue.
-    pub fn len(&self) -> i64 {
+    pub fn len(&self) -> usize {
         return self.items.len();
     }
 
@@ -380,8 +383,8 @@ impl<T> VecDeque<T> {
     }
 
     /// The value at the given position counted from the front.
-    pub fn get(&self, index: i64) -> Option<T> {
-        if index < 0 || index >= self.items.len() {
+    pub fn get(&self, index: usize) -> Option<T> {
+        if index >= self.items.len() {
             return None;
         }
         return Some(self.items.get(index).unwrap().clone());
@@ -405,7 +408,7 @@ impl<T> BinaryHeap<T> {
     }
 
     /// The number of values in the heap.
-    pub fn len(&self) -> i64 {
+    pub fn len(&self) -> usize {
         return self.items.len();
     }
 
@@ -421,7 +424,7 @@ impl<T> BinaryHeap<T> {
 
     /// Inserts a value.
     pub fn push(&mut self, value: T) {
-        let mut index = 0;
+        let mut index: usize = 0;
         while index < self.items.len() {
             let current = self.items.get(index).unwrap().clone();
             if current < value {

@@ -52,7 +52,7 @@ impl Counter {
     }
 
     pub fn distinct(&self) -> i64 {
-        self.counts.len()
+        self.counts.len() as i64
     }
 
     pub fn most_common_count(&self) -> i64 {
@@ -109,7 +109,7 @@ impl Counter {
         for key in keys {
             total += key.len();
         }
-        total
+        total as i64
     }
 
     pub fn checksum(&self) -> i64 {
@@ -117,7 +117,7 @@ impl Counter {
         let keys = self.counts.keys();
         for key in keys {
             let count = self.counts.get(key).unwrap();
-            total += count * 31 + key.len();
+            total += count * 31 + key.len() as i64;
         }
         total % MODULUS
     }
@@ -205,7 +205,7 @@ pub fn lookup_checksum(table: &HashMap<String, i64>) -> i64 {
     let keys = table.keys();
     for key in keys {
         let value = table.get(key).unwrap();
-        total += value * 31 + key.len();
+        total += value * 31 + key.len() as i64;
     }
     total % MODULUS
 }
@@ -231,7 +231,7 @@ pub fn int_table_total(table: &HashMap<i64, i64>) -> i64 {
 }
 
 pub fn int_table_distinct(table: &HashMap<i64, i64>) -> i64 {
-    table.len()
+    table.len() as i64
 }
 
 pub fn string_table(entries: i64) -> HashMap<String, String> {
@@ -253,11 +253,11 @@ pub fn string_table_key_length(table: &HashMap<String, String>) -> i64 {
     for key in keys {
         total += key.len();
     }
-    total
+    total as i64
 }
 
 pub fn table_size(table: &HashMap<i64, i64>) -> i64 {
-    table.len()
+    table.len() as i64
 }
 
 pub fn checksum(seed: i64) -> i64 {
@@ -272,7 +272,7 @@ pub fn checksum(seed: i64) -> i64 {
         String::from("blue"),
     ];
     let frequencies = word_frequencies(words);
-    acc = (acc * 31 + frequencies.len()) % MODULUS;
+    acc = (acc * 31 + frequencies.len() as i64) % MODULUS;
     let red = String::from("red");
     acc = (acc * 31 + lookup_or(&frequencies, &red, 0)) % MODULUS;
 
@@ -290,7 +290,7 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + counter.total()) % MODULUS;
     acc = (acc * 31 + counter.distinct()) % MODULUS;
     acc = (acc * 31 + counter.most_common_count()) % MODULUS;
-    acc = (acc * 31 + counter.most_common_key().len()) % MODULUS;
+    acc = (acc * 31 + counter.most_common_key().len() as i64) % MODULUS;
     acc = (acc * 31 + counter.keys_above(1)) % MODULUS;
     acc = (acc * 31 + counter.frequency_squares()) % MODULUS;
     acc = (acc * 31 + counter.key_length_total()) % MODULUS;
@@ -308,7 +308,7 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + int_table_checksum(&buckets)) % MODULUS;
 
     let table = build_lookup(40);
-    acc = (acc * 31 + table.len()) % MODULUS;
+    acc = (acc * 31 + table.len() as i64) % MODULUS;
     acc = (acc * 31 + lookup_total(&table)) % MODULUS;
     acc = (acc * 31 + lookup_squares(&table)) % MODULUS;
     acc = (acc * 31 + lookup_checksum(&table)) % MODULUS;
@@ -318,7 +318,7 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + lookup_or(&table, &unknown, 5)) % MODULUS;
 
     let names = string_table(12);
-    acc = (acc * 31 + names.len()) % MODULUS;
+    acc = (acc * 31 + names.len() as i64) % MODULUS;
     acc = (acc * 31 + string_table_key_length(&names)) % MODULUS;
 
     acc % MODULUS

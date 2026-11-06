@@ -11,6 +11,8 @@ dynamic dispatch through trait objects as well — `Box<dyn Trait>`, `Rc<dyn
 Trait>` and `&dyn Trait` — but that is a separate mechanism, covered on
 [Trait objects](25-trait-objects.md); generics themselves stay static.
 
+The rules on this page describe lsaca 2.1.0.
+
 ## Generic structs
 
 A struct declares its type parameters after its name:
@@ -44,6 +46,16 @@ hold any value type, including move-only values such as `String` and `Vec<T>`.
 The struct becomes move-only or Copy according to the same rules as any other
 struct: `Pair<i64>` is Copy, `Pair<String>` is move-only.
 
+Since 2.1.0 a generic type can also be declared in tuple-struct form:
+
+```rust
+struct Pair<T>(T, T);
+```
+
+Its fields are `.0` and `.1` and it is constructed as `Pair(1, 2)`; parameter
+and field rules are the same as for a named struct (see [Structs, enums and
+impl](10-structs-enums-and-impl.md#tuple-and-unit-structs)).
+
 ## Generic functions
 
 Type parameters on a function are inferred from the arguments or written with
@@ -60,7 +72,7 @@ fn pair<T>(first: T, second: T) -> Pair<T> {
 }
 
 fn main() {
-    let numbers: Pair<i64> = pair(1, 2);
+    let numbers: Pair<i64> = pair(1i64, 2i64);
     let words: Pair<String> = pair(String::from("a"), String::from("b"));
     println!("{} {}", numbers.first, numbers.second);
     println!("{} {}", words.first, words.second);
@@ -387,7 +399,7 @@ fn apply_twice<F: Fn(i64) -> i64>(f: F, value: i64) -> i64 {
 }
 
 fn main() {
-    let not_callable = 5;
+    let not_callable: i64 = 5;
     println!("{}", apply_twice(not_callable, 1));
 }
 ```
@@ -434,7 +446,8 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 ## Summary
 
 * Structs, enums, functions, inherent impls and trait impls can be generic with
-  `<T>` parameter lists and `: Bound` bounds.
+  `<T>` parameter lists and `: Bound` bounds; since 2.1.0 a generic struct may
+  also be a tuple or unit struct.
 * `Self` and `Self::new(...)` / `Self { ... }` work inside generic impls.
 * Types are inferred from arguments and context, or named with the turbofish
   form `pair::<i64>(...)`.

@@ -7,6 +7,6 @@ fn main() {
     let shouted = words.iter().map(|word| word + "!").collect::<Vec<String>>();
     println!("{:?}", shouted);
 
-    let evens: Vec<i64> = vec![1, 2, 3, 4, 5, 6].iter().filter(|n| *n % 2 == 0).collect();
+    let evens: Vec<i64> = vec![1i64, 2, 3, 4, 5, 6].iter().filter(|n| *n % 2 == 0).collect();
     println!("{:?}", evens);
 }

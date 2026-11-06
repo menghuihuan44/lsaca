@@ -4,7 +4,7 @@
 
 fn main() {
     let path: String = String::from("fs_basic_scratch.txt");
-    match std::fs::write(path.clone(), String::from("hello file")) {
+    match std::fs::write(&path, "hello file") {
         Ok(unit) => {
             println!("write ok");
         }
@@ -12,7 +12,7 @@ fn main() {
             println!("write failed");
         }
     }
-    match std::fs::read_to_string(path.clone()) {
+    match std::fs::read_to_string(&path) {
         Ok(text) => {
             println!("read: {}", text);
         }
@@ -20,7 +20,7 @@ fn main() {
             println!("read failed");
         }
     }
-    match std::fs::read_to_string(String::from("fs_basic_missing.txt")) {
+    match std::fs::read_to_string("fs_basic_missing.txt") {
         Ok(text) => {
             println!("unexpected {}", text);
         }

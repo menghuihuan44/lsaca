@@ -1,9 +1,13 @@
 //! The standard-library prelude: lsaca source compiled into every program.
 //!
-//! The prelude is written in lsaca itself (see `prelude.ls` next to this
-//! file) and parsed once per process. It provides the `Iterator` trait and the
-//! lazy iterator adapters that the compiler's method sugar lowers to, so
-//! ordinary library code can be written in the language it serves.
+//! The prelude is written in lsaca itself: it is the standard library's
+//! iterator module (`stdlib/src/iter.ls`), embedded here as text and parsed
+//! once per process. It provides the `Iterator` trait and the lazy iterator
+//! adapters that the compiler's method sugar lowers to, so ordinary library
+//! code can be written in the language it serves. The compiler used to keep a
+//! byte-identical copy of that module named `prelude.ls`; embedding the
+//! standard-library file directly removes the copy, so the prelude and the
+//! shipped library can never drift apart.
 //!
 //! Every span of the parsed prelude program is rewritten to `Span::empty(0)`
 //! so prelude-origin diagnostics and generated location information never point
@@ -21,8 +25,8 @@ use crate::span::{SourceFile, Span};
 /// The name reported for the synthetic prelude source file.
 pub const FILE_NAME: &str = "<lsaca prelude>";
 
-/// The prelude source code.
-pub const SOURCE: &str = include_str!("prelude.ls");
+/// The prelude source code: the embedded standard library iterator module.
+pub const SOURCE: &str = include_str!("../../../stdlib/src/iter.ls");
 
 /// The parsed prelude program, parsed on first use and cached afterwards.
 ///

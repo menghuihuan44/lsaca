@@ -22,6 +22,14 @@ Unlike `Vec`, the key type is restricted: it must be one of `i64`, `u64`,
 value type, including move-only types and types that implement `Drop`. The
 pointer-sized integer types hash like the other integer types.
 
+The list is exhaustive: in particular `i32` is not a key type, even though it is
+the default integer type since 2.1.0, and neither are `i8`, `i16`, `u8`, `u16`
+or `u32`. A map declared with one of those keys is rejected with `E0277`, whose
+diagnostic reads "HashMap keys must be one of i64, u64, isize, usize, bool, char
+or String, found i32". Use `i64` (or another listed integer type) as the key and
+let the context choose it for unsuffixed literals: `counts.insert(1, 1)` on a
+`HashMap<i64, i64>` stores an `i64` key.
+
 ## Creating a map
 
 `HashMap::new()` is the only associated function. The type arguments come from
@@ -73,7 +81,7 @@ type arguments, the compiler reports `E0282`.
 | `get_with(key, f)` | `→ Option<U>` | copies the key argument; `f` has type `Fn(&V) -> U` and is called with a reference to the stored value |
 | `contains_key(key)` | `→ bool` | copies the key argument |
 | `remove(key)` | `→ Option<V>` | copies the key argument; moves the stored value out of the map |
-| `len()` | `→ i64` | number of entries |
+| `len()` | `→ usize` | number of entries |
 | `is_empty()` | `→ bool` | true when the map has no entries |
 | `clear()` | `()` | removes every entry |
 | `keys()` | `→ Vec<K>` | clones every key into a vector |
@@ -386,7 +394,8 @@ lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
 
 ## No for-loop iteration
 
-A `HashMap` cannot be iterated with `for` in 1.7.0: it does not implement
+A `HashMap` cannot be iterated with `for` in 1.7.0, and 2.1.0 does not add
+one either: it does not implement
 `Iterator<T>`. Use `keys()` or `values()` and iterate the resulting vector:
 
 ```ls,compile-fail
@@ -412,7 +421,7 @@ error[E0277]: cannot iterate over a value of type HashMap<i64, i64>; for loops r
 lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
-## Known limitations in 2.0.0
+## Known limitations in 2.1.0
 
 * Key types are limited to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and
   `char`; user structs, enums and other types cannot be keys.
@@ -446,7 +455,7 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 * `insert`, `remove` and `clear` need a mutable binding.
 * `==` compares contents, ignoring insertion order; `{}` and `{:?}` print the
   entries in slot order.
-* There is no `for`-loop iteration over a map in 2.0.0 either.
+* There is no `for`-loop iteration over a map in 2.1.0 either.
 
 ## What next
 

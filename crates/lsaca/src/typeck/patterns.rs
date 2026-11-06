@@ -6,10 +6,12 @@ use std::collections::HashMap;
 use super::check::Checker;
 use super::items::TypeKey;
 use super::itype::ITy;
+use super::modules::DefRef;
 use super::tree::{TLit, TPat, TPatKind};
 use crate::ast::{self, Pattern, PatternKind};
 use crate::diag::Diagnostic;
 use crate::span::Span;
+use crate::types::{FloatTy, IntTy};
 
 /// A binding introduced by a pattern.
 #[derive(Clone, Debug)]
@@ -163,6 +165,23 @@ impl<'a> Checker<'a> {
         if let Some(const_id) = self.lookup_const(name) {
             return self.check_const_pattern(const_id, &pointee, span);
         }
+        // A plain identifier is a unit struct pattern when the name resolves to
+        // a unit struct: the pattern matches that value instead of binding it.
+        if let Some(id) = self.lookup_struct(name)
+            && self.structs[id].unit
+        {
+            let struct_ty = ITy::Struct(id);
+            self.unify_or_report(expected, &struct_ty, span);
+            return TPat::new(
+                struct_ty,
+                TPatKind::Struct {
+                    struct_id: id,
+                    fields: Vec::new(),
+                    has_rest: false,
+                },
+                span,
+            );
+        }
         if let Some(aggregate) = self.pattern_drop_hook_stack.last().cloned() {
             // The value being destructured has its own `impl Drop` hook: Rust
             // forbids moving any non-Copy part out of it in a pattern. Copy
@@ -256,13 +275,49 @@ impl<'a> Checker<'a> {
 
     fn check_literal_pattern(&mut self, lit: &ast::Lit, expected: &ITy, span: Span) -> TPat {
         let checked_lit = match lit {
-            ast::Lit::Int { value, raw } => {
-                let ty = self.infer.int_literal(*value, raw.clone(), span);
+            ast::Lit::Int { value, raw, suffix } => {
+                let ty = match suffix.as_deref() {
+                    Some(suffix) => match IntTy::from_name(suffix) {
+                        Some(int_ty) => self.infer.int_literal_typed(
+                            ITy::Int(int_ty),
+                            *value,
+                            raw.clone(),
+                            span,
+                        ),
+                        None => {
+                            self.error_code(
+                                format!("invalid suffix {} on numeric literal", suffix),
+                                span,
+                                "E0001",
+                            );
+                            self.infer.int_literal(*value, raw.clone(), span)
+                        }
+                    },
+                    None => self.infer.int_literal(*value, raw.clone(), span),
+                };
                 self.unify_or_report(expected, &ty, span);
                 TLit::Int(*value)
             }
-            ast::Lit::Float { value, raw } => {
-                let ty = self.infer.float_literal(*value, raw.clone(), span);
+            ast::Lit::Float { value, raw, suffix } => {
+                let ty = match suffix.as_deref() {
+                    Some(suffix) => match FloatTy::from_name(suffix) {
+                        Some(float_ty) => self.infer.float_literal_typed(
+                            ITy::Float(float_ty),
+                            *value,
+                            raw.clone(),
+                            span,
+                        ),
+                        None => {
+                            self.error_code(
+                                format!("invalid suffix {} on numeric literal", suffix),
+                                span,
+                                "E0001",
+                            );
+                            self.infer.float_literal(*value, raw.clone(), span)
+                        }
+                    },
+                    None => self.infer.float_literal(*value, raw.clone(), span),
+                };
                 self.unify_or_report(expected, &ty, span);
                 TLit::Float(*value)
             }
@@ -465,7 +520,13 @@ impl<'a> Checker<'a> {
             Some("None") => self.check_option_none(args, expected, span),
             Some("Ok") => self.check_result_ok(args, expected, span, overrides),
             Some("Err") => self.check_result_err(args, expected, span, overrides),
-            _ => self.check_enum_variant_pattern(path, args, expected, span, overrides),
+            _ => {
+                if self.path_names_struct(path) {
+                    self.check_tuple_struct_pattern(path, args, expected, span, overrides)
+                } else {
+                    self.check_enum_variant_pattern(path, args, expected, span, overrides)
+                }
+            }
         }
     }
 
@@ -831,6 +892,96 @@ impl<'a> Checker<'a> {
             checked.push(checked_alt);
         }
         TPat::new(expected.clone(), TPatKind::Or(checked), span)
+    }
+
+    /// Whether a path in a pattern names a struct type, as opposed to an enum
+    /// variant (or an unknown name). Module-qualified paths resolve their module
+    /// prefix quietly so enum patterns keep their existing diagnostics.
+    fn path_names_struct(&mut self, path: &ast::PathExpr) -> bool {
+        let last = path.segments.len() - 1;
+        let name = path.segments[last].name.clone();
+        if path.segments.len() > 1 {
+            if let Some((module, consumed)) = self.resolve_path_prefix(path, last, false)
+                && consumed == last
+            {
+                return matches!(
+                    self.lookup_type_in(module, &name)
+                        .map(|binding| binding.def),
+                    Some(DefRef::Struct(_)) | Some(DefRef::GenericStruct(_))
+                );
+            }
+            return false;
+        }
+        if name == "Self" {
+            return self.current_self_key().is_some();
+        }
+        matches!(
+            self.lookup_type_scoped(&name).map(|binding| binding.def),
+            Some(DefRef::Struct(_)) | Some(DefRef::GenericStruct(_))
+        )
+    }
+
+    /// Check a positional pattern against a tuple (or unit) struct. The struct
+    /// fields are matched in declaration order; a named struct cannot be
+    /// matched positionally.
+    fn check_tuple_struct_pattern(
+        &mut self,
+        path: &ast::PathExpr,
+        args: &[Pattern],
+        expected: &ITy,
+        span: Span,
+        overrides: Option<&HashMap<String, BindingInfo>>,
+    ) -> TPat {
+        let struct_id = match self.resolve_pattern_struct(path, expected, span) {
+            Some(id) => id,
+            None => return TPat::new(expected.clone(), TPatKind::Wild, span),
+        };
+        self.ensure_struct_fields(struct_id);
+        let struct_ty = ITy::Struct(struct_id);
+        self.unify_or_report(expected, &struct_ty, span);
+        let struct_fields = self.struct_fields(struct_id);
+        let positional = self
+            .structs
+            .get(struct_id)
+            .map(|info| info.tuple || info.unit)
+            .unwrap_or(false);
+        if !positional {
+            let struct_name = self.struct_name(struct_id);
+            self.error_code(
+                format!(
+                    "expected named fields in a pattern for struct {}, found a tuple struct pattern",
+                    struct_name
+                ),
+                span,
+                "E0532",
+            );
+        }
+        if struct_fields.len() != args.len() {
+            self.error_code(
+                format!(
+                    "this pattern expects {} field(s) but {} were supplied",
+                    struct_fields.len(),
+                    args.len()
+                ),
+                span,
+                "E0023",
+            );
+        }
+        let mut checked = Vec::new();
+        for (index, (arg, field)) in args.iter().zip(struct_fields.iter()).enumerate() {
+            let field_ty = field.2.clone();
+            let child = self.check_pattern_inner(arg, &field_ty, overrides);
+            checked.push((index, child));
+        }
+        TPat::new(
+            struct_ty,
+            TPatKind::Struct {
+                struct_id,
+                fields: checked,
+                has_rest: false,
+            },
+            span,
+        )
     }
 
     fn resolve_pattern_struct(

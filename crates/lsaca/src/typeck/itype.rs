@@ -67,6 +67,14 @@ impl ITy {
         ITy::Int(IntTy::I64)
     }
 
+    pub fn i32() -> ITy {
+        ITy::Int(IntTy::I32)
+    }
+
+    pub fn usize() -> ITy {
+        ITy::Int(IntTy::Usize)
+    }
+
     pub fn f64() -> ITy {
         ITy::Float(FloatTy::F64)
     }
@@ -236,6 +244,29 @@ impl Infer {
         if let ITy::Var(id) = ty {
             self.vars[id as usize].kind = VarKind::FloatLiteral;
         }
+        self.float_checks.push(FloatLitCheck {
+            ty: ty.clone(),
+            value,
+            raw,
+            span,
+        });
+        ty
+    }
+
+    /// Record a range check for a literal whose type is already known because
+    /// it carried an explicit type suffix (for example 255u8).
+    pub fn int_literal_typed(&mut self, ty: ITy, value: i128, raw: String, span: Span) -> ITy {
+        self.int_checks.push(IntLitCheck {
+            ty: ty.clone(),
+            value,
+            raw,
+            span,
+        });
+        ty
+    }
+
+    /// Record a range check for a float literal with an explicit suffix.
+    pub fn float_literal_typed(&mut self, ty: ITy, value: f64, raw: String, span: Span) -> ITy {
         self.float_checks.push(FloatLitCheck {
             ty: ty.clone(),
             value,
@@ -477,7 +508,7 @@ impl Infer {
             }
             match state.kind {
                 VarKind::General => {}
-                VarKind::IntLiteral => state.value = Some(ITy::i64()),
+                VarKind::IntLiteral => state.value = Some(ITy::i32()),
                 VarKind::FloatLiteral => state.value = Some(ITy::f64()),
             }
         }

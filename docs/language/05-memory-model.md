@@ -21,7 +21,10 @@ Unicode](22-characters-and-unicode.md). Version 2.0 adds unsized values that
 only exist behind a pointer — trait objects (`Box<dyn Trait>`, `Rc<dyn Trait>`,
 `&dyn Trait`) and slices and `str` (`&[T]`, `&str`) — plus the pointer-sized
 integer types `isize`/`usize`; ownership, moves and ORC apply to what the
-pointer refers to.
+pointer refers to. Version 2.1 changes values, not ownership: a bare integer
+literal defaults to `i32`, lengths, indices, counts and capacities are `usize`,
+and standard-library text parameters take `&str`; existing moves, clones and
+drops behave exactly as before.
 
 This page is the authoritative description of ownership, moves, `.clone()`,
 `Drop`, copy-on-write mutation, `Rc<T>`, `Box<T>`, iterator ownership,
@@ -385,7 +388,7 @@ vector. The iterator is an ordinary move-only value: it lives in a local, is
 passed and returned like any value, and releases its vector (and its elements)
 when it is dropped. Each adapter in a chain such as
 `values.iter().filter(...).map(...)` creates a new iterator value, and a terminal
-operation (`collect`, `fold`, `count`, `sum`, `any`, `all`, `find`) consumes the
+operation (such as `collect`, `fold`, `sum` or `count`) consumes the
 chain and produces an ordinary value. A `for` loop over an iterator releases it
 at loop exit. See [Iterators](19-iterators.md).
 
@@ -411,7 +414,8 @@ invariant is part of the value's representation: every constructor, mutation
 and substring operation either preserves it or rejects the input, so a `String`
 never contains invalid bytes. Lengths and offsets stay byte-based (`len`,
 `find`, `substring`), and the character-oriented methods (`char_count`,
-`chars`, `char_at`) count Unicode scalar values; see
+`chars`, `char_at`) count Unicode scalar values; since 2.1.0 every length,
+offset, count and capacity is a `usize`. See
 [Characters and Unicode](22-characters-and-unicode.md).
 
 Acyclic refcounted values are freed deterministically, one allocation at a time,
@@ -433,7 +437,7 @@ The API is small:
 | `r.clone()` | Another handle to the same cell; the reference count grows. |
 | `r.get()` | Read the payload (returns an owned copy of it). |
 | `r.set(v)` | Replace the payload with `v` (moved in); releases the old payload. Works on an immutable binding; the cell is mutable even though the binding is not. |
-| `r.strong_count()` | Number of live handles to the cell, including `r` itself. |
+| `r.strong_count()` | Number of live handles to the cell, including `r` itself. Returns `usize`. |
 
 Notes:
 
@@ -704,7 +708,12 @@ They are produced by coercion (`&Vec<T>` to `&[T]`, `&mut Vec<T>` to
 `&mut [T]`, `&String` to `&str`, `&mut String` to `&mut str`, `&T` to
 `&dyn Trait`) or by taking a slice with `&values[1..3]`; copying one copies the
 two words and never touches a reference count, and none of them can be stored
-inside an aggregate. See [Slices and str](26-slices-and-str.md).
+inside an aggregate. Since 2.1.0 a string literal used where a `&str` is
+expected — `greet("hello")`, `s.contains("x")`, `let t: &str = "x";` — is a
+**static slice**: the bytes live in the program image, the two-word view
+points at them, and no `String` is allocated or reference-counted. An owned
+`String` value still has to be borrowed explicitly (`&text`) to reach a `&str`
+parameter. See [Slices and str](26-slices-and-str.md).
 
 ```ls
 fn append(text: &mut String) {
@@ -728,7 +737,7 @@ fn main() {
     grow(&mut values);
     println!("{:?}", values);
 
-    let mut cell = Rc::new(5);
+    let mut cell = Rc::new(5i64);
     bump(&mut cell);
     println!("{}", cell.get());
 }
@@ -794,7 +803,8 @@ See [References and borrowing](12-references-and-borrowing.md) for the rules.
   same cell.
 * `isize` and `usize` are pointer-sized integer types (64 bits on every
   supported target) and behave like every other integer for moves, casts and
-  formatting.
+  formatting. Since 2.1.0 `usize` is the length, index, count and capacity type
+  of the standard library.
 * Leak tracking is opt-in and reports only at a normal shutdown.
 * Panics and `exit` terminate the process; the operating system reclaims all
   memory.

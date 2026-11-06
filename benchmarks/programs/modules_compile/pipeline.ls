@@ -9,7 +9,7 @@
 pub const MODULUS: i64 = 1000000007;
 
 pub fn numbers(limit: i64) -> Vec<i64> {
-    let mut values: Vec<i64> = Vec::with_capacity(limit);
+    let mut values: Vec<i64> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(index + 1);
@@ -19,7 +19,7 @@ pub fn numbers(limit: i64) -> Vec<i64> {
 }
 
 pub fn squares(limit: i64) -> Vec<i64> {
-    let mut values: Vec<i64> = Vec::with_capacity(limit);
+    let mut values: Vec<i64> = Vec::with_capacity(limit as usize);
     let mut index = 1;
     while index <= limit {
         values.push(index * index);
@@ -58,7 +58,7 @@ pub fn product_odd(limit: i64) -> i64 {
 
 pub fn count_above(limit: i64, threshold: i64) -> i64 {
     let values = numbers(limit);
-    values.iter().filter(|n| *n > threshold).count()
+    values.iter().filter(|n| *n > threshold).count() as i64
 }
 
 pub fn sum_skip_take(limit: i64) -> i64 {
@@ -89,9 +89,9 @@ pub fn enumerate_sum(limit: i64) -> i64 {
     let mut total = 0;
     for pair in values.iter().enumerate() {
         let (index, value) = pair;
-        total += index * value;
+        total += (index as i64) * value;
     }
-    total
+    total as i64
 }
 
 pub fn chain_sum(limit: i64) -> i64 {
@@ -110,18 +110,18 @@ pub fn nested_chain(limit: i64) -> i64 {
 }
 
 pub fn joined_words(limit: i64) -> String {
-    let mut values: Vec<String> = Vec::with_capacity(limit);
+    let mut values: Vec<String> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(format!("w{}", index % 7));
         index += 1;
     }
-    let joined = values.iter().fold(String::from(""), |acc, item| acc + item);
+    let joined = values.iter().fold(String::from(""), |acc, item| acc + &item);
     joined
 }
 
 pub fn shouted_words(limit: i64) -> Vec<String> {
-    let mut values: Vec<String> = Vec::with_capacity(limit);
+    let mut values: Vec<String> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(format!("w{}", index));
@@ -132,25 +132,25 @@ pub fn shouted_words(limit: i64) -> Vec<String> {
 }
 
 pub fn word_lengths(limit: i64) -> Vec<i64> {
-    let mut values: Vec<String> = Vec::with_capacity(limit);
+    let mut values: Vec<String> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(format!("value-{}", index));
         index += 1;
     }
-    let lengths: Vec<i64> = values.iter().map(|word| word.len()).collect();
+    let lengths: Vec<i64> = values.iter().map(|word| word.len() as i64).collect();
     lengths
 }
 
 pub fn longest_word_length(limit: i64) -> i64 {
     let base = words();
-    let mut values: Vec<String> = Vec::with_capacity(limit);
+    let mut values: Vec<String> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(format!("{}-{}", base[0], index));
         index += 1;
     }
-    let lengths: Vec<i64> = values.iter().map(|word| word.len()).collect();
+    let lengths: Vec<i64> = values.iter().map(|word| word.len() as i64).collect();
     let mut longest = 0;
     let mut index = 0;
     while index < lengths.len() {
@@ -163,35 +163,35 @@ pub fn longest_word_length(limit: i64) -> i64 {
 }
 
 pub fn total_word_length(limit: i64) -> i64 {
-    let mut values: Vec<String> = Vec::with_capacity(limit);
+    let mut values: Vec<String> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(format!("word{}", index));
         index += 1;
     }
-    values.iter().map(|word| word.len()).sum()
+    values.iter().map(|word| word.len() as i64).sum()
 }
 
 pub fn any_longer_than(limit: i64, threshold: i64) -> bool {
     let base = words();
-    let mut values: Vec<String> = Vec::with_capacity(limit);
+    let mut values: Vec<String> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(format!("{}-{}", base[1], index));
         index += 1;
     }
-    values.iter().any(|word| word.len() > threshold)
+    values.iter().any(|word| word.len() > (threshold as usize))
 }
 
 pub fn all_shorter_than(limit: i64, threshold: i64) -> bool {
     let base = words();
-    let mut values: Vec<String> = Vec::with_capacity(limit);
+    let mut values: Vec<String> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(format!("{}-{}", base[2], index));
         index += 1;
     }
-    values.iter().all(|word| word.len() < threshold)
+    values.iter().all(|word| word.len() < (threshold as usize))
 }
 
 pub fn find_at_least(values: Vec<i64>, threshold: i64) -> i64 {
@@ -212,7 +212,7 @@ pub fn first_above_index(limit: i64, threshold: i64) -> i64 {
 }
 
 pub fn row_lengths(matrix: Vec<Vec<i64>>) -> Vec<i64> {
-    let lengths: Vec<i64> = matrix.iter().map(|row| row.len()).collect();
+    let lengths: Vec<i64> = matrix.iter().map(|row| row.len() as i64).collect();
     lengths
 }
 
@@ -258,7 +258,7 @@ pub fn captured_offset(limit: i64, offset: i64) -> i64 {
 
 pub fn captured_suffix(limit: i64) -> Vec<String> {
     let suffix = String::from("!");
-    let mut values: Vec<String> = Vec::with_capacity(limit);
+    let mut values: Vec<String> = Vec::with_capacity(limit as usize);
     let mut index = 0;
     while index < limit {
         values.push(format!("tag{}", index));
@@ -287,15 +287,15 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + sum_skip_take(10)) % MODULUS;
 
     let evens = collect_evens(10);
-    acc = (acc * 31 + evens.len()) % MODULUS;
+    acc = (acc * 31 + evens.len() as i64) % MODULUS;
     acc = (acc * 31 + evens.iter().sum()) % MODULUS;
 
     let doubles = collect_doubles(6);
-    acc = (acc * 31 + doubles.len()) % MODULUS;
+    acc = (acc * 31 + doubles.len() as i64) % MODULUS;
     acc = (acc * 31 + doubles.iter().fold(0, |acc2, item| acc2 + item)) % MODULUS;
 
     let cubes = collect_cubes(4);
-    acc = (acc * 31 + cubes.len()) % MODULUS;
+    acc = (acc * 31 + cubes.len() as i64) % MODULUS;
     acc = (acc * 31 + cubes[2]) % MODULUS;
 
     acc = (acc * 31 + enumerate_sum(6)) % MODULUS;
@@ -304,14 +304,14 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + nested_chain(8)) % MODULUS;
 
     let joined = joined_words(5);
-    acc = (acc * 31 + joined.len()) % MODULUS;
+    acc = (acc * 31 + joined.len() as i64) % MODULUS;
 
     let shouted = shouted_words(4);
-    acc = (acc * 31 + shouted.len()) % MODULUS;
-    acc = (acc * 31 + shouted[1].len()) % MODULUS;
+    acc = (acc * 31 + shouted.len() as i64) % MODULUS;
+    acc = (acc * 31 + shouted[1].len() as i64) % MODULUS;
 
     let lengths = word_lengths(5);
-    acc = (acc * 31 + lengths.len()) % MODULUS;
+    acc = (acc * 31 + lengths.len() as i64) % MODULUS;
     acc = (acc * 31 + lengths.iter().sum()) % MODULUS;
 
     acc = (acc * 31 + longest_word_length(3)) % MODULUS;
@@ -344,7 +344,7 @@ pub fn checksum(seed: i64) -> i64 {
         vec![7, 8],
     ];
     let totals = row_totals(&grid);
-    acc = (acc * 31 + totals.len()) % MODULUS;
+    acc = (acc * 31 + totals.len() as i64) % MODULUS;
     acc = (acc * 31 + totals[2]) % MODULUS;
     acc = (acc * 31 + matrix_flat_total(&grid)) % MODULUS;
 
@@ -352,7 +352,7 @@ pub fn checksum(seed: i64) -> i64 {
     acc = (acc * 31 + captured_offset(5, 3)) % MODULUS;
 
     let tagged = captured_suffix(3);
-    acc = (acc * 31 + tagged[2].len()) % MODULUS;
+    acc = (acc * 31 + tagged[2].len() as i64) % MODULUS;
 
     acc = (acc * 31 + window_sums(12)) % MODULUS;
 

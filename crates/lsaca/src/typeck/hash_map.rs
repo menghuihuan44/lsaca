@@ -110,7 +110,7 @@ impl<'a> Checker<'a> {
             }
             "contains_key" => method(MapContainsKey, vec![key], ITy::bool_(), false),
             "remove" => method(MapRemove, vec![key], ITy::option(value), true),
-            "len" => method(MapLen, vec![], ITy::i64(), false),
+            "len" => method(MapLen, vec![], ITy::usize(), false),
             "is_empty" => method(MapIsEmpty, vec![], ITy::bool_(), false),
             "clear" => method(MapClear, vec![], ITy::Unit, true),
             // keys()/values() build a new Vec and therefore clone each entry.

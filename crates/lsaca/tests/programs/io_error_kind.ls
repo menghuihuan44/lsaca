@@ -1,6 +1,6 @@
 fn main() {
     let missing: String = String::from("io_fixture_missing.txt");
-    let opened = std::io::File::open(missing.clone());
+    let opened = std::io::File::open(&missing);
     println!("missing open is_err {}", opened.is_err());
     let kind = std::io::Error::last().kind();
     match kind {

@@ -13,9 +13,9 @@ use super::itype::ITy;
 use super::tree::{TExpr, TExprKind};
 
 impl Checker<'_> {
-    /// Check a slice bound expression. Bounds are `i64` indices.
+    /// Check a slice bound expression. Bounds are `usize` indices.
     pub fn check_slice_bound(&mut self, bound: &ast::Expr) -> TExpr {
-        let expected = ITy::i64();
+        let expected = ITy::usize();
         let expr = self.check_expr(bound, Some(&expected));
         let ty = self.infer.resolve(&expr.ty);
         if !self.unify_quiet(&expected, &ty) {

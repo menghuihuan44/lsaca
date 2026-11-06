@@ -177,6 +177,12 @@ pub struct Checker<'a> {
     pub probing: bool,
     /// True while probing candidate impls: shape mismatches are not reported.
     pub probe_quiet: bool,
+    /// True while resolving the signature of a deferred generic function
+    /// instantiation. User generic structs mentioned in that signature are
+    /// instantiated with their still-open inference variables preserved, so a
+    /// later constraint (for example a `collect` target type) can determine
+    /// them; the instance is named once those variables are resolved.
+    pub defer_open_instances: bool,
     /// Key types of invalid HashMap instantiations that already produced a
     /// diagnostic. A HashMap type is validated both where it is annotated and
     /// where a value is created, but only one diagnostic is reported.
@@ -251,6 +257,7 @@ impl<'a> Checker<'a> {
             force_public_items: false,
             probing: false,
             probe_quiet: false,
+            defer_open_instances: false,
             reported_hash_map_key_errors: HashSet::new(),
             trait_objects: Vec::new(),
             vtables: Vec::new(),
@@ -760,23 +767,40 @@ impl<'a> Checker<'a> {
         // belongs to the caller: report it as an ordinary user diagnostic at the
         // recorded call site instead.
         if let Some(span) = self.fns[id].deferred_span {
-            // Variables pinned to an integer or float literal normalize to i64
+            // Variables pinned to an integer or float literal normalize to i32
             // or f64, so only genuinely open arguments make the body checkable.
             let args = self.fns[id]
                 .generic
                 .as_ref()
                 .map(|instance| instance.args.clone());
-            if let Some(args) = args
-                && self.normalize_args(&args).is_none()
-            {
-                self.error_code_note(
-                    "type annotations needed".to_string(),
-                    span,
-                    "E0282",
-                    "cannot infer the type arguments for this call; annotate the binding or the expected type"
-                        .to_string(),
-                );
-                return;
+            match args.map(|args| self.normalize_args(&args)) {
+                Some(None) => {
+                    self.error_code_note(
+                        "type annotations needed".to_string(),
+                        span,
+                        "E0282",
+                        "cannot infer the type arguments for this call; annotate the binding or the expected type"
+                            .to_string(),
+                    );
+                    return;
+                }
+                Some(Some(concrete)) => {
+                    // Deferred instantiation postponed the trait-bound check until
+                    // the type arguments of this instance are known. The caller
+                    // receives the E0277 at its own call site, like every concrete
+                    // instantiation; the body itself is legal under the declared
+                    // bounds and is not monomorphized for an invalid instance.
+                    if let Some(instance) = generic.as_ref()
+                        && let Some(def) = self.generic_fns.get(instance.def_id).cloned()
+                    {
+                        let errors_before = self.diagnostics.error_count();
+                        self.validate_generic_bounds(&def.generics, &concrete, span, def.module);
+                        if self.diagnostics.error_count() > errors_before {
+                            return;
+                        }
+                    }
+                }
+                None => {}
             }
         }
         let diagnostics_before = self.diagnostics.len();
@@ -801,7 +825,7 @@ impl<'a> Checker<'a> {
         let mut frame = Frame::new(sig.ret.clone());
         for (index, param) in decl.params.iter().enumerate() {
             let ty = sig.params.get(index).cloned().unwrap_or(ITy::Unit);
-            let mut mutable = false;
+            let mut mutable = param.mutable;
             if param.name == "self" && self_kind == Some(SelfKind::RefMut) {
                 mutable = true;
             }

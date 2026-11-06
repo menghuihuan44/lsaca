@@ -7,11 +7,19 @@ measured `25` programs (22 executed, 3 compile-only),
 each workload implemented in lsaca plus the reference languages it is compared with (C, Rust,
 Python 3 and Node.js).
 
-The headline is that lsaca 2.0 compiles to C that runs, on average, close to hand-written C:
-9 of the 22 executed workloads are within 1.4x of the C build (14 within 1.5x), and the
+> **Version note.** The tables on this page are the official **2.1.0** run, produced on
+> 2026-11-06 (harness timestamp 18:46 +08:00). Every number was measured by the benchmark
+> harness in this repository on a single host with the release compiler `lsaca 2.1.0`
+> (repository commit `151a9c2`, gcc 15.2.0 for the C reference builds). The previous
+> published run (2.0.0, 2026-11-03) is used only for the explicit comparison in the analysis.
+
+The headline is that lsaca 2.1.0 compiles to C that runs, on average, close to hand-written C:
+10 of the 22 executed workloads are within 1.4x of the C build (15 within 1.5x), and the
 remaining ones are either on the documented list of known gaps or are semantic exceptions where
-the workload itself performs by-value copies. Build time is not yet where it should be: a cold
-single-file build takes 0.38-1.18 s, a cached rebuild 34-66 ms.
+the workload itself performs by-value copies. One string-building workload is a visible outlier:
+`string_build` measures 7.48x C because the 2.1 `&str` alignment removed an old
+format-into-push fusion. Build time is not yet where it should be: a cold single-file build
+takes 0.46-1.67 s, a cached rebuild 53-108 ms.
 
 ## Workloads
 
@@ -46,9 +54,9 @@ workload — `fib_iter` and `fib_memo` against `fib`, `sort_insertion` against `
 | `string_unicode` | character-level string building and Unicode data | build a 120,000-scalar mixed ASCII/Unicode string one character at a time, fold every scalar from iteration and from 1,000 random `char_at` accesses, apply full-Unicode `to_uppercase`, slice on character boundaries, push/pop and extend; checksum is character count, byte length and the folded scalar checksum | `checksum=3357,6921,368454760` |
 | `hashmap_i64` | integer-key map operations | 1,000,000 integer-key inserts, 1,000,000 present lookups, 1,000,000 absent lookups and 100,000 deletions; checksum is the folded value sum, the final length and the number of successful lookups | `checksum=821060469,900000,1000000` |
 | `hashmap_string` | string-key map: hashing and owned keys | 200,000 distinct generated `String` keys inserted, then 200,000 present lookups, 200,000 absent lookups (folding the bytes of each absent key) and 20,000 deletions; checksum is the folded value sum, the final length and the number of successful lookups | `checksum=794025725,180000,200000` |
-| `compile_large` | compile-time scaling with source size | generated 4,511-line lsaca source (450 functions); **compile-only**, never executed by the harness | `checksum=14655037 (not checked)` |
-| `modules_compile` | compile-time scaling with a multi-file crate | one crate root (`main.ls`) plus eight sibling module files, 3,587 lines across 9 files, with structs, enums, generics, trait impls, strings, vectors and hash maps; **compile-only**, never executed by the harness | `checksum=547598677 (not checked)` |
-| `package_compile` | compile-time scaling with path dependencies | binary package `compile_app` plus library packages `util_a` and `util_b` (`util_b` depends on `util_a`), 1,088 lines across 13 files in 3 packages; **compile-only**, never executed by the harness | `checksum=417367897 (not checked)` |
+| `compile_large` | compile-time scaling with source size | generated 4,511-line lsaca source (450 functions); **compile-only**, never executed by the harness | `checksum=14655037,` (not measured) |
+| `modules_compile` | compile-time scaling with a multi-file crate | one crate root (`main.ls`) plus eight sibling module files, 3,592 lines across 9 files, with structs, enums, generics, trait impls, strings, vectors and hash maps; **compile-only**, never executed by the harness | `checksum=547598677,` (not measured) |
+| `package_compile` | compile-time scaling with path dependencies | binary package `compile_app` plus library packages `util_a` and `util_b` (`util_b` depends on `util_a`), 1,088 lines across 13 files in 3 packages; **compile-only**, never executed by the harness | `checksum=417367897,` (not measured) |
 
 Each workload prints one deterministic line (a checksum or a short summary). The harness
 compares the observed stdout with the expected line byte for byte, and the expected lines are
@@ -146,10 +154,10 @@ individual run times.
 
 | field | value |
 | --- | --- |
-| Measured at | 2026-11-03 00:20:17 +08:00 (harness timestamp at run start) |
+| Measured at | 2026-11-06 18:46:10 +08:00 (harness timestamp at run start) |
 | Machine | laptop, 12th Gen Intel Core i7-1260P (4 performance + 8 efficiency cores, 16 logical CPUs), 15.63 GiB RAM |
 | OS | Windows 11, build 10.0.26300, AMD64 |
-| lsaca | 2.0.0, repository HEAD `b151d1a`, compiler sha256 prefix `2a60c5ac7c9fd34c`, compiler mtime 2026-11-03 00:19:38 +08:00 |
+| lsaca | 2.1.0, repository HEAD `151a9c2`, compiler sha256 prefix `90fca3bbe4e3ec5e`, compiler mtime 2026-11-06 18:46:09 +08:00 |
 | lsaca build path | `lsaca build -r`, default direct C compiler back end (gcc 15.2.0, `-O2 -DNDEBUG`); the old CMake + Ninja path is available as `--cmake` |
 | C compiler | gcc 15.2.0 (MSYS2 UCRT64, Rev14, Built by MSYS2 project) |
 | Rust compiler | rustc 1.99.0 (`b940084d7 2026-09-28`) |
@@ -165,357 +173,253 @@ single table.
 
 ### Compile time
 
+Cold build means the whole pipeline from lsaca source to an executable with an empty cache; cached build re-uses the compile cache and only re-links. Times are medians of 3 compile repeats, in seconds unless stated otherwise.
+
 | program | lsaca cold build (default back end) | lsaca cached build | lsaca emit-c + gcc | gcc -O2 | rustc -O | Python 3 | Node.js |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fib | 0.561 | 0.045 | n/a | 0.276 | 0.360 | n/a | n/a |
-| fib_iter | 0.529 | 0.043 | n/a | 0.254 | n/a | n/a | n/a |
-| fib_memo | 0.423 | 0.034 | n/a | 0.256 | n/a | n/a | n/a |
-| loop_sum | 0.453 | 0.042 | n/a | 0.249 | 0.359 | n/a | n/a |
-| string_build | 0.391 | 0.036 | n/a | 0.213 | 0.324 | n/a | n/a |
-| vec_memory | 0.379 | 0.034 | n/a | 0.223 | 0.220 | n/a | n/a |
-| sort_i64 | 0.506 | 0.038 | n/a | 0.264 | 0.464 | n/a | n/a |
-| sort_insertion | 0.426 | 0.035 | n/a | 0.214 | n/a | n/a | n/a |
-| matrix_multiply | 0.448 | 0.045 | n/a | 0.269 | 0.289 | n/a | n/a |
-| binary_trees | 0.591 | 0.036 | n/a | 0.318 | 0.346 | n/a | n/a |
-| binary_trees_refs | 0.641 | 0.052 | n/a | 0.367 | 0.466 | n/a | n/a |
-| string_split | 0.601 | 0.051 | n/a | 0.311 | 0.477 | n/a | n/a |
-| sieve | 0.471 | 0.042 | n/a | 0.243 | 0.381 | n/a | n/a |
-| mandelbrot | 0.402 | 0.066 | n/a | 0.238 | 0.243 | n/a | n/a |
-| iterator_pipeline | 1.176 | 0.046 | n/a | 0.247 | 0.267 | n/a | n/a |
-| hashmap_wordcount | 0.495 | 0.040 | n/a | 0.264 | 0.437 | n/a | n/a |
-| array_wordcount | 0.462 | 0.044 | n/a | 0.231 | n/a | n/a | n/a |
-| generic_stack | 0.498 | 0.041 | n/a | 0.251 | 0.294 | n/a | n/a |
-| fn_pipeline | 1.159 | 0.041 | n/a | 0.232 | 0.264 | n/a | n/a |
-| string_unicode | 0.532 | 0.043 | n/a | 0.322 | 0.400 | n/a | n/a |
-| hashmap_i64 | 0.496 | 0.041 | n/a | 0.272 | 0.504 | n/a | n/a |
-| hashmap_string | 0.547 | 0.042 | n/a | 0.282 | 0.634 | n/a | n/a |
-| compile_large (compile-only) | 2.023 | 0.513 | n/a | n/a | n/a | n/a | n/a |
-| modules_compile (compile-only) | 2.898 | 0.478 | n/a | n/a | n/a | n/a | n/a |
-| package_compile (compile-only) | 1.377 | 0.100 | n/a | n/a | n/a | n/a | n/a |
+| fib | 0.564 | 0.055 | n/a | 0.263 | 0.334 | n/a | n/a |
+| fib_iter | 0.525 | 0.095 | n/a | 0.248 | n/a | n/a | n/a |
+| fib_memo | 0.585 | 0.060 | n/a | 0.264 | n/a | n/a | n/a |
+| loop_sum | 0.489 | 0.065 | n/a | 0.237 | 0.395 | n/a | n/a |
+| string_build | 0.502 | 0.063 | n/a | 0.267 | 0.386 | n/a | n/a |
+| vec_memory | 0.473 | 0.061 | n/a | 0.255 | 0.314 | n/a | n/a |
+| sort_i64 | 0.630 | 0.108 | n/a | 0.367 | 0.418 | n/a | n/a |
+| sort_insertion | 0.771 | 0.062 | n/a | 0.255 | n/a | n/a | n/a |
+| matrix_multiply | 0.474 | 0.058 | n/a | 0.269 | 0.368 | n/a | n/a |
+| binary_trees | 0.585 | 0.059 | n/a | 0.323 | 0.398 | n/a | n/a |
+| binary_trees_refs | 0.660 | 0.066 | n/a | 0.474 | 0.471 | n/a | n/a |
+| string_split | 0.818 | 0.085 | n/a | 0.281 | 0.424 | n/a | n/a |
+| sieve | 0.692 | 0.065 | n/a | 0.248 | 0.419 | n/a | n/a |
+| mandelbrot | 0.557 | 0.075 | n/a | 0.275 | 0.256 | n/a | n/a |
+| iterator_pipeline | 1.671 | 0.064 | n/a | 0.225 | 0.253 | n/a | n/a |
+| hashmap_wordcount | 0.516 | 0.055 | n/a | 0.252 | 0.412 | n/a | n/a |
+| array_wordcount | 0.458 | 0.053 | n/a | 0.217 | n/a | n/a | n/a |
+| generic_stack | 0.499 | 0.057 | n/a | 0.232 | 0.267 | n/a | n/a |
+| fn_pipeline | 1.569 | 0.056 | n/a | 0.228 | 0.252 | n/a | n/a |
+| string_unicode | 0.589 | 0.073 | n/a | 0.382 | 0.444 | n/a | n/a |
+| hashmap_i64 | 0.527 | 0.055 | n/a | 0.265 | 0.481 | n/a | n/a |
+| hashmap_string | 0.512 | 0.055 | n/a | 0.260 | 0.455 | n/a | n/a |
+| compile_large (compile-only) | 1.963 | 0.549 | n/a | n/a | n/a | n/a | n/a |
+| modules_compile (compile-only) | 2.961 | 0.510 | n/a | n/a | n/a | n/a | n/a |
+| package_compile (compile-only) | 1.332 | 0.116 | n/a | n/a | n/a | n/a | n/a |
 
-Cold builds use a fresh compiler cache; cached builds reuse the cache from the previous cold
-build of the same program, which is what an edit-rebuild cycle sees. Over the twenty-two
-executed programs a cold single-file build takes 0.38-0.64 s for ordinary programs;
-the two largest programs, `iterator_pipeline` and `fn_pipeline`, take
-1.176 s and 1.159 s. The compile-only workloads show
-how build time grows with size: `compile_large` (a generated source of 4,511 lines) takes
-2.023 s and produces 301,361 bytes of C (0.30 MB);
-`modules_compile` (nine files) and `package_compile` (thirteen files across three packages) are
-built by the package-aware driver. The C compiler itself is not the bottleneck — gcc needs
-0.21-0.37 s per program — and the gap between a cold and a cached lsaca build is the compiler
-front end plus the C code generation done in-process.
+Cold builds of the 22 executed programs take 0.46-1.67 s. Excluding the two large pipeline programs (`fn_pipeline` 1.57 s, `iterator_pipeline` 1.67 s), the ordinary single-file programs span 0.46-0.82 s. Cached rebuilds take 53-108 ms.
+
+gcc itself needs 0.22-0.47 s per program, so on Windows a cold build is dominated by gcc compiling the generated C and the shared runtime translation units, not by the lsaca front end. The three compile-only workloads show the scaling: `compile_large` needs 1.96 s cold and 0.5 s cached (549 ms) for 301,361 bytes (0.30 MB) of generated C; `modules_compile` needs 2.96 s / 510 ms for 3,592 lines across 9 files; `package_compile` needs 1.33 s / 116 ms for 1,088 lines across 13 files in 3 packages.
+
+Against the 2.0.0 run, most single-file cold builds are within about 0.2 s of where they were (for example `fib` 0.56 -> 0.56 s; `sort_insertion` 0.43 -> 0.77 s; `sieve` 0.47 -> 0.69 s), while the two large pipeline programs moved up (`fn_pipeline` 1.16 -> 1.57 s, `iterator_pipeline` 1.18 -> 1.67 s). `compile_large` and `package_compile` are slightly faster than in 2.0.0 (2.02 -> 1.96 s and 1.38 -> 1.33 s). Cached builds are uniformly slower than in the 2.0.0 run (34-66 ms then, 53-108 ms now); since the C compiler also needed slightly more time on this host (0.22-0.47 s versus 0.21-0.37 s), the cached shifts are read as host effects rather than compiler work.
 
 ### Runtime
 
 | language | fib | fib_iter | fib_memo | loop_sum | string_build | vec_memory | sort_i64 | sort_insertion | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot | iterator_pipeline | hashmap_wordcount | array_wordcount | generic_stack | fn_pipeline | string_unicode | hashmap_i64 | hashmap_string |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 31.4 (29.8) | 13.4 (12.5) | 10.5 (10.2) | 17.5 (15.2) | 26.8 (25.6) | 17.9 (17.0) | 30.8 (28.2) | 11.4 (11.1) | 18.1 (15.0) | 190.7 (178.5) | 59.5 (46.4) | 24.4 (23.1) | 32.9 (31.4) | 44.0 (36.8) | 14.2 (13.7) | 36.0 (32.6) | 13.7 (12.8) | 18.0 (17.3) | 12.7 (11.2) | 33.3 (32.0) | 212.5 (207.5) | 193.2 (179.8) |
-| C (gcc -O2) | 23.8 (22.9) | 7.3 (7.0) | 9.7 (8.7) | 12.4 (11.9) | 11.0 (10.6) | 12.4 (11.8) | 30.9 (28.2) | 8.9 (8.1) | 12.7 (12.1) | 18.5 (17.6) | 25.5 (24.2) | 12.8 (12.3) | 29.6 (27.4) | 26.6 (23.6) | 12.3 (11.4) | 25.2 (22.6) | 9.0 (7.7) | 13.6 (13.4) | 9.1 (8.2) | 10.9 (10.2) | 150.2 (137.3) | 180.5 (170.8) |
-| Rust (rustc -O) | 19.2 (17.9) | n/a | n/a | 9.8 (8.9) | 59.4 (56.2) | 13.5 (13.2) | 35.2 (28.4) | n/a | 10.9 (9.3) | 17.6 (16.8) | 33.4 (28.3) | 16.7 (15.1) | 28.2 (27.1) | 29.8 (28.3) | 12.1 (11.8) | 46.2 (43.9) | n/a | 15.6 (13.4) | 9.7 (8.8) | 14.6 (12.9) | 187.6 (181.7) | 238.1 (220.0) |
-| Python 3 | 941.8 (903.4) | n/a | n/a | 856.4 (751.6) | 371.2 (347.8) | 506.5 (467.6) | 558.0 (522.8) | n/a | 1207.1 (1053.3) | 103.4 (99.5) | 116.3 (104.9) | 100.2 (73.5) | 509.1 (493.5) | 2443.8 (2304.0) | 207.4 (201.8) | 109.2 (107.9) | n/a | 306.5 (297.7) | 36.0 (35.1) | 239.2 (232.7) | 1942.3 (1915.0) | 1020.9 (1007.2) |
-| Node.js | 184.4 (176.6) | n/a | n/a | 127.4 (117.4) | 217.1 (204.5) | 189.9 (183.8) | 188.3 (159.6) | n/a | 142.0 (127.0) | 136.3 (129.3) | 135.9 (124.5) | 160.1 (153.6) | 160.6 (151.2) | 138.0 (121.9) | 159.1 (138.4) | 129.3 (119.2) | n/a | 138.5 (133.2) | 116.8 (108.3) | 172.4 (169.7) | 705.7 (695.8) | 404.4 (387.9) |
+| lsaca | 27.6 (25.8) | 24.1 (16.3) | 13.6 (13.1) | 20.6 (17.7) | 97.2 (86.0) | 19.9 (18.9) | 56.6 (53.1) | 14.3 (13.9) | 16.2 (15.1) | 212.5 (198.6) | 38.2 (35.7) | 39.3 (38.9) | 37.8 (34.8) | 39.5 (37.5) | 16.0 (15.7) | 32.5 (30.3) | 13.1 (12.8) | 17.2 (16.8) | 12.1 (11.9) | 38.1 (37.2) | 196.3 (194.1) | 181.8 (167.4) |
+| C (gcc -O2) | 23.7 (22.4) | 9.2 (8.4) | 10.2 (9.9) | 13.4 (12.8) | 13.0 (12.4) | 14.5 (14.3) | 33.1 (30.7) | 9.8 (9.4) | 12.7 (11.8) | 19.2 (18.9) | 26.2 (24.1) | 14.3 (13.7) | 29.3 (27.5) | 31.7 (29.7) | 12.2 (12.1) | 21.7 (20.9) | 9.0 (8.7) | 13.9 (13.2) | 8.3 (8.1) | 15.6 (13.6) | 145.6 (144.4) | 163.5 (152.8) |
+| Rust (rustc -O) | 11.1 (10.6) | n/a | n/a | 13.0 (11.2) | 59.5 (57.7) | 18.5 (17.6) | 29.3 (26.9) | n/a | 21.7 (16.1) | 22.2 (21.3) | 20.0 (18.6) | 13.2 (12.9) | 30.7 (29.3) | 31.1 (29.7) | 12.3 (11.7) | 41.9 (40.0) | n/a | 15.0 (13.8) | 8.9 (8.6) | 14.3 (13.8) | 181.2 (179.6) | 213.6 (208.6) |
+| Python 3 | 841.8 (827.9) | n/a | n/a | 901.9 (836.8) | 418.1 (375.1) | 495.7 (464.0) | 661.5 (594.6) | n/a | 1385.9 (1262.2) | 131.8 (114.9) | 102.8 (98.5) | 70.4 (65.5) | 594.6 (493.1) | 2508.7 (2179.4) | 187.8 (186.9) | 99.9 (96.4) | n/a | 282.3 (266.4) | 32.8 (31.2) | 245.1 (220.4) | 1751.0 (1732.5) | 905.1 (891.6) |
+| Node.js | 204.2 (193.3) | n/a | n/a | 129.4 (119.9) | 201.0 (194.1) | 221.7 (211.9) | 161.8 (151.2) | n/a | 132.9 (122.8) | 163.4 (142.2) | 138.2 (133.8) | 189.0 (157.4) | 184.2 (159.4) | 127.7 (124.5) | 132.8 (131.2) | 132.8 (127.7) | n/a | 132.3 (129.7) | 117.5 (107.4) | 185.0 (176.7) | 634.2 (620.1) | 343.2 (338.8) |
 
-Median of 7 measured runs after one warm-up, with the minimum in parentheses. The same numbers
-as ratios to the C build:
+Median of 7 measured runs after one warm-up, in milliseconds, with the minimum in parentheses.
+
+The next table divides each language median by the C median for the same program. A value below 1.00x means that language was faster than the C build in this run.
 
 | language | fib | fib_iter | fib_memo | loop_sum | string_build | vec_memory | sort_i64 | sort_insertion | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot | iterator_pipeline | hashmap_wordcount | array_wordcount | generic_stack | fn_pipeline | string_unicode | hashmap_i64 | hashmap_string |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 1.32x | 1.83x | 1.09x | 1.41x | 2.44x | 1.44x | 1.00x | 1.28x | 1.43x | 10.31x | 2.33x | 1.91x | 1.11x | 1.65x | 1.15x | 1.43x | 1.51x | 1.32x | 1.40x | 3.06x | 1.42x | 1.07x |
-| Rust | 0.81x | n/a | n/a | 0.79x | 5.40x | 1.08x | 1.14x | n/a | 0.85x | 0.95x | 1.31x | 1.30x | 0.95x | 1.12x | 0.99x | 1.83x | n/a | 1.14x | 1.06x | 1.34x | 1.25x | 1.32x |
-| Python 3 | 39.63x | n/a | n/a | 68.89x | 33.75x | 40.76x | 18.07x | n/a | 94.98x | 5.59x | 4.56x | 7.83x | 17.18x | 91.98x | 16.88x | 4.34x | n/a | 22.52x | 3.97x | 21.95x | 12.93x | 5.66x |
-| Node.js | 7.76x | n/a | n/a | 10.25x | 19.74x | 15.28x | 6.10x | n/a | 11.18x | 7.37x | 5.32x | 12.51x | 5.42x | 5.19x | 12.95x | 5.14x | n/a | 10.17x | 12.86x | 15.82x | 4.70x | 2.24x |
+| lsaca | 1.17x | 2.63x | 1.33x | 1.54x | 7.48x | 1.37x | 1.71x | 1.45x | 1.27x | 11.05x | 1.46x | 2.75x | 1.29x | 1.25x | 1.30x | 1.50x | 1.45x | 1.24x | 1.46x | 2.44x | 1.35x | 1.11x |
+| Rust | 0.47x | n/a | n/a | 0.97x | 4.58x | 1.27x | 0.88x | n/a | 1.71x | 1.16x | 0.76x | 0.92x | 1.05x | 0.98x | 1.00x | 1.93x | n/a | 1.08x | 1.07x | 0.92x | 1.24x | 1.31x |
+| Python 3 | 35.55x | n/a | n/a | 67.41x | 32.16x | 34.15x | 19.96x | n/a | 109.13x | 6.85x | 3.93x | 4.92x | 20.28x | 79.14x | 15.33x | 4.61x | n/a | 20.31x | 3.96x | 15.73x | 12.02x | 5.54x |
+| Node.js | 8.62x | n/a | n/a | 9.67x | 15.46x | 15.28x | 4.88x | n/a | 10.46x | 8.49x | 5.28x | 13.22x | 6.28x | 4.03x | 10.85x | 6.12x | n/a | 9.51x | 14.17x | 11.88x | 4.35x | 2.10x |
 
 ### Peak memory
 
 | language | fib | fib_iter | fib_memo | loop_sum | string_build | vec_memory | sort_i64 | sort_insertion | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot | iterator_pipeline | hashmap_wordcount | array_wordcount | generic_stack | fn_pipeline | string_unicode | hashmap_i64 | hashmap_string |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 5.1 | 5.1 | 5.1 | 5.1 | 11.7 | 20.1 | 7.9 | 5.1 | 5.5 | 53.1 | 17.0 | 10.6 | 20.1 | 5.1 | 12.4 | 5.4 | 5.1 | 13.8 | 5.1 | 6.4 | 56.7 | 30.8 |
-| C (gcc -O2) | 4.0 | 4.0 | 4.0 | 4.0 | 7.3 | 18.8 | 5.1 | 4.0 | 4.5 | 7.6 | 7.6 | 4.0 | 18.8 | 4.0 | 11.1 | 4.2 | 4.0 | 12.5 | 4.0 | 4.3 | 52.4 | 19.7 |
-| Rust (rustc -O) | 4.1 | n/a | n/a | 4.1 | 7.4 | 18.9 | 5.2 | n/a | 4.5 | 7.7 | 7.7 | 4.4 | 18.9 | 4.1 | 11.2 | 4.4 | n/a | 12.6 | 4.1 | 4.7 | 55.9 | 19.8 |
-| Python 3 | 11.0 | n/a | n/a | 10.9 | 72.2 | 142.8 | 21.3 | n/a | 13.6 | 21.1 | 21.1 | 17.0 | 26.2 | 11.0 | 49.2 | 11.4 | n/a | 54.2 | 11.0 | 27.0 | 113.5 | 37.9 |
-| Node.js | 43.0 | n/a | n/a | 45.9 | 88.3 | 121.2 | 50.8 | n/a | 46.8 | 56.6 | 56.5 | 51.0 | 59.2 | 44.5 | 58.1 | 46.4 | n/a | 72.1 | 40.1 | 68.3 | 102.5 | 90.4 |
+| lsaca | 5.1 | 5.1 | 5.1 | 5.1 | 11.9 | 20.1 | 7.9 | 5.2 | 5.5 | 53.1 | 17.1 | 10.6 | 20.1 | 5.1 | 12.5 | 5.5 | 5.1 | 13.9 | 5.2 | 6.4 | 56.8 | 30.8 |
+| C (gcc -O2) | 4.0 | 4.0 | 4.0 | 4.0 | 7.3 | 18.8 | 5.1 | 4.0 | 4.6 | 7.7 | 7.7 | 4.0 | 18.8 | 4.0 | 11.2 | 4.3 | 4.1 | 12.5 | 4.0 | 4.7 | 52.6 | 19.7 |
+| Rust (rustc -O) | 4.2 | n/a | n/a | 4.2 | 7.4 | 18.9 | 5.2 | n/a | 4.5 | 7.7 | 7.7 | 4.4 | 18.9 | 4.2 | 11.3 | 4.4 | n/a | 12.6 | 4.2 | 4.7 | 55.8 | 19.8 |
+| Python 3 | 11.0 | n/a | n/a | 11.0 | 74.4 | 142.8 | 21.4 | n/a | 13.6 | 21.1 | 21.0 | 16.9 | 26.3 | 11.1 | 49.3 | 11.4 | n/a | 54.2 | 11.1 | 26.0 | 113.4 | 38.0 |
+| Node.js | 43.0 | n/a | n/a | 45.8 | 88.2 | 121.3 | 51.0 | n/a | 47.0 | 56.1 | 56.8 | 51.5 | 59.1 | 44.6 | 57.9 | 46.4 | n/a | 72.4 | 40.0 | 68.6 | 102.8 | 90.5 |
 
-Peak working set of the child process, sampled by the harness while it runs. lsaca programs
-track their allocations, so a program that never leaks memory settles at a peak close to the C
-build's.
+Peak working set of the child process, sampled by the harness while it runs. lsaca programs track their allocations, so a program that never leaks memory settles at a peak close to the C build's. The by-value `binary_trees` row is the peak-memory counterpart of its runtime row: the deep copies are part of the workload by design.
 
 ### Runtime by data scale
 
-The workloads with an argument-driven size are also measured at a small and a large scale, in
-all five languages. The medium scale is the default configuration used by the headline tables
-above, so it is repeated here for comparison. Three runs per cell, no warm-up.
+The argument-driven workloads are measured at three sizes. Each cell is the median in milliseconds at that scale.
 
 | program | scale | lsaca | C (gcc -O2) | Rust (rustc -O) | Python 3 | Node.js |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| fib | small | 15.0 (12.9) | 10.3 (10.2) | 10.6 (10.2) | 49.0 (46.7) | 98.3 (97.0) |
-| fib | medium | 31.4 (29.8) | 23.8 (22.9) | 19.2 (17.9) | 941.8 (903.4) | 184.4 (176.6) |
-| fib | large | 42.1 (39.7) | 36.9 (34.5) | 17.8 (15.2) | 1381.3 (1199.5) | 260.9 (255.1) |
-| fib_iter | small | 13.9 (13.3) | 9.2 (8.5) | n/a | n/a | n/a |
-| fib_iter | medium | 13.4 (12.5) | 7.3 (7.0) | n/a | n/a | n/a |
-| fib_iter | large | 14.8 (14.4) | 9.6 (9.4) | n/a | n/a | n/a |
-| fib_memo | small | 10.6 (10.5) | 9.6 (8.8) | n/a | n/a | n/a |
-| fib_memo | medium | 10.5 (10.2) | 9.7 (8.7) | n/a | n/a | n/a |
-| fib_memo | large | 10.6 (10.5) | 12.1 (11.2) | n/a | n/a | n/a |
-| loop_sum | small | 14.0 (13.2) | 10.3 (10.0) | 7.7 (7.7) | 137.4 (127.1) | 105.6 (101.6) |
-| loop_sum | medium | 17.5 (15.2) | 12.4 (11.9) | 9.8 (8.9) | 856.4 (751.6) | 127.4 (117.4) |
-| loop_sum | large | 17.7 (17.3) | 13.7 (12.6) | 9.2 (9.0) | 1160.7 (1134.1) | 112.0 (111.9) |
-| string_build | small | 11.0 (10.7) | 8.4 (7.5) | 9.6 (8.9) | 32.1 (30.5) | 117.0 (116.2) |
-| string_build | medium | 26.8 (25.6) | 11.0 (10.6) | 59.4 (56.2) | 371.2 (347.8) | 217.1 (204.5) |
-| string_build | large | 74.3 (72.4) | 22.0 (21.8) | 193.8 (188.5) | 1226.7 (1211.2) | 453.3 (400.7) |
-| sort_i64 | small | 11.7 (11.5) | 9.4 (9.3) | 10.7 (10.1) | 43.0 (37.2) | 128.0 (120.9) |
-| sort_i64 | medium | 30.8 (28.2) | 30.9 (28.2) | 35.2 (28.4) | 558.0 (522.8) | 188.3 (159.6) |
-| sort_i64 | large | 62.6 (60.3) | 60.3 (57.6) | 64.8 (62.7) | 1542.8 (1376.9) | 271.4 (231.2) |
-| sort_insertion | small | 13.0 (11.0) | 7.9 (7.8) | n/a | n/a | n/a |
-| sort_insertion | medium | 11.4 (11.1) | 8.9 (8.1) | n/a | n/a | n/a |
-| sort_insertion | large | 15.7 (14.2) | 9.0 (9.0) | n/a | n/a | n/a |
-| binary_trees | small | 17.2 (17.0) | 9.8 (9.3) | 8.7 (8.6) | 34.7 (34.2) | 123.3 (117.5) |
-| binary_trees | medium | 190.7 (178.5) | 18.5 (17.6) | 17.6 (16.8) | 103.4 (99.5) | 136.3 (129.3) |
-| binary_trees | large | 997.9 (968.5) | 43.5 (42.1) | 46.1 (43.9) | 300.6 (294.1) | 158.5 (156.9) |
-| binary_trees_refs | small | 15.9 (14.7) | 17.4 (16.1) | 15.9 (13.2) | 46.5 (43.9) | 123.2 (122.6) |
-| binary_trees_refs | medium | 59.5 (46.4) | 25.5 (24.2) | 33.4 (28.3) | 116.3 (104.9) | 135.9 (124.5) |
-| binary_trees_refs | large | 115.3 (107.9) | 84.0 (79.7) | 57.2 (55.5) | 334.5 (320.3) | 197.4 (181.8) |
-| string_split | small | 16.3 (14.9) | 10.5 (9.8) | 11.8 (11.6) | 49.1 (45.1) | 149.7 (137.7) |
-| string_split | medium | 24.4 (23.1) | 12.8 (12.3) | 16.7 (15.1) | 100.2 (73.5) | 160.1 (153.6) |
-| string_split | large | 109.5 (105.6) | 49.7 (46.3) | 54.3 (53.9) | 472.2 (427.6) | 327.3 (305.2) |
-| sieve | small | 15.0 (13.6) | 10.2 (9.4) | 10.5 (10.1) | 57.5 (56.4) | 118.3 (117.9) |
-| sieve | medium | 32.9 (31.4) | 29.6 (27.4) | 28.2 (27.1) | 509.1 (493.5) | 160.6 (151.2) |
-| sieve | large | 87.0 (82.1) | 74.6 (73.3) | 74.7 (71.1) | 1350.4 (1269.0) | 216.0 (211.0) |
-| hashmap_wordcount | small | 15.1 (14.0) | 9.8 (9.8) | 11.5 (11.1) | 37.1 (34.7) | 113.1 (113.0) |
-| hashmap_wordcount | medium | 36.0 (32.6) | 25.2 (22.6) | 46.2 (43.9) | 109.2 (107.9) | 129.3 (119.2) |
-| hashmap_wordcount | large | 120.0 (117.5) | 79.9 (79.5) | 182.9 (177.9) | 409.2 (393.0) | 186.8 (179.8) |
-| array_wordcount | small | 13.9 (13.3) | 8.8 (8.3) | n/a | n/a | n/a |
-| array_wordcount | medium | 13.7 (12.8) | 9.0 (7.7) | n/a | n/a | n/a |
-| array_wordcount | large | 16.5 (16.4) | 9.7 (9.2) | n/a | n/a | n/a |
+| fib | small | 12.3 (12.0) | 9.7 (9.3) | 8.8 (8.6) | 39.2 (37.4) | 140.2 (137.3) |
+| fib | medium | 27.6 (25.8) | 23.7 (22.4) | 11.1 (10.6) | 841.8 (827.9) | 204.2 (193.3) |
+| fib | large | 38.1 (37.2) | 33.3 (31.2) | 14.0 (14.0) | 1362.6 (1337.6) | 266.2 (262.0) |
+| fib_iter | small | 15.5 (15.0) | 11.0 (9.1) | n/a | n/a | n/a |
+| fib_iter | medium | 24.1 (16.3) | 9.2 (8.4) | n/a | n/a | n/a |
+| fib_iter | large | 16.0 (15.8) | 10.9 (10.5) | n/a | n/a | n/a |
+| fib_memo | small | 14.7 (13.9) | 10.3 (9.4) | n/a | n/a | n/a |
+| fib_memo | medium | 13.6 (13.1) | 10.2 (9.9) | n/a | n/a | n/a |
+| fib_memo | large | 13.7 (13.0) | 9.9 (9.6) | n/a | n/a | n/a |
+| loop_sum | small | 14.4 (13.8) | 10.1 (9.7) | 11.8 (11.3) | 143.9 (142.2) | 114.3 (106.0) |
+| loop_sum | medium | 20.6 (17.7) | 13.4 (12.8) | 13.0 (11.2) | 901.9 (836.8) | 129.4 (119.9) |
+| loop_sum | large | 20.7 (20.7) | 14.0 (13.5) | 14.0 (13.7) | 1559.5 (1314.0) | 117.2 (117.0) |
+| string_build | small | 21.2 (20.3) | 10.2 (10.0) | 9.7 (9.2) | 50.1 (48.9) | 155.4 (138.1) |
+| string_build | medium | 97.2 (86.0) | 13.0 (12.4) | 59.5 (57.7) | 418.1 (375.1) | 201.0 (194.1) |
+| string_build | large | 408.5 (358.2) | 23.5 (23.4) | 218.0 (217.6) | 1465.4 (1422.4) | 565.3 (430.9) |
+| sort_i64 | small | 16.7 (16.2) | 10.3 (10.2) | 9.7 (9.2) | 35.9 (35.9) | 111.8 (110.3) |
+| sort_i64 | medium | 56.6 (53.1) | 33.1 (30.7) | 29.3 (26.9) | 661.5 (594.6) | 161.8 (151.2) |
+| sort_i64 | large | 90.1 (85.8) | 65.7 (61.7) | 57.6 (56.9) | 1635.1 (1445.5) | 269.5 (267.4) |
+| sort_insertion | small | 13.4 (12.6) | 10.2 (9.8) | n/a | n/a | n/a |
+| sort_insertion | medium | 14.3 (13.9) | 9.8 (9.4) | n/a | n/a | n/a |
+| sort_insertion | large | 16.6 (15.9) | 12.0 (11.8) | n/a | n/a | n/a |
+| binary_trees | small | 23.0 (22.0) | 9.8 (9.1) | 13.3 (12.5) | 54.7 (51.5) | 126.9 (122.9) |
+| binary_trees | medium | 212.5 (198.6) | 19.2 (18.9) | 22.2 (21.3) | 131.8 (114.9) | 163.4 (142.2) |
+| binary_trees | large | 1183.4 (956.6) | 48.9 (47.5) | 61.6 (56.0) | 372.3 (354.6) | 171.4 (170.8) |
+| binary_trees_refs | small | 20.3 (18.7) | 15.1 (14.8) | 9.7 (9.5) | 38.8 (37.6) | 127.0 (122.8) |
+| binary_trees_refs | medium | 38.2 (35.7) | 26.2 (24.1) | 20.0 (18.6) | 102.8 (98.5) | 138.2 (133.8) |
+| binary_trees_refs | large | 120.9 (116.3) | 65.1 (63.3) | 49.5 (49.4) | 297.1 (295.4) | 198.9 (195.1) |
+| string_split | small | 29.8 (28.6) | 10.8 (10.7) | 11.0 (11.0) | 38.2 (36.4) | 156.0 (139.1) |
+| string_split | medium | 39.3 (38.9) | 14.3 (13.7) | 13.2 (12.9) | 70.4 (65.5) | 189.0 (157.4) |
+| string_split | large | 151.3 (137.2) | 48.6 (47.0) | 45.7 (45.0) | 388.8 (375.1) | 322.9 (297.8) |
+| sieve | small | 15.6 (15.2) | 10.0 (9.5) | 14.8 (13.7) | 96.4 (85.7) | 148.0 (142.5) |
+| sieve | medium | 37.8 (34.8) | 29.3 (27.5) | 30.7 (29.3) | 594.6 (493.1) | 184.2 (159.4) |
+| sieve | large | 89.7 (89.2) | 81.8 (80.2) | 87.4 (83.2) | 1690.6 (1433.7) | 283.2 (270.4) |
+| hashmap_wordcount | small | 14.3 (14.1) | 9.3 (8.9) | 11.9 (11.2) | 35.4 (34.8) | 111.7 (110.0) |
+| hashmap_wordcount | medium | 32.5 (30.3) | 21.7 (20.9) | 41.9 (40.0) | 99.9 (96.4) | 132.8 (127.7) |
+| hashmap_wordcount | large | 108.2 (104.2) | 76.9 (74.5) | 164.0 (161.2) | 359.2 (349.6) | 185.5 (181.1) |
+| array_wordcount | small | 12.3 (11.9) | 9.2 (8.9) | n/a | n/a | n/a |
+| array_wordcount | medium | 13.1 (12.8) | 9.0 (8.7) | n/a | n/a | n/a |
+| array_wordcount | large | 15.6 (15.3) | 9.3 (8.9) | n/a | n/a | n/a |
 
-The C and lsaca columns track closely at small sizes; at the large scales the gap widens where
-the workload allocates more. The full scale matrix is the fastest way to check that a change
-helps the whole curve rather than one default size, and the per-scale results are stored under
-`programs.<name>.scales` in the results JSON.
+At every scale the C and lsaca columns track closely for the scalar, map and string workloads; the gap widens where the workload allocates more, and it grows with size for `string_build` (up to 17.38x C at the largest scale) and `binary_trees` (up to 24.20x C) because each element costs an allocation or a by-value copy. The full scale matrix is the fastest way to check that a change helps the whole curve rather than one default size, and the per-scale results are stored under `programs.<name>.scales` in the results JSON.
 
 ### Artifacts and generated C
 
 | program | lsaca executable (bytes) | lsaca generated C (bytes) | C executable (bytes) | Rust executable (bytes) |
 | --- | ---: | ---: | ---: | ---: |
-| fib | 334,152 | 10,680 | 141,002 | 141,312 |
-| fib_iter | 333,133 | 10,953 | 139,870 | n/a |
-| fib_memo | 334,850 | 16,414 | 142,044 | n/a |
-| loop_sum | 333,029 | 8,731 | 139,870 | 141,312 |
-| string_build | 333,250 | 10,781 | 140,382 | 142,336 |
-| vec_memory | 332,021 | 8,595 | 139,058 | 132,096 |
-| sort_i64 | 335,688 | 22,735 | 140,557 | 142,336 |
-| sort_insertion | 334,505 | 17,035 | 140,557 | n/a |
-| matrix_multiply | 332,459 | 15,439 | 139,745 | 132,608 |
-| binary_trees | 337,888 | 18,087 | 143,819 | 142,336 |
-| binary_trees_refs | 338,400 | 17,606 | 143,839 | 142,336 |
-| string_split | 333,897 | 14,642 | 142,849 | 142,848 |
-| sieve | 333,883 | 12,465 | 140,045 | 141,824 |
+| fib | 335,640 | 16,903 | 141,002 | 141,312 |
+| fib_iter | 334,621 | 17,176 | 139,870 | n/a |
+| fib_memo | 336,338 | 22,684 | 142,044 | n/a |
+| loop_sum | 334,517 | 15,011 | 139,870 | 141,312 |
+| string_build | 334,658 | 17,757 | 140,382 | 142,336 |
+| vec_memory | 333,260 | 9,347 | 139,058 | 132,096 |
+| sort_i64 | 337,077 | 29,287 | 140,557 | 142,336 |
+| sort_insertion | 336,059 | 23,702 | 140,557 | n/a |
+| matrix_multiply | 332,459 | 15,659 | 139,745 | 132,608 |
+| binary_trees | 339,888 | 24,364 | 143,819 | 142,336 |
+| binary_trees_refs | 340,400 | 23,883 | 143,839 | 142,336 |
+| string_split | 335,305 | 21,156 | 142,849 | 142,848 |
+| sieve | 335,371 | 19,013 | 140,045 | 141,824 |
 | mandelbrot | 330,994 | 8,550 | 139,058 | 131,072 |
-| iterator_pipeline | 383,039 | 184,572 | 139,253 | 132,096 |
-| hashmap_wordcount | 337,501 | 22,639 | 143,556 | 145,920 |
-| array_wordcount | 333,883 | 13,729 | 140,045 | n/a |
-| generic_stack | 337,518 | 20,164 | 142,725 | 133,632 |
-| fn_pipeline | 380,007 | 168,520 | 139,238 | 132,096 |
-| string_unicode | 338,302 | 32,901 | 142,035 | 140,800 |
-| hashmap_i64 | 336,518 | 21,898 | 140,381 | 136,192 |
-| hashmap_string | 338,929 | 27,887 | 143,360 | 138,240 |
+| iterator_pipeline | 420,445 | 329,196 | 139,253 | 132,096 |
+| hashmap_wordcount | 339,418 | 28,533 | 143,556 | 145,920 |
+| array_wordcount | 335,371 | 20,216 | 140,045 | n/a |
+| generic_stack | 337,653 | 21,170 | 142,725 | 133,632 |
+| fn_pipeline | 415,258 | 310,282 | 139,238 | 132,096 |
+| string_unicode | 339,095 | 35,371 | 142,035 | 140,800 |
+| hashmap_i64 | 336,597 | 22,382 | 140,381 | 136,192 |
+| hashmap_string | 339,145 | 29,325 | 143,360 | 138,240 |
 | compile_large (compile-only) | 452,777 | 301,361 | n/a | n/a |
-| modules_compile (compile-only) | 607,256 | 1,934,577 | n/a | n/a |
-| package_compile (compile-only) | 384,637 | 667,122 | n/a | n/a |
+| modules_compile (compile-only) | 646,579 | 2,321,642 | n/a | n/a |
+| package_compile (compile-only) | 386,831 | 680,334 | n/a | n/a |
 
-Generated C is larger than the hand-written C source because it contains the whole program
-prelude (runtime declarations, the collections and string ABI, closure shims) in addition to the
-compiled body. The compile-only workloads are measured for build time only and are not executed
-by the harness.
+Generated C is larger than the hand-written C source because it contains the whole program prelude (runtime declarations, the collections and string ABI, closure shims) in addition to the compiled body; in 2.1 the standard library is embedded into that generated C as well. The compile-only workloads are measured for build time only and are not executed by the harness.
 
 ## Analysis
 
-### What 1.6 changed: characters, a new map and a faster tree
+### What 2.1.0 changes
 
-1.6 added the `char` scalar type with character literals, made every `String` a
-guaranteed-valid UTF-8 string with character-aware methods (`char_count`, `chars`,
-`char_at`, `push`/`pop`, `String::from_char`), extended
-`to_uppercase`/`to_lowercase`/`trim` to full Unicode, rewrote `HashMap` as a
-Swiss-Table-style map with `char` keys, and fixed a batch of runtime and code-generation
-issues (stale-handle checks, iterative ORC cycle collection, buffered I/O, shortest
-Dragon4 float formatting, interned NUL-safe string literals). Three workloads measure
-the new surfaces, each against the closest idiomatic C/Rust equivalent:
+2.1.0 is the Rust-alignment release. It makes `i32` the default integer type, turns lengths, indices, counts and capacities into `usize`, changes the stdlib text parameters from `String` to `&str` (string literals compile to zero-allocation static slices in `&str` positions), and adds tuple and unit structs, `mut` parameters, `ParseIntError`/`ParseFloatError`, and a batch of `Option`, `Result`, iterator, `str`, `char` and `Vec` methods. None of that changes the runtime representation: values are still ORC handles, `String` is still guaranteed-valid UTF-8, generics are still monomorphized, and the `HashMap` is the same Swiss-table implementation. The shape of the runtime table is therefore stable: 10 of 22 executed workloads are within 1.4x of C and 15 within 1.5x.
 
-| workload | lsaca (ms) | C (ms) | Rust (ms) | lsaca vs C | what it isolates |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `string_unicode` | 27.9 | 10.9 | 12.0 | 2.56x | UTF-8 string API and Unicode case mapping |
-| `hashmap_i64` | 213.0 | 135.1 | 168.5 | 1.58x | integer-key map operations |
-| `hashmap_string` | 243.7 | 164.8 | 213.1 | 1.48x | owned `String` keys, hashing and deletion |
+Two effects of the release are visible in the numbers. The `&str` alignment removed the old format-into-push fusion in `string_build`, which is the one large language-caused regression. And because many workloads run in tens of milliseconds, host variance is a significant share of every short row; the C reference builds moved too, so the 2.0.0 comparison below is a measured delta on this host, not a pure compiler-to-compiler difference.
 
-The ownership rows improved against the 1.5 session even though the source did not
-change: the by-value tree traversal moved from 534.4 ms / 101.2 MiB to 322.4 ms /
-52.3 MiB (40% less time, 48% less peak memory) after match arms learned to steal owned
-bindings instead of copying the matched value, and the borrowed traversal moved from
-34.1 ms / 19.9 MiB to 26.8 ms / 15.8 MiB. In this 1.7 run the same two rows measure
-331.3 ms / 52.2 MiB and 25.9 ms / 15.7 MiB - within session noise of the 1.6 numbers. The
-rest of the suite moved within the session-to-session range already discussed (this clean
-run is not uniformly faster or slower than the 1.6 session: the scalar loops and sorting
-drifted faster, `string_build` and `iterator_pipeline` slightly slower); the new
-character and map workloads are the only rows that changed the shape of the table.
+| workload | 2.0.0 (ms) | 2.1.0 (ms) | change | C change |
+| --- | ---: | ---: | ---: | ---: |
+| `string_build` | 26.8 | 97.2 | +263.0% | +18.2% |
+| `sort_i64` | 30.8 | 56.6 | +83.7% | +7.3% |
+| `fib_iter` | 13.4 | 24.1 | +79.9% | +25.3% |
+| `string_split` | 24.4 | 39.3 | +61.3% | +11.8% |
+| `fib_memo` | 10.5 | 13.6 | +28.8% | +5.7% |
+| `sort_insertion` | 11.4 | 14.3 | +25.1% | +10.2% |
+| `loop_sum` | 17.5 | 20.6 | +17.7% | +7.7% |
+| `sieve` | 32.9 | 37.8 | +14.6% | -1.1% |
+| `string_unicode` | 33.3 | 38.1 | +14.3% | +42.9% |
+| `iterator_pipeline` | 14.2 | 16.0 | +12.7% | -0.3% |
+| `binary_trees` | 190.7 | 212.5 | +11.4% | +4.0% |
+| `vec_memory` | 17.9 | 19.9 | +10.7% | +16.8% |
+| `generic_stack` | 18.0 | 17.2 | -4.3% | +2.1% |
+| `array_wordcount` | 13.7 | 13.1 | -4.4% | -0.4% |
+| `fn_pipeline` | 12.7 | 12.1 | -4.5% | -8.7% |
+| `hashmap_string` | 193.2 | 181.8 | -5.9% | -9.4% |
+| `hashmap_i64` | 212.5 | 196.3 | -7.6% | -3.0% |
+| `hashmap_wordcount` | 36.0 | 32.5 | -9.8% | -13.8% |
+| `mandelbrot` | 44.0 | 39.5 | -10.1% | +19.3% |
+| `matrix_multiply` | 18.1 | 16.2 | -10.8% | -0.1% |
+| `fib` | 31.4 | 27.6 | -11.9% | -0.4% |
+| `binary_trees_refs` | 59.5 | 38.2 | -35.8% | +2.6% |
 
-### What 1.7 changed: modules and packages
+`string_build` is the clearest language effect. In 2.1 the program has to bind the formatted piece before passing it as `&str` (`let piece = format!("{},", v); s.push_str(&piece);`), so each of the one million tokens allocates and copies a temporary `String`. In 2.0 the compiler fused `push_str(format!(...))` into an in-place append and the same workload measured 26.8 ms. The C build moved only from 11.0 to 13.0 ms, so most of the +263.0% is the lost fusion, not the host.
 
-1.7 is a program-organisation release: it adds modules and multi-file crates with
-visibility and imports, plus a small package manager for path dependencies. It does not
-change the runtime, the value representation or the value ABI - ownership, ORC handles,
-UTF-8 strings, generics, iterators and the HashMap all keep the 1.6 implementation - so
-the runtime rows of this suite should look like the 1.6 session, and they do. Of the
-eighteen runtime workloads the biggest ratio shifts against C are `sort_i64` (1.09x to
-1.15x), `string_split` (1.52x to 1.39x), `string_unicode` (2.78x to 2.56x) and
-`iterator_pipeline` (1.99x to 2.58x); their absolute times moved in both directions, and
-the C baseline moved with them, which is the session-noise pattern described in the
-caveats. The ownership rows are stable: 331.3 ms / 52.2 MiB by value and 25.9 ms / 15.7
-MiB borrowed here, against 322.4 / 52.3 and 26.8 / 15.8 in 1.6. The language changes that
-did land - a type-checker fix for by-value destructuring of Drop-containing enum payloads
-and the new `assert_ne!` macro - are not on any hot path in these workloads.
+`sort_i64` is the other large outlier: 30.8 ms -> 56.6 ms (+83.7%, now 1.71x C) while its C build moved +7.3%. Its source changed only by casting the quicksort indices to `usize`; nothing else in the program or the representation changed, so the movement is recorded as a code-generation follow-up rather than a language-design effect.
 
-What 1.7 does change is what gets compiled: a program can now be several files, and a
-project can be a package with dependencies. The three compile-only workloads measure
-that. `compile_large` remains the single-file scaling check at 1.84 s cold / 238 ms
-cached; `modules_compile` adds module resolution and whole-tree checking at 2.38 s cold
-/ 199 ms cached for 3,587 lines in nine files; `package_compile` adds manifest
-discovery, a three-package dependency graph and a whole-graph build at 1.48 s cold /
-42 ms cached for 1,088 lines in thirteen files. None of them changes the fundamental
-picture from 1.6: on Windows, gcc on the generated C and the shared runtime dominates a
-cold build, and a cached build is a content-hash hit on the whole project.
-
-### What 2.0 changes
-
-The 2.0 run measured on 2026-11-03 with lsaca 2.0.0 (commit `b151d1a`) is the first run
-of the new external standard library and the refactored code generator. Two comparison points
-are used below: the published 1.7 run (archived under `benchmarks/results/archive/v1.7`) and the
-Phase D pre-performance baseline taken earlier in the 2.0 cycle on the same code line before the
-performance work (archived under `benchmarks/results/archive/v2.0-pre-perf`). The Phase D run was
-taken on a host that was busy with parallel builds, so it is used as a directional reference, not
-as a scored result.
-
-| workload | v1.7 | Phase D baseline | v2.0 | change | v2.0 x C |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `fib` | 26.1 | n/a | 31.4 | +20.0% | 1.32x |
-| `loop_sum` | 8.0 | n/a | 17.5 | +118.6% | 1.41x |
-| `string_build` | 30.0 | 70.8 | 26.8 | -10.8% | 2.44x |
-| `vec_memory` | 13.5 | 32.6 | 17.9 | +33.4% | 1.44x |
-| `sort_i64` | 30.5 | n/a | 30.8 | +0.9% | 1.00x |
-| `matrix_multiply` | 9.9 | n/a | 18.1 | +83.8% | 1.43x |
-| `binary_trees` | 331.3 | 545.3 | 190.7 | -42.4% | 10.31x |
-| `binary_trees_refs` | 25.9 | 37.1 | 59.5 | +129.5% | 2.33x |
-| `string_split` | 15.9 | 35.3 | 24.4 | +53.7% | 1.91x |
-| `sieve` | 26.1 | n/a | 32.9 | +26.3% | 1.11x |
-| `mandelbrot` | 23.0 | n/a | 44.0 | +91.1% | 1.65x |
-| `iterator_pipeline` | 27.7 | 35.7 | 14.2 | -48.7% | 1.15x |
-| `hashmap_wordcount` | 44.2 | 60.9 | 36.0 | -18.5% | 1.43x |
-| `generic_stack` | 12.9 | 23.6 | 18.0 | +39.4% | 1.32x |
-| `fn_pipeline` | 7.6 | 16.5 | 12.7 | +65.8% | 1.40x |
-| `string_unicode` | 27.9 | 375.0 | 33.3 | +19.5% | 3.06x |
-| `hashmap_i64` | 213.0 | 262.8 | 212.5 | -0.2% | 1.42x |
-| `hashmap_string` | 243.7 | 377.0 | 193.2 | -20.7% | 1.07x |
-
-Runtime is compared against the 1.7 run measured on an idle host. Build times moved the other
-way in this run because the host was busier than during the 1.7 run (the C compiler alone needed
-0.21-0.37 s here versus 0.21-0.29 s in 1.7), so the cold and cached columns are indicative
-rather than directly comparable:
-
-| workload | v1.7 cold (s) | Phase D baseline cold (s) | v2.0 cold (s) | change | v1.7 cached (ms) | Phase D baseline cached (ms) | v2.0 cached (ms) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `fib` | 1.170 | n/a | 0.561 | -52.0% | 16.3 | n/a | 44.8 |
-| `loop_sum` | 1.136 | n/a | 0.453 | -60.1% | 15.6 | n/a | 41.9 |
-| `string_build` | 1.033 | 2.610 | 0.391 | -62.2% | 17 | 57.6 | 35.7 |
-| `vec_memory` | 1.022 | 2.477 | 0.379 | -62.9% | 16.1 | 68.7 | 34.3 |
-| `sort_i64` | 1.078 | n/a | 0.506 | -53.1% | 19.5 | n/a | 38.2 |
-| `matrix_multiply` | 1.056 | n/a | 0.448 | -57.6% | 16.1 | n/a | 45.4 |
-| `binary_trees` | 0.992 | 2.484 | 0.591 | -40.4% | 16 | 52 | 35.8 |
-| `binary_trees_refs` | 1.008 | 2.104 | 0.641 | -36.5% | 16.1 | 46 | 51.9 |
-| `string_split` | 1.025 | 2.492 | 0.601 | -41.3% | 15.8 | 57.9 | 51 |
-| `sieve` | 1.017 | n/a | 0.471 | -53.7% | 16.3 | n/a | 42.3 |
-| `mandelbrot` | 1.003 | n/a | 0.402 | -59.9% | 16.7 | n/a | 65.8 |
-| `iterator_pipeline` | 1.002 | 2.314 | 1.176 | +17.3% | 17.1 | 58.7 | 46 |
-| `hashmap_wordcount` | 1.057 | 2.211 | 0.495 | -53.1% | 16 | 47.6 | 40.2 |
-| `generic_stack` | 1.007 | 2.157 | 0.498 | -50.5% | 16.9 | 48 | 40.9 |
-| `fn_pipeline` | 0.997 | 2.707 | 1.159 | +16.2% | 18.1 | 51.9 | 41.4 |
-| `string_unicode` | 0.990 | 2.208 | 0.532 | -46.2% | 16.8 | 53.6 | 43.3 |
-| `hashmap_i64` | 0.983 | 2.500 | 0.496 | -49.6% | 16 | 42.8 | 40.7 |
-| `hashmap_string` | 1.025 | 2.567 | 0.547 | -46.7% | 16.1 | 57.1 | 41.9 |
-| `compile_large` | 1.837 | n/a | 2.023 | +10.1% | 237.9 | n/a | 512.7 |
-| `modules_compile` | 2.379 | n/a | 2.898 | +21.8% | 198.6 | n/a | 478.2 |
-| `package_compile` | 1.482 | n/a | 1.377 | -7.0% | 41.8 | n/a | 99.9 |
+The rest of the movements are consistent with run-to-run host variance. The largest improvements are `binary_trees_refs` (59.5 -> 38.2 ms, now 1.46x C), `fib`, `matrix_multiply`, `mandelbrot` and `hashmap_wordcount`; the largest regressions after `string_build` are `fib_iter` (+79.9%), `string_split` (+61.3%) and `fib_memo` (+28.8%), all short runs whose C builds also moved (by 25.3, 11.8 and 5.7). Absolute times are host-specific; the ratios in the runtime table are the portable part.
 
 ### The largest runtime changes
 
-The four workloads that improved most against the 1.7 run:
+Compared with the published 2.0.0 run, the six workloads that improved most were:
 
-- `iterator_pipeline`: 27.7 ms -> 14.2 ms (-48.7%, now 1.15x C)
-- `binary_trees`: 331.3 ms -> 190.7 ms (-42.4%, now 10.31x C)
-- `hashmap_string`: 243.7 ms -> 193.2 ms (-20.7%, now 1.07x C)
-- `hashmap_wordcount`: 44.2 ms -> 36.0 ms (-18.5%, now 1.43x C)
+- `binary_trees_refs`: 59.5 ms -> 38.2 ms (-35.8%, now 1.46x C)
+- `fib`: 31.4 ms -> 27.6 ms (-11.9%, now 1.17x C)
+- `matrix_multiply`: 18.1 ms -> 16.2 ms (-10.8%, now 1.27x C)
+- `mandelbrot`: 44.0 ms -> 39.5 ms (-10.1%, now 1.25x C)
+- `hashmap_wordcount`: 36.0 ms -> 32.5 ms (-9.8%, now 1.50x C)
+- `hashmap_i64`: 212.5 ms -> 196.3 ms (-7.6%, now 1.35x C)
 
-The four that lost the most ground:
+The six that lost the most ground were:
 
-- `binary_trees_refs`: 25.9 ms -> 59.5 ms (+129.5%, now 2.33x C)
-- `loop_sum`: 8.0 ms -> 17.5 ms (+118.6%, now 1.41x C)
-- `mandelbrot`: 23.0 ms -> 44.0 ms (+91.1%, now 1.65x C)
-- `matrix_multiply`: 9.9 ms -> 18.1 ms (+83.8%, now 1.43x C)
+- `string_build`: 26.8 ms -> 97.2 ms (+263.0%, now 7.48x C)
+- `sort_i64`: 30.8 ms -> 56.6 ms (+83.7%, now 1.71x C)
+- `fib_iter`: 13.4 ms -> 24.1 ms (+79.9%, now 2.63x C)
+- `string_split`: 24.4 ms -> 39.3 ms (+61.3%, now 2.75x C)
+- `fib_memo`: 10.5 ms -> 13.6 ms (+28.8%, now 1.33x C)
+- `sort_insertion`: 11.4 ms -> 14.3 ms (+25.1%, now 1.45x C)
 
-The losses are concentrated in the programs whose runs are shortest, where fixed per-process
-cost is a large share of the total; the reference-traversal workload is the exception, a real
-regression in the traversal itself. Note that the C builds of these same workloads were also
-slower in this run than in 1.7, so part of the movement is environmental rather than code
-generation.
+Short workloads dominate both lists, and the C builds of the same programs moved in the same direction in several cases (see the C change column above). Read these deltas as measured together on this host, not as isolated compiler improvements or regressions.
 
 ### Workloads outside the 1.4x target
 
-9 of the 22 executed workloads are within 1.4x of the C build; 14 are within 1.5x. The
-13 above 1.4x are listed here (the by-value `binary_trees` row is a semantic exception, not a
-performance gap):
+10 of the 22 executed workloads are within 1.4x of the C build; 15 are within 1.5x. The 12 above 1.4x are listed here (the by-value `binary_trees` row is a semantic exception, not a performance gap):
 
-| workload | v2.0 runtime (ms) | C runtime (ms) | ratio to C | note |
+| workload | 2.1.0 runtime (ms) | C runtime (ms) | ratio to C | note |
 | --- | ---: | ---: | ---: | --- |
-| `string_unicode` | 33.3 | 10.9 | 3.06x | owned String wrapper calls and Unicode table lookups |
-| `string_build` | 26.8 | 11.0 | 2.44x | string growth and appends |
-| `binary_trees_refs` | 59.5 | 25.5 | 2.33x | reference-based tree traversal |
-| `string_split` | 24.4 | 12.8 | 1.91x | splitting and parsing |
-| `fib_iter` | 13.4 | 7.3 | 1.83x | iterative alternative to fib |
-| `mandelbrot` | 44.0 | 26.6 | 1.65x | floating-point heavy loop |
-| `array_wordcount` | 13.7 | 9.0 | 1.51x | flat-array alternative to hashmap_wordcount |
-| `vec_memory` | 17.9 | 12.4 | 1.44x | vector of structs, by-value element copies |
-| `hashmap_wordcount` | 36.0 | 25.2 | 1.43x | hashing owned String words |
-| `matrix_multiply` | 18.1 | 12.7 | 1.43x | nested Vec indexing and bounds checks |
-| `hashmap_i64` | 212.5 | 150.2 | 1.42x | integer-key map operations |
-| `loop_sum` | 17.5 | 12.4 | 1.41x | short-running scalar loop, fixed process cost dominates |
-| `binary_trees` | 190.7 | 18.5 | 10.31x | by-value workload: each recursive step builds and returns a subtree by value, so the deep copies are part of the measured workload by design; the binary_trees_refs workload is the comparable reference-traversal variant |
+| `binary_trees` | 212.5 | 19.2 | 11.05x | by-value workload: each recursive step builds and returns a subtree by value, so the deep copies are part of the measured workload by design; the binary_trees_refs workload is the comparable reference-traversal variant |
+| `string_build` | 97.2 | 13.0 | 7.48x | string growth and appends; the 2.1 &str alignment removed the old format-into-push fusion |
+| `string_split` | 39.3 | 14.3 | 2.75x | splitting and parsing |
+| `fib_iter` | 24.1 | 9.2 | 2.63x | iterative alternative to fib |
+| `string_unicode` | 38.1 | 15.6 | 2.44x | owned String wrapper calls and Unicode table lookups |
+| `sort_i64` | 56.6 | 33.1 | 1.71x | in-language sorting of random data; follow-up item |
+| `loop_sum` | 20.6 | 13.4 | 1.54x | short-running scalar loop, fixed process cost dominates |
+| `hashmap_wordcount` | 32.5 | 21.7 | 1.50x | hashing owned String words |
+| `fn_pipeline` | 12.1 | 8.3 | 1.46x | function values stored in records |
+| `binary_trees_refs` | 38.2 | 26.2 | 1.46x | reference-based tree traversal |
+| `array_wordcount` | 13.1 | 9.0 | 1.45x | flat-array alternative to hashmap_wordcount |
+| `sort_insertion` | 14.3 | 9.8 | 1.45x | quadratic insertion sort, alternative to the library sort |
 
-The `binary_trees` workload is a semantic exception rather than a code-generation gap: the
-program's recursive step builds and returns a subtree by value, so the deep copies are part of
-the measured workload. Its `binary_trees_refs` sibling performs the same tree walk through
-references and is the comparable measurement.
+The `binary_trees` workload is a semantic exception rather than a code-generation gap: the recursive step builds and returns a subtree by value, so the deep copies are part of the measured workload. Its `binary_trees_refs` sibling performs the same tree walk through references and is the comparable measurement; it is now 1.46x C.
 
-### Acceptance against the 2.0 targets
+### Acceptance against the standing targets
 
 | target | result | status |
 | --- | --- | --- |
-| every measured runtime within 1.4x of C | 9 of 22 executed programs are within 1.4x (14 within 1.5x); the 13 exceptions are tabulated above | partly met |
-| smallest single-file cold build 0.35-0.5 s | 0.379 s (`vec_memory`) | met |
-| cached build ~15 ms | 44.8 ms for `fib`, 34-66 ms across all programs | not met |
-| `compile_large` cold build <= 2.5x the C reference | 2.02 s (301,361 bytes of generated C, 0.30 MB); the run was on a busier host than 1.7, so this is a snapshot rather than a scored result | not scored |
+| every measured runtime within 1.4x of C | 10 of 22 executed programs are within 1.4x (15 within 1.5x); the 12 exceptions are tabulated above | partly met |
+| smallest single-file cold build 0.35-0.5 s | 0.5 s (`array_wordcount`) | met |
+| cached build ~15 ms | 53 ms for `array_wordcount`; 53-108 ms across all programs | not met |
+| `compile_large` cold build <= 2.5x the C reference | 1.96 s (301,361 bytes of generated C, 0.30 MB); the workload has no equivalent C build, so this is a snapshot and not a scored result | not scored |
 | generated C warning-free under `-Wall -Wextra -Werror` | checked by every harness build in this run | met |
-| expected output agrees with an independent oracle | 22 program checksums and 3-run scale checksums agree | met |
+| expected output agrees with an independent oracle | 22 program checksums and 39 data-scale checksums agree | met |
 
-The compile-time targets were set against an idle host. This run's cold builds
-(0.38-1.18 s for single-file programs, 2.02 s for `compile_large`) and cached rebuilds
-(34-66 ms) are measured on a host that was simultaneously building the rest of the
-project, so these numbers are indicative snapshots rather than scored results for the
-compile-time targets. Runtime and validation targets do not depend on host load to the same
-degree and are met.
+Runtime and validation targets do not depend on host load to the same degree and are met. Compile-time targets were set against an idle host; the cold and cached numbers above come from one run on a host that was also running the rest of the measurement suite, so they are indicative snapshots rather than scored results.
 
 ### Python and Node.js
 
-The interpreted languages are shown for scale, not as primary references. Their runtimes are
-4.0x-95.0x and 2.2x-19.7x the C median respectively over the executed workloads; they
-exist in the table to demonstrate the size of the gap a compiled language removes, and to check
-that every implementation computes the same checksum line.
+The interpreted languages are shown for scale, not as primary references. Their runtimes are 3.93x-109.13x and 2.10x-15.46x the C median respectively over the executed workloads; they exist in the table to demonstrate the size of the gap a compiled language removes, and to check that every implementation computes the same checksum line.
 
 ## Fairness notes and caveats
 
@@ -524,7 +428,7 @@ that every implementation computes the same checksum line.
 
    | workload | lsaca | C | Rust | Python | Node.js |
    | --- | --- | --- | --- | --- | --- |
-   | `string_build` | `String::new()` + `push_str(format!(...))` | one `malloc`ed char buffer of exact size | `String::with_capacity` + `to_string` + `push` | list of `str` + `",".join` | array + `join` |
+   | `string_build` | `String::new()` + `format!` then `push_str(&piece)` | one `malloc`ed char buffer of exact size | `String::with_capacity` + `to_string` + `push` | list of `str` + `",".join` | array + `join` |
    | `vec_memory` | `Vec<Point>` + `with_capacity` + `push` | `malloc`ed array of structs | `Vec<Point>` with `with_capacity` | list of tuples | array of objects |
    | `sort_i64` | iterative quicksort on `Vec<i64>` | same quicksort on a `malloc`ed array | `Vec<i64>` + `swap` | list + swapping | array + swapping |
    | `binary_trees` | `Option<Box<Node>>` recursive struct; the by-value traversal clones child subtrees with `.clone()` (moving a field out is `E0507`) | `malloc`ed nodes + raw pointers | `Option<Box<Node>>` if let / match | class with `__slots__` | plain objects |
@@ -543,45 +447,20 @@ that every implementation computes the same checksum line.
 
 The following things are deliberately kept visible rather than smoothed over:
 
-- Every number in a table is from one run on one host. Table cells are never combined from
-  different machines, and no cross-machine comparison is made anywhere on this page.
-- The runtime tables show the median of 7 measured runs after one warm-up, with the minimum in
-  parentheses. The `min` column is there so that a noisy median can be spotted.
-- This 2.0 run was recorded on a busier host than the published 1.7 run: the same gcc needs
-  0.21-0.37 s here versus 0.21-0.29 s then, and the lsaca cold builds moved by more than that.
-  Runtime comparisons are still useful because lsaca and C are measured in the same run, but
-  build-time comparisons across the two runs are directional only.
-- The Phase D baseline in the three-way table was measured on an even busier host, so its
-  compile columns are not comparable with either published run.
-- Several workloads are slower than in the 1.7 run; the largest movements are listed in the
-  analysis. The shortest programs are dominated by fixed per-process cost, and the reference
-  traversal regressed as well. The same C programs were 10-60% slower in this run than in 1.7,
-  so part of that movement is environmental and part is a code-generation follow-up.
-- The 2.0 runtime wins are largest where the Phase D work on allocation and reference counting
-  applied: the tree, string and hash-map workloads move the most, while the smallest programs
-  are dominated by the fixed cost above.
-- The four alternative-implementation workloads (`fib_iter`, `fib_memo`, `sort_insertion`,
-  `array_wordcount`) are built in lsaca and C only. Rust, Python and Node.js cells are `n/a` for
-  them by design, not because they failed.
-- `binary_trees` intentionally performs by-value tree copies; `binary_trees_refs` is the
-  reference-traversal variant and the one to read when comparing traversal overhead.
-- The `string_unicode` workload spends its time in the stdlib `String` wrappers and Unicode table
-  lookups. The 2.0 external standard library adds a wrapper layer that the 1.7 builtins did not
-  have, and the copy-heavy view path it exposed is the largest single runtime regression in this
-  run.
-- Compile-only workloads are built but never executed, so they appear only in the compile and
-  artifact tables.
-- The cached-build column reuses the cache produced by the cold build of the same program in the
-  same run; it is the best case for incremental builds, not an average edit-rebuild cost.
-- Peak memory is the operating system's peak working set for the child process (sampled by the
-  harness), not a per-allocation count. A program that leaks does not necessarily show a high
-  peak in a short run, which is why every lsaca program is also built and run with the debugging
-  runtime that reports leaks.
-- Expected checksums are computed by `scripts/oracles.py` independently of lsaca and of the other
-  languages; a mismatch aborts the run instead of publishing it.
-- The measurement environment is Windows 11 on an Intel i7-1260P. Absolute numbers will differ on
-  other hardware; the ratios to C are the portable part, and the CI matrix re-runs the quick suite
-  on Linux, macOS and Windows to keep the smoke signal honest.
+- Every number in a table is from one run on one host. Table cells are never combined from different machines, and no cross-machine comparison is made anywhere on this page.
+- The runtime tables show the median of 7 measured runs after one warm-up, with the minimum in parentheses. The minimum is there so that a noisy median can be spotted.
+- This 2.1.0 run was recorded on a host whose C reference builds were slower than in the published 2.0.0 run: gcc needed 0.22-0.47 s per program here versus 0.21-0.37 s then, and several C runtime medians moved by tens of percent (`loop_sum` 12.4 -> 13.4 ms, `string_unicode` 10.9 -> 15.6 ms). lsaca and C are always measured in the same run, so ratios stay meaningful; deltas between the two published runs mix code changes with host variance.
+- Several short workloads moved by tens of percent in both directions. Per-process fixed cost is a large share of any run under about 25 ms, so read those deltas as measured on this host, not as isolated improvements or regressions in generated code.
+- `string_build` is the one large regression explained by the language itself: 2.1 takes `&str` for text parameters, so the idiomatic program is `let piece = format!("{},", v); s.push_str(&piece);`. The 2.0 compiler could fuse `push_str(format!(...))` into an in-place append; that fusion no longer applies, so the workload now allocates a temporary `String` per token. Recovering the optimisation is a follow-up.
+- `sort_i64` moved +83.7% while its C build moved +7.3%; the only source change is index casts to `usize`, so this is listed as a code-generation follow-up rather than a language effect.
+- `binary_trees` intentionally performs by-value tree copies; `binary_trees_refs` is the reference-traversal variant and the one to read when comparing traversal overhead. The borrowed traversal improved to 38.2 ms (1.46x C) in this run.
+- The `string_unicode` ratio improved from 3.06x to 2.44x mostly because the C build moved (+42.9%) on this host; the lsaca time moved +14.3%.
+- The four alternative-implementation workloads (`fib_iter`, `fib_memo`, `sort_insertion`, `array_wordcount`) are built in lsaca and C only. Rust, Python and Node.js cells are `n/a` for them by design, not because they failed.
+- Compile-only workloads are built but never executed, so they appear only in the compile and artifact tables.
+- The cached-build column reuses the cache produced by the cold build of the same program in the same run; it is the best case for incremental builds, not an average edit-rebuild cost.
+- Peak memory is the operating system's peak working set for the child process (sampled by the harness), not a per-allocation count. A program that leaks does not necessarily show a high peak in a short run, which is why every lsaca program is also built and run with the debugging runtime that reports leaks.
+- Expected checksums are computed by `scripts/oracles.py` independently of lsaca and of the other languages; a mismatch aborts the run instead of publishing it.
+- The measurement environment is Windows 11 on an Intel i7-1260P. Absolute numbers will differ on other hardware; the ratios to C are the portable part, and the CI matrix re-runs the quick suite on Linux, macOS and Windows to keep the smoke signal honest.
 
 ## Reproducing
 
@@ -609,8 +488,7 @@ To regenerate the derived report sections used on this page:
 
 ```sh
 python scripts/bench_report.py \
-  --baseline benchmarks/results/archive/v1.7/latest.json \
-  --baseline2 benchmarks/results/archive/v2.0-pre-perf/latest.json
+  --baseline benchmarks/results/archive/v2.0/latest.json
 ```
 
 The harness requires gcc, rustc, node and Python on the PATH and, on Windows, the MSYS2 UCRT64

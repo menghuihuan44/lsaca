@@ -305,24 +305,45 @@ fn manifest_diagnostics(scratch: &Scratch, relative: &str) -> (bool, Diagnostics
     (parsed.is_some(), diagnostics, sources)
 }
 
-/// Write a module chain: main.ls declares m000, m000 declares m001, and so on.
+/// Write a module chain: main.ls declares m0, m0 declares m1, and so on.
 ///
-/// Module resolution is strictly tree shaped: the file for `mNNN` lives in the
-/// child directory of its parent module, so the chain is written as nested
-/// directories (`m000.ls` then `m000/m001.ls` then `m000/m001/m002.ls`).
+/// Module resolution is strictly tree shaped: the file for a module lives in
+/// the child directory of its parent module, so the chain is written as nested
+/// directories (`m0.ls` then `m0/m1.ls` then `m0/m1/m2.ls`).
+///
+/// The generated names stay short on purpose: the nesting test writes hundreds
+/// of levels deep, and the total generated path must stay below the platform
+/// limit (macOS accepts at most 1024 bytes per path). Four-character names such
+/// as `m000` overflow that budget at this depth, while the compact names used
+/// here fit comfortably: the first 26 modules are single letters and the rest
+/// are a letter followed by a digit.
 fn write_module_chain(scratch: &Scratch, relative: &str, length: usize) {
-    scratch.write(&format!("{relative}/main.ls"), "mod m000;\nfn main() { }\n");
+    let name = |index: usize| {
+        if index < 26 {
+            char::from(b'a' + index as u8).to_string()
+        } else {
+            let rest = index - 26;
+            format!("{}{}", char::from(b'a' + (rest / 10) as u8), rest % 10)
+        }
+    };
+    scratch.write(
+        &format!("{relative}/main.ls"),
+        &format!("mod {};\nfn main() {{ }}\n", name(0)),
+    );
     for index in 0..length {
         let contents = if index + 1 < length {
-            format!("mod m{:03};\n", index + 1)
+            format!("mod {};\n", name(index + 1))
         } else {
             "pub fn leaf() -> i64 { 7 }\n".to_string()
         };
         let mut path = relative.to_string();
         for parent in 0..index {
-            path.push_str(&format!("/m{parent:03}"));
+            path.push('/');
+            path.push_str(&name(parent));
         }
-        path.push_str(&format!("/m{index:03}.ls"));
+        path.push('/');
+        path.push_str(&name(index));
+        path.push_str(".ls");
         scratch.write(&path, &contents);
     }
 }
@@ -476,7 +497,9 @@ fn rejects_self_referential_module_file() {
 fn rejects_module_chain_deeper_than_256() {
     case("deep-module-chain", || {
         let scratch = Scratch::new("deep-module-chain");
-        write_module_chain(&scratch, "deep", 300);
+        // 257 levels is the smallest chain that exceeds the 256-level limit,
+        // and its generated nested path stays well under the macOS limit.
+        write_module_chain(&scratch, "deep", 257);
         let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "deep/main.ls");
         assert!(
             has_code(&diagnostics, "E0001"),
@@ -1587,4 +1610,818 @@ fn valid_sources_with_bom_and_crlf_parse_cleanly() {
         let diagnostics = source_diagnostics("crlf.ls", source);
         assert!(!diagnostics.has_errors(), "{}", messages(&diagnostics));
     });
+}
+
+// ---------------------------------------------------------------------------
+// v2.1 semantic hardening: integer inference, structs, text and slice views
+// Adds clean rejection and acceptance coverage for the rules that changed in
+// the 2.1 release, plus parsing robustness for the new surface syntax.
+// ---------------------------------------------------------------------------
+
+fn expect_v21_rejected(
+    case_name: &'static str,
+    source: &'static str,
+    expected: &'static str,
+    fragment: Option<&'static str>,
+) {
+    case(case_name, move || {
+        let scratch = Scratch::new(case_name);
+        scratch.write("main.ls", source);
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        let text = rendered(&frontend, &diagnostics);
+        assert!(
+            has_code(&diagnostics, expected),
+            "{case_name}: expected {expected}, got:\n{text}"
+        );
+        if let Some(fragment) = fragment {
+            assert!(
+                messages(&diagnostics).contains(fragment),
+                "{case_name}: expected a message containing {fragment:?}, got:\n{text}"
+            );
+        }
+        assert_clean_failure(case_name, &text);
+    });
+}
+
+fn expect_v21_rejected_message(
+    case_name: &'static str,
+    source: &'static str,
+    fragment: &'static str,
+) {
+    case(case_name, move || {
+        let scratch = Scratch::new(case_name);
+        scratch.write("main.ls", source);
+        let (frontend, diagnostics) = failed_load_diagnostics(&scratch, "main.ls");
+        let text = rendered(&frontend, &diagnostics);
+        assert!(
+            messages(&diagnostics).contains(fragment),
+            "{case_name}: expected a message containing {fragment:?}, got:\n{text}"
+        );
+        assert_clean_failure(case_name, &text);
+    });
+}
+
+fn expect_v21_accepted(case_name: &'static str, source: &'static str) {
+    case(case_name, move || {
+        let scratch = Scratch::new(case_name);
+        scratch.write("main.ls", source);
+        expect_clean_check(&load_ok(&scratch, "main.ls"));
+    });
+}
+
+#[test]
+fn rejects_mixed_integer_arithmetic() {
+    expect_v21_rejected(
+        "v21-mixed-arith",
+        r#"
+fn main() {
+    let small: i32 = 1;
+    let big: i64 = 2;
+    let total = small + big;
+    println!("{}", total);
+}
+"#,
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_usize_to_i64_assignment() {
+    expect_v21_rejected(
+        "v21-usize-to-i64",
+        r#"
+fn main() {
+    let index: usize = 2;
+    let value: i64 = index;
+    println!("{}", value);
+}
+"#,
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_mixed_integer_comparison() {
+    expect_v21_rejected(
+        "v21-mixed-compare",
+        r#"
+fn main() {
+    let index: i32 = 1;
+    let values = vec![10, 20, 30];
+    if index < values.len() {
+        println!("in range");
+    }
+}
+"#,
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_i32_vector_index() {
+    expect_v21_rejected(
+        "v21-i32-index",
+        r#"
+fn main() {
+    let values = vec![1, 2];
+    let index: i32 = 0;
+    println!("{}", values[index]);
+}
+"#,
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_suffixed_literal_out_of_range() {
+    expect_v21_rejected(
+        "v21-i8-range",
+        r#"
+fn main() {
+    let value: i8 = 128;
+    println!("{}", value);
+}
+"#,
+        "E0080",
+        Some("literal out of range for i8"),
+    );
+}
+
+#[test]
+fn rejects_unsuffixed_literal_out_of_i32_range() {
+    expect_v21_rejected(
+        "v21-default-overflow",
+        r#"
+fn main() {
+    let value = 3000000000;
+    println!("{}", value);
+}
+"#,
+        "E0080",
+        Some("literal out of range for i32"),
+    );
+}
+
+#[test]
+fn rejects_tuple_struct_constructor_arity() {
+    expect_v21_rejected(
+        "v21-tuple-arity",
+        r#"
+struct Point(i64, i64);
+
+fn main() {
+    let point = Point(1);
+    println!("{:?}", point);
+}
+"#,
+        "E0061",
+        None,
+    );
+}
+
+#[test]
+fn rejects_tuple_struct_field_out_of_bounds() {
+    expect_v21_rejected(
+        "v21-tuple-field",
+        r#"
+struct Point(i64, i64);
+
+fn main() {
+    let point = Point(1, 2);
+    println!("{}", point.2);
+}
+"#,
+        "E0609",
+        None,
+    );
+}
+
+#[test]
+fn rejects_unit_struct_constructor_call() {
+    expect_v21_rejected(
+        "v21-unit-call",
+        r#"
+struct Marker;
+
+fn main() {
+    let marker = Marker();
+    println!("{:?}", marker);
+}
+"#,
+        "E0532",
+        None,
+    );
+}
+
+#[test]
+fn rejects_tuple_struct_pattern_arity() {
+    expect_v21_rejected(
+        "v21-tuple-pattern",
+        r#"
+struct Point(i64, i64);
+
+fn main() {
+    let point = Point(1, 2);
+    match point {
+        Point(x) => println!("{}", x),
+    }
+}
+"#,
+        "E0023",
+        None,
+    );
+}
+
+#[test]
+fn rejects_mut_self_receiver() {
+    expect_v21_rejected_message(
+        "v21-mut-self",
+        r#"
+struct Counter {
+    count: i64,
+}
+
+impl Counter {
+    fn bump(mut self) -> Counter {
+        self.count += 1;
+        self
+    }
+}
+
+fn main() {
+    let counter = Counter { count: 0 };
+    println!("{}", counter.bump().count);
+}
+"#,
+        "cannot be declared 'mut'",
+    );
+}
+
+#[test]
+fn rejects_slice_parameter_by_value() {
+    expect_v21_rejected(
+        "v21-slice-param",
+        r#"
+fn total(values: [i64]) -> i64 {
+    0
+}
+
+fn main() {
+}
+"#,
+        "E0001",
+        Some("slices are unsized"),
+    );
+}
+
+#[test]
+fn rejects_str_index() {
+    expect_v21_rejected(
+        "v21-str-index",
+        r#"
+fn main() {
+    let text: &str = "hello";
+    let first = text[0];
+    println!("{}", first);
+}
+"#,
+        "E0608",
+        None,
+    );
+}
+
+#[test]
+fn rejects_generic_parse_target() {
+    expect_v21_rejected(
+        "v21-parse-target",
+        r#"
+fn main() {
+    let value = "42".parse::<u8>();
+    println!("{:?}", value);
+}
+"#,
+        "E0107",
+        Some("unsupported type argument for parse: u8"),
+    );
+}
+
+#[test]
+fn rejects_strong_count_as_i64() {
+    expect_v21_rejected(
+        "v21-strong-count",
+        r#"
+fn main() {
+    let value = Rc::new(String::from("hello"));
+    let count: i64 = value.strong_count();
+    println!("{}", count);
+}
+"#,
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_shutdown_from_integer() {
+    expect_v21_rejected(
+        "v21-shutdown",
+        r#"
+use std::net::Shutdown;
+
+fn shut(how: Shutdown) {
+    println!("requested");
+}
+
+fn main() {
+    shut(0);
+}
+"#,
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_slice_stored_in_struct() {
+    expect_v21_rejected(
+        "v21-slice-struct",
+        r#"
+struct Holder {
+    values: &[i64],
+}
+
+fn main() {
+}
+"#,
+        "E0498",
+        None,
+    );
+}
+
+#[test]
+fn rejects_borrowed_text_concatenation() {
+    expect_v21_rejected(
+        "v21-str-concat",
+        r#"
+fn main() {
+    let left: &str = "a";
+    let right: &str = "b";
+    let joined = left + right;
+    println!("{}", joined);
+}
+"#,
+        "E0369",
+        None,
+    );
+}
+
+#[test]
+fn rejects_owned_string_concatenation() {
+    expect_v21_rejected(
+        "v21-string-concat",
+        r#"
+fn main() {
+    let left = String::from("a");
+    let right = String::from("b");
+    let joined = left + right;
+    println!("{}", joined);
+}
+"#,
+        "E0277",
+        None,
+    );
+}
+
+#[test]
+fn rejects_move_while_a_str_view_is_live() {
+    expect_v21_rejected(
+        "v21-move-borrowed",
+        r#"
+fn main() {
+    let text = String::from("hello");
+    let view: &str = &text;
+    let moved = text;
+    println!("{} {}", view, moved);
+}
+"#,
+        "E0505",
+        None,
+    );
+}
+
+#[test]
+fn rejects_move_out_of_string_field() {
+    expect_v21_rejected(
+        "v21-move-field",
+        r#"
+struct Holder {
+    text: String,
+}
+
+fn main() {
+    let holder = Holder { text: String::from("hello") };
+    let text = holder.text;
+    println!("{}", text);
+}
+"#,
+        "E0507",
+        None,
+    );
+}
+
+#[test]
+fn rejects_move_out_of_indexed_string_element() {
+    expect_v21_rejected(
+        "v21-move-index",
+        r#"
+fn main() {
+    let values: Vec<String> = vec![String::from("a")];
+    let first = values[0];
+    println!("{}", first);
+}
+"#,
+        "E0507",
+        None,
+    );
+}
+
+#[test]
+fn rejects_use_after_move_of_string() {
+    expect_v21_rejected(
+        "v21-use-after-move",
+        r#"
+fn main() {
+    let first = String::from("a");
+    let second = first;
+    println!("{}", first);
+    println!("{}", second);
+}
+"#,
+        "E0382",
+        None,
+    );
+}
+
+#[test]
+fn accepts_clone_keeps_string_source_live() {
+    expect_v21_accepted(
+        "v21-clone",
+        r#"
+fn main() {
+    let first = String::from("a");
+    let second = first.clone();
+    println!("{} {}", first, second);
+}
+"#,
+    );
+}
+
+#[test]
+fn accepts_move_after_last_borrow() {
+    expect_v21_accepted(
+        "v21-last-borrow",
+        r#"
+fn main() {
+    let text = String::from("hello");
+    let view: &str = &text;
+    println!("view = {}", view);
+    let moved = text;
+    println!("moved = {}", moved);
+}
+"#,
+    );
+}
+
+#[test]
+fn accepts_v21_tuple_structs_and_mut_parameters() {
+    expect_v21_accepted(
+        "v21-tuple-accept",
+        r#"
+struct Point(i64, i64);
+
+struct Meters(i64);
+
+struct Marker;
+
+impl Point {
+    fn new(x: i64, y: i64) -> Point {
+        Point(x, y)
+    }
+
+    fn sum(&self) -> i64 {
+        self.0 + self.1
+    }
+}
+
+fn bump(mut value: i64) -> i64 {
+    value += 1;
+    value
+}
+
+fn fill(mut text: String, suffix: String) -> String {
+    text += "!";
+    text + &suffix
+}
+
+fn main() {
+    let point = Point::new(1, 2);
+    let meters = Meters(3);
+    let _marker = Marker;
+    let pair = Point(4, 5);
+    let total = match pair {
+        Point(x, y) => x + y,
+    };
+    println!(
+        "{} {} {} {} {}",
+        point.sum(),
+        meters.0,
+        bump(1),
+        fill(String::from("a"), String::from("b")),
+        total
+    );
+}
+"#,
+    );
+}
+
+#[test]
+fn accepts_v21_borrowed_text_and_slices() {
+    expect_v21_accepted(
+        "v21-text-accept",
+        r#"
+fn greet(name: &str) -> String {
+    String::from_str("hello, ") + name
+}
+
+fn total(values: &[i64]) -> i64 {
+    let mut sum = 0;
+    let mut index = 0;
+    while index < values.len() {
+        sum += values[index];
+        index += 1;
+    }
+    sum
+}
+
+fn main() {
+    let name = String::from("world");
+    let greeting = greet("there");
+    let borrowed = greet(&name);
+    let literal: &str = "text";
+    let values: Vec<i64> = vec![1, 2, 3];
+    let view: &[i64] = &values;
+    let index = 0;
+    println!(
+        "{} {} {} {} {}",
+        greeting,
+        borrowed,
+        literal.len(),
+        total(&values),
+        view[index]
+    );
+}
+"#,
+    );
+}
+
+#[test]
+fn accepts_v21_dyn_trait_objects() {
+    expect_v21_accepted(
+        "v21-dyn",
+        r#"
+trait Shape {
+    fn area(&self) -> i64;
+}
+
+struct Square {
+    side: i64,
+}
+
+impl Shape for Square {
+    fn area(&self) -> i64 {
+        self.side * self.side
+    }
+}
+
+fn measure(shape: &dyn Shape) -> i64 {
+    shape.area()
+}
+
+fn main() {
+    let square = Square { side: 3 };
+    let boxed: Box<dyn Shape> = Box::new(Square { side: 4 });
+    let counted: Rc<dyn Shape> = Rc::new(Square { side: 5 });
+    println!(
+        "{} {} {}",
+        measure(&square),
+        boxed.area(),
+        counted.area()
+    );
+}
+"#,
+    );
+}
+
+#[test]
+fn accepts_v21_time_types() {
+    expect_v21_accepted(
+        "v21-time",
+        r#"
+use std::time::{Duration, Instant, SystemTime, sleep};
+
+fn main() {
+    let duration = Duration::from_secs(2).checked_add(Duration::from_secs(3)).unwrap();
+    let start = Instant::now();
+    let elapsed = start.elapsed();
+    let now = SystemTime::now();
+    println!(
+        "{} {} {}",
+        duration.as_secs(),
+        elapsed.as_millis() >= 0,
+        now.unix_ms() != 0
+    );
+    println!("{}", unix_epoch().unix_ms());
+    sleep(Duration::from_millis(0));
+}
+"#,
+    );
+}
+
+#[test]
+fn accepts_v21_fs_env_net_types() {
+    expect_v21_accepted(
+        "v21-system",
+        r#"
+use std::fs::FileType;
+use std::net::Shutdown;
+
+fn kind(info: &std::fs::Metadata) -> FileType {
+    info.file_type()
+}
+
+fn shut(how: Shutdown) {
+    let _ = how;
+    println!("shutdown requested");
+}
+
+fn main() {
+    let result = std::env::var("LSACA_ROBUSTNESS_MISSING_VARIABLE");
+    println!("{}", result.is_ok());
+    shut(Shutdown::Both);
+    println!("{}", std::env::var("TEMP").is_ok());
+}
+"#,
+    );
+}
+
+const V21_MALFORMED_SNIPPETS: &[&str] = &[
+    "struct Point(i64, i64",
+    "struct Point(i64 i64);",
+    "struct Point(i64, i64) { }",
+    "struct Marker; fn main() { Marker(1); }",
+    "fn take() -> &[i64] { }",
+    "fn take(values: [i64; 3]) -> i64 { 0 }",
+    "fn take(values: &[i64) -> i64 { 0 }",
+    "use std::net::Shutdown",
+    "use std::time::{Duration, };",
+    "use std::fs::FileType as;",
+    "trait Shape { fn area(&self) -> dyn Shape; }",
+    "impl Point { fn new(mut self) -> Point { self } }",
+    "fn main() { let value = 1i128; }",
+    "fn main() { let value = \"abc\".parse::<i64>; }",
+    "fn main() { let value: &[i64] = [1, 2]; }",
+    "fn main() { let value = vec![1, 2,]; }",
+    "fn main() { let value = String::from_str(); }",
+    "fn main() { let value = Duration::from_secs(); }",
+];
+
+#[test]
+fn malformed_v21_snippets_do_not_panic() {
+    case("v21-snippets", || {
+        for snippet in V21_MALFORMED_SNIPPETS {
+            let diagnostics = source_diagnostics("v21_snippet.ls", snippet);
+            let text = messages(&diagnostics);
+            if !text.is_empty() {
+                assert_clean_failure("v2.1 malformed snippet", &text);
+            }
+        }
+    });
+}
+
+const V21_STORM_TOKENS: &[&str] = &[
+    "struct",
+    "Point",
+    "i64",
+    "i8",
+    "u8",
+    "usize",
+    "i32",
+    "(",
+    ")",
+    "[",
+    "]",
+    "&",
+    "&[",
+    "dyn",
+    "Shape",
+    "trait",
+    "impl",
+    "fn",
+    "main",
+    "self",
+    "mut",
+    "parse",
+    "::<",
+    ">",
+    "::",
+    ";",
+    "{",
+    "}",
+    ",",
+    ".",
+    "=",
+    "->",
+    "=>",
+    "use",
+    "std",
+    "net",
+    "fs",
+    "time",
+    "Shutdown",
+    "FileType",
+    "Duration",
+    "String",
+    "from_str",
+    "from_secs",
+    "1u8",
+    "1i8",
+    "0",
+    "1.5",
+    "\"text\"",
+    "'c'",
+    "?",
+];
+
+#[test]
+fn random_v21_token_storms_do_not_panic() {
+    case("storm-v21", || {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..120 {
+            let mut source = String::new();
+            for index in 0..160 {
+                if index > 0 {
+                    source.push(' ');
+                }
+                let pick = (next_random(&mut state) as usize) % V21_STORM_TOKENS.len();
+                source.push_str(V21_STORM_TOKENS[pick]);
+            }
+            let diagnostics = source_diagnostics("v21_storm.ls", &source);
+            let text = messages(&diagnostics);
+            assert_clean_failure("v2.1 token storm", &text);
+        }
+    });
+}
+
+#[test]
+fn rejects_owned_string_for_str_parameter() {
+    expect_v21_rejected(
+        "v21-owned-string-param",
+        "fn greet(name: &str) -> i64 {\n    name.len()\n}\n\nfn main() {\n    println!(\"{}\", greet(String::from(\"abc\")));\n}\n",
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_assignment_to_immutable_parameter() {
+    expect_v21_rejected(
+        "v21-immutable-param-assign",
+        "fn bump(value: i64) -> i64 {\n    value += 1;\n    value\n}\n\nfn main() {\n    println!(\"{}\", bump(1));\n}\n",
+        "E0596",
+        Some("immutable"),
+    );
+}
+
+#[test]
+fn rejects_duration_millis_as_i64() {
+    expect_v21_rejected(
+        "v21-duration-millis",
+        "use std::time::Duration;\n\nfn main() {\n    let millis: i64 = Duration::from_secs(1).as_millis();\n    println!(\"{}\", millis);\n}\n",
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_env_var_as_string() {
+    expect_v21_rejected(
+        "v21-env-var-string",
+        "fn main() {\n    let value: String = std::env::var(\"LSACA_MISSING\");\n    println!(\"{}\", value);\n}\n",
+        "E0308",
+        None,
+    );
 }

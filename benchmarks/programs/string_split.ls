@@ -7,7 +7,8 @@ fn main() {
     let mut text = String::new();
     let mut i = 0;
     while i < tokens {
-        text.push_str(format!("{},", i % 1000));
+        let piece = format!("{},", i % 1000);
+        text.push_str(&piece);
         i += 1;
     }
 

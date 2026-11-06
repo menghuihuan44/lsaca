@@ -84,7 +84,10 @@ impl<'a> Gen<'a> {
                 if !fused {
                     let place = self.place_through_reference(receiver);
                     if let Some(arg) = args.first() {
-                        let value = self.gen_owned(arg);
+                        // push_str takes text, so a &str argument is bridged
+                        // to a read only LsString view instead of an owned
+                        // temporary.
+                        let value = self.string_text_argument(arg, "String::push_str");
                         self.line(format!(
                             "{} = ls_str_push_str({}, {});",
                             place, place, value
@@ -110,17 +113,19 @@ impl<'a> Gen<'a> {
             HBuiltinMethod::StrFind => {
                 let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
-                    let value = self.gen_owned(arg);
+                    let value = self.string_text_argument(arg, "String::find");
                     let found = self.new_plain_of("int64_t", "found");
                     self.line(format!("{} = ls_str_find({}, {});", found, place, value));
                     self.line(format!("if ({} >= 0) {{", found));
                     self.w.indent();
                     self.line(format!("{}.{} = 1;", target, types::TAG_FIELD));
+                    let payload_ctype = self.ctype(&option_payload(ty));
                     self.line(format!(
-                        "{}.{}.{} = (int64_t){};",
+                        "{}.{}.{} = ({}){};",
                         target,
                         types::UNION_FIELD,
                         types::OPTION_SOME_MEMBER,
+                        payload_ctype,
                         found
                     ));
                     self.w.dedent();
@@ -130,8 +135,8 @@ impl<'a> Gen<'a> {
             HBuiltinMethod::StrReplace => {
                 let place = self.place_through_reference(receiver);
                 if let (Some(from), Some(to)) = (args.first(), args.get(1)) {
-                    let from_value = self.gen_owned(from);
-                    let to_value = self.gen_owned(to);
+                    let from_value = self.string_text_argument(from, "String::replace");
+                    let to_value = self.string_text_argument(to, "String::replace");
                     self.line(format!(
                         "{} = ls_str_replace({}, {}, {});",
                         target, place, from_value, to_value
@@ -153,7 +158,7 @@ impl<'a> Gen<'a> {
             HBuiltinMethod::StrSplit => {
                 let place = self.place_through_reference(receiver);
                 if let Some(arg) = args.first() {
-                    let value = self.gen_owned(arg);
+                    let value = self.string_text_argument(arg, "String::split");
                     self.line(format!("{} = ls_str_split({}, {});", target, place, value));
                 }
             }
@@ -1203,9 +1208,10 @@ impl<'a> Gen<'a> {
                 if map_ty.is_hash_map() {
                     let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
                     let place = self.map_place(receiver);
+                    let ctype = self.ctype(ty);
                     self.line(format!(
-                        "{} = (int64_t)lsaca_map_len_{}({});",
-                        target, suffix, place
+                        "{} = ({})lsaca_map_len_{}({});",
+                        target, ctype, suffix, place
                     ));
                 }
             }
@@ -1342,6 +1348,26 @@ impl<'a> Gen<'a> {
                     ));
                     self.w.dedent();
                     self.line("}");
+                    // Rust rejects capacities whose allocation size overflows
+                    // with a capacity overflow panic instead of attempting the
+                    // allocation. Check the byte size before reserving.
+                    let element_size = if ops::is_frozen_shared(ty) {
+                        "sizeof(LsString*)".to_string()
+                    } else {
+                        format!("sizeof({})", self.ctype(&vec_element(ty)))
+                    };
+                    self.line(format!(
+                        "if ((size_t)({}) > SIZE_MAX / {}) {{",
+                        capacity, element_size
+                    ));
+                    self.w.indent();
+                    self.line(format!(
+                        "ls_panic_cstr({}, {});",
+                        loc,
+                        util::c_string_literal(CAPACITY_OVERFLOW)
+                    ));
+                    self.w.dedent();
+                    self.line("}");
                     if ops::is_frozen_shared(ty) {
                         self.line(format!(
                             "{} = ls_vec_string_with_capacity((size_t)({}));",
@@ -1452,14 +1478,16 @@ impl<'a> Gen<'a> {
             }
             HBuiltinFn::ReadFile => {
                 if let Some(arg) = args.first() {
-                    let path = self.gen_owned(arg);
+                    // The path may be an owned String or a borrowed &str; the
+                    // runtime only reads it.
+                    let path = self.string_text_argument(arg, "read_file");
                     self.line(format!("{} = ls_read_file({});", target, path));
                 }
             }
             HBuiltinFn::WriteFile => {
                 if let (Some(path), Some(contents)) = (args.first(), args.get(1)) {
-                    let path_value = self.gen_owned(path);
-                    let contents_value = self.gen_owned(contents);
+                    let path_value = self.string_text_argument(path, "write_file");
+                    let contents_value = self.string_text_argument(contents, "write_file");
                     let result = self.fresh("res");
                     self.line("{");
                     self.w.indent();
@@ -1573,7 +1601,7 @@ impl<'a> Gen<'a> {
     fn string_predicate(&mut self, receiver: &HExpr, args: &[HExpr], func: &str, target: &str) {
         let place = self.place_through_reference(receiver);
         if let Some(arg) = args.first() {
-            let value = self.gen_owned(arg);
+            let value = self.string_text_argument(arg, "String predicate");
             self.line(format!("{} = {}({}, {});", target, func, place, value));
         }
     }

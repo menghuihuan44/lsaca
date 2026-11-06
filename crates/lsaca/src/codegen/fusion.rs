@@ -17,7 +17,7 @@
 
 use crate::hir::{HBlock, HClosure, HExpr, HExprKind, HFormatPart, HFormatPartKind, HPat};
 use crate::span::Span;
-use crate::types::Ty;
+use crate::types::{IntTy, Ty};
 
 use super::emit::{Gen, LoopCtx};
 use super::ops;
@@ -161,7 +161,8 @@ pub(crate) fn try_gen_fused_terminal(
             if fused_item_type(generator, &pipeline).is_none() {
                 return false;
             }
-            if ty != &Ty::i64() {
+            // Iterator::count returns usize in the aligned standard library.
+            if !matches!(ty, Ty::Int(_)) {
                 return false;
             }
             emit_fused_pipeline(
@@ -407,7 +408,7 @@ fn parse_fused_pipeline(generator: &Gen, expr: &HExpr) -> Option<FusedPipeline> 
             Some(pipeline)
         }
         "__lsaca_it_take" => {
-            if args.len() != 2 || args[1].ty != Ty::i64() {
+            if args.len() != 2 || !matches!(args[1].ty, Ty::Int(_)) {
                 return None;
             }
             let mut pipeline = parse_fused_pipeline(generator, &args[0])?;
@@ -417,7 +418,7 @@ fn parse_fused_pipeline(generator: &Gen, expr: &HExpr) -> Option<FusedPipeline> 
             Some(pipeline)
         }
         "__lsaca_it_skip" => {
-            if args.len() != 2 || args[1].ty != Ty::i64() {
+            if args.len() != 2 || !matches!(args[1].ty, Ty::Int(_)) {
                 return None;
             }
             let mut pipeline = parse_fused_pipeline(generator, &args[0])?;
@@ -463,7 +464,8 @@ fn fused_item_type(generator: &Gen, pipeline: &FusedPipeline) -> Option<Ty> {
             }
             FusedStage::Take { .. } | FusedStage::Skip { .. } => {}
             FusedStage::Enumerate => {
-                item = Ty::tuple(vec![Ty::i64(), item]);
+                // enumerate hands out (usize, item) pairs, like Rust.
+                item = Ty::tuple(vec![Ty::Int(IntTy::Usize), item]);
             }
         }
     }
@@ -627,12 +629,16 @@ fn emit_fused_pipeline(
         let slot = match stage {
             FusedStage::Take { count } | FusedStage::Skip { count } => {
                 let limit = generator.gen_owned(count);
-                let counter = generator.new_plain_of("int64_t", "taken");
+                // The counter uses the type of the limit so the comparison is
+                // between two values of the same C type.
+                let counter_ctype = generator.ctype(&count.ty);
+                let counter = generator.new_plain_of(&counter_ctype, "taken");
                 generator.w.line(format!("{} = 0;", counter));
                 FusedSlot::Limited { limit, counter }
             }
             FusedStage::Enumerate => {
-                let counter = generator.new_plain_of("int64_t", "position");
+                let counter_ctype = generator.ctype(&Ty::Int(IntTy::Usize));
+                let counter = generator.new_plain_of(&counter_ctype, "position");
                 generator.w.line(format!("{} = 0;", counter));
                 FusedSlot::Counting { counter }
             }
@@ -710,7 +716,8 @@ fn fused_runtime(generator: &mut Gen, consumer: &FusedConsumer, ty: &Ty) -> Fuse
             FusedRuntime::Fold { accumulator }
         }
         FusedConsumer::Count => {
-            let counter = generator.new_plain_of("int64_t", "count");
+            let counter_ctype = generator.ctype(ty);
+            let counter = generator.new_plain_of(&counter_ctype, "count");
             generator.w.line(format!("{} = 0;", counter));
             FusedRuntime::Count { counter }
         }
@@ -882,7 +889,7 @@ fn emit_fused_stages(
             let FusedSlot::Counting { counter } = &slots[index] else {
                 return;
             };
-            let tuple_ty = Ty::tuple(vec![Ty::i64(), current_ty.clone()]);
+            let tuple_ty = Ty::tuple(vec![Ty::Int(IntTy::Usize), current_ty.clone()]);
             let pair = generator.new_plain(&tuple_ty, "pair");
             generator.w.line(format!(
                 "({}).{} = {};",

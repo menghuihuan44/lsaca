@@ -709,7 +709,7 @@ fn package_dependencies_are_built_together() {
         "[package]\nname = \"greeting\"\nversion = \"0.1.0\"\n",
         &[(
             "src/lib.ls",
-            "pub fn greet(name: String) -> String {\n    String::from(\"hello, \") + name\n}\n",
+            "pub fn greet(name: String) -> String {\n    String::from(\"hello, \") + &name\n}\n",
         )],
     );
     let app = dir.join("app");

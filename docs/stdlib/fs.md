@@ -1,76 +1,120 @@
-# fs: files and directories
+# fs: the file system
 
-**Status in 2.0.0.** Implemented. The path, directory and metadata API below is
-implemented in `stdlib/src/fs.ls`. Paths are owned `String` values, as everywhere
-in the 2.0.0 library, and every function that can fail returns
-`Result<T, io::Error>`. The `io::Result<T>` alias itself is not implemented in
-2.0.0 and is planned for a later release; see [io](io.md).
+**Status in 2.1.0.** Implemented in `stdlib/src/fs.ls` on top of the handle and
+path primitives of [io](io.md). Every path argument is a read-only `&str` slice
+and every failure is an [`io::Error`](io.md), never a panic.
 
-## Implemented API
+Paths are text: pass a literal directly, or `&owned` for a `String` variable.
+The module has no `Path` or `PathBuf` type in 2.1.0; paths are platform strings
+and the operating system decides what they mean.
 
-| Function | Signature | Meaning |
+## Functions
+
+| Function | Signature | Notes |
 | --- | --- | --- |
-| `read_to_string` | `(String) -> Result<String, io::Error>` | reads a UTF-8 file; invalid UTF-8 is an error |
-| `write` | `(String, String) -> Result<(), io::Error>` | writes (truncates) a text file |
-| `read` | `(String) -> Result<Vec<u8>, io::Error>` | reads a whole file as raw bytes |
-| `append` | `(String, String) -> Result<(), io::Error>` | appends text, creating the file when missing |
-| `copy` | `(String, String) -> Result<(), io::Error>` | copies a UTF-8 text file |
-| `exists` | `(String) -> bool` | whether the path exists |
-| `is_file` / `is_dir` | `(String) -> bool` | whether the path is a regular file / a directory |
-| `metadata` | `(String) -> Result<Metadata, io::Error>` | size, modification time and kind |
-| `read_dir` | `(String) -> Result<Vec<String>, io::Error>` | entry names, sorted, without `.` and `..` |
-| `create_dir` | `(String) -> Result<(), io::Error>` | creates one directory |
-| `create_dir_all` | `(String) -> Result<(), io::Error>` | creates a directory tree |
-| `remove_file` | `(String) -> Result<(), io::Error>` | removes a file |
-| `remove_dir` | `(String) -> Result<(), io::Error>` | removes an empty directory |
-| `remove_dir_all` | `(String) -> Result<(), io::Error>` | removes a directory tree |
-| `rename` | `(String, String) -> Result<(), io::Error>` | renames or moves |
-| `canonicalize` | `(String) -> Result<String, io::Error>` | absolute, normalized path |
-| `current_dir` | `() -> Result<String, io::Error>` | current working directory |
-| `set_current_dir` | `(String) -> Result<(), io::Error>` | changes the working directory |
-| `temp_dir` | `() -> String` | the system temporary directory (infallible) |
+| `read_to_string` | `(path: &str) -> Result<String, Error>` | reads a whole UTF-8 file |
+| `read` | `(path: &str) -> Result<Vec<u8>, Error>` | reads a whole file as bytes |
+| `write` | `(path: &str, contents: &str) -> Result<(), Error>` | truncates or creates the file and writes text |
+| `append` | `(path: &str, contents: &str) -> Result<(), Error>` | appends text; read-modify-write, not atomic |
+| `copy` | `(from: &str, to: &str) -> Result<(), Error>` | copies a text file; read-modify-write, not atomic |
+| `exists` | `(path: &str) -> bool` | whether the path exists |
+| `is_file` | `(path: &str) -> bool` | whether the path is a regular file |
+| `is_dir` | `(path: &str) -> bool` | whether the path is a directory |
+| `metadata` | `(path: &str) -> Result<Metadata, Error>` | size, modification time and type |
+| `read_dir` | `(path: &str) -> Result<Vec<String>, Error>` | sorted names, without `.` and `..` |
+| `create_dir` | `(path: &str) -> Result<(), Error>` | creates one directory |
+| `create_dir_all` | `(path: &str) -> Result<(), Error>` | creates a directory and its missing parents |
+| `remove_file` | `(path: &str) -> Result<(), Error>` | removes a file |
+| `remove_dir` | `(path: &str) -> Result<(), Error>` | removes an empty directory |
+| `remove_dir_all` | `(path: &str) -> Result<(), Error>` | removes a directory tree |
+| `rename` | `(from: &str, to: &str) -> Result<(), Error>` | renames or moves a file or directory |
+| `canonicalize` | `(path: &str) -> Result<String, Error>` | the absolute, resolved form of the path |
+| `current_dir` | `() -> Result<String, Error>` | the working directory |
+| `set_current_dir` | `(path: &str) -> Result<(), Error>` | changes the working directory |
+| `temp_dir` | `() -> String` | the platform temporary directory |
 
-`Metadata` is a plain struct with `size`, `modified_ms` and `kind` fields and
-five accessors:
+`read_to_string` and `write` are text conveniences: they wrap the legacy
+`read_file` / `write_file` helpers of [io](io.md), so a failure from them is an
+`Error` of kind `ErrorKind::Other` carrying the operating system's message. The
+other functions call classified primitives and report a precise kind through
+`Error::last()`: a missing path is `ErrorKind::NotFound`, a permission failure is
+`ErrorKind::PermissionDenied`, an existing target is `ErrorKind::AlreadyExists`,
+and so on.
 
-| Method | Returns | Meaning |
+`append` and `copy` are defined in terms of a read followed by a write. They are
+not atomic, they only handle UTF-8 text (binary files are not preserved), and a
+concurrent writer can lose data. Use them for configuration and log-style files,
+not as a general-purpose copy.
+
+`read_dir` returns the names only, sorted, and never returns the `.` and `..`
+entries. Build a child path with `String + &str` concatenation:
+
+```rust
+let mut dir: String = path;
+dir += "/";
+dir += name;
+```
+
+## Metadata and file types
+
+```rust
+pub struct Metadata {
+    size: u64,
+    modified_ms: i64,
+    kind: i64,
+}
+
+pub enum FileType {
+    File,
+    Dir,
+    Other,
+}
+```
+
+| Method | Signature | Notes |
 | --- | --- | --- |
-| `size` | `i64` | file size in bytes (`0` for directories) |
-| `modified_ms` | `i64` | last modification time in milliseconds since the Unix epoch |
-| `kind` | `i64` | `0` regular file, `1` directory, `2` anything else |
-| `is_file` | `bool` | `kind == 0` |
-| `is_dir` | `bool` | `kind == 1` |
+| `size` | `(&self) -> u64` | file size in bytes |
+| `modified` | `(&self) -> Result<SystemTime, Error>` | modification time; an error when it is before the Unix epoch |
+| `file_type` | `(&self) -> FileType` | regular file, directory or other |
+| `modified_ms` | `(&self) -> i64` | deprecated in 2.1.0; use `modified` |
+| `kind` | `(&self) -> i64` | deprecated in 2.1.0; use `file_type` |
+| `is_file` | `(&self) -> bool` | shorthand for `file_type().is_file()` |
+| `is_dir` | `(&self) -> bool` | shorthand for `file_type().is_dir()` |
 
-`append` and `copy` are text-level helpers implemented in lsaca in 2.0.0: they
-read the file and write it back, are not atomic and handle UTF-8 text only.
-`read` is binary-safe because it goes through the `File` handle API.
+`file_type()` returns the `FileType` enum added in 2.1.0; `FileType` has
+`is_file()`, `is_dir()` and `is_other()`, all taking `self` because the type is
+`Copy`. `size` returns `u64` and `modified` returns a
+[`SystemTime`](time.md), matching the Rust shapes.
 
 ## Error classification
 
-The path-level functions report classified failures: a missing path is
-`ErrorKind::NotFound`, a permission failure is `ErrorKind::PermissionDenied`
-and an existing destination for `create_dir` is `ErrorKind::AlreadyExists`.
-`read_to_string` and `write` are thin wrappers over the legacy text
-intrinsics, so their failures carry `ErrorKind::Other` with the OS message.
-The exact OS message is platform-specific and should not be parsed; use
-`kind()` instead.
+| Situation | Kind |
+| --- | --- |
+| missing file or directory | `NotFound` |
+| access denied | `PermissionDenied` |
+| `create_dir` of an existing directory | `AlreadyExists` |
+| `remove_dir` of a non-empty directory, invalid path text | `InvalidInput` |
+| failure inside `read_to_string` / `write` | `Other` |
 
 ## Cross-platform behaviour
 
-The functions are implemented in lsaca on top of the runtime file primitives, so
-they behave the same on Windows, macOS and Linux within the documented error
-kinds. Paths are text; a path that the platform cannot represent is a failure,
-not a panic.
+* Path separators are the platform's. There is no path-joining helper: build a
+  path with `String + &str` or with the `+` operator on a `String`.
+* `temp_dir` reads the platform temporary directory and falls back to `.`.
+* `canonicalize` resolves symbolic links and returns an absolute path; on
+  Windows the result may be an extended-length path.
+* Modification times come from the operating system and may have coarse
+  resolution (`modified_ms` exposes the raw millisecond count).
 
-## Limits in 2.0
+## Limits in 2.1.0
 
-There is no recursive walker, no globbing, no file watcher and no symbolic-link
-API in 2.0.0. `append` and `copy` are text-level and not atomic;
-`metadata` reports only size, modification time and kind (no permissions or
-owner), and directory entries are returned as names, not full paths.
+There is no `Path`, `PathBuf` or `OsStr` type, no directory-entry iterator, no
+symbolic-link API, no permission or ownership API, no file watching and no
+recursive walker. `append` and `copy` are text-only and not atomic. Reading a
+file that is not valid UTF-8 with `read_to_string` fails; use `read` for bytes.
 
 ## See also
 
-* [io](io.md) and [error](error.md).
-* [Standard library chapter](../language/15-standard-library.md#io-and-process) -
-  `read_file` and `write_file` of 1.7.
+* [io](io.md) - file handles, errors and standard streams.
+* [time](time.md) - `SystemTime` for modification times.
+* [Standard library chapter](../language/15-standard-library.md#io-and-process).

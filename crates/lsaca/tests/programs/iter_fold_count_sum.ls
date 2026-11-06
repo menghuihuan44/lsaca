@@ -4,7 +4,10 @@ fn main() {
     println!("total {}", total);
 
     let words: Vec<String> = vec![String::from("a"), String::from("b")];
-    let joined = words.iter().fold(String::from(""), |acc, item| acc + item);
+    let joined = words.iter().fold(String::from(""), |mut acc, item| {
+        acc.push_str(&item);
+        acc
+    });
     println!("joined {}", joined);
 
     let count = vec![1, 2, 3].iter().count();

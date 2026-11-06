@@ -52,8 +52,8 @@ impl<'a> Checker<'a> {
         if let ITy::Var(id) = ty {
             match self.infer.var_kind(id) {
                 VarKind::IntLiteral => {
-                    let _ = self.infer.unify(&ty, &ITy::i64());
-                    ty = ITy::i64();
+                    let _ = self.infer.unify(&ty, &ITy::i32());
+                    ty = ITy::i32();
                 }
                 VarKind::FloatLiteral => {
                     let _ = self.infer.unify(&ty, &ITy::f64());

@@ -4,6 +4,11 @@ Bindings are introduced with `let`. By default a binding is immutable; `let mut`
 makes the binding mutable. This page covers bindings, shadowing, assignment,
 compound assignment, destructuring and constants.
 
+The rules on this page describe lsaca 2.1.0. Since 2.1.0 an unsuffixed integer
+literal has type `i32` by default (floats default to `f64`), lengths and indices
+are `usize`, and a function parameter may be declared `mut`; the sections below
+call out the places where this matters.
+
 ## Bindings
 
 The form is:
@@ -21,7 +26,11 @@ Rules:
   deferred initialization: the type and the value are fixed at the point of
   declaration.
 * The type annotation is optional; the type of the binding is the type of the
-  initializer, after inference.
+  initializer, after inference. An unsuffixed integer literal has type `i32`
+  unless the annotation, an argument or the surrounding expression requires a
+  different integer type; in a `usize` context (a length, an index, a capacity)
+  an unsuffixed literal becomes `usize`. An unsuffixed float literal is `f64`
+  (see [Types](04-types.md)).
 * A binding is immutable unless declared `mut`. Immutability is about the
   *binding*, not the value: an immutable binding cannot be assigned to, but an
   `Rc` handle in an immutable binding can still be used with `set` (the cell is
@@ -261,7 +270,9 @@ Assignment also moves. For a move-only type the right-hand side is transferred
 into the place and the place's previous value is released immediately, running
 its `Drop` hook; the right-hand-side binding is unusable afterwards. Compound
 assignment reads and writes the place in one step, so `text += "..."` does not
-move `text`.
+move `text`. Since 2.1.0 the right-hand side of `+=` on a `String` must be a
+`&str`, and string `+` is likewise `String + &str` only (see
+[Operators](07-operators.md)).
 
 Compound assignment combines a binary operator with assignment:
 
@@ -385,10 +396,16 @@ once. The pattern must be irrefutable: tuples of the right shape and struct
 patterns without `Some`/`Ok`-style alternatives always are. `mut` may be applied
 to individual bindings inside the pattern.
 
-Destructuring a move-only value moves its parts into the new bindings (`Copy`
-parts are copied). A struct or tuple is destructured as a whole, so a `String`
-field moves out cleanly; moving a field out of a value *without* destructuring it
-is still rejected (`E0507`).
+Destructuring a value copies it into the new bindings: `Copy` parts are
+copied, and move-only parts (`String`, `Vec`, `Rc`, `Box`) are deep-copied — for
+`Rc` and `Box` the new binding points to the same cell or heap value and the
+reference count is retained. This is not Rust's move semantics: the source value
+stays fully usable after the pattern, and no partial move happens. Version 2.1.0
+has no partial moves; destructuring always copies the whole value, so a `String`
+field is cloned out rather than moved. Moving a field out of a value *without*
+destructuring it is still rejected (`E0507`), and `match` still moves the
+scrutinee. Partial moves are planned for a later release (see
+[Roadmap](16-roadmap.md)).
 
 ```ls
 struct Point {
@@ -400,10 +417,12 @@ fn main() {
     let pair = (1, String::from("one"));
     let (number, name) = pair;
     println!("{} {}", number, name);
+    println!("{} {}", pair.0, pair.1);
 
     let origin = Point { x: 3, y: 4 };
     let Point { x, y } = origin;
     println!("{} {}", x, y);
+    println!("{}", origin.x);
 
     let (mut total, label) = (0, "sum");
     total += x + y;
@@ -414,7 +433,9 @@ fn main() {
 Output:
 ```text
 1 one
+1 one
 3 4
+3
 sum = 7
 ```
 
@@ -559,20 +580,24 @@ cell passed around explicitly.
 
 ## Parameters and loop variables
 
-Function parameters are immutable bindings owned by the function body. A
-move-only argument is moved into the parameter, so the caller cannot use its
-binding afterwards (see [Functions](09-functions.md#calls-and-argument-checking)).
-Writing `mut` on a parameter parses but has no effect: assigning to the
-parameter is still rejected with `E0596` (see the example in
-[Memory model](05-memory-model.md)). To modify a value, take the value and
-return the new one, pass an `Rc` cell, or take a mutable reference to a builtin
-heap type (`&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>`).
+Function parameters are bindings owned by the function body. A move-only
+argument is moved into the parameter, so the caller cannot use its binding
+afterwards (see [Functions](09-functions.md#calls-and-argument-checking)).
+Since 2.1.0 a parameter may be declared `mut` — `fn countdown(mut n: i64)` — and
+the function body may assign to it; mutation never affects the caller, because
+the parameter is a local copy or a moved-in value. A `self` parameter cannot be
+declared `mut` (it is `E0001`). To modify a caller's value, return the new value,
+pass an `Rc` cell, or take a mutable reference to a builtin heap type
+(`&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>`).
 
 The variable bound by a `for` loop is a normal, immutable binding, and it may be
 declared `mut`: `for mut i in 0..3` parses and permits reassigning `i` inside the
 loop body. This is a lenient corner of the parser rather than a design
 feature; iterating with a separate mutable accumulator is clearer (see
-[Statements and control flow](08-statements-and-control-flow.md)).
+[Statements and control flow](08-statements-and-control-flow.md)). Since 2.1.0
+the loop variable of a range `for` takes the integer type of the range after
+unifying its endpoints, so `for i in 0..3` binds an `i32`, while a range built
+from lengths and indices binds a `usize`.
 
 ## What next
 

@@ -277,7 +277,7 @@ pub fn digit_histogram(value: i64) -> Vec<i64> {
     }
     while rest > 0 {
         let digit = rest % 10;
-        counts[digit] = counts[digit] + 1;
+        counts[digit as usize] = counts[digit as usize] + 1;
         rest = rest / 10;
     }
     return counts;

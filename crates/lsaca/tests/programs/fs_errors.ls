@@ -1,9 +1,9 @@
 fn main() {
     let dir: String = String::from("fs_err_dir");
-    std::fs::remove_dir_all(dir.clone());
-    let first = std::fs::create_dir(dir.clone());
+    std::fs::remove_dir_all(&dir);
+    let first = std::fs::create_dir(&dir);
     println!("first create ok {}", first.is_ok());
-    let second = std::fs::create_dir(dir.clone());
+    let second = std::fs::create_dir(&dir);
     println!("second create is_err {}", second.is_err());
     let kind = std::io::Error::last().kind();
     match kind {
@@ -11,9 +11,9 @@ fn main() {
         std::io::ErrorKind::Other => { println!("second create kind Other true"); }
         _ => { println!("second create kind unexpected"); }
     }
-    println!("remove dir ok {}", std::fs::remove_dir(dir.clone()).is_ok());
+    println!("remove dir ok {}", std::fs::remove_dir(&dir).is_ok());
     let missing: String = String::from("fs_err_missing.txt");
-    let removed = std::fs::remove_file(missing.clone());
+    let removed = std::fs::remove_file(&missing);
     println!("missing remove is_err {}", removed.is_err());
     let missing_kind = std::io::Error::last().kind();
     match missing_kind {

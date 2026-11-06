@@ -11,7 +11,7 @@ fn main() {
     let mut acc = util_a_checksum(seed);
     acc = (acc * 31 + util_b_checksum(seed)) % MODULUS;
     acc = (acc * 31 + report.checksum) % MODULUS;
-    acc = (acc * 31 + report.label.len()) % MODULUS;
+    acc = (acc * 31 + report.label.len() as i64) % MODULUS;
     acc = (acc * 31 + report.metrics) % MODULUS;
     if report.is_valid() {
         acc = (acc * 31 + 1) % MODULUS;

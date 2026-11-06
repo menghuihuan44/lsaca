@@ -4,6 +4,9 @@ lsaca has the familiar C-family operator set with Rust's precedence. Every
 operator is statically typed, and most binary operators require both operands to
 have the **same type**: there are no implicit integer promotions and no implicit
 numeric conversions. When the types differ, convert explicitly with `as`.
+An unsuffixed integer literal takes its type from context and defaults to `i32`;
+a suffix (`1u8`, `2i64`, `0xFFusize`) fixes it explicitly (see
+[Lexical structure](03-lexical-structure.md)).
 
 ## Precedence and associativity
 
@@ -201,9 +204,13 @@ itself, and `0.0 == -0.0` is true.
 
 ## Strings: concatenation and comparison
 
-`String` supports `+` (concatenation) and the compound `+=`. The right-hand side
-of `+` may be a `String` or a string literal. Comparisons `==`, `!=`, `<`, `<=`,
-`>`, `>=` compare the UTF-8 bytes lexicographically, which for valid UTF-8 is
+`String` supports `+` (concatenation) with a `&str` right-hand side, and the
+compound `+=` with a `&str` right-hand side. The right side may be a string
+literal — which is compiled as a static `&str` — or a `&String`/`&str` value;
+when you have a `String`, borrow it as `&other`. `String + String` and
+`&str + &str` are not available, so one side is always the owned `String` and the
+other a borrowed slice. Comparisons `==`, `!=`, `<`, `<=`, `>`, `>=` compare the
+UTF-8 bytes lexicographically, which for valid UTF-8 is
 the same as comparing by code point; this makes the usual sorting operators
 available. Comparisons borrow both operands, so `==` and the ordering operators
 do not move the values being compared; both stay usable afterwards.
@@ -212,13 +219,13 @@ do not move the values being compared; both stay usable afterwards.
 fn main() {
     let first = String::from("hello");
     let second = String::from(", world");
-    let joined = first + second;
+    let joined = first + &second;
     println!("{}", joined);
     println!("{}", first);
 
     let mut text = String::from("abc");
     text += "def";
-    text += String::from("!");
+    text += "!";
     println!("{}", text);
 
     println!("{} {} {}", "apple" < "banana", "Z" < "a", String::from("a") == String::from("a"));
@@ -233,9 +240,9 @@ abcdef!
 true true true
 ```
 
-Concatenation does not consume its operands: `+` borrows both sides, so the left
-operand stays usable afterwards (and a cloned handle shares the buffer until it is
-written, copy-on-write). `+=` mutates the string in place when its buffer is
+Concatenation borrows its operands: the left `String` stays usable afterwards
+(and a cloned handle shares the buffer until it is written, copy-on-write), and
+the right slice is only read. `+=` mutates the string in place when its buffer is
 unique and clones first otherwise (see [Memory model](05-memory-model.md)).
 
 ## Boolean operators
@@ -252,7 +259,7 @@ fn step(counter: Rc<i64>) -> bool {
 }
 
 fn main() {
-    let counter = Rc::new(0);
+    let counter = Rc::new(0i64);
     let a = step(counter.clone()) && step(counter.clone());
     println!("{} {}", a, counter.get());
 
@@ -280,9 +287,10 @@ flow](08-statements-and-control-flow.md#conditions).
 
 `&`, `|`, `^`, `!` and the shifts `<<`, `>>` work on integers. `!` is a
 **bitwise** NOT on integers (so `!0` is `-1`) and a logical NOT on `bool`. The
-shift count must have the same type as the shifted value, `i64` by default;
+shift count must have the same type as the shifted value, `i32` by default;
 shifting by a negative count or by a count greater than or equal to the bit width
-panics in Debug builds.
+panics in Debug builds. `1i64 << 62` shifts a 64-bit value, while a plain
+`1 << 62` shifts an `i32` and overflows.
 
 ```ls
 fn main() {
@@ -313,7 +321,7 @@ left shift of a signed value is a logical shift on the two's-complement bits:
 ```ls
 fn main() {
     println!("{}", -8 >> 1);
-    println!("{}", 1 << 62);
+    println!("{}", 1i64 << 62);
 }
 ```
 
@@ -327,7 +335,7 @@ A shift that overflows the width panics in Debug builds:
 
 ```ls,panic
 fn main() {
-    println!("{}", 1 << 70);
+    println!("{}", 1i64 << 70);
 }
 ```
 

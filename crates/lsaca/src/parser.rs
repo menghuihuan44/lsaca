@@ -557,8 +557,8 @@ impl<'a> Parser<'a> {
     fn starts_expression(&self) -> bool {
         matches!(
             self.peek_kind(),
-            TokenKind::Int(_)
-                | TokenKind::Float(_)
+            TokenKind::Int { .. }
+                | TokenKind::Float { .. }
                 | TokenKind::Str(_)
                 | TokenKind::Char(_)
                 | TokenKind::Ident(_)
@@ -1053,6 +1053,14 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
+            if first
+                && impl_ty.is_some()
+                && self.at(TokenKind::KwMut)
+                && matches!(self.peek_kind_at(1), Some(TokenKind::KwSelf))
+            {
+                let mut_token = self.bump();
+                self.error("'self' cannot be declared 'mut'", mut_token.span);
+            }
             if first && impl_ty.is_some() {
                 if self.at(TokenKind::KwSelf) {
                     let token = self.bump();
@@ -1061,6 +1069,7 @@ impl<'a> Parser<'a> {
                     params.push(Param {
                         name: "self".to_string(),
                         name_span: token.span,
+                        mutable: false,
                         ty,
                     });
                 } else if self.at(TokenKind::Amp) {
@@ -1077,6 +1086,7 @@ impl<'a> Parser<'a> {
                         params.push(Param {
                             name: "self".to_string(),
                             name_span: token.span,
+                            mutable: false,
                             ty,
                         });
                     } else {
@@ -1093,6 +1103,7 @@ impl<'a> Parser<'a> {
                 params.push(Param {
                     name: "self".to_string(),
                     name_span: token.span,
+                    mutable: false,
                     ty,
                 });
             } else {
@@ -1114,9 +1125,10 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Colon, "':' after parameter name");
         let ty = self.parse_type();
         match &pattern.kind {
-            PatternKind::Binding { name, .. } => Param {
+            PatternKind::Binding { name, mutable } => Param {
                 name: name.clone(),
                 name_span: pattern.span,
+                mutable: *mutable,
                 ty,
             },
             _ => {
@@ -1124,6 +1136,7 @@ impl<'a> Parser<'a> {
                 Param {
                     name: "_".to_string(),
                     name_span: pattern.span,
+                    mutable: false,
                     ty,
                 }
             }
@@ -1141,41 +1154,91 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
-        let mut fields = Vec::new();
-        self.expect(TokenKind::LBrace, "'{'");
-        loop {
-            if self.at(TokenKind::RBrace) || self.at_eof() {
-                break;
-            }
-            let before = self.pos;
-            let field_vis = self.parse_visibility();
-            let (field_name, field_span) = self.expect_ident("field name");
-            self.expect(TokenKind::Colon, "':' after field name");
-            let ty = self.parse_type();
-            fields.push(FieldDef {
-                name: field_name,
-                name_span: field_span,
-                vis: field_vis,
-                ty,
-            });
-            self.ensure_progress(before);
-            if self.eat(TokenKind::Comma).is_some() {
-                continue;
-            }
-            break;
-        }
-        let end = self
-            .expect(TokenKind::RBrace, "'}'")
-            .map(|token| token.span)
-            .unwrap_or_else(|| self.span());
+        let (kind, end) = self.parse_struct_kind();
         StructDecl {
             name,
             name_span,
             vis,
             generics,
-            fields,
+            kind,
             span: start.join(end),
         }
+    }
+
+    /// Parse the body of a struct declaration: named fields, tuple fields, or
+    /// the unit form.
+    ///
+    /// `struct S { x: T }` yields `StructKind::Named`; `struct S(T, U);`
+    /// yields `StructKind::Tuple` (its fields are implicitly public, mirroring
+    /// the tuple field access syntax `s.0`); `struct S;` yields
+    /// `StructKind::Unit`.
+    fn parse_struct_kind(&mut self) -> (StructKind, Span) {
+        if self.at(TokenKind::LBrace) {
+            let mut fields = Vec::new();
+            self.bump();
+            loop {
+                if self.at(TokenKind::RBrace) || self.at_eof() {
+                    break;
+                }
+                let before = self.pos;
+                let field_vis = self.parse_visibility();
+                let (field_name, field_span) = self.expect_ident("field name");
+                self.expect(TokenKind::Colon, "':' after field name");
+                let ty = self.parse_type();
+                fields.push(FieldDef {
+                    name: field_name,
+                    name_span: field_span,
+                    vis: field_vis,
+                    ty,
+                });
+                self.ensure_progress(before);
+                if self.eat(TokenKind::Comma).is_some() {
+                    continue;
+                }
+                break;
+            }
+            let end = self
+                .expect(TokenKind::RBrace, "'}'")
+                .map(|token| token.span)
+                .unwrap_or_else(|| self.span());
+            return (StructKind::Named(fields), end);
+        }
+        if self.at(TokenKind::LParen) {
+            self.bump();
+            let mut types = Vec::new();
+            loop {
+                if self.at(TokenKind::RParen) || self.at_eof() {
+                    break;
+                }
+                let before = self.pos;
+                types.push(self.parse_type());
+                self.ensure_progress(before);
+                if self.eat(TokenKind::Comma).is_some() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(TokenKind::RParen, "')'");
+            let end = self
+                .expect(TokenKind::Semi, "';' after tuple struct declaration")
+                .map(|token| token.span)
+                .unwrap_or_else(|| self.prev_span());
+            return (StructKind::Tuple(types), end);
+        }
+        if let Some(semi) = self.eat(TokenKind::Semi) {
+            return (StructKind::Unit, semi.span);
+        }
+        let span = self.span();
+        let found = self.peek_kind().describe();
+        self.error(
+            format!(
+                "expected '{{', '(' or ';' after struct name, found {}",
+                found
+            ),
+            span,
+        );
+        self.synchronize_item();
+        (StructKind::Unit, self.prev_span())
     }
 
     fn parse_enum_decl(&mut self, vis: Visibility) -> EnumDecl {
@@ -1546,6 +1609,13 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
+            if first
+                && self.at(TokenKind::KwMut)
+                && matches!(self.peek_kind_at(1), Some(TokenKind::KwSelf))
+            {
+                let mut_token = self.bump();
+                self.error("'self' cannot be declared 'mut'", mut_token.span);
+            }
             if first {
                 if self.at(TokenKind::KwSelf) {
                     let token = self.bump();
@@ -1553,6 +1623,7 @@ impl<'a> Parser<'a> {
                     params.push(Param {
                         name: "self".to_string(),
                         name_span: token.span,
+                        mutable: false,
                         ty: self_type(token.span),
                     });
                 } else if self.at(TokenKind::Amp) {
@@ -1567,6 +1638,7 @@ impl<'a> Parser<'a> {
                     params.push(Param {
                         name: "self".to_string(),
                         name_span: amp.span,
+                        mutable: false,
                         ty: TypeExpr::Ref {
                             mutable,
                             inner: Box::new(self_type(amp.span)),
@@ -2034,20 +2106,20 @@ impl<'a> Parser<'a> {
                     span: start,
                 }
             }
-            TokenKind::Int(value) => {
-                let raw = self.token_text(start);
+            TokenKind::Int { value, suffix } => {
+                let raw = self.literal_raw(start, &suffix);
                 self.bump();
                 let value = self.small_int(value, start);
                 Pattern {
-                    kind: PatternKind::Lit(Lit::Int { value, raw }),
+                    kind: PatternKind::Lit(Lit::Int { value, raw, suffix }),
                     span: start,
                 }
             }
-            TokenKind::Float(value) => {
-                let raw = self.token_text(start);
+            TokenKind::Float { value, suffix } => {
+                let raw = self.literal_raw(start, &suffix);
                 self.bump();
                 Pattern {
-                    kind: PatternKind::Lit(Lit::Float { value, raw }),
+                    kind: PatternKind::Lit(Lit::Float { value, raw, suffix }),
                     span: start,
                 }
             }
@@ -2103,27 +2175,29 @@ impl<'a> Parser<'a> {
 
     fn parse_negative_literal_pattern(&mut self, start: Span) -> Pattern {
         match self.peek_kind() {
-            TokenKind::Int(value) => {
+            TokenKind::Int { value, suffix } => {
                 let number_span = self.span();
-                let raw = self.token_text(number_span);
+                let raw = self.literal_raw(number_span, &suffix);
                 self.bump();
                 let value = self.small_int(value, number_span);
                 Pattern {
                     kind: PatternKind::Lit(Lit::Int {
                         value: -value,
                         raw: format!("-{}", raw),
+                        suffix,
                     }),
                     span: start.join(number_span),
                 }
             }
-            TokenKind::Float(value) => {
+            TokenKind::Float { value, suffix } => {
                 let number_span = self.span();
-                let raw = self.token_text(number_span);
+                let raw = self.literal_raw(number_span, &suffix);
                 self.bump();
                 Pattern {
                     kind: PatternKind::Lit(Lit::Float {
                         value: -value,
                         raw: format!("-{}", raw),
+                        suffix,
                     }),
                     span: start.join(number_span),
                 }
@@ -2277,6 +2351,19 @@ impl<'a> Parser<'a> {
             },
             span: start,
         }
+    }
+
+    /// Number text of a numeric literal with the type suffix and digit
+    /// separators removed, matching the `raw` convention on `ast::Lit`.
+    fn literal_raw(&self, span: Span, suffix: &Option<String>) -> String {
+        let text = self.token_text(span);
+        let text = match suffix {
+            Some(suffix) => text
+                .get(..text.len().saturating_sub(suffix.len()))
+                .unwrap_or(&text),
+            None => text.as_str(),
+        };
+        text.chars().filter(|ch| *ch != '_').collect()
     }
 
     fn small_int(&mut self, value: u128, span: Span) -> i128 {
@@ -2699,7 +2786,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let kind = self.peek_kind();
                 match kind {
-                    TokenKind::Int(value) => {
+                    TokenKind::Int { value, .. } => {
                         let token = self.bump();
                         let index = match usize::try_from(value) {
                             Ok(index) => index,
@@ -2885,16 +2972,16 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Expr {
         let start = self.span();
         match self.peek_kind() {
-            TokenKind::Int(value) => {
-                let raw = self.token_text(start);
+            TokenKind::Int { value, suffix } => {
+                let raw = self.literal_raw(start, &suffix);
                 self.bump();
                 let value = self.small_int(value, start);
-                Expr::new(ExprKind::Lit(Lit::Int { value, raw }), start)
+                Expr::new(ExprKind::Lit(Lit::Int { value, raw, suffix }), start)
             }
-            TokenKind::Float(value) => {
-                let raw = self.token_text(start);
+            TokenKind::Float { value, suffix } => {
+                let raw = self.literal_raw(start, &suffix);
                 self.bump();
-                Expr::new(ExprKind::Lit(Lit::Float { value, raw }), start)
+                Expr::new(ExprKind::Lit(Lit::Float { value, raw, suffix }), start)
             }
             TokenKind::Str(value) => {
                 self.bump();
@@ -2998,6 +3085,7 @@ impl<'a> Parser<'a> {
                     ExprKind::Lit(Lit::Int {
                         value: 0,
                         raw: "0".to_string(),
+                        suffix: None,
                     }),
                     start,
                 )
@@ -3584,8 +3672,18 @@ impl<'a> AstNode<'a> {
                 Item::Fn(decl) => stack.push((AstNode::Fn(decl), depth)),
                 Item::Struct(decl) => {
                     push_generic_bounds(stack, &decl.generics, depth);
-                    for field in &decl.fields {
-                        stack.push((AstNode::Type(&field.ty), depth));
+                    match &decl.kind {
+                        StructKind::Named(fields) => {
+                            for field in fields {
+                                stack.push((AstNode::Type(&field.ty), depth));
+                            }
+                        }
+                        StructKind::Tuple(types) => {
+                            for ty in types {
+                                stack.push((AstNode::Type(ty), depth));
+                            }
+                        }
+                        StructKind::Unit => {}
                     }
                 }
                 Item::Enum(decl) => {
@@ -4103,6 +4201,192 @@ mod tests {
     }
 
     #[test]
+    fn records_numeric_literal_suffixes() {
+        let source = r#"fn main() {
+    let a = 123i64;
+    let b = 1.5f32;
+    let c = 1f64;
+    let d = 0xFFu8;
+    let e = 1_000usize;
+    let f = 42;
+}"#;
+        let program = parse_ok(source);
+        let body = fn_body(fn_named(&program, "main"));
+        assert_eq!(body.stmts.len(), 6);
+        match &let_init(&body.stmts[0]).kind {
+            ExprKind::Lit(Lit::Int { value, raw, suffix }) => {
+                assert_eq!(*value, 123);
+                assert_eq!(raw, "123");
+                assert_eq!(suffix.as_deref(), Some("i64"));
+            }
+            other => panic!("expected an i64 literal, got {:?}", other),
+        }
+        match &let_init(&body.stmts[1]).kind {
+            ExprKind::Lit(Lit::Float { value, raw, suffix }) => {
+                assert_eq!(*value, 1.5);
+                assert_eq!(raw, "1.5");
+                assert_eq!(suffix.as_deref(), Some("f32"));
+            }
+            other => panic!("expected an f32 literal, got {:?}", other),
+        }
+        // A decimal integer with a float suffix is a float literal.
+        match &let_init(&body.stmts[2]).kind {
+            ExprKind::Lit(Lit::Float { value, raw, suffix }) => {
+                assert_eq!(*value, 1.0);
+                assert_eq!(raw, "1");
+                assert_eq!(suffix.as_deref(), Some("f64"));
+            }
+            other => panic!("expected an f64 literal, got {:?}", other),
+        }
+        match &let_init(&body.stmts[3]).kind {
+            ExprKind::Lit(Lit::Int { value, raw, suffix }) => {
+                assert_eq!(*value, 255);
+                assert_eq!(raw, "0xFF");
+                assert_eq!(suffix.as_deref(), Some("u8"));
+            }
+            other => panic!("expected a u8 literal, got {:?}", other),
+        }
+        // Digit separators are stripped from `raw`.
+        match &let_init(&body.stmts[4]).kind {
+            ExprKind::Lit(Lit::Int { value, raw, suffix }) => {
+                assert_eq!(*value, 1_000);
+                assert_eq!(raw, "1000");
+                assert_eq!(suffix.as_deref(), Some("usize"));
+            }
+            other => panic!("expected a usize literal, got {:?}", other),
+        }
+        match &let_init(&body.stmts[5]).kind {
+            ExprKind::Lit(Lit::Int { value, raw, suffix }) => {
+                assert_eq!(*value, 42);
+                assert_eq!(raw, "42");
+                assert!(suffix.is_none());
+            }
+            other => panic!("expected an unsuffixed int literal, got {:?}", other),
+        }
+
+        let program = parse_ok("fn main() { match x { -2i8 => 0, _ => 1 } }");
+        match &fn_body(fn_named(&program, "main"))
+            .tail
+            .as_ref()
+            .expect("expected a match tail")
+            .kind
+        {
+            ExprKind::Match(match_expr) => match &match_expr.arms[0].pat.kind {
+                PatternKind::Lit(Lit::Int { value, raw, suffix }) => {
+                    assert_eq!(*value, -2);
+                    assert_eq!(raw, "-2");
+                    assert_eq!(suffix.as_deref(), Some("i8"));
+                }
+                other => panic!(
+                    "expected a suffixed negative literal pattern, got {:?}",
+                    other
+                ),
+            },
+            other => panic!("expected a match expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_mutable_parameters() {
+        let program = parse_ok("fn bump(mut x: i64) -> i64 { x = x + 1; x }");
+        let function = fn_named(&program, "bump");
+        assert_eq!(function.params.len(), 1);
+        assert!(function.params[0].mutable);
+        assert!(!fn_named(&parse_ok("fn f(x: i64) {}"), "f").params[0].mutable);
+
+        let program = parse_ok("impl Point { fn shift(&mut self) -> i64 { 1 } }");
+        match &program.items[0] {
+            Item::Impl(block) => {
+                assert!(!block.fns[0].params[0].mutable);
+                assert_eq!(block.fns[0].params[0].name, "self");
+            }
+            other => panic!("expected an impl block, got {:?}", other),
+        }
+
+        for source in [
+            "impl Point { fn f(mut self) {} }",
+            "trait T { fn f(mut self); }",
+        ] {
+            let (_, diagnostics) = parse_source(source);
+            assert!(
+                messages(&diagnostics)
+                    .iter()
+                    .any(|message| message.contains("'self' cannot be declared 'mut'")),
+                "expected a mut-self diagnostic for {source:?}, got {:?}",
+                messages(&diagnostics)
+            );
+        }
+    }
+
+    #[test]
+    fn parses_struct_kinds() {
+        let source = r#"
+struct Named { x: i64, pub y: f64 }
+struct Meters(i64, u8);
+struct Marker;
+struct Pair<T>(T, T);
+"#;
+        let program = parse_ok(source);
+        assert_eq!(program.items.len(), 4);
+        match &program.items[0] {
+            Item::Struct(decl) => match &decl.kind {
+                StructKind::Named(fields) => {
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].name, "x");
+                    assert_eq!(fields[0].vis, Visibility::Private);
+                    assert_eq!(fields[1].name, "y");
+                    assert_eq!(fields[1].vis, Visibility::Public);
+                }
+                other => panic!("expected a named struct, got {:?}", other),
+            },
+            other => panic!("expected a struct, got {:?}", other),
+        }
+        match &program.items[1] {
+            Item::Struct(decl) => {
+                match &decl.kind {
+                    StructKind::Tuple(types) => {
+                        assert_eq!(types.len(), 2);
+                        assert!(matches!(&types[0], TypeExpr::Path { name, .. } if name == "i64"));
+                        assert!(matches!(&types[1], TypeExpr::Path { name, .. } if name == "u8"));
+                    }
+                    other => panic!("expected a tuple struct, got {:?}", other),
+                }
+                let fields = decl.kind.fields();
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "0");
+                assert_eq!(fields[1].name, "1");
+                assert_eq!(fields[0].vis, Visibility::Public);
+            }
+            other => panic!("expected a struct, got {:?}", other),
+        }
+        match &program.items[2] {
+            Item::Struct(decl) => {
+                assert!(matches!(decl.kind, StructKind::Unit));
+                assert!(decl.kind.fields().is_empty());
+            }
+            other => panic!("expected a struct, got {:?}", other),
+        }
+        match &program.items[3] {
+            Item::Struct(decl) => {
+                assert_eq!(decl.generics.len(), 1);
+                assert_eq!(decl.generics[0].name, "T");
+                assert!(matches!(decl.kind, StructKind::Tuple(ref types) if types.len() == 2));
+            }
+            other => panic!("expected a struct, got {:?}", other),
+        }
+
+        // A struct declaration needs one of the three shapes.
+        let (_, diagnostics) = parse_source("struct Broken");
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("after struct name")),
+            "expected a struct-shape diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
     fn parses_items_with_pub_visibility() {
         let source = r#"pub fn exported(x: i64) -> i64 { x }
 pub struct Point { x: f64, y: f64 }
@@ -4113,9 +4397,10 @@ pub const MAX: i64 = 100;"#;
         match &program.items[1] {
             Item::Struct(structure) => {
                 assert_eq!(structure.name, "Point");
-                assert_eq!(structure.fields.len(), 2);
-                assert_eq!(structure.fields[0].name, "x");
-                assert_eq!(structure.fields[1].name, "y");
+                let fields = structure.kind.fields();
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "x");
+                assert_eq!(fields[1].name, "y");
             }
             other => panic!("expected a struct, got {:?}", other),
         }
@@ -5409,9 +5694,10 @@ impl Point {
             Item::Struct(declaration) => {
                 assert_eq!(declaration.name, "Public");
                 assert_eq!(declaration.vis, Visibility::Public);
-                assert_eq!(declaration.fields.len(), 2);
-                assert_eq!(declaration.fields[0].vis, Visibility::Public);
-                assert_eq!(declaration.fields[1].vis, Visibility::Private);
+                let fields = declaration.kind.fields();
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].vis, Visibility::Public);
+                assert_eq!(fields[1].vis, Visibility::Private);
             }
             other => panic!("expected a struct, got {:?}", other),
         }
@@ -5471,7 +5757,7 @@ impl Point {
         match &module.items[0] {
             Item::Struct(declaration) => {
                 assert_eq!(declaration.vis, Visibility::Crate);
-                assert_eq!(declaration.fields[0].vis, Visibility::Public);
+                assert_eq!(declaration.kind.fields()[0].vis, Visibility::Public);
             }
             other => panic!("expected a struct, got {:?}", other),
         }
@@ -6227,9 +6513,10 @@ impl Point {
             ExprKind::Match(match_expr) => {
                 assert_eq!(match_expr.arms.len(), 7);
                 match &match_expr.arms[0].pat.kind {
-                    PatternKind::Lit(Lit::Int { value, raw }) => {
+                    PatternKind::Lit(Lit::Int { value, raw, suffix }) => {
                         assert_eq!(*value, -1);
                         assert_eq!(raw, "-1");
+                        assert!(suffix.is_none());
                     }
                     other => panic!("expected a negative int literal, got {:?}", other),
                 }
@@ -6380,11 +6667,12 @@ fn main() {
                 _ => None,
             })
             .expect("expected a struct");
-        match &tagged.fields[0].ty {
+        let tagged_fields = tagged.kind.fields();
+        match &tagged_fields[0].ty {
             TypeExpr::Path { name, .. } => assert_eq!(name, "char"),
             other => panic!("expected a char field, got {:?}", other),
         }
-        match &tagged.fields[1].ty {
+        match &tagged_fields[1].ty {
             TypeExpr::Path { name, generics, .. } => {
                 assert_eq!(name, "Vec");
                 assert_eq!(generics.len(), 1);
@@ -7084,7 +7372,12 @@ impl Counter {
         // accepted by the parser. This guards against syntax regressions in
         // both the prelude and the parser.
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let prelude = manifest_dir.join("src").join("prelude.ls");
+        let prelude = manifest_dir
+            .join("..")
+            .join("..")
+            .join("stdlib")
+            .join("src")
+            .join("iter.ls");
         let source = std::fs::read_to_string(&prelude)
             .unwrap_or_else(|error| panic!("failed to read {prelude:?}: {error}"));
         let (program, diagnostics) = parse_source(&source);
@@ -7460,8 +7753,9 @@ fn takes(value: &mut dyn Shape) -> Box<dyn Shape> {
                 _ => None,
             })
             .expect("expected the Holder struct");
-        assert_eq!(holder.fields.len(), 3);
-        match &holder.fields[0].ty {
+        let holder_fields = holder.kind.fields();
+        assert_eq!(holder_fields.len(), 3);
+        match &holder_fields[0].ty {
             TypeExpr::Path { name, generics, .. } => {
                 assert_eq!(name, "Box");
                 assert_eq!(generics.len(), 1);
@@ -7475,7 +7769,7 @@ fn takes(value: &mut dyn Shape) -> Box<dyn Shape> {
             }
             other => panic!("expected a Box type, got {:?}", other),
         }
-        match &holder.fields[1].ty {
+        match &holder_fields[1].ty {
             TypeExpr::Ref { mutable, inner, .. } => {
                 assert!(!mutable);
                 match inner.as_ref() {
@@ -7485,7 +7779,7 @@ fn takes(value: &mut dyn Shape) -> Box<dyn Shape> {
             }
             other => panic!("expected a reference, got {:?}", other),
         }
-        match &holder.fields[2].ty {
+        match &holder_fields[2].ty {
             TypeExpr::Path { name, generics, .. } => {
                 assert_eq!(name, "Rc");
                 match generics.as_slice() {
@@ -7542,20 +7836,21 @@ fn view(items: &[i64], boxed: Box<[i64]>) -> [i64] {
                 _ => None,
             })
             .expect("expected the Parts struct");
-        assert_eq!(parts.fields.len(), 4);
-        match &parts.fields[0].ty {
+        let part_fields = parts.kind.fields();
+        assert_eq!(part_fields.len(), 4);
+        match &part_fields[0].ty {
             TypeExpr::Slice { elem, .. } => {
                 assert!(matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "u8"))
             }
             other => panic!("expected a slice type, got {:?}", other),
         }
-        match &parts.fields[1].ty {
+        match &part_fields[1].ty {
             TypeExpr::Ref { inner, .. } => {
                 assert!(matches!(inner.as_ref(), TypeExpr::Slice { .. }));
             }
             other => panic!("expected a shared slice type, got {:?}", other),
         }
-        match &parts.fields[2].ty {
+        match &part_fields[2].ty {
             TypeExpr::Path { name, generics, .. } => {
                 assert_eq!(name, "Box");
                 assert!(matches!(
@@ -7566,7 +7861,7 @@ fn view(items: &[i64], boxed: Box<[i64]>) -> [i64] {
             }
             other => panic!("expected a Box type, got {:?}", other),
         }
-        match &parts.fields[3].ty {
+        match &part_fields[3].ty {
             TypeExpr::Slice { elem, .. } => match elem.as_ref() {
                 TypeExpr::Slice { elem, .. } => {
                     assert!(matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "i64"));

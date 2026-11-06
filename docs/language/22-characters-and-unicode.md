@@ -422,7 +422,7 @@ API when you care about characters.
 fn main() {
     let text = String::from("héllo");
     println!("{} {}", text.len(), text.char_count());
-    println!("{}", text.find(String::from("llo")));
+    println!("{}", text.find("llo"));
     println!("{}", text.chars().len());
 }
 ```
@@ -439,16 +439,18 @@ Some(3)
 
 | Method | Returns | Meaning |
 | --- | --- | --- |
-| `char_count()` | `i64` | number of Unicode scalar values |
+| `char_count()` | `usize` | number of Unicode scalar values |
 | `chars()` | `Vec<char>` | every scalar value, in order |
-| `char_at(i)` | `Option<char>` | the `i`-th scalar value; `None` when out of range |
-| `is_char_boundary(i)` | `bool` | whether byte index `i` is a character boundary |
+| `char_at(i: usize)` | `Option<char>` | the `i`-th scalar value; `None` when out of range |
+| `is_char_boundary(i: usize)` | `bool` | whether byte index `i` is a character boundary |
 | `push(c)` | nothing | append one character (the string must be `mut`) |
 | `pop()` | `Option<char>` | remove the last character (the string must be `mut`) |
 | `String::from_char(c)` | `String` | a new one-character string |
 
 `char_at` counts characters, not bytes: `char_at(1)` of `"héllo"` is
-`Some('é')`, and `char_at(5)` is `None`. `is_char_boundary(i)` returns
+`Some('é')`, and `char_at(5)` is `None`. Both `char_at` and
+`is_char_boundary` take a `usize` index, like every other index and length in
+2.1. `is_char_boundary(i)` returns
 `true` for `0`, for `len()`, and for every byte index where a scalar value
 starts; it returns `false` for byte positions inside a multi-byte character
 and for indices greater than `len()`.
@@ -514,7 +516,7 @@ allocation per call. See [Iterators](19-iterators.md).
 
 `substring(start, len)` keeps its byte-offset, byte-length signature: it
 returns the string formed by the `len` bytes starting at byte offset
-`start`. Because those offsets are not necessarily character boundaries,
+`start`; both arguments are `usize` byte counts. Because those offsets are not necessarily character boundaries,
 `substring` checks its arguments at run time and panics when the result would
 split a character or run past the end of the string. A panic exits the process
 with code 101.
@@ -565,7 +567,7 @@ fn main() {
 Panic:
 
 ```text
-thread 'main' panicked at example-18.ls:3:18:
+thread 'main' panicked at std/string.ls:168:16:
 byte index 2 is not a char boundary; it is inside 'é' (bytes 1..3) of `héllo`
 ```
 
@@ -580,7 +582,7 @@ fn main() {
 Panic:
 
 ```text
-thread 'main' panicked at example-19.ls:3:16:
+thread 'main' panicked at std/string.ls:168:16:
 byte index 15 is out of bounds of `héllo`
 ```
 
@@ -677,7 +679,7 @@ replacing bad bytes with U+FFFD.
 `read_line()` returns `Option<String>`: `None` at end of input, and
 `Some(line)` for a line with the line terminator removed. If the bytes read
 are not valid UTF-8, the whole program panics at the call site; there is no
-lossy variant in 2.0.0. `read_file` is the non-panicking form: it returns
+lossy variant in 2.1.0. `read_file` is the non-panicking form: it returns
 `Result<String, String>`, and a file whose bytes are not valid UTF-8 becomes
 `Err("stream did not contain valid UTF-8")`. `args()` panics if any argument
 is not valid UTF-8.
@@ -691,7 +693,7 @@ them. The end-to-end test harness covers the three cases with raw byte streams.
 
 ## `char` in a `HashMap`
 
-`char` is a valid `HashMap` key type alongside `i64`, `u64`, `bool` and
+`char` is a valid `HashMap` key type alongside the integer types, `bool` and
 `String`. Keys are copied into the map; the usual rule that `insert` moves
 its arguments applies to the `char` key trivially (it is `Copy`). The hash of
 a character is the hash of its scalar value.
@@ -730,18 +732,23 @@ The printed order of a `HashMap` is not specified; the map prints its slots
 in the order the implementation stores them, which is deterministic for a given
 sequence of operations but is not an insertion order and is not a language
 guarantee. Content equality (`==`) ignores insertion order. The map is not
-iterable with `for` in 1.7.0 (unchanged in 2.0.0); use `keys()` or `values()`
+iterable with `for` in 1.7.0 (unchanged in 2.1.0); use `keys()` or `values()`
 first. See [HashMap](20-hashmap.md) for the implementation and hashing notes.
 
 ## Differences from Rust
 
 The character support follows Rust closely but stays inside lsaca's design:
 
-* `char` has no methods. Version 2.0 puts the classification helpers in a
-  `std::char` module as free functions (`is_alphabetic(c)`, `is_whitespace(c)`,
-  `to_digit(c, radix)`, `is_ascii(c)` and friends, see [char](../stdlib/char.md))
-  instead of Rust's inherent methods; case mapping and trimming remain `String`
-  methods.
+* `char` has inherent methods for the ASCII classifications and conversions:
+  `is_ascii()`, `is_ascii_digit()`, `is_ascii_uppercase()`,
+  `is_ascii_lowercase()`, `is_ascii_alphabetic()`, `is_ascii_alphanumeric()`,
+  `is_ascii_hexdigit()`, `is_ascii_whitespace()`, `is_ascii_control()`,
+  `is_ascii_graphic()`, `is_ascii_punctuation()`, `is_ascii_word()`,
+  `to_ascii_uppercase()`, `to_ascii_lowercase()` and `to_digit(radix)`, matching
+  Rust's methods (`is_ascii_word` is an lsaca extension used by the lexer). The
+  Unicode predicates (`is_alphabetic()`, `is_numeric()`, `is_whitespace()`) and
+  Unicode case conversion are not implemented yet. See
+  [char](../stdlib/char.md). Case mapping and trimming remain `String` methods.
 * There are no character ranges: `'a'..='z'` is not a range, and a string
   cannot be indexed with a character count. Version 2.0 adds *byte* slice
   expressions over strings (`&text[1..4]`, see [Slices and
@@ -757,21 +764,22 @@ The character support follows Rust closely but stays inside lsaca's design:
 * Numeric conversion is explicit through `as`; there is no
   `char::from_u32` or `u32::from(char)` trait machinery, and only `u8` may
   be cast to `char`.
-* The byte-oriented `String` API is unchanged from 1.5.0: `len`, `find` and
-  `substring` use bytes, and `s[0]` is still rejected with E0608 (2.0 adds
-  byte-range slicing `&s[0..1]`, but there is still no `char` indexing).
+* The `String` API is byte-oriented: `len` is a byte count (`usize`), `find`
+  returns a byte index (`Option<usize>`), and `substring` takes byte bounds
+  (`usize`); `s[0]` is still rejected with E0608 (2.0 adds byte-range slicing
+  `&s[0..1]`, but there is still no `char` indexing).
 
-## Known limitations in 2.0.0
+## Known limitations in 2.1.0
 
-* No character classification *methods* on `char`; the 2.0 plan puts the
-  classification functions in `std::char` ([char](../stdlib/char.md)), and until
-  that module lands the Unicode property tables are only used internally by case
-  mapping and trimming.
+* The `char` methods cover ASCII only; the Unicode predicates and Unicode
+  case conversion are not implemented ([char](../stdlib/char.md)), and the
+  Unicode property tables are only used internally by `String` case mapping and
+  trimming.
 * No grapheme cluster or normalization support; operators work on scalar
   values.
 * No locale-aware collation: comparisons and sorting use code point order.
 * `substring` panics instead of returning an `Option` (so does out-of-range
-  byte-range slicing); a panic cannot be caught in 2.0.0.
+  byte-range slicing); a panic cannot be caught in 2.1.0.
 * Invalid UTF-8 on stdin or in arguments panics rather than returning an error.
 * `chars()` allocates a `Vec`; there is no borrowing character iterator.
 * `HashMap` iteration is still not available; keys with either `String` or
@@ -780,7 +788,7 @@ The character support follows Rust closely but stays inside lsaca's design:
 * Formatting a character ignores East Asian display width; a character counts
   as one column for width and alignment.
 
-See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-200)
+See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-210)
 for the complete list.
 
 ## Summary
@@ -808,7 +816,7 @@ for the complete list.
   and formatting rules.
 * [HashMap](20-hashmap.md) - the builtin map, including `char` keys.
 * [char](../stdlib/char.md) - the `std::char` classification module (the ASCII
-  methods are implemented; the Unicode helpers are not implemented in 2.0.0 and
+  methods are implemented; the Unicode helpers are not implemented in 2.1.0 and
   are planned for a later release).
 * [Roadmap and differences from Rust](16-roadmap.md) - the full set of
-  limitations in 2.0.0.
+  limitations in 2.1.0.

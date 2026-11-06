@@ -432,10 +432,28 @@ impl<'a> Checker<'a> {
                 base: Box::new(self.lower_expr(base)),
                 index: Box::new(self.lower_expr(index)),
             },
-            TExprKind::Unary { op, expr } => HExprKind::Unary {
-                op: *op,
-                expr: Box::new(self.lower_expr(expr)),
-            },
+            TExprKind::Unary { op, expr } => {
+                // Fold a negated integer literal into a negative HLit::Int so
+                // that the minimum value of each integer type (for example
+                // -128i8 or i64::MIN) is representable: emitting Neg(128i8)
+                // would overflow at run time. The parser always models a
+                // negative literal as unary minus over the positive literal,
+                // and the deferred range check recorded the folded value.
+                if *op == crate::hir::HUnaryOp::Neg
+                    && let TExprKind::Lit(TLit::Int(value)) = &expr.kind
+                    && let Ty::Int(int_ty) = ty
+                {
+                    HExprKind::Lit(HLit::Int {
+                        value: -*value,
+                        int_ty,
+                    })
+                } else {
+                    HExprKind::Unary {
+                        op: *op,
+                        expr: Box::new(self.lower_expr(expr)),
+                    }
+                }
+            }
             TExprKind::Binary { op, lhs, rhs } => HExprKind::Binary {
                 op: *op,
                 lhs: Box::new(self.lower_expr(lhs)),

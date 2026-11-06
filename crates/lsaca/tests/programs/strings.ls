@@ -4,7 +4,7 @@ fn main() {
     println!("{}", greeting);
     println!("{}", greeting.len());
     let s = String::from("foo");
-    let t = s + String::from("bar");
+    let t = s.clone() + "bar";
     println!("{} {}", t, s);
     println!("{}", t.contains("oob"));
     println!("{}", t.to_uppercase());

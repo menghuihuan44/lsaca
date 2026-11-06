@@ -2219,6 +2219,97 @@ fn main() {
             message
         );
     }
+
+    // -- v2.1: usize, string concatenation and mut parameters ----------------
+
+    #[test]
+    fn moving_a_tuple_struct_field_is_rejected() {
+        expect_rejected(
+            r#"struct Pair(i64, String);
+            fn main() {
+                let pair = Pair(1, String::from("x"));
+                let moved = pair.1;
+                println!("{}", pair.0);
+            }"#,
+            "E0507",
+        );
+    }
+
+    #[test]
+    fn using_a_moved_local_is_reported_as_e0382() {
+        expect_rejected(
+            r#"fn main() {
+                let text = String::from("x");
+                let moved = text;
+                println!("{} {}", text, moved);
+            }"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn usize_is_copy_and_may_be_read_after_a_copy() {
+        expect_accepted(
+            r#"fn main() {
+                let n: usize = 3;
+                let copy = n;
+                println!("{} {}", n, copy);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn string_concatenation_does_not_move_the_left_operand() {
+        expect_accepted(
+            r#"fn main() {
+                let left = String::from("x");
+                let right = String::from("y");
+                let joined = left + &right;
+                let moved = left;
+                println!("{} {}", joined, moved);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn plus_assign_then_move_is_accepted() {
+        expect_accepted(
+            r#"fn main() {
+                let mut text = String::from("a");
+                let suffix = String::from("b");
+                text += &suffix;
+                let moved = text;
+                println!("{} {}", moved, suffix);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn a_moved_mut_parameter_can_be_reassigned_and_read() {
+        expect_accepted(
+            r#"fn bump(mut value: i64) -> i64 {
+                let moved = value;
+                value = moved + 1;
+                return value;
+            }
+            fn main() {
+                println!("{}", bump(1));
+            }"#,
+        );
+    }
+
+    #[test]
+    fn unit_structs_are_copy() {
+        expect_accepted(
+            r#"struct Marker;
+            fn main() {
+                let first = Marker;
+                let second = first;
+                let third = first;
+                println!("{}", 1);
+            }"#,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

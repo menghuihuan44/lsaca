@@ -1,6 +1,6 @@
 fn main() {
     let address: String = String::from("127.0.0.1:0");
-    let bound = std::net::TcpListener::bind(address);
+    let bound = std::net::TcpListener::bind(&address);
     if bound.is_err() {
         println!("bind skipped");
         return;
@@ -10,8 +10,8 @@ fn main() {
     println!("port positive {}", port > 0);
     let mut target: String = String::from("127.0.0.1:");
     let port_text: String = format!("{}", port);
-    target.push_str(port_text);
-    let connected = std::net::TcpStream::connect(target.clone());
+    target.push_str(&port_text);
+    let connected = std::net::TcpStream::connect(&target);
     if connected.is_err() {
         println!("connect failed");
         return;
@@ -39,5 +39,5 @@ fn main() {
     reply.push(110);
     reply.push(103);
     println!("reply sent {}", peer.write(reply.as_slice()).unwrap());
-    println!("shutdown ok {}", stream.shutdown(2).is_ok());
+    println!("shutdown ok {}", stream.shutdown(std::net::Shutdown::Both).is_ok());
 }

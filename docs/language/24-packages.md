@@ -389,7 +389,7 @@ so a function `pub fn triple` in the package `util` is emitted as
 The generated C program has one entry point, the `fn main` of the root
 package's root module. A library package contributes no entry point.
 
-## Known limitations in 2.0.0
+## Known limitations in 2.1.0
 
 - Only path dependencies; no registry, git dependencies, version selection,
   lockfile or workspaces.
@@ -435,4 +435,4 @@ package's root module. A library package contributes no entry point.
   a quick start for multi-file and package projects.
 - [Program structure](02-program-structure.md) — the item kinds and the
   grammar.
-- [Roadmap and deviations from Rust](16-roadmap.md) — what comes after 2.0.0.
+- [Roadmap and deviations from Rust](16-roadmap.md) — what comes after 2.1.0.

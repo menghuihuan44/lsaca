@@ -46,6 +46,10 @@ pub struct StructInfo {
     pub generic: Option<StructInstance>,
     pub span: Span,
     pub decl_fields: Vec<FieldDef>,
+    /// True for tuple structs such as Point(i64, i64).
+    pub tuple: bool,
+    /// True for unit structs such as struct Unit;.
+    pub unit: bool,
     pub fields: Vec<StructField>,
     pub fields_resolved: bool,
 }
@@ -594,7 +598,9 @@ impl<'a> Checker<'a> {
             c_name,
             generic: None,
             span: decl.span,
-            decl_fields: decl.fields.clone(),
+            decl_fields: decl.kind.fields(),
+            tuple: matches!(decl.kind, ast::StructKind::Tuple(_)),
+            unit: matches!(decl.kind, ast::StructKind::Unit),
             fields: Vec::new(),
             fields_resolved: false,
         });
@@ -1638,14 +1644,31 @@ impl<'a> Checker<'a> {
             return None;
         }
         let mut args = Vec::with_capacity(arity);
-        let mut unresolved = false;
         for expr in generics {
             let resolved = self.resolve_ty(expr, self_key)?;
-            match self.normalize_instance_arg(&resolved) {
-                Some(arg) => args.push(arg),
+            args.push(self.infer.resolve(&resolved));
+        }
+        // Keep an instance open while a deferred generic signature mentions it:
+        // a later constraint (an expected type, a turbofish) may still determine
+        // its arguments. Anywhere else the arguments must be named now.
+        if args.iter().any(|arg| self.ty_has_open_args(arg)) {
+            if let Some(&id) = def.instances.get(&args) {
+                return Some(ITy::Struct(id));
+            }
+            if self.defer_open_instances {
+                return self
+                    .instantiate_struct_open(def_id, args, span)
+                    .map(ITy::Struct);
+            }
+        }
+        let mut normalized = Vec::with_capacity(arity);
+        let mut unresolved = false;
+        for (arg, expr) in args.iter().zip(generics.iter()) {
+            match self.normalize_instance_arg(arg) {
+                Some(arg) => normalized.push(arg),
                 None => {
                     if self.probing {
-                        args.push(self.infer.fresh_var());
+                        normalized.push(self.infer.fresh_var());
                     } else {
                         self.error_code(
                             "type annotations needed".to_string(),
@@ -1660,10 +1683,11 @@ impl<'a> Checker<'a> {
         if unresolved {
             return None;
         }
-        if self.probing && args.iter().any(|arg| matches!(arg, ITy::Var(_))) {
+        if self.probing && normalized.iter().any(|arg| matches!(arg, ITy::Var(_))) {
             return Some(self.infer.fresh_var());
         }
-        self.instantiate_struct(def_id, args, span).map(ITy::Struct)
+        self.instantiate_struct(def_id, normalized, span)
+            .map(ITy::Struct)
     }
 
     fn instantiate_generic_enum_path(

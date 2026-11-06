@@ -318,7 +318,7 @@ impl Tag {
 
 impl Describe<String> for Tag {
     fn describe(&self, extra: String) -> String {
-        self.label + ":" + extra
+        self.label + ":" + &extra
     }
 }
 
@@ -328,18 +328,18 @@ pub fn shape_checksum(seed: i64) -> i64 {
     let rectangle = Rectangle::new(3, 4);
     acc = (acc * 31 + rectangle.area()) % MODULUS;
     acc = (acc * 31 + rectangle.perimeter()) % MODULUS;
-    acc = (acc * 31 + rectangle.name().len()) % MODULUS;
+    acc = (acc * 31 + rectangle.name().len() as i64) % MODULUS;
 
     let circle = Circle::new(5);
     acc = (acc * 31 + circle.area()) % MODULUS;
     acc = (acc * 31 + circle.perimeter()) % MODULUS;
-    acc = (acc * 31 + circle.name().len()) % MODULUS;
+    acc = (acc * 31 + circle.name().len() as i64) % MODULUS;
 
     let square = Square::new(6);
     acc = (acc * 31 + square.area()) % MODULUS;
     acc = (acc * 31 + square.perimeter()) % MODULUS;
     acc = (acc * 31 + square.double().area()) % MODULUS;
-    acc = (acc * 31 + square.name().len()) % MODULUS;
+    acc = (acc * 31 + square.name().len() as i64) % MODULUS;
 
     let triangle = Triangle::new(4, 5, 6);
     acc = (acc * 31 + triangle.area()) % MODULUS;
@@ -354,7 +354,7 @@ pub fn score_checksum(seed: i64) -> i64 {
     let record = Record::new(7, 3, 10);
     acc = (acc * 31 + record.attempts()) % MODULUS;
     acc = (acc * 31 + record.score()) % MODULUS;
-    acc = (acc * 31 + record.grade().len()) % MODULUS;
+    acc = (acc * 31 + record.grade().len() as i64) % MODULUS;
 
     let perfect = Record::new(9, 0, 10);
     acc = (acc * 31 + perfect.score()) % MODULUS;
@@ -364,7 +364,7 @@ pub fn score_checksum(seed: i64) -> i64 {
 
     let review = Review::new(4);
     acc = (acc * 31 + review.score()) % MODULUS;
-    acc = (acc * 31 + review.grade().len()) % MODULUS;
+    acc = (acc * 31 + review.grade().len() as i64) % MODULUS;
 
     let weak = Review::new(2);
     acc = (acc * 31 + weak.score()) % MODULUS;
@@ -377,11 +377,11 @@ pub fn label_checksum(seed: i64) -> i64 {
 
     let ticket = Ticket::new(7, String::from("printer"));
     let ticket_label = ticket.label();
-    acc = (acc * 31 + ticket_label.len()) % MODULUS;
+    acc = (acc * 31 + ticket_label.len() as i64) % MODULUS;
 
     let version = Version::new(2, 11);
     let version_label = version.label();
-    acc = (acc * 31 + version_label.len()) % MODULUS;
+    acc = (acc * 31 + version_label.len() as i64) % MODULUS;
     acc = (acc * 31 + version.major) % MODULUS;
 
     acc % MODULUS
@@ -413,11 +413,11 @@ pub fn describe_checksum(seed: i64) -> i64 {
 
     let point = Point::new(1, 2);
     let point_text = point.describe(3);
-    acc = (acc * 31 + point_text.len()) % MODULUS;
+    acc = (acc * 31 + point_text.len() as i64) % MODULUS;
 
     let tag = Tag::new(String::from("t"));
     let tag_text = tag.describe(String::from("v"));
-    acc = (acc * 31 + tag_text.len()) % MODULUS;
+    acc = (acc * 31 + tag_text.len() as i64) % MODULUS;
 
     acc % MODULUS
 }

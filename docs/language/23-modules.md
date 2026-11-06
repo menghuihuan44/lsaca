@@ -339,7 +339,7 @@ useSegment = IDENT | "crate" | "self" | "super" ;
 ```
 
 Groups nest and accept a trailing comma. A glob (`use crate::math::*;`) parses
-but the resolver rejects it; version 2.0.0 has no glob imports. An import is
+but the resolver rejects it; version 2.1.0 has no glob imports. An import is
 local to its module: importing a name in the root module does not make it
 visible in a child module.
 
@@ -560,7 +560,7 @@ lsaca: main.ls: could not compile main.ls due to previous error(s)
 
 ## Visibility
 
-Every named item can carry a visibility. Version 2.0.0 has three levels:
+Every named item can carry a visibility. Version 2.1.0 has three levels:
 
 | Written | Visible from |
 | --- | --- |
@@ -863,7 +863,7 @@ build. The build cache compensates: its key hashes the complete generated C, the
 runtime sources, the compiler path and the build mode, so an unchanged program is
 reused as a whole and editing any file in the graph rebuilds it.
 
-## Known limitations in 2.0.0
+## Known limitations in 2.1.0
 
 * Glob imports (`use path::*;`) parse but are rejected by the resolver.
 * Only private, `pub(crate)` and `pub` exist: `pub(super)` and `pub(in path)` are

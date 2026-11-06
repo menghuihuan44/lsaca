@@ -20,7 +20,7 @@ struct Tag {
 
 impl Describe<String> for Tag {
     fn describe(&self, extra: String) -> String {
-        return self.label + ":" + extra;
+        return format!("{}:{}", self.label, extra);
     }
 }
 
@@ -36,7 +36,7 @@ impl Sizer for Point {
 
 impl Sizer for Tag {
     fn size(&self) -> i64 {
-        return self.label.len();
+        return self.label.len() as i64;
     }
 }
 

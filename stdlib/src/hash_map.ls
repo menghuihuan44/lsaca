@@ -10,6 +10,8 @@
 // report E0277 for values with drop glue (use get_with instead). Keeping them
 // there preserves that diagnostic and its wording.
 //
+// Since 2.1.0 len() returns usize like the other collection lengths.
+//
 // contains_key and remove also stay on the compiler fallback table: in 2.0 their
 // key parameter is copied (pinned v1.7 semantics) and a generic stdlib method
 // cannot express "K: Clone". A by-reference lookup API is planned for a later
@@ -38,8 +40,8 @@ impl<K, V> HashMap<K, V> {
         return __map_insert(self, key, value);
     }
 
-    pub fn len(&self) -> i64 {
-        return __map_len(self);
+    pub fn len(&self) -> usize {
+        return __map_len(self) as usize;
     }
 
     pub fn is_empty(&self) -> bool {

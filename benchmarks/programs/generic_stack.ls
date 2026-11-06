@@ -18,7 +18,7 @@ impl<T> Stack<T> {
         self.items.pop()
     }
 
-    fn len(&self) -> i64 {
+    fn len(&self) -> usize {
         self.items.len()
     }
 }
@@ -44,7 +44,7 @@ fn main() {
     }
     let mut char_total: i64 = 0;
     while words.len() > 0 {
-        char_total += words.pop().unwrap().len();
+        char_total += words.pop().unwrap().len() as i64;
     }
     println!("checksum={},{}", total, char_total);
 }

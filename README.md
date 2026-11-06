@@ -15,9 +15,56 @@ This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
-The current release is **2.0.0**. It turns the standard library into real lsaca
-code, adds trait objects, slices and `str`, and closes most of the remaining
-performance gap to C:
+The current release is **2.1.0**. It is the Rust-alignment release: numeric
+defaults and suffixes, `usize` lengths and indices, `&str` text parameters,
+tuple and unit structs, and `mut` parameters now follow Rust, and the standard
+library and system interfaces grew the types and combinators that were
+missing:
+
+- **Rust-style numeric defaults and suffixes**: integer literals infer `i32`
+  and float literals `f64`; every integer type accepts a Rust suffix
+  (`i8`, `i16`, `i32`, `i64`, `isize`, `u8`, `u16`, `u32`,
+  `u64`, `usize`, plus `f32`/`f64` for floats), suffixed and annotated
+  values are range checked at compile time (`128i8` and `let x: u8 = 300`
+  are errors), and an unsuffixed literal adapts to the integer type its context
+  asks for.
+- **`usize` for every length and index**: `Vec`, `String`, slices,
+  `HashMap` and the iterator protocol use `usize` for lengths, capacities,
+  indices and counts, `find` returns `Option<usize>`, and indexing requires
+  `usize` exactly like Rust. `isize` is a complete type as well.
+- **Borrowed text in signatures**: read-only text parameters of the standard
+  library (and `expect`) take `&str`; a string literal in a `&str`
+  context compiles to a zero-allocation static view, `&String`/`&mut String`
+  coerce to `&str`, and `String + &str` / `String += &str` replace
+  owned-string concatenation.
+- **Tuple, newtype and unit structs**: `struct Point(i64, i64);`,
+  `struct Meters(i64);` and `struct Marker;` with `.0` access, tuple
+  patterns, methods and `Debug` output such as `Point(10, 4)`.
+- **`mut` parameters**: `fn f(mut x: i64)` may assign to its parameter
+  binding; `mut self` is still rejected.
+- **More standard library**: the new `Option::or`/`Option::xor` and
+  `Result::unwrap_err` combinators, the iterator adapters `zip`, `chain`,
+  `filter_map`, `take_while`,
+  `skip_while`, `step_by`, `position`, `last`, `nth`, `reduce`,
+  `product`, `inspect` and `for_each`, `str` helpers
+  (`chars`, `split_whitespace`, `lines`, `trim_start`, `trim_end`,
+  `replace`), `char` ASCII helpers, `Vec::truncate`/`swap`/`contains`,
+  and `parse_i64`/`parse_f64` returning `Result<_, ParseIntError>` and
+  `Result<_, ParseFloatError>`.
+- **Typed system interfaces**: `time::{Duration, Instant, SystemTime}` with
+  `sleep`, `io::Error::new`/`other` and `error::Error`,
+  `File::read`/`write` returning the byte count, `seek` returning `u64`,
+  `fs::Metadata::size()` returning `u64` with `modified`/`file_type`,
+  `env::VarError`, `net::Shutdown`, `process::exit` and the `f64`
+  constants from `math`.
+
+Version 2.1.0 is not fully source compatible with 2.0.0: unannotated numeric
+literals now infer `i32`, lengths and indices are `usize`, standard-library
+text parameters are `&str`, `parse_i64`/`parse_f64` return the new dedicated
+error types instead of `Result<_, String>`, and `String + String` is no
+longer accepted. Each change is reported by a targeted diagnostic rather than
+a type mismatch somewhere else; the [release history](#release-history) lists
+the details.
 
 - **Standard library written in lsaca**: `Vec`, `String`, `Option`, `Result`,
   `Rc`, `Box`, `HashMap`, `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque`,
@@ -42,9 +89,10 @@ performance gap to C:
   `char_count`, `starts_with`, `find`, `trim`, `split`, `parse_i64`, ...)
   live in the standard library. See
   [docs/language/26-slices-and-str.md](docs/language/26-slices-and-str.md).
-- **`isize` and `usize`**: pointer-sized integer types, available everywhere
-  (including `HashMap` keys and `as` casts) alongside the ten fixed-width
-  integer types.
+- **`isize` and `usize`**: pointer-sized integer types available everywhere
+  (including `HashMap` keys and `as` casts). Since 2.1.0 every length,
+  capacity, index and count in the standard library is `usize`, and indexing
+  requires `usize`.
 - **New collections**: insertion-ordered `HashSet`, sorted `BTreeSet` and
   `BTreeMap`, `VecDeque` and `BinaryHeap`, all written in lsaca on top of the
   builtin `HashMap` and `Vec`, with set operations (`union`, `intersection`,
@@ -84,11 +132,12 @@ locations name the real file and line. The
 
 ## Highlights
 
-- **Rust-like language**: `fn`, `let`/`let mut`, `struct`, `enum`,
-  `impl`, `match` with exhaustiveness checking, `Option`, `Result`,
-  `Vec<T>`, `Rc<T>`, `Box<T>`, tuples, closures, `if let`/`while let`,
-  `for` loops, compound assignment and `print!`/`println!` macros. Blocks,
-  `if` and `match` are expressions.
+- **Rust-like language**: `fn`, `let`/`let mut`, `mut` parameters,
+  named, tuple, newtype and unit `struct`s, `enum`, `impl`, `match` with
+  exhaustiveness checking, `Option`, `Result`, `Vec<T>`, `Rc<T>`,
+  `Box<T>`, tuples, closures, `if let`/`while let`, `for` loops, compound
+  assignment and `print!`/`println!` macros. Blocks, `if` and `match` are
+  expressions.
 - **Modules, multi-file programs and packages**: `mod` declarations,
   `use` imports with aliases and groups, `pub`/`pub(crate)`
   visibility and `pub use` re-exports checked through multi-segment paths
@@ -115,11 +164,14 @@ locations name the real file and line. The
   iterators, formatting, math, `io`, `fs`, `net`, `time`, `env`, `process`
   and `error` are lsaca source compiled into the compiler, backed by a small
   set of `extern fn` intrinsics. See [docs/stdlib/README.md](docs/stdlib/README.md).
-- **Lazy iterators**: `Vec<T>.iter()` and the adapters `map`, `filter`, `take`,
-  `skip`, `enumerate`, `collect`, `fold`, `count`, `sum`, `any`, `all` and
-  `find`, implemented generically in the standard library (`stdlib/src/iter.ls`);
-  `for` loops accept any type implementing `Iterator<T>`, and simple adapter
-  chains are fused into a single C loop by the code generator. See
+- **Lazy iterators**: `Vec<T>.iter()` and the adapters `map`, `filter`,
+  `filter_map`, `take`, `skip`, `take_while`, `skip_while`, `step_by`, `zip`,
+  `chain`, `enumerate` and `inspect`, plus the terminal operations `collect`,
+  `fold`, `reduce`, `count`, `sum`, `product`, `any`, `all`, `find`, `position`,
+  `last`, `nth` and `for_each`, implemented generically in the standard library
+  (`stdlib/src/iter.ls`); `for` loops accept any type implementing `Iterator<T>`,
+  and simple adapter chains are fused into a single C loop by the code
+  generator. See
   [docs/language/19-iterators.md](docs/language/19-iterators.md).
 - **Builtin `HashMap<K, V>`**: `insert`, `get`, `get_with`, `contains_key`,
   `remove`, `len`, `is_empty`, `clear`, `keys` and `values`, with
@@ -160,7 +212,12 @@ locations name the real file and line. The
   composes with the standard combinators `Option::map`/`map_or`/`and_then`/
   `filter`/`ok_or` and `Result::map`/`map_err`/`and_then`.
 - **Static typing with local inference**: annotations are optional where the type
-  follows from the initializer; numeric literals default to `i64`/`f64`.
+  follows from the initializer; integer literals default to `i32`, float
+  literals to `f64`, and Rust numeric suffixes override the default while
+  being range checked.
+- **Borrowed standard-library signatures**: text parameters are `&str`
+  instead of owned `String`, so passing a literal allocates nothing and
+  passing a `String` requires an explicit borrow, exactly as in Rust.
 - **Formatting controls**: format strings accept the Rust-style
   `[[fill]align][sign][0][width][.precision][?]` specification, so
   `{:>8}`, `{:*^9}`, `{:+}`, `{:08}`, `{:08.2}`, `{:.3}` and `{:?}` all
@@ -183,9 +240,9 @@ locations name the real file and line. The
   static documentation site, plus
   cross-language benchmarks (compile time, runtime and peak memory) against C,
   Rust, Python and Node.js with the raw data checked in.
-- **Tested end to end**: more than 820 compiler unit tests, 20 end-to-end test
-  functions that compile and run 133 programs (single files, module trees and
-  packages), 55 robustness tests, 22 CLI tests, a 10,357-check C runtime
+- **Tested end to end**: more than 870 compiler unit tests, 20 end-to-end test
+  functions that compile and run 158 programs (single files, module trees and
+  packages), 91 robustness tests, 22 CLI tests, a 10,357-check C runtime
   suite and a 121-check runtime smoke script; CI runs the test matrix on Linux,
   macOS and Windows, plus AddressSanitizer and UndefinedBehaviorSanitizer jobs.
 
@@ -738,58 +795,60 @@ before it is timed; the harness records cold and cached build time, runtime
 median and peak working set. lsaca programs go through the normal cached
 `lsaca build -r` pipeline (the default direct C backend).
 
-The official 2.0.0 result is [benchmarks/results/latest.md](benchmarks/results/latest.md),
-archived under [benchmarks/results/archive/v2.0/](benchmarks/results/archive/v2.0/),
-with the full three-way analysis in
-[benchmarks/results/v2.0-report.md](benchmarks/results/v2.0-report.md) and the
+The official 2.1.0 result is [benchmarks/results/latest.md](benchmarks/results/latest.md),
+archived under [benchmarks/results/archive/v2.1/](benchmarks/results/archive/v2.1/),
+with the full analysis in
+[benchmarks/results/v2.1-report.md](benchmarks/results/v2.1-report.md) and the
 per-workload commentary on
 [docs/language/21-benchmarks.md](docs/language/21-benchmarks.md). The run used
 Windows 11 on a Core i7-1260P (16 threads, 15.6 GiB), gcc 15.2.0 (`-O2`),
 rustc 1.99 (`-O`), Node 24 and Python 3.14; runtimes are medians of seven
-runs after one warmup and are lower-is-better.
+runs after one warmup and are lower-is-better. Short workloads on this laptop
+vary noticeably between runs, so the tables below are the recorded official
+run; the benchmarks page discusses the noise and repeats the affected cases.
 
-| workload | lsaca 2.0.0 | C (gcc -O2) | Rust (rustc -O) | ratio vs C |
+| workload | lsaca 2.1.0 | C (gcc -O2) | Rust (rustc -O) | ratio vs C |
 | --- | ---: | ---: | ---: | ---: |
-| `fib` | 31.4 ms | 23.8 ms | 19.2 ms | 1.32x |
-| `fib_iter` | 13.4 ms | 7.3 ms | - | 1.83x |
-| `fib_memo` | 10.5 ms | 9.7 ms | - | 1.09x |
-| `loop_sum` | 17.5 ms | 12.4 ms | 9.8 ms | 1.41x |
-| `string_build` | 26.8 ms | 11.0 ms | 59.4 ms | 2.44x |
-| `vec_memory` | 17.9 ms | 12.4 ms | 13.5 ms | 1.44x |
-| `sort_i64` | 30.8 ms | 30.9 ms | 35.2 ms | 1.00x |
-| `sort_insertion` | 11.4 ms | 8.9 ms | - | 1.28x |
-| `matrix_multiply` | 18.1 ms | 12.7 ms | 10.9 ms | 1.43x |
-| `binary_trees` | 190.7 ms | 18.5 ms | 17.6 ms | 10.31x |
-| `binary_trees_refs` | 59.5 ms | 25.5 ms | 33.4 ms | 2.33x |
-| `string_split` | 24.4 ms | 12.8 ms | 16.7 ms | 1.91x |
-| `sieve` | 32.9 ms | 29.6 ms | 28.2 ms | 1.11x |
-| `mandelbrot` | 44.0 ms | 26.6 ms | 29.8 ms | 1.65x |
-| `iterator_pipeline` | 14.2 ms | 12.3 ms | 12.1 ms | 1.15x |
-| `hashmap_wordcount` | 36.0 ms | 25.2 ms | 46.2 ms | 1.43x |
-| `array_wordcount` | 13.7 ms | 9.0 ms | - | 1.51x |
-| `generic_stack` | 18.0 ms | 13.6 ms | 15.6 ms | 1.32x |
-| `fn_pipeline` | 12.7 ms | 9.1 ms | 9.7 ms | 1.40x |
-| `string_unicode` | 33.3 ms | 10.9 ms | 14.6 ms | 3.06x |
-| `hashmap_i64` | 212.5 ms | 150.2 ms | 187.6 ms | 1.42x |
-| `hashmap_string` | 193.2 ms | 180.5 ms | 238.1 ms | 1.07x |
+| `fib` | 27.6 ms | 23.7 ms | 11.1 ms | 1.17x |
+| `fib_iter` | 24.1 ms | 9.2 ms | - | 2.63x |
+| `fib_memo` | 13.6 ms | 10.2 ms | - | 1.33x |
+| `loop_sum` | 20.6 ms | 13.4 ms | 13.0 ms | 1.54x |
+| `string_build` | 97.2 ms | 13.0 ms | 59.5 ms | 7.48x |
+| `vec_memory` | 19.9 ms | 14.5 ms | 18.5 ms | 1.37x |
+| `sort_i64` | 56.6 ms | 33.1 ms | 29.3 ms | 1.71x |
+| `sort_insertion` | 14.3 ms | 9.8 ms | - | 1.45x |
+| `matrix_multiply` | 16.2 ms | 12.7 ms | 21.7 ms | 1.27x |
+| `binary_trees` | 212.5 ms | 19.2 ms | 22.2 ms | 11.05x |
+| `binary_trees_refs` | 38.2 ms | 26.2 ms | 20.0 ms | 1.46x |
+| `string_split` | 39.3 ms | 14.3 ms | 13.2 ms | 2.75x |
+| `sieve` | 37.8 ms | 29.3 ms | 30.7 ms | 1.29x |
+| `mandelbrot` | 39.5 ms | 31.7 ms | 31.1 ms | 1.25x |
+| `iterator_pipeline` | 16.0 ms | 12.2 ms | 12.3 ms | 1.30x |
+| `hashmap_wordcount` | 32.5 ms | 21.7 ms | 41.9 ms | 1.50x |
+| `array_wordcount` | 13.1 ms | 9.0 ms | - | 1.45x |
+| `generic_stack` | 17.2 ms | 13.9 ms | 15.0 ms | 1.24x |
+| `fn_pipeline` | 12.1 ms | 8.3 ms | 8.9 ms | 1.46x |
+| `string_unicode` | 38.1 ms | 15.6 ms | 14.3 ms | 2.44x |
+| `hashmap_i64` | 196.3 ms | 145.6 ms | 181.2 ms | 1.35x |
+| `hashmap_string` | 181.8 ms | 163.5 ms | 213.6 ms | 1.11x |
 
 Compile times on the same machine (cold: fresh program cache with a warm
 shared runtime-object cache; cached: only relinking):
 
-| build | lsaca 2.0.0 | C (gcc -O2) |
+| build | lsaca 2.1.0 | C (gcc -O2) |
 | --- | ---: | ---: |
-| cold build, typical single file | 0.38-0.64 s (median 0.50 s) | 0.21-0.37 s (median 0.26 s) |
-| cached build, typical single file | 34-66 ms (median 42 ms) | - |
-| `compile_large` (4,511 lines), cold / cached | 2.02 s / 513 ms | - |
-| `modules_compile` (9 files), cold / cached | 2.90 s / 478 ms | - |
-| `package_compile` (13 files, 3 packages), cold / cached | 1.38 s / 100 ms | - |
+| cold build, typical single file | 0.46-0.82 s (median 0.56 s) | 0.22-0.47 s (median 0.26 s) |
+| cached build, typical single file | 53-108 ms (median 62 ms) | - |
+| `compile_large` (4,511 lines), cold / cached | 1.96 s / 549 ms | - |
+| `modules_compile` (9 files), cold / cached | 2.96 s / 510 ms | - |
+| `package_compile` (13 files, 3 packages), cold / cached | 1.33 s / 116 ms | - |
 
-Peak memory is at parity with C for most workloads: `fib` 5.1 vs 4.0 MiB,
-`vec_memory` 20.1 vs 18.8 MiB, `sieve` 20.1 vs 18.8 MiB, `hashmap_i64` 56.7
-vs 52.4 MiB. The exceptions are documented workload-fairness effects: by-value
-`binary_trees` deep-copies the tree when summing (53.1 vs 7.6 MiB, 10.31x
+Peak memory is at parity with C for most workloads: `fib` 5.1 vs 4.1 MiB,
+`vec_memory` 20.1 vs 18.8 MiB, `sieve` 20.1 vs 18.8 MiB, `hashmap_i64` 56.8
+vs 52.6 MiB. The exceptions are documented workload-fairness effects: by-value
+`binary_trees` deep-copies the tree when summing (53.1 vs 7.7 MiB, 11.05x
 runtime) while the borrowed `binary_trees_refs` variant is the fair comparison
-(17.0 vs 7.6 MiB, 2.33x), and `hashmap_string` allocates one shared `String`
+(17.1 vs 7.7 MiB, 1.46x), and `hashmap_string` allocates one shared `String`
 buffer per unique word (30.8 vs 19.7 MiB).
 
 The single-file cold build is dominated by the system C compiler compiling the
@@ -800,31 +859,37 @@ build on a fresh machine (empty runtime cache) still pays for the runtime and
 takes roughly 1.8 s. Cached rebuilds skip the C compiler for unchanged
 content.
 
-At run time, 14 of the 22 executed workloads are within 1.5x of C and nine are
-within 1.4x; five are at or below 1.15x (`sort_i64`, `fib_memo`, `sieve`,
-`iterator_pipeline`, `hashmap_string`). The 13 workloads above 1.4x are analyzed
-individually on the benchmarks page and in the report: `string_unicode`
-(3.06x) spends its time in the documented O(n) `char_at` API walking UTF-8
-from the start of the string, `string_build` (2.44x) and `string_split`
-(1.91x) pay for reference-counted buffer growth and per-piece allocation,
-`binary_trees_refs` (2.33x) pays reference-count traffic on boxed nodes,
-`fib_iter` (1.83x) and `mandelbrot` (1.65x) are loop/closure-heavy,
-`array_wordcount` (1.51x) combines hashing with per-character string work, and
-`vec_memory` (1.44x), `matrix_multiply` (1.43x), `hashmap_wordcount` (1.43x),
-`hashmap_i64` (1.42x) and `loop_sum` (1.41x) sit just outside the target;
-`binary_trees` remains the deliberate by-value semantics comparison.
+At run time, 15 of the 22 executed workloads are within 1.5x of C and ten are
+within 1.4x; `hashmap_string` (1.11x) is the closest to C and `fib` (1.17x) is
+second. The twelve workloads above 1.4x are analyzed individually on the
+benchmarks page and in the report: `string_build` (7.48x) is the one real
+2.1.0 regression - the `&str` alignment means `s.push_str(format!(...))` has
+to be written as `let piece = format!(...); s.push_str(&piece)`, so the old
+format-into-push fusion no longer applies and every token now allocates a
+second string; restoring that fusion is the top 2.2 performance item.
+`string_split` (2.75x) has the same cause plus per-split allocation.
+`fib_iter` (2.63x) and `sort_i64` (1.71x) are the loudest of the short-workload
+noise: an immediate repeat of the same suite measured `fib_iter` at 1.18x and
+`sort_i64` at 1.35x while the C baselines also moved (`fib` C 23.7 -> 38.4 ms),
+so only same-run comparisons are exact; `sort_i64` additionally pays `as usize`
+casts on every element access in the migrated quicksort. `string_unicode`
+(2.44x) spends its time in the documented O(n) `char_at` API walking UTF-8
+from the start of the string, `binary_trees_refs` (1.46x) pays reference-count
+traffic on boxed nodes, `fn_pipeline` (1.46x), `array_wordcount` (1.45x) and
+`sort_insertion` (1.45x) sit just outside the target, `hashmap_wordcount`
+(1.50x) and `loop_sum` (1.54x) mix hashing / short loops with the same noise,
+and `binary_trees` (11.05x) remains the deliberate by-value semantics
+comparison.
 
-The 2.0.0 code-generation and runtime work shows up as large same-suite gains
-over 1.7.0 in `iterator_pipeline` (27.7 -> 14.2 ms, iterator-chain fusion),
-`binary_trees` (331.3 -> 190.7 ms, the allocator size-class pool),
-`hashmap_string` (243.7 -> 193.2 ms) and `hashmap_wordcount` (44.2 -> 36.0 ms).
-Rows that regressed against the 1.7 run - `fib` 26.1 -> 31.4 ms, `loop_sum`
-8.0 -> 17.5 ms, `binary_trees_refs` 25.9 -> 59.5 ms and `mandelbrot` 23.0 ->
-44.0 ms - moved together with their C baselines on a host that was busier than
-the idle 1.7 host (gcc needed 0.21-0.37 s for the same workloads here versus
-0.21-0.29 s in 1.7), so only same-run comparisons are exact. The
-[benchmarks page](docs/language/21-benchmarks.md) has the complete before/after
-tables.
+Against the archived 2.0.0 run the same-suite wins are `binary_trees_refs`
+(59.5 -> 38.2 ms, -36%), `hashmap_string` (193.2 -> 181.8 ms) and
+`hashmap_i64` (212.5 -> 196.3 ms); `string_build` moved from 26.8 to 97.2 ms
+because of the fusion loss described above, and the other rows moved together
+with their C baselines on a host that was busier than the 2.0.0 host (gcc
+needed 0.22-0.47 s for the same workloads here versus 0.21-0.37 s in 2.0.0).
+The [benchmarks page](docs/language/21-benchmarks.md) and
+[benchmarks/results/v2.1-report.md](benchmarks/results/v2.1-report.md) have the
+complete before/after tables.
 
 ## Environment variables
 
@@ -864,16 +929,16 @@ tables.
 ## Testing
 
 ```sh
-cargo test --workspace   # more than 820 unit + 20 end-to-end + 55 robustness + 22 CLI tests
+cargo test --workspace   # more than 870 unit + 20 end-to-end + 91 robustness + 22 CLI tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-`cargo test --workspace` runs more than 820 unit tests across the compiler
+`cargo test --workspace` runs more than 870 unit tests across the compiler
 library - including the lexer, parser, type checker, borrow checker, move
 checker, C code generator and the embedded standard library loader - plus 20
-end-to-end test functions that compile and run 133 programs: single files under
+end-to-end test functions that compile and run 158 programs: single files under
 `crates/lsaca/tests/programs/` and `examples/`, module trees under
 `tests/programs/modules/`, package projects (including path dependencies)
 under `tests/packages/`, and IO/FS fixtures that run in a private scratch
@@ -909,6 +974,50 @@ only that CLI test; the dedicated CI job still covers the CMake backend.
 
 ## Release history
 
+- **2.1.0** - the Rust-alignment release. Numeric defaults and suffixes: integer
+  literals infer `i32`, float literals `f64`, every integer type accepts a
+  Rust suffix (`i8` to `i64`, `isize`, `u8` to `u64`, `usize`, plus
+  `f32`/`f64`), suffixed and annotated literals are range checked, an
+  unsuffixed literal adapts to a contextual integer type, `for` ranges iterate
+  the operand's integer type and negative literal folding follows Rust. Every
+  length, index, capacity and count is `usize` (vectors, strings, slices,
+  `HashMap`, `find`, iterator counts, `Rc::strong_count`) and indexing
+  requires `usize`. Standard-library read-only text parameters and `expect`
+  take `&str`; literals in `&str` contexts become zero-allocation static
+  views and `String + &str` / `+= &str` replace owned concatenation.
+  Tuple/newtype/unit structs and `mut` parameters. Standard library:
+  `Option::or`/`xor` and `Result::unwrap_err`, iterator adapters (`zip`, `chain`,
+  `filter_map`, `take_while`, `skip_while`, `step_by`, `position`,
+  `last`, `nth`, `reduce`, `product`, `inspect`, `for_each`), `str`
+  whitespace/line helpers and `replace`, `char` ASCII helpers,
+  `Vec::truncate`/`swap`/`contains`, `ParseIntError` and
+  `ParseFloatError`. System interfaces: `time::{Duration, Instant,
+  SystemTime}`, `io::Error::new`, `error::Error`, byte-count
+  `File::read`/`write`, `File::seek`, `fs::Metadata` accessors and
+  `FileType`, `env::VarError`, `net::Shutdown`, `process::exit` and the
+  `math` float constants. Source breaking: changed default integer type,
+  `usize` lengths and indices, `&str` parameters, parse error types and
+  `String + String`.
+- **2.0.0** - the standard library is now written in lsaca and ships as the
+  `std` crate under `stdlib/src` (embedded into the compiler): `Option`,
+  `Result`, `Iterator`, `String`, `char`, `Vec`, formatting, math,
+  `io`, `fs`, `net`, `time`, `env`, `process`, `error` and the
+  collections (`HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque`,
+  `BinaryHeap`). Builtin marker types are lowered to the C runtime through
+  `extern fn` intrinsics that only the standard library may declare. Trait
+  default method bodies; trait objects (`dyn Trait` with object safety,
+  `Box<dyn Trait>`, `Rc<dyn Trait>` and `&dyn Trait`, one vtable per trait
+  and implementing type, automatic coercion at `&`, `Box` and `Rc` sites);
+  slices and string views (`[T]` behind references, `&str`, slice
+  expressions, `&Vec<T>`/`&mut Vec<T>` and `&String`/`&mut String`
+  coercions, UTF-8 boundary checks) with `isize`/`usize`; system
+  interfaces for files, directories, TCP, time and the environment; managed
+  closure environments and `Rc` cells allocated through the ORC collector;
+  performance work: iterator-chain fusion, allocator size-class pool,
+  Swiss-table and string fast paths, less reference traffic, and a shared
+  runtime-object cache outside the per-program build cache (cold build median
+  0.50 s, cached 42 ms); a 25-program benchmark matrix. Source compatible with
+  1.7.0 except programs using `dyn` or `extern` as identifiers.
 - **1.7.0** - modules, multi-file programs and a package manager: inline and
   file modules (`mod foo;` resolving to `foo.ls` or
   `foo/mod.ls`), arbitrary module nesting, `use` trees with aliases,
@@ -988,26 +1097,6 @@ only that CLI test; the dedicated CI job still covers the CMake backend.
   signs, zero padding and precision; correctly implemented or-patterns and
   match guards; non-`bool` conditions became a compile-time error.
 - **1.0.0** - first release of the rewrite.
-
-- **2.0.0** - the standard library is now written in lsaca and ships as the
-  `std` crate under `stdlib/src` (embedded into the compiler): `Option`,
-  `Result`, `Iterator`, `String`, `char`, `Vec`, formatting, math, `io`, `fs`,
-  `net`, `time`, `env`, `process`, `error` and the collections (`HashSet`,
-  `BTreeSet`, `BTreeMap`, `VecDeque`, `BinaryHeap`). Builtin marker types are
-  lowered to the C runtime through `extern fn` intrinsics that only the standard
-  library may declare. Trait default method bodies; trait objects (`dyn Trait`
-  with object safety, `Box<dyn Trait>`, `Rc<dyn Trait>` and `&dyn Trait`, one
-  vtable per trait and implementing type, automatic coercion at `&`, `Box` and
-  `Rc` sites); slices and string views (`[T]` behind references, `&str`, slice
-  expressions, `&Vec<T>`/`&mut Vec<T>` and `&String`/`&mut String` coercions,
-  UTF-8 boundary checks) with `isize`/`usize`; system interfaces for files,
-  directories, TCP, time and the environment; managed closure environments and
-  `Rc` cells allocated through the ORC collector; performance work:
-  iterator-chain fusion, allocator size-class pool, Swiss-table and string fast
-  paths, less reference traffic, and a shared runtime-object cache outside the
-  per-program build cache (cold build median 0.50 s, cached 42 ms); a
-  25-program benchmark matrix. Source compatible with 1.7.0 except programs
-  using `dyn` or `extern` as identifiers.
 
 ## Repository layout
 

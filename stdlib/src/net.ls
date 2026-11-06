@@ -1,20 +1,50 @@
 // TCP networking.
 //
-// Plain TCP only. Addresses are owned String values in the form
+// Plain TCP only. Addresses are read-only text (`&str`) in the form
 // "host:port" (for example "127.0.0.1:8080"); a port of 0 asks the
 // operating system for an ephemeral port, which local_port reports.
 // Failures are reported as io::Error values, never as panics. Both
 // listener and stream handles are closed when the value is dropped.
+//
+// Since 2.1.0 read and write return the number of bytes transferred as usize
+// and shutdown takes a Shutdown value instead of the raw numeric code.
 
-pub extern fn __net_listen(address: String) -> i64;
+pub extern fn __net_listen(address: &str) -> i64;
 pub extern fn __net_local_port(handle: i64) -> i64;
 pub extern fn __net_accept(listener: i64) -> i64;
-pub extern fn __net_connect(address: String) -> i64;
+pub extern fn __net_connect(address: &str) -> i64;
 pub extern fn __net_set_timeout(handle: i64, milliseconds: i64) -> i64;
 pub extern fn __net_shutdown(handle: i64, how: i64) -> i64;
 pub extern fn __io_close(handle: i64) -> i64;
 pub extern fn __io_read(handle: i64, buffer: &mut [u8]) -> i64;
 pub extern fn __io_write(handle: i64, buffer: &[u8]) -> i64;
+
+/// The direction(s) of a connection to shut down.
+pub enum Shutdown {
+    /// Shut down the read half.
+    Read,
+    /// Shut down the write half.
+    Write,
+    /// Shut down both halves.
+    Both,
+}
+
+impl Shutdown {
+    /// The frozen runtime code for this direction: 0 read, 1 write, 2 both.
+    fn code(self) -> i64 {
+        match self {
+            Shutdown::Read => {
+                return 0;
+            }
+            Shutdown::Write => {
+                return 1;
+            }
+            Shutdown::Both => {
+                return 2;
+            }
+        }
+    }
+}
 
 /// A listening TCP socket.
 pub struct TcpListener {
@@ -23,7 +53,7 @@ pub struct TcpListener {
 
 impl TcpListener {
     /// Binds a listener to an address such as "127.0.0.1:0".
-    pub fn bind(address: String) -> Result<TcpListener, Error> {
+    pub fn bind(address: &str) -> Result<TcpListener, Error> {
         let handle: i64 = __net_listen(address);
         if handle < 0 {
             return Err(Error::last());
@@ -67,7 +97,7 @@ pub struct TcpStream {
 
 impl TcpStream {
     /// Connects to an address such as "127.0.0.1:8080".
-    pub fn connect(address: String) -> Result<TcpStream, Error> {
+    pub fn connect(address: &str) -> Result<TcpStream, Error> {
         let handle: i64 = __net_connect(address);
         if handle < 0 {
             return Err(Error::last());
@@ -81,21 +111,21 @@ impl TcpStream {
     }
 
     /// Reads up to buffer.len() bytes, returning the number read.
-    pub fn read(&mut self, buffer: &mut [u8]) -> Result<i64, Error> {
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
         let count: i64 = __io_read(self.handle, buffer);
         if count < 0 {
             return Err(Error::last());
         }
-        return Ok(count);
+        return Ok(count as usize);
     }
 
     /// Writes the whole buffer, returning the number of bytes written.
-    pub fn write(&mut self, buffer: &[u8]) -> Result<i64, Error> {
+    pub fn write(&mut self, buffer: &[u8]) -> Result<usize, Error> {
         let count: i64 = __io_write(self.handle, buffer);
         if count < 0 {
             return Err(Error::last());
         }
-        return Ok(count);
+        return Ok(count as usize);
     }
 
     /// Sets a read and write timeout in milliseconds (0 disables it).
@@ -107,9 +137,9 @@ impl TcpStream {
         return Ok(());
     }
 
-    /// Shuts down the connection: how 0 read, 1 write, 2 both directions.
-    pub fn shutdown(&self, how: i64) -> Result<(), Error> {
-        let status: i64 = __net_shutdown(self.handle, how);
+    /// Shuts down the connection.
+    pub fn shutdown(&self, how: Shutdown) -> Result<(), Error> {
+        let status: i64 = __net_shutdown(self.handle, how.code());
         if status < 0 {
             return Err(Error::last());
         }

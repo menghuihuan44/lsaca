@@ -46,6 +46,49 @@ pub use iter::__lsaca_it_any;
 pub use iter::__lsaca_it_all;
 pub use iter::__lsaca_it_find;
 
+// v2.1 iterator adapters: hidden types and constructor helpers resolved by
+// the iterator sugar in the standard library crate root.
+pub use iter::__lsaca_ZipIter;
+pub use iter::__lsaca_ChainIter;
+pub use iter::__lsaca_FilterMapIter;
+pub use iter::__lsaca_TakeWhileIter;
+pub use iter::__lsaca_SkipWhileIter;
+pub use iter::__lsaca_StepByIter;
+pub use iter::__lsaca_InspectIter;
+pub use iter::__lsaca_it_zip;
+pub use iter::__lsaca_it_chain;
+pub use iter::__lsaca_it_filter_map;
+pub use iter::__lsaca_it_take_while;
+pub use iter::__lsaca_it_skip_while;
+pub use iter::__lsaca_it_step_by;
+pub use iter::__lsaca_it_inspect;
+pub use iter::__lsaca_it_for_each;
+pub use iter::__lsaca_it_position;
+pub use iter::__lsaca_it_last;
+pub use iter::__lsaca_it_nth;
+pub use iter::__lsaca_it_reduce;
+pub use iter::__lsaca_it_sum_i32;
+pub use iter::__lsaca_it_sum_usize;
+pub use iter::__lsaca_it_product_i32;
+pub use iter::__lsaca_it_product_i64;
+pub use iter::__lsaca_it_product_usize;
+pub use iter::__lsaca_it_product_f64;
+
+// Text parsing helpers used by the generic `parse::<T>()` sugar and by the
+// numeric parse methods on String and str.
+pub use string::__lsaca_parse_i8;
+pub use string::__lsaca_parse_i16;
+pub use string::__lsaca_parse_i32;
+pub use string::__lsaca_parse_i64;
+pub use string::__lsaca_parse_isize;
+pub use string::__lsaca_parse_u8;
+pub use string::__lsaca_parse_u16;
+pub use string::__lsaca_parse_u32;
+pub use string::__lsaca_parse_u64;
+pub use string::__lsaca_parse_usize;
+pub use string::__lsaca_parse_f32;
+pub use string::__lsaca_parse_f64;
+
 // Collection types.
 pub use collections::HashSet;
 pub use collections::BTreeSet;
@@ -56,6 +99,8 @@ pub use collections::BinaryHeap;
 // Error types.
 pub use io::Error;
 pub use io::ErrorKind;
+pub use core::ParseIntError;
+pub use core::ParseFloatError;
 
 // Text input and output.
 pub use io::read_line;
@@ -64,6 +109,7 @@ pub use io::write_file;
 
 // Process helpers.
 pub use process::args;
+pub use process::exit;
 
 // Numeric helper functions.
 pub use math::sqrt;
@@ -77,6 +123,24 @@ pub use math::ln;
 pub use math::log10;
 pub use math::exp;
 pub use math::pow;
+
+// Numeric constants (f64, exact Rust values; since 2.1.0).
+pub use math::PI;
+pub use math::E;
+pub use math::TAU;
+pub use math::SQRT_2;
+pub use math::FRAC_1_SQRT_2;
+pub use math::FRAC_1_PI;
+pub use math::FRAC_2_PI;
+pub use math::FRAC_2_SQRT_PI;
+pub use math::LN_2;
+pub use math::LN_10;
+pub use math::LOG2_E;
+pub use math::LOG10_E;
+pub use math::PHI;
+pub use math::FRAC_PI_2;
+pub use math::FRAC_PI_3;
+pub use math::FRAC_PI_4;
 
 // Handles and standard streams.
 pub use io::File;
@@ -92,6 +156,7 @@ pub use fs::append;
 pub use fs::copy;
 pub use fs::metadata;
 pub use fs::Metadata;
+pub use fs::FileType;
 pub use fs::read_dir;
 pub use fs::exists;
 pub use fs::is_file;
@@ -110,13 +175,21 @@ pub use fs::temp_dir;
 // Networking.
 pub use net::TcpListener;
 pub use net::TcpStream;
+pub use net::Shutdown;
 
-// Time.
+// Time (the Duration/Instant/SystemTime types are new in 2.1.0; the
+// millisecond helpers are deprecated values kept for compatibility).
+pub use time::Duration;
+pub use time::Instant;
+pub use time::SystemTime;
+pub use time::unix_epoch;
+pub use time::sleep;
 pub use time::DateTime;
 pub use time::now_ms;
 pub use time::monotonic_ns;
 pub use time::sleep_ms;
 
 // Environment.
+pub use env::VarError;
 pub use env::var;
 pub use env::vars;

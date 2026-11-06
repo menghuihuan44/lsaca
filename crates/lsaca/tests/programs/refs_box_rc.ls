@@ -31,7 +31,7 @@ fn main() {
     let tree = Some(Box::new(node(1, node(2, leaf(4), leaf(5)), leaf(3))));
     println!("{}", sum(&tree));
 
-    let shared = Rc::new(41);
+    let shared = Rc::new(41i64);
     println!("{}", rc_payload(&shared));
     println!("{}", shared.strong_count());
 }

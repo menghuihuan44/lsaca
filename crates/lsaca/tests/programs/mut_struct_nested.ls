@@ -22,7 +22,7 @@ fn record_score(outer: &mut Outer, score: i64) {
 fn relabel(outer: &mut Outer) {
     let existing: String = outer.label.clone();
     outer.label = String::from("outer:");
-    outer.label.push_str(existing);
+    outer.label.push_str(&existing);
 }
 
 fn main() {

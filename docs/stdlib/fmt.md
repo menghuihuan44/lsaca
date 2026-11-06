@@ -1,8 +1,8 @@
 # fmt: formatting
 
-**Status in 2.0.0.** The format machinery is implemented by the compiler. `std::fmt` is
-the module that documents the supported surface; it does not expose
-user-implementable formatting traits in 2.0.
+**Status in 2.1.0.** The format machinery is implemented by the compiler.
+`std::fmt` is the module that documents the supported surface; it does not
+expose user-implementable formatting traits.
 
 ## Macros
 
@@ -34,18 +34,18 @@ specifier) is a compile-time error, not a run-time panic.
 
 ## Debug and Display
 
-There are no user-implementable `Display`/`Debug` traits in 2.0.0. Every value prints
-through the formatting rules the compiler knows: structs and enums print
-field/variant names, `String` prints its text, `char` prints with quotes and escapes
-in Debug, and `?` uses the escaped form. Trait objects print through their vtable
-(see [Trait objects](../language/25-trait-objects.md)).
+There are no user-implementable `Display`/`Debug` traits. Every value prints
+through the formatting rules the compiler knows: named structs print
+`Name { x: 1 }`, tuple structs print `Name(10, 4)`, unit structs print `Name`,
+enums print their variant, `String` prints its text, `char` prints with quotes and
+escapes in Debug, and `?` uses the escaped form. Trait objects print through
+their vtable (see [Trait objects](../language/25-trait-objects.md)).
 
 ## Planned for a later release
 
 * Formatting helpers (`join`-style utilities) are not planned; the macros and the
   compiler rules are the whole surface.
-* User-defined `Display`/`Debug` implementations are deferred; `impl` on a trait
-  that is not `Drop` remains an error.
+* User-defined `Display`/`Debug` implementations are deferred.
 
 ## See also
 

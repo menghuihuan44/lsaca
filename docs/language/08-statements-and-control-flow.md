@@ -271,7 +271,7 @@ done -2
 
 `loop` repeats its block forever. Leave it with `break` (optionally from inside a
 nested `if`). `continue` skips to the next iteration. A loop has type `()`:
-`break` cannot carry a value in 2.0.0.
+`break` cannot carry a value in 2.1.0.
 
 ```ls
 fn main() {
@@ -324,10 +324,13 @@ lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
 * `start..end` — from `start` up to but not including `end`;
 * `start..=end` — from `start` up to and including `end`.
 
-Both endpoints are `i64` (the default integer type); cast if you computed them in
-another type. The loop variable is a fresh immutable binding, but — a parser
-leniency — `for mut i in …` is accepted and lets you reassign it inside the body;
-that does not change the iteration.
+The endpoints must have the same integer type, and the loop variable has that
+type; any integer type works, not just `i64`. Unsuffixed literal endpoints
+default to `i32`, so `for i in 0..5` iterates `i32` values, while a range over a
+`usize` count takes the `usize` type because the unsuffixed `0` adapts to it. The
+loop variable is a fresh immutable binding, but — a parser leniency — `for mut i
+in …` is accepted and lets you reassign it inside the body; that does not change
+the iteration.
 
 ```ls
 fn main() {
@@ -421,7 +424,7 @@ Output:
 1: b
 ```
 
-The `mut` on a loop variable is accepted in 2.0.0; the assignment does not affect
+The `mut` on a loop variable is accepted in 2.1.0; the assignment does not affect
 the sequence of values:
 
 ```ls
@@ -451,6 +454,7 @@ lowering (see [Iterators](19-iterators.md)):
 fn main() {
     let words = vec![String::from("alpha"), String::from("beta")];
     for (index, word) in words.iter().enumerate() {
+        // enumerate yields a usize index and the element type
         println!("{}: {}", index, word);
     }
 }
@@ -490,7 +494,7 @@ lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
 
 `break` and `continue` are valid only inside `loop`, `while` or `for`. `break`
 leaves the innermost loop, `continue` starts the next iteration of the innermost
-loop. There are no labels in 2.0.0, so to leave nested loops use a flag or a
+loop. There are no labels in 2.1.0, so to leave nested loops use a flag or a
 function with `return`.
 
 Outside a loop, `continue` (and `break`) is a compile error:

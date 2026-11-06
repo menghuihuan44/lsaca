@@ -8,6 +8,12 @@
 // File values own a runtime handle and close it when dropped, except for the
 // standard stream constructors, whose handles are never closed by the standard
 // library. Handles are plain i64 runtime table indices.
+//
+// Since 2.1.0 read-only text parameters are `&str` (paths and text), byte
+// counts and positions are `usize` (sizes stay `u64`), and `Error`
+// implements the `error::Error` trait in addition to its inherent methods.
+
+use crate::error::Error as ErrorTrait;
 
 // Intrinsic declarations for the runtime error record.
 pub extern fn __io_last_error_kind() -> i64;
@@ -17,10 +23,10 @@ pub extern fn __io_last_error_message() -> String;
 //
 // These are thin intrinsics: the compiler expands each call inline exactly as
 // the legacy builtin table did. The structured io/fs modules build on top of
-// them in a later phase.
+// them in a later phase. Their path and text arguments are `&str` slices.
 pub extern fn read_line() -> Option<String>;
-pub extern fn read_file(path: String) -> Result<String, String>;
-pub extern fn write_file(path: String, contents: String) -> Result<(), String>;
+pub extern fn read_file(path: &str) -> Result<String, String>;
+pub extern fn write_file(path: &str, contents: &str) -> Result<(), String>;
 
 /// The classification of an operating system error.
 ///
@@ -52,9 +58,9 @@ pub enum ErrorKind {
     /// The operation or type is not supported on this platform or handle.
     Unsupported,
     /// The requested address is already in use.
-    AddressInUse,
+    AddrInUse,
     /// The requested address is not available on this host.
-    AddressNotAvailable,
+    AddrNotAvailable,
     /// A pipe or socket was closed while writing.
     BrokenPipe,
     /// Any other error.
@@ -79,8 +85,8 @@ impl ErrorKind {
             10 => ErrorKind::Interrupted,
             11 => ErrorKind::UnexpectedEof,
             12 => ErrorKind::Unsupported,
-            13 => ErrorKind::AddressInUse,
-            14 => ErrorKind::AddressNotAvailable,
+            13 => ErrorKind::AddrInUse,
+            14 => ErrorKind::AddrNotAvailable,
             15 => ErrorKind::BrokenPipe,
             _ => ErrorKind::Other,
         }
@@ -89,14 +95,25 @@ impl ErrorKind {
 
 /// An operating system error with a classification and a message.
 ///
-/// Values are obtained from `Error::last()` after a failed operation; the
-/// standard library never panics on an operating system failure.
+/// Values are obtained from `Error::last()` after a failed operation, or built
+/// directly with `Error::new` / `Error::other`; the standard library never
+/// panics on an operating system failure.
 pub struct Error {
     kind: ErrorKind,
     message: String,
 }
 
 impl Error {
+    /// Builds an error from a classification and a message.
+    pub fn new(kind: ErrorKind, message: String) -> Error {
+        return Error { kind: kind, message: message };
+    }
+
+    /// Builds an error of kind `ErrorKind::Other` from a message.
+    pub fn other(message: String) -> Error {
+        return Error { kind: ErrorKind::Other, message: message };
+    }
+
     /// The classification of this error.
     pub fn kind(&self) -> ErrorKind {
         return self.kind;
@@ -110,9 +127,16 @@ impl Error {
     /// Builds an error from a message when the runtime only reports text.
     ///
     /// The legacy content helpers report failures as strings; operations built
-    /// on top of them classify those failures as ErrorKind::Other.
+    /// on top of them classify those failures as ErrorKind::Other. Prefer
+    /// `Error::new` when the classification is known.
     pub fn from_message(message: String) -> Error {
         return Error { kind: ErrorKind::Other, message: message };
+    }
+}
+
+impl ErrorTrait for Error {
+    fn message(&self) -> String {
+        return self.message.clone();
     }
 }
 
@@ -124,8 +148,8 @@ impl Error {
 pub extern fn __io_stdin() -> i64;
 pub extern fn __io_stdout() -> i64;
 pub extern fn __io_stderr() -> i64;
-pub extern fn __io_open(path: String) -> i64;
-pub extern fn __io_create(path: String) -> i64;
+pub extern fn __io_open(path: &str) -> i64;
+pub extern fn __io_create(path: &str) -> i64;
 pub extern fn __io_close(handle: i64) -> i64;
 pub extern fn __io_read(handle: i64, buffer: &mut [u8]) -> i64;
 pub extern fn __io_write(handle: i64, buffer: &[u8]) -> i64;
@@ -157,7 +181,7 @@ pub struct File {
 
 impl File {
     /// Opens an existing file for reading.
-    pub fn open(path: String) -> Result<File, Error> {
+    pub fn open(path: &str) -> Result<File, Error> {
         let handle: i64 = __io_open(path);
         if handle < 0 {
             return Err(Error::last());
@@ -166,7 +190,7 @@ impl File {
     }
 
     /// Creates or truncates a file for writing.
-    pub fn create(path: String) -> Result<File, Error> {
+    pub fn create(path: &str) -> Result<File, Error> {
         let handle: i64 = __io_create(path);
         if handle < 0 {
             return Err(Error::last());
@@ -181,30 +205,33 @@ impl File {
 
     /// Reads up to buffer.len() bytes, returning the number read.
     /// A return of 0 means the end of the file.
-    pub fn read(&mut self, buffer: &mut [u8]) -> Result<i64, Error> {
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
         let read: i64 = __io_read(self.handle, buffer);
         if read < 0 {
             return Err(Error::last());
         }
-        return Ok(read);
+        return Ok(read as usize);
     }
 
     /// Writes the whole buffer, returning the number of bytes written.
-    pub fn write(&mut self, buffer: &[u8]) -> Result<i64, Error> {
+    pub fn write(&mut self, buffer: &[u8]) -> Result<usize, Error> {
         let written: i64 = __io_write(self.handle, buffer);
         if written < 0 {
             return Err(Error::last());
         }
-        return Ok(written);
+        return Ok(written as usize);
     }
 
     /// Moves the file position. whence: 0 start, 1 current, 2 end.
-    pub fn seek(&mut self, offset: i64, whence: i64) -> Result<i64, Error> {
+    ///
+    /// A negative result from the runtime is reported as an Error; the runtime
+    /// classifies a negative resulting position as InvalidInput.
+    pub fn seek(&mut self, offset: i64, whence: i64) -> Result<u64, Error> {
         let position: i64 = __io_seek(self.handle, offset, whence);
         if position < 0 {
             return Err(Error::last());
         }
-        return Ok(position);
+        return Ok(position as u64);
     }
 
     /// Flushes buffered data to the operating system.
@@ -217,12 +244,15 @@ impl File {
     }
 
     /// The total size of the file in bytes.
-    pub fn size(&self) -> Result<i64, Error> {
+    ///
+    /// Sizes are u64 (like fs::Metadata::size); byte counts and positions are
+    /// usize.
+    pub fn size(&self) -> Result<u64, Error> {
         let size: i64 = __io_size(self.handle);
         if size < 0 {
             return Err(Error::last());
         }
-        return Ok(size);
+        return Ok(size as u64);
     }
 
     /// Enables or disables non blocking mode where the platform supports it.

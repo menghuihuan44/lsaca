@@ -487,6 +487,33 @@ impl<'a> Checker<'a> {
             "None" => return self.check_option_none_value(hint, span),
             _ => {}
         }
+        if let Some(id) = self.lookup_struct(name) {
+            let (unit, tuple) = (self.structs[id].unit, self.structs[id].tuple);
+            if unit {
+                // A unit struct is a value: it has no fields to initialize.
+                let ty = ITy::Struct(id);
+                self.apply_hint(&ty, hint);
+                return TExpr::new(
+                    ty,
+                    TExprKind::StructLit {
+                        struct_id: id,
+                        fields: Vec::new(),
+                    },
+                    span,
+                );
+            }
+            let struct_name = self.struct_name(id);
+            let kind = if tuple { "tuple struct" } else { "struct" };
+            self.error_code(
+                format!(
+                    "expected function, found {} {}; construct it with a struct expression",
+                    kind, struct_name
+                ),
+                span,
+                "E0423",
+            );
+            return self.never_expr(span);
+        }
         let entries = self.unit_variants_scoped(name);
         if !entries.is_empty() {
             let mut chosen: Option<(usize, usize)> = None;

@@ -70,6 +70,7 @@ pub(crate) const PHASE_C_INTRINSICS: &[&str] = &[
     "__env_var",
     "__env_vars",
     "__proc_args",
+    "__proc_exit",
 ];
 
 /// True when the name belongs to the frozen Phase C ABI.
@@ -363,6 +364,15 @@ impl<'a> Gen<'a> {
                 self.line(format!("{} = ls_args_at({});", target, location));
                 true
             }
+            "proc_exit" => {
+                let code = self.phase_c_int(name, args, 0);
+                let unit = self.zero_expr(&Ty::unit());
+                self.line(format!("{} = {};", target, unit));
+                self.line(format!("ls_exit((int32_t)({}));", code));
+                self.block_terminated = true;
+                self.fn_terminated = true;
+                true
+            }
             other => util::internal_error(format!(
                 "intrinsic __{} belongs to the Phase C ABI but has no emitter",
                 other
@@ -485,17 +495,15 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Borrow a String argument: the runtime call does not take ownership.
+    /// Borrow a text argument: the runtime call does not take ownership.
+    ///
+    /// The standard library declares these parameters as `&str`, but the
+    /// front end may still hand over an owned String (e.g. for a `&String`
+    /// argument), so both shapes are accepted.
     fn phase_c_string(&mut self, name: &str, args: &[HExpr], index: usize) -> String {
         let argument = phase_c_argument(name, args, index);
-        match &argument.ty {
-            Ty::String => self.gen_borrowed(argument),
-            Ty::Ref { inner, .. } if inner.is_string() => self.place_through_reference(argument),
-            other => util::internal_error(format!(
-                "intrinsic {} expects a String argument, found {:?}",
-                name, other
-            )),
-        }
+        let context = format!("intrinsic {}", name);
+        self.string_text_argument(argument, &context)
     }
 
     /// Evaluate an int64_t argument.

@@ -1411,6 +1411,13 @@ class Harness:
                 exe.unlink()
             cmd = [self.tools["gcc"], "-O2", "-DNDEBUG"]
             cmd.extend(str(path) for path in generated_c)
+            # The generated C uses the platform math library everywhere and the
+            # v2.1 runtime's net/io translation unit needs the Winsock/crypto
+            # libraries on Windows. The default `lsaca build` path adds these
+            # itself; the fallback has to mirror that so it can link.
+            cmd.append("-lm")
+            if os.name == "nt":
+                cmd.extend(["-lws2_32", "-lbcrypt"])
             cmd.extend(["-o", str(exe)])
             proc, gcc_s = timed_run(cmd, env, cwd=gen, timeout=300)
             if proc.returncode != 0:

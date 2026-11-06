@@ -13,7 +13,7 @@ use crate::span::Span;
 use crate::typeck::check::Checker;
 use crate::typeck::generics::ImplInfo;
 use crate::typeck::items::TypeKey;
-use crate::typeck::itype::ITy;
+use crate::typeck::itype::{ITy, VarKind};
 use crate::typeck::modules::{BuiltinTypeKind, DefRef, ModuleId};
 use crate::typeck::tree::{TExpr, TExprKind};
 use crate::types::SelfKind;
@@ -168,9 +168,15 @@ impl<'a> Checker<'a> {
         (env, checked, ok)
     }
 
-    /// Resolve the inferred generic argument bindings to concrete types,
-    /// reporting E0283 when one is still unconstrained.
-    fn resolve_env_args(
+    /// Resolve the inferred generic argument bindings to types, leaving every
+    /// still-open inference variable in place.
+    ///
+    /// Literal variables must stay open: an expected type or a turbofish at the
+    /// call site can still determine them, and a default chosen here would make
+    /// e.g. `vec![1, 2].iter().collect::<Vec<i64>>()` fail with "expected
+    /// Vec<i64>, found Vec<i32>". [Self::concrete_call_args] decides whether the
+    /// instantiation can be named yet.
+    fn resolve_open_type_args(
         &mut self,
         generics: &[ast::GenericParam],
         env: &HashMap<String, ITy>,
@@ -178,19 +184,8 @@ impl<'a> Checker<'a> {
     ) -> Option<Vec<ITy>> {
         let mut out = Vec::with_capacity(generics.len());
         for param in generics {
-            let ty = match env.get(&param.name) {
-                Some(ty) => self.infer.resolve(ty),
-                None => {
-                    self.error_code(
-                        "type annotations needed for generic arguments".to_string(),
-                        span,
-                        "E0283",
-                    );
-                    return None;
-                }
-            };
-            match self.normalize_instance_arg(&ty) {
-                Some(ty) => out.push(ty),
+            match env.get(&param.name) {
+                Some(ty) => out.push(self.infer.resolve(ty)),
                 None => {
                     self.error_code(
                         "type annotations needed for generic arguments".to_string(),
@@ -202,6 +197,76 @@ impl<'a> Checker<'a> {
             }
         }
         Some(out)
+    }
+
+    /// Normalize the type arguments of a generic call to a concrete instance.
+    ///
+    /// Returns `None` when an argument is still an open inference variable. A
+    /// top-level integer or float literal variable defers instead of being
+    /// pinned to its default, so the instance keeps the variable open and the
+    /// caller can still constrain it.
+    fn concrete_call_args(&mut self, args: &[ITy]) -> Option<Vec<ITy>> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            if self.is_open_literal_var(arg) {
+                return None;
+            }
+            out.push(self.normalize_instance_arg(arg)?);
+        }
+        Some(out)
+    }
+
+    /// Whether the type is an unresolved integer or float literal variable.
+    fn is_open_literal_var(&self, ty: &ITy) -> bool {
+        match self.infer.resolve(ty) {
+            ITy::Var(id) => matches!(
+                self.infer.var_kind(id),
+                VarKind::IntLiteral | VarKind::FloatLiteral
+            ),
+            _ => false,
+        }
+    }
+
+    /// Whether every unresolved type argument is a literal variable that will
+    /// fall back to its default before its instance body is checked.
+    ///
+    /// Literal variables nested inside a compound argument (for example the
+    /// closure parameter of a callable bound) are just as deferrable as a
+    /// top-level one: they default in [Checker::normalize_args] before the
+    /// deferred instance body is checked.
+    fn no_open_general_vars(&self, args: &[ITy]) -> bool {
+        args.iter().all(|arg| self.deferable_literal_vars(arg))
+    }
+
+    /// Whether the type mentions only literal inference variables, which can
+    /// safely default later, instead of general ones that need annotations.
+    fn deferable_literal_vars(&self, ty: &ITy) -> bool {
+        match self.infer.resolve(ty) {
+            ITy::Var(id) => matches!(
+                self.infer.var_kind(id),
+                VarKind::IntLiteral | VarKind::FloatLiteral
+            ),
+            ITy::Vec(inner)
+            | ITy::Rc(inner)
+            | ITy::Box(inner)
+            | ITy::Option(inner)
+            | ITy::Slice(inner) => self.deferable_literal_vars(&inner),
+            ITy::Result(ok, err) => {
+                self.deferable_literal_vars(&ok) && self.deferable_literal_vars(&err)
+            }
+            ITy::HashMap(key, value) => {
+                self.deferable_literal_vars(&key) && self.deferable_literal_vars(&value)
+            }
+            ITy::Tuple(elems) => elems.iter().all(|elem| self.deferable_literal_vars(elem)),
+            ITy::Fn(params, ret) => {
+                params
+                    .iter()
+                    .all(|param| self.deferable_literal_vars(param))
+                    && self.deferable_literal_vars(&ret)
+            }
+            ITy::Ref { inner, .. } => self.deferable_literal_vars(&inner),
+            _ => true,
+        }
     }
 
     /// Build the DirectCall expression for an instantiated generic function,
@@ -393,22 +458,12 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        let mut concrete = Vec::with_capacity(resolved_args.len());
-        let mut all_concrete = true;
-        for ty in &resolved_args {
-            match self.normalize_instance_arg(ty) {
-                Some(normalized) => concrete.push(normalized),
-                None => {
-                    all_concrete = false;
-                    break;
-                }
+        let fn_id = match self.concrete_call_args(&resolved_args) {
+            Some(concrete) => {
+                self.validate_generic_bounds(&info.generics, &concrete, span, info.module);
+                self.instantiate_generic_fn(gfn_id, concrete, span)
             }
-        }
-        let fn_id = if all_concrete {
-            self.validate_generic_bounds(&info.generics, &concrete, span, info.module);
-            self.instantiate_generic_fn(gfn_id, concrete, span)
-        } else {
-            self.instantiate_generic_fn_deferred(gfn_id, resolved_args, span)
+            None => self.instantiate_generic_fn_deferred(gfn_id, resolved_args, span),
         };
         let Some(fn_id) = fn_id else {
             return Some(self.never_expr(span));
@@ -468,13 +523,24 @@ impl<'a> Checker<'a> {
         }
         let (env, checked, ok) =
             self.infer_callable_args(&def.generics, &def.decl.params, args, span, def.module);
-        let type_args = match self.resolve_env_args(&def.generics, &env, span) {
-            Some(type_args) => type_args,
+        let Some(type_args) = self.resolve_open_type_args(&def.generics, &env, span) else {
+            return TExpr::new(ITy::Never, TExprKind::Break, span);
+        };
+        let fn_id = match self.concrete_call_args(&type_args) {
+            Some(concrete) => self.instantiate_generic_fn(def_id, concrete, span),
+            None if self.no_open_general_vars(&type_args) => {
+                self.instantiate_generic_fn_deferred(def_id, type_args, span)
+            }
             None => {
+                self.error_code(
+                    "type annotations needed for generic arguments".to_string(),
+                    span,
+                    "E0283",
+                );
                 return TExpr::new(ITy::Never, TExprKind::Break, span);
             }
         };
-        match self.instantiate_generic_fn(def_id, type_args, span) {
+        match fn_id {
             Some(fn_id) => self.finish_generic_call(fn_id, None, checked, ok, span, hint),
             None => TExpr::new(ITy::Never, TExprKind::Break, span),
         }
@@ -575,16 +641,30 @@ impl<'a> Checker<'a> {
         };
         let (env, checked, ok) =
             self.infer_callable_args(&info.generics, &gfn.decl.params, args, span, info.module);
-        let impl_args = match self.resolve_env_args(&info.generics, &env, span) {
-            Some(impl_args) => impl_args,
-            None => return TExpr::new(ITy::Never, TExprKind::Break, span),
+        let Some(impl_args) = self.resolve_open_type_args(&info.generics, &env, span) else {
+            return TExpr::new(ITy::Never, TExprKind::Break, span);
         };
-        self.validate_generic_bounds(&info.generics, &impl_args, span, info.module);
-        let fn_id = match self.instantiate_generic_fn(gfn_id, impl_args, span) {
-            Some(fn_id) => fn_id,
-            None => return TExpr::new(ITy::Never, TExprKind::Break, span),
+        let fn_id = match self.concrete_call_args(&impl_args) {
+            Some(concrete) => {
+                self.validate_generic_bounds(&info.generics, &concrete, span, info.module);
+                self.instantiate_generic_fn(gfn_id, concrete, span)
+            }
+            None if self.no_open_general_vars(&impl_args) => {
+                self.instantiate_generic_fn_deferred(gfn_id, impl_args, span)
+            }
+            None => {
+                self.error_code(
+                    "type annotations needed for generic arguments".to_string(),
+                    span,
+                    "E0283",
+                );
+                return TExpr::new(ITy::Never, TExprKind::Break, span);
+            }
         };
-        self.finish_generic_call(fn_id, None, checked, ok, span, hint)
+        match fn_id {
+            Some(fn_id) => self.finish_generic_call(fn_id, None, checked, ok, span, hint),
+            None => TExpr::new(ITy::Never, TExprKind::Break, span),
+        }
     }
 
     /// Instantiate a generic type from explicit turbofish arguments.

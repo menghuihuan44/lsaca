@@ -2,7 +2,9 @@
 
 This page describes the raw text of a program: how source files are encoded, the
 character set of identifiers, the keywords, comments, and the exact forms of
-integer, float, string, character, boolean and unit literals.
+integer, float, string, character, boolean and unit literals. It describes
+lsaca 2.1.0, whose integer literals default to `i32` and may carry a type
+suffix.
 
 ## Source files and encoding
 
@@ -54,16 +56,16 @@ fn main() {
 Error:
 ```text
 error[E0002]: invalid suffix fast on numeric literal
-  --> example-02.ls:2:9
+  --> example-02.ls:2:10
    |
  2 |     let 2fast = 2;
-   |         ^^^^^
+   |          ^^^^
 
 error[E0002]: invalid suffix fast on numeric literal
-  --> example-02.ls:3:20
+  --> example-02.ls:3:21
    |
  3 |     println!("{}", 2fast);
-   |                    ^^^^^
+   |                     ^^^^
 
 error: expected a pattern, found =
   --> example-02.ls:2:15
@@ -155,15 +157,25 @@ Rules and restrictions:
   digits may be either case (`0xFF` and `0xff` are the same literal).
 * Underscores may appear between digits, but `_` cannot be the first or last
   character of the literal's digit sequence. Underscores do not change the value.
-* There are **no suffixes**: `42i64`, `1u8` and `0xFFu32` are not literals, they
-  are a literal followed by an identifier and fail to parse. To give a literal a
-  type, use a `let` annotation or an `as` cast.
-* An unannotated integer literal has the type `i64`, unless its context forces
-  another integer type (for example passing it to a function that expects `u8`,
-  or assigning it to a `u8` variable).
+* A literal may end with a type suffix: `i8`, `i16`, `i32`, `i64`, `isize`,
+  `u8`, `u16`, `u32`, `u64`, `usize` for integers, `f32`/`f64` for floats —
+  for example `42i64`, `1u8`, `0xFFu32`, `1_000_000usize` and `1.5f32`. The
+  suffix fixes the literal's type exactly. It is written immediately after the
+  last digit, with no space in between, and must be one of those names or
+  absent: `1.5u8`, `1i32f` and the unsupported `i128`/`u128` names are
+  rejected while lexing, and the span points at the suffix itself. A bad
+  suffix on an integer literal (including a non-decimal one such as `0xFFu8x`)
+  is reported as `error[E0002]: invalid suffix … on numeric literal`; the same
+  mistake on a float literal is `E0003`. A whole-number literal written with a
+  float suffix — `1f64`, `42f32` — is a float literal, not an integer one.
+* An unannotated integer literal has the type `i32`, unless its context forces
+  another integer type (for example assigning it to a `u8` variable, passing it
+  to a function that expects `u64`, using it as a length or index, or comparing
+  it with a `usize` value).
 * The value must fit the inferred type. A decimal literal that does not fit
-  `i64` is a compile-time error; for narrower types the literal must fit the
-  target type after inference.
+  `i32` is a compile-time error unless a suffix or the context gives it a wider
+  type; in every case the literal must fit the type it finally has. A
+  well-formed but out-of-range literal is `E0080`.
 
 ```ls
 fn main() {
@@ -187,6 +199,25 @@ Output:
 18446744073709551615 255 -100
 ```
 
+A suffix is an alternative to an annotation, and both work in every base:
+
+```ls
+fn main() {
+    let small = 1u8;
+    let big = 42i64;
+    let wide = 0xFFusize;
+    let narrow: u16 = 65_535;
+    println!("{} {} {}", small, big, wide);
+    println!("{} {}", narrow, 10u32 + 32u32);
+}
+```
+
+Output:
+```text
+1 42 255
+65535 42
+```
+
 A literal out of range for its type is rejected before any C is generated:
 
 ```ls,compile-fail
@@ -199,20 +230,18 @@ fn main() {
 Error:
 ```text
 error[E0080]: literal out of range for i8: 999
-  --> example-05.ls:2:23
+  --> example-06.ls:2:23
    |
  2 |     let too_big: i8 = 999;
    |                       ^^^
 
-lsaca: example-05.ls: could not compile example-05.ls due to previous error(s)
+lsaca: example-06.ls: could not compile example-06.ls due to previous error(s)
 ```
 
-The range check applies to the literal token itself, **before** any surrounding
-negation is folded, so the most negative value of a signed type cannot be written
-as a plain negative literal: `let x: i8 = -128;` is rejected with
-`error[E0080]: literal out of range for i8: 128`. Compute it instead, for
-example `-127 - 1`, or produce it by arithmetic. This is a known simplification
-of the constant checker.
+The range check understands a leading minus, so the most negative value of a
+signed type can be written directly: `let x: i8 = -128;` and `-128i8` are
+both accepted. The check applies to the signed value, not to the unsigned token
+alone.
 
 ## Float literals
 
@@ -223,10 +252,12 @@ Accepted forms include `1.5`, `2.0`, `1e10`, `1.5e-3` and `2.0E+4`:
   followed by a field-access dot), and `.5` is not a literal either; write `0.5`.
 * The exponent marker is `e` or `E`, optionally followed by a sign and at least
   one digit.
-* There are no float suffixes, no hexadecimal floats, and no `NaN`/`inf`
-  literals. Infinities and NaN are produced at run time by ordinary arithmetic,
-  for example `1.0 / 0.0`.
-* An unannotated float literal has type `f64` unless context requires `f32`.
+* A float literal may carry the `f32` or `f64` suffix (`1.5f32`, `2.0f64`,
+  and a whole number written `2f64` is a float literal too). There are no
+  hexadecimal floats and no `NaN`/`inf` literals. Infinities and NaN are
+  produced at run time by ordinary arithmetic, for example `1.0 / 0.0`.
+* An unannotated float literal has type `f64` unless context requires `f32`; a
+  suffix fixes the type even when context would infer otherwise.
 
 ```ls
 fn main() {
@@ -259,9 +290,12 @@ covers float arithmetic in detail.
 ## String literals
 
 String literals are double-quoted and may contain any UTF-8 text except an
-unescaped double quote or backslash. They denote values of the built-in type
-`String`: owned, immutable, reference-counted strings with cheap copies (see
-[Memory model](05-memory-model.md)).
+unescaped double quote or backslash. By default they denote values of the
+built-in type `String`: owned, immutable, reference-counted strings with cheap
+copies (see [Memory model](05-memory-model.md)). Where a `&str` is expected —
+a function or method argument, a `let` annotation, a return position — a
+literal is compiled as a static UTF-8 slice instead, with no allocation (see
+[Slices and str](26-slices-and-str.md)).
 
 The following escape sequences are recognized:
 
@@ -335,12 +369,12 @@ fn main() {
 Error:
 ```text
 error[E0005]: unknown escape sequence \q
-  --> example-08.ls:2:17
+  --> example-09.ls:2:17
    |
  2 |     let bad = "a\qb";
    |                 ^^
 
-lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
+lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
 ```
 
 ## Boolean and unit literals
@@ -416,12 +450,12 @@ Error:
 
 ```text
 error[E0007]: empty character literal
-  --> example-11.ls:2:17
+  --> example-12.ls:2:17
    |
  2 |     let empty = '';
    |                 ^^
 
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -435,12 +469,12 @@ Error:
 
 ```text
 error[E0007]: character literal may only contain one codepoint
-  --> example-12.ls:2:16
+  --> example-13.ls:2:16
    |
  2 |     let pair = 'ab';
    |                ^^^^
 
-lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -454,12 +488,12 @@ Error:
 
 ```text
 error[E0005]: unknown escape sequence \q
-  --> example-13.ls:2:16
+  --> example-14.ls:2:16
    |
  2 |     let bad = '\q';
    |                ^^
 
-lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
 There are still no byte-string literals (`b"..."`) and no raw strings.

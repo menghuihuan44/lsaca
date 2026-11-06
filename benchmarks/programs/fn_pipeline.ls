@@ -30,10 +30,10 @@ fn main() {
     let mut checksum: i64 = 0;
     let mut label_bytes: i64 = 0;
     checksum += run(&copy, 11, 500);
-    label_bytes += copy.label.len();
+    label_bytes += copy.label.len() as i64;
     for rule in rules {
         checksum += run(&rule, 7, 1000);
-        label_bytes += rule.label.len();
+        label_bytes += rule.label.len() as i64;
     }
     println!("checksum={},{}", checksum, label_bytes);
 }

@@ -1,0 +1,35 @@
+fn main() {
+    let mut set: HashSet<i64> = HashSet::new();
+    set.insert(2i64);
+    set.insert(3i64);
+    set.insert(3i64);
+    println!("{} {} {}", set.len(), set.contains(2i64), set.contains(9i64));
+    let mut other: HashSet<i64> = HashSet::new();
+    other.insert(3i64);
+    other.insert(4i64);
+    let union = set.union(&other);
+    let intersection = set.intersection(&other);
+    let difference = other.difference(&set);
+    println!("{} {} {}", union.len(), union.contains(4i64), union.contains(9i64));
+    println!("{} {} {}", intersection.len(), intersection.contains(3i64), intersection.contains(2i64));
+    println!("{} {} {}", difference.len(), difference.contains(4i64), difference.contains(3i64));
+    let mut ordered: BTreeSet<String> = BTreeSet::new();
+    ordered.insert(String::from("pear"));
+    ordered.insert(String::from("apple"));
+    ordered.insert(String::from("orange"));
+    println!("{:?} {} {}", ordered.elements(), ordered.first().unwrap(), ordered.last().unwrap());
+    let mut tree: BTreeMap<String, i64> = BTreeMap::new();
+    tree.insert(String::from("b"), 2i64);
+    tree.insert(String::from("a"), 1i64);
+    println!("{:?} {:?} {}", tree.keys(), tree.values(), tree.len());
+    let mut deque: VecDeque<i64> = VecDeque::new();
+    deque.push_back(2i64);
+    deque.push_front(1i64);
+    deque.push_back(3i64);
+    println!("{:?} {} {}", deque.elements(), deque.pop_front().unwrap(), deque.len());
+    let mut heap: BinaryHeap<i64> = BinaryHeap::new();
+    heap.push(3i64);
+    heap.push(7i64);
+    heap.push(5i64);
+    println!("{} {} {}", heap.peek().unwrap(), heap.pop().unwrap(), heap.len());
+}

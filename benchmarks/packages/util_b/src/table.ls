@@ -45,7 +45,7 @@ impl Counter {
     }
 
     pub fn distinct(&self) -> i64 {
-        return self.counts.len();
+        return self.counts.len() as i64;
     }
 
     pub fn entries(&self) -> Vec<Entry> {
@@ -81,7 +81,7 @@ pub fn entry_signature(entry: &Entry) -> i64 {
 pub fn word_count(words: Vec<String>, limit: i64) -> Counter {
     let mut counter = Counter::new();
     for word in words {
-        if word.len() > 0 && word.len() <= limit {
+        if word.len() > 0 && (word.len() as i64) <= limit {
             counter.touch(word);
         }
     }

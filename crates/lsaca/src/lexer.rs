@@ -20,8 +20,16 @@ pub struct Token {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Ident(String),
-    Int(u128),
-    Float(f64),
+    Int {
+        value: u128,
+        /// Numeric type suffix exactly as written, for example `i64`.
+        suffix: Option<String>,
+    },
+    Float {
+        value: f64,
+        /// Numeric type suffix exactly as written, for example `f32`.
+        suffix: Option<String>,
+    },
     Str(String),
     Char(char),
     // Keywords
@@ -126,8 +134,14 @@ impl TokenKind {
     pub fn describe(&self) -> String {
         match self {
             TokenKind::Ident(name) => format!("identifier {}", name),
-            TokenKind::Int(value) => format!("integer literal {}", value),
-            TokenKind::Float(value) => format!("float literal {}", value),
+            TokenKind::Int { value, suffix } => match suffix {
+                Some(suffix) => format!("integer literal {}{}", value, suffix),
+                None => format!("integer literal {}", value),
+            },
+            TokenKind::Float { value, suffix } => match suffix {
+                Some(suffix) => format!("float literal {}{}", value, suffix),
+                None => format!("float literal {}", value),
+            },
             TokenKind::Str(_) => "string literal".to_string(),
             TokenKind::Char(_) => "character literal".to_string(),
             TokenKind::Eof => "end of file".to_string(),
@@ -140,8 +154,20 @@ impl std::fmt::Display for TokenKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenKind::Ident(name) => write!(f, "{}", name),
-            TokenKind::Int(value) => write!(f, "{}", value),
-            TokenKind::Float(value) => write!(f, "{}", value),
+            TokenKind::Int { value, suffix } => {
+                write!(f, "{}", value)?;
+                if let Some(suffix) = suffix {
+                    write!(f, "{}", suffix)?;
+                }
+                Ok(())
+            }
+            TokenKind::Float { value, suffix } => {
+                write!(f, "{}", value)?;
+                if let Some(suffix) = suffix {
+                    write!(f, "{}", suffix)?;
+                }
+                Ok(())
+            }
             TokenKind::Str(_) => write!(f, "string literal"),
             TokenKind::Char(_) => write!(f, "character literal"),
             TokenKind::KwFn => write!(f, "fn"),
@@ -544,45 +570,71 @@ impl<'a> Lexer<'a> {
             digits += 1;
             self.bump();
         }
-        let end = self.pos;
+        let digits_end = self.pos;
         if digits == 0 {
             self.report_error(
                 E_INT_LITERAL,
                 format!("{} integer literal has no digits", name),
                 start,
-                end,
+                digits_end,
             );
             return;
         }
-        // Anything alphanumeric directly after the digits is a bad digit or an
-        // unsupported type suffix: consume it and report one clear error.
-        let bad_start = self.pos;
-        while let Some(ch) = self.peek_char() {
-            if ch.is_ascii_alphanumeric() {
-                self.bump();
-            } else {
-                break;
+        // A radix integer may carry a type suffix, as in 0xFFu8. The suffix
+        // must be one of the supported integer type names; anything else is
+        // reported once, with the span pointing at the suffix itself.
+        let suffix_start = self.pos;
+        let mut suffix = None;
+        if matches!(self.peek_char(), Some(ch) if is_ident_start(ch)) {
+            while let Some(ch) = self.peek_char() {
+                if is_ident_continue(ch) {
+                    self.bump();
+                } else {
+                    break;
+                }
             }
-        }
-        if self.pos > bad_start {
-            self.report_error(
-                E_INT_LITERAL,
-                format!("invalid digit in {} integer literal", name),
-                start,
-                self.pos,
-            );
-            return;
+            let text = self.source.get(suffix_start..self.pos).unwrap_or("");
+            if !int_suffix_allowed(text) {
+                self.report_error(
+                    E_INT_LITERAL,
+                    format!("invalid suffix {} on numeric literal", text),
+                    suffix_start,
+                    self.pos,
+                );
+                return;
+            }
+            suffix = Some(text.to_string());
+        } else {
+            // Anything alphanumeric directly after the digits is a bad digit:
+            // consume it and report one clear error.
+            let bad_start = self.pos;
+            while let Some(ch) = self.peek_char() {
+                if ch.is_ascii_alphanumeric() {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            if self.pos > bad_start {
+                self.report_error(
+                    E_INT_LITERAL,
+                    format!("invalid digit in {} integer literal", name),
+                    start,
+                    self.pos,
+                );
+                return;
+            }
         }
         if overflow {
             self.report_error(
                 E_INT_LITERAL,
                 "integer literal is too large for any supported integer type",
                 start,
-                end,
+                digits_end,
             );
             return;
         }
-        self.push(TokenKind::Int(value), start, end);
+        self.push(TokenKind::Int { value, suffix }, start, self.pos);
     }
 
     fn lex_decimal(&mut self, start: usize) {
@@ -669,13 +721,13 @@ impl<'a> Lexer<'a> {
             is_float = true;
         }
 
-        let end = self.pos;
-        // Reject unsupported type suffixes (the language has none) with a clear
-        // message instead of producing a confusing parser error later.
-        if let Some(ch) = self.peek_char()
-            && is_ident_start(ch)
-        {
-            let suffix_start = self.pos;
+        let number_end = self.pos;
+        // An attached identifier is a type suffix: the literal keeps the
+        // suffix spelling and the type checker validates it further. A bad
+        // suffix is reported once, with the span pointing at the suffix.
+        let suffix_start = self.pos;
+        let mut suffix = None;
+        if matches!(self.peek_char(), Some(ch) if is_ident_start(ch)) {
             while let Some(inner) = self.peek_char() {
                 if is_ident_continue(inner) {
                     self.bump();
@@ -683,20 +735,37 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
-            let suffix = self.source.get(suffix_start..self.pos).unwrap_or("");
-            let message = format!("invalid suffix {} on numeric literal", suffix);
+            let text = self.source.get(suffix_start..self.pos).unwrap_or("");
             let code = if is_float {
                 E_FLOAT_LITERAL
             } else {
                 E_INT_LITERAL
             };
-            self.report_error(code, message, start, self.pos);
-            return;
+            let legal = if is_float {
+                float_suffix_allowed(text)
+            } else {
+                int_suffix_allowed(text) || float_suffix_allowed(text)
+            };
+            if !legal {
+                self.report_error(
+                    code,
+                    format!("invalid suffix {} on numeric literal", text),
+                    suffix_start,
+                    self.pos,
+                );
+                return;
+            }
+            // An integer literal with a float suffix is a float literal: 1f64.
+            if !is_float && float_suffix_allowed(text) {
+                is_float = true;
+            }
+            suffix = Some(text.to_string());
         }
 
+        // The raw spelling kept for diagnostics: no underscores and no suffix.
         let raw: String = self
             .source
-            .get(start..end)
+            .get(start..number_end)
             .unwrap_or("")
             .chars()
             .filter(|ch| *ch != '_')
@@ -705,14 +774,14 @@ impl<'a> Lexer<'a> {
         if is_float {
             match raw.parse::<f64>() {
                 Ok(value) if value.is_finite() => {
-                    self.push(TokenKind::Float(value), start, end);
+                    self.push(TokenKind::Float { value, suffix }, start, self.pos);
                 }
                 Ok(_) => {
                     self.report_error(
                         E_FLOAT_LITERAL,
                         format!("float literal {} is out of range", raw),
                         start,
-                        end,
+                        number_end,
                     );
                 }
                 Err(_) => {
@@ -720,7 +789,7 @@ impl<'a> Lexer<'a> {
                         E_FLOAT_LITERAL,
                         format!("invalid float literal {}", raw),
                         start,
-                        end,
+                        number_end,
                     );
                 }
             }
@@ -749,11 +818,11 @@ impl<'a> Lexer<'a> {
                 E_INT_LITERAL,
                 "integer literal is too large for any supported integer type",
                 start,
-                end,
+                number_end,
             );
             return;
         }
-        self.push(TokenKind::Int(value), start, end);
+        self.push(TokenKind::Int { value, suffix }, start, self.pos);
     }
 
     // -----------------------------------------------------------------------
@@ -1169,6 +1238,20 @@ fn is_ident_continue(ch: char) -> bool {
     ch == '_' || ch.is_alphanumeric()
 }
 
+/// The integer type suffixes a numeric literal may carry. The lexer validates
+/// only the spelling; the type checker decides whether the value fits.
+fn int_suffix_allowed(suffix: &str) -> bool {
+    matches!(
+        suffix,
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+    )
+}
+
+/// The floating point type suffixes a numeric literal may carry.
+fn float_suffix_allowed(suffix: &str) -> bool {
+    matches!(suffix, "f32" | "f64")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1198,7 +1281,7 @@ mod tests {
             .0
             .into_iter()
             .filter_map(|token| match token.kind {
-                TokenKind::Int(value) => Some(value),
+                TokenKind::Int { value, .. } => Some(value),
                 _ => None,
             })
             .collect()
@@ -1209,10 +1292,46 @@ mod tests {
             .0
             .into_iter()
             .filter_map(|token| match token.kind {
-                TokenKind::Float(value) => Some(value),
+                TokenKind::Float { value, .. } => Some(value),
                 _ => None,
             })
             .collect()
+    }
+
+    /// Build an unsuffixed integer token, for compact token-stream assertions.
+    fn int(value: u128) -> TokenKind {
+        TokenKind::Int {
+            value,
+            suffix: None,
+        }
+    }
+
+    /// Every integer literal in `source`, with its numeric value and suffix.
+    fn int_tokens(source: &str) -> Vec<(u128, Option<String>)> {
+        tokenize(source)
+            .0
+            .into_iter()
+            .filter_map(|token| match token.kind {
+                TokenKind::Int { value, suffix } => Some((value, suffix)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every float literal in `source`, with its numeric value and suffix.
+    fn float_tokens(source: &str) -> Vec<(f64, Option<String>)> {
+        tokenize(source)
+            .0
+            .into_iter()
+            .filter_map(|token| match token.kind {
+                TokenKind::Float { value, suffix } => Some((value, suffix)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ty_suffix(text: &str) -> Option<String> {
+        Some(text.to_string())
     }
 
     fn strings(source: &str) -> Vec<String> {
@@ -1456,7 +1575,10 @@ mod tests {
             vec![
                 TokenKind::Ident("café".to_string()),
                 TokenKind::Eq,
-                TokenKind::Int(1),
+                TokenKind::Int {
+                    value: 1,
+                    suffix: None
+                },
                 TokenKind::Semi,
                 TokenKind::Eof,
             ]
@@ -1538,6 +1660,63 @@ mod tests {
     }
 
     #[test]
+    fn numeric_literal_suffixes() {
+        assert_eq!(ints("123i64"), vec![123]);
+        assert_eq!(
+            int_tokens("1_000_000u32"),
+            vec![(1_000_000, ty_suffix("u32"))]
+        );
+        assert_eq!(int_tokens("0xFFu8"), vec![(255, ty_suffix("u8"))]);
+        assert_eq!(int_tokens("0b1010usize"), vec![(10, ty_suffix("usize"))]);
+        assert_eq!(int_tokens("0o77i8"), vec![(63, ty_suffix("i8"))]);
+        assert_eq!(int_tokens("42"), vec![(42, None)]);
+        // An integer literal with a float suffix is a float literal, like Rust.
+        assert_eq!(float_tokens("2f64"), vec![(2.0, ty_suffix("f64"))]);
+        assert_eq!(float_tokens("1.5f32"), vec![(1.5, ty_suffix("f32"))]);
+        assert_eq!(float_tokens("1e3f64"), vec![(1000.0, ty_suffix("f64"))]);
+        assert_eq!(float_tokens("1.5"), vec![(1.5, None)]);
+        // The token span covers the suffix so diagnostics can print the
+        // literal exactly as written.
+        let (tokens, _) = tokenize("0xFFu8");
+        assert_eq!(tokens[0].span, Span::new(0, 6));
+        assert!(errors("123i64 1.5f32 2f64 0xFFu8 1_000u32").is_empty());
+        // The suffix is part of the token's display form.
+        assert_eq!(kinds("1u8")[0].to_string(), "1u8");
+        assert_eq!(kinds("1u8")[0].describe(), "integer literal 1u8");
+        assert_eq!(kinds("1.5f32")[0].to_string(), "1.5f32");
+        assert_eq!(kinds("1.5f32")[0].describe(), "float literal 1.5f32");
+    }
+
+    #[test]
+    fn invalid_numeric_suffixes() {
+        for source in [
+            "123i128", "123u128", "123uz", "1.5i64", "1.5u8", "1e5u8", "0b101f32", "1i64u8",
+        ] {
+            let messages = error_messages(source);
+            assert_eq!(
+                messages.len(),
+                1,
+                "expected one error for {:?}: {:?}",
+                source,
+                messages
+            );
+            assert!(
+                messages[0].contains("invalid suffix"),
+                "unexpected message for {:?}: {}",
+                source,
+                messages[0]
+            );
+        }
+        // The diagnostic span points at the suffix itself, not the whole
+        // literal, and no literal token is produced.
+        let diagnostics = errors("123i128");
+        assert_eq!(diagnostics[0].span, Span::new(3, 7));
+        assert!(ints("123i128").is_empty());
+        let diagnostics = errors("1.5q");
+        assert_eq!(diagnostics[0].span, Span::new(3, 4));
+    }
+
+    #[test]
     fn integer_literal_boundaries() {
         // u128::MAX still lexes (the type checker rejects it for i64 if needed).
         let source = "340282366920938463463374607431768211455";
@@ -1556,8 +1735,11 @@ mod tests {
             let messages = error_messages(source);
             assert!(!messages.is_empty(), "expected an error for {:?}", source);
         }
-        // A suffix is not supported: report it instead of lexing an ident.
-        let messages = error_messages("123i64");
+        // A supported suffix is lexed as part of the literal; an unsupported
+        // one is reported instead of being lexed as an identifier.
+        assert!(errors("123i64").is_empty());
+        assert_eq!(ints("123i64"), vec![123]);
+        let messages = error_messages("123i128");
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("suffix"));
     }
@@ -1576,15 +1758,15 @@ mod tests {
     #[test]
     fn dot_after_integer_is_not_a_float() {
         use TokenKind::*;
-        assert_eq!(kinds("1..2"), vec![Int(1), DotDot, Int(2), Eof]);
+        assert_eq!(kinds("1..2"), vec![int(1), DotDot, int(2), Eof]);
         assert_eq!(
             kinds("1.max(2)"),
             vec![
-                Int(1),
+                int(1),
                 Dot,
                 Ident("max".to_string()),
                 LParen,
-                Int(2),
+                int(2),
                 RParen,
                 Eof
             ]
@@ -1598,7 +1780,9 @@ mod tests {
             let messages = error_messages(source);
             assert!(!messages.is_empty(), "expected an error for {:?}", source);
         }
-        let messages = error_messages("1.5f32");
+        assert!(errors("1.5f32").is_empty());
+        assert_eq!(floats("1.5f32"), vec![1.5]);
+        let messages = error_messages("1.5i64");
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("suffix"));
     }
@@ -1933,7 +2117,10 @@ mod tests {
                 TokenKind::KwLet,
                 TokenKind::Ident("x".to_string()),
                 TokenKind::Eq,
-                TokenKind::Int(1),
+                TokenKind::Int {
+                    value: 1,
+                    suffix: None
+                },
                 TokenKind::Semi,
                 TokenKind::Eof,
             ]
@@ -1949,12 +2136,18 @@ mod tests {
                 TokenKind::KwLet,
                 TokenKind::Ident("x".to_string()),
                 TokenKind::Eq,
-                TokenKind::Int(1),
+                TokenKind::Int {
+                    value: 1,
+                    suffix: None
+                },
                 TokenKind::Semi,
                 TokenKind::KwLet,
                 TokenKind::Ident("y".to_string()),
                 TokenKind::Eq,
-                TokenKind::Int(2),
+                TokenKind::Int {
+                    value: 2,
+                    suffix: None
+                },
                 TokenKind::Semi,
                 TokenKind::Eof,
             ]
@@ -1993,10 +2186,10 @@ mod tests {
     #[test]
     fn tuple_field_numbers_are_not_floats() {
         use TokenKind::*;
-        assert_eq!(kinds("t.0"), vec![Ident("t".to_string()), Dot, Int(0), Eof]);
+        assert_eq!(kinds("t.0"), vec![Ident("t".to_string()), Dot, int(0), Eof]);
         assert_eq!(
             kinds("t.0.1"),
-            vec![Ident("t".to_string()), Dot, Int(0), Dot, Int(1), Eof]
+            vec![Ident("t".to_string()), Dot, int(0), Dot, int(1), Eof]
         );
         assert!(errors("t.0.1").is_empty());
         // A float after any other token still lexes as one token.

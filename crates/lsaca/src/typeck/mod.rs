@@ -367,8 +367,8 @@ mod tests {
         match check_source(source) {
             Ok(program) => program,
             Err(diagnostics) => panic!(
-                "expected the program to type check, got: {:?}",
-                messages(&diagnostics)
+                "expected the program to type check, got: {:#?}",
+                diagnostics
             ),
         }
     }
@@ -450,9 +450,16 @@ mod tests {
         match check_source_with_prelude(source) {
             Ok(program) => program,
             Err(diagnostics) => panic!(
-                "expected the program to type check, got: {:?}",
-                messages(&diagnostics)
+                "expected the program to type check, got: {:#?}",
+                diagnostics
             ),
+        }
+    }
+
+    fn expect_errors_with_prelude(source: &str) -> Diagnostics {
+        match check_source_with_prelude(source) {
+            Ok(_) => panic!("expected type errors, but the program type checked"),
+            Err(diagnostics) => diagnostics,
         }
     }
 
@@ -617,9 +624,9 @@ fn main() {
         let body = &main_fn(&program).body;
         match &body.stmts[0] {
             HStmt::Let { pat, init, .. } => {
-                assert_eq!(pat.ty, Ty::Int(IntTy::I64));
+                assert_eq!(pat.ty, Ty::Int(IntTy::I32));
                 let init = init.as_ref().expect("initializer");
-                assert_eq!(init.ty, Ty::Int(IntTy::I64));
+                assert_eq!(init.ty, Ty::Int(IntTy::I32));
             }
             _ => panic!("expected a let statement"),
         }
@@ -1661,7 +1668,7 @@ fn main() {
             } => init,
             other => panic!("expected a let statement, got {:?}", other),
         };
-        assert_eq!(init.ty, Ty::Option(Box::new(Ty::Int(IntTy::I64))));
+        assert_eq!(init.ty, Ty::Option(Box::new(Ty::Int(IntTy::I32))));
         match &init.kind {
             HExprKind::Match { scrutinee, arms } => {
                 assert!(matches!(&scrutinee.kind, HExprKind::OptionSome(_)));
@@ -1695,7 +1702,7 @@ fn main() {
             } => init,
             other => panic!("expected a let statement, got {:?}", other),
         };
-        assert_eq!(init.ty, Ty::Int(IntTy::I64));
+        assert_eq!(init.ty, Ty::Int(IntTy::I32));
         match &init.kind {
             HExprKind::Block(block) => {
                 assert_eq!(block.stmts.len(), 2);
@@ -1793,7 +1800,7 @@ fn main() {
             }
             other => panic!("expected the filter match, got {:?}", other),
         }
-        assert_eq!(filter_init.ty, Ty::Option(Box::new(Ty::Int(IntTy::I64))));
+        assert_eq!(filter_init.ty, Ty::Option(Box::new(Ty::Int(IntTy::I32))));
     }
 
     #[test]
@@ -1816,7 +1823,7 @@ fn main() {
         };
         assert_eq!(
             init.ty,
-            Ty::Result(Box::new(Ty::Int(IntTy::I64)), Box::new(Ty::String))
+            Ty::Result(Box::new(Ty::Int(IntTy::I32)), Box::new(Ty::String))
         );
         match &init.kind {
             HExprKind::Block(block) => {
@@ -2068,7 +2075,7 @@ fn main() {
 }"#,
         );
         let main = main_fn(&program);
-        let expected = shared_ref(shared_ref(Ty::Int(IntTy::I64)));
+        let expected = shared_ref(shared_ref(Ty::Int(IntTy::I32)));
         match &main.body.stmts[3] {
             HStmt::Let {
                 pat,
@@ -2080,7 +2087,7 @@ fn main() {
             }
             other => panic!("expected let nested = &second, got {:?}", other),
         }
-        assert_eq!(let_init(&main.body, 2).ty, shared_ref(Ty::Int(IntTy::I64)));
+        assert_eq!(let_init(&main.body, 2).ty, shared_ref(Ty::Int(IntTy::I32)));
     }
 
     #[test]
@@ -2095,7 +2102,7 @@ fn main() {
         );
         let body = &main_fn(&program).body;
         let reference = let_init(body, 1);
-        assert_eq!(reference.ty, shared_ref(Ty::Int(IntTy::I64)));
+        assert_eq!(reference.ty, shared_ref(Ty::Int(IntTy::I32)));
         match &reference.kind {
             HExprKind::Ref { mutable, expr } => {
                 assert!(!*mutable);
@@ -2104,7 +2111,7 @@ fn main() {
             other => panic!("expected a borrow expression, got {:?}", other),
         }
         let copy = let_init(body, 2);
-        assert_eq!(copy.ty, Ty::Int(IntTy::I64));
+        assert_eq!(copy.ty, Ty::Int(IntTy::I32));
         assert!(matches!(
             &copy.kind,
             HExprKind::Deref { expr }
@@ -2124,7 +2131,7 @@ fn main() {
         );
         let body = &main_fn(&program).body;
         let reference = let_init(body, 1);
-        assert_eq!(reference.ty, mutable_ref(Ty::Int(IntTy::I64)));
+        assert_eq!(reference.ty, mutable_ref(Ty::Int(IntTy::I32)));
         match body.stmts.get(2) {
             Some(HStmt::Expr(HExpr {
                 kind: HExprKind::Assign { target, .. },
@@ -2326,7 +2333,7 @@ fn main() {
     #[test]
     fn auto_derefs_multiple_reference_levels_for_methods() {
         let program = expect_ok(
-            r#"fn length(values: &&Vec<i64>) -> i64 {
+            r#"fn length(values: &&Vec<i64>) -> usize {
     values.len()
 }
 
@@ -4139,7 +4146,7 @@ impl Describe<i64> for Point {
 }
 impl Describe<String> for Tag {
     fn describe(&self, extra: String) -> String {
-        return self.label + ":" + extra;
+        return format!("{}:{}", self.label, extra);
     }
 }
 fn main() {
@@ -4850,8 +4857,10 @@ fn main() {
         let (program, file, parse_diagnostics) = parse_source(
             r#"fn main() {
     let values: Vec<i64> = vec![1, 2, 3];
-    let zipped = values.iter().zip(vec![4, 5, 6].iter());
-    println!("{}", zipped.count());
+    let iterator = values.iter();
+    let total = iterator.flatten();
+    let _ = total;
+    println!("done");
 }"#,
         );
         assert!(
@@ -4862,7 +4871,7 @@ fn main() {
         let prelude = crate::prelude::program().expect("the embedded prelude must parse");
         let (result, _warnings) = check_reporting_with_prelude(&program, Some(prelude), &file);
         let diagnostics = match result {
-            Ok(_) => panic!(".zip() must be rejected as an unsupported iterator method"),
+            Ok(_) => panic!(".flatten() must be rejected as an unsupported iterator method"),
             Err(diagnostics) => diagnostics,
         };
         assert!(
@@ -5278,7 +5287,7 @@ fn main() {
 }"#,
         );
         let expected = [
-            (1usize, HBuiltinMethod::StrCharCount, Ty::Int(IntTy::I64)),
+            (1usize, HBuiltinMethod::StrCharCount, Ty::Int(IntTy::Usize)),
             (2, HBuiltinMethod::StrChars, Ty::Vec(Box::new(Ty::Char))),
             (3, HBuiltinMethod::StrCharAt, Ty::Option(Box::new(Ty::Char))),
             (4, HBuiltinMethod::StrIsCharBoundary, Ty::Bool),
@@ -5673,7 +5682,7 @@ fn main() {
         expect_ok(
             r#"fn main() {
     let explicit: i64 = -9223372036854775808;
-    let inferred = -9223372036854775808;
+    let inferred: i64 = -9223372036854775808;
     let narrowed: i32 = -2147483648;
     println!("{} {} {}", explicit, inferred, narrowed);
 }"#,
@@ -6340,7 +6349,7 @@ fn main() { println!("{}", a::b::c::f()); }
                 (
                     "greeting",
                     r#"
-pub fn greet(name: String) -> String { String::from("hello, ") + name }
+pub fn greet(name: String) -> String { String::from("hello, ") + &name }
 pub const ANSWER: i64 = 42;
 pub struct Counter { pub value: i64 }
 pub fn counter() -> Counter { Counter { value: 7 } }
@@ -6594,9 +6603,8 @@ fn main() { println!("{}", value()); }
             }
             if let Err(diagnostics) = check_with_prelude(&program, Some(prelude), &file) {
                 failures.push(format!(
-                    "{} should type check, got: {:?}",
-                    name,
-                    messages(&diagnostics)
+                    "{} should type check, got: {:#?}",
+                    name, diagnostics
                 ));
             }
         }
@@ -7936,5 +7944,547 @@ impl String {
             messages(&diagnostics)
         );
         assert!(has_code(&diagnostics, "E0308"));
+    }
+
+    // -----------------------------------------------------------------
+    // v2.1 numeric, tuple-struct, and text-context semantics
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn accepts_tuple_and_unit_structs() {
+        let program = expect_ok(
+            r#"struct Point(i64, i64);
+struct Meters(i64);
+struct Unit;
+impl Point {
+    fn sum(&self) -> i64 { self.0 + self.1 }
+    fn set_x(&mut self, x: i64) { self.0 = x; }
+}
+fn main() {
+    let mut p = Point(3, 4);
+    p.set_x(10);
+    let total = p.sum();
+    let m = Meters(7);
+    let raw = m.0;
+    let first = Unit;
+    let second = Unit;
+    match p {
+        Point(x, y) => { println!("{}", x + y); }
+    }
+    println!("{} {} {:?} {:?}", total, raw, first, second);
+}"#,
+        );
+        let point = program
+            .structs
+            .iter()
+            .find(|structure| structure.name.starts_with("Point"))
+            .expect("Point must be lowered");
+        assert_eq!(point.fields.len(), 2);
+        assert_eq!(point.fields[0].name, "0");
+        assert_eq!(point.fields[1].name, "1");
+        assert_eq!(point.fields[0].ty, Ty::Int(IntTy::I64));
+        let meters = program
+            .structs
+            .iter()
+            .find(|structure| structure.name.starts_with("Meters"))
+            .expect("Meters must be lowered");
+        assert_eq!(meters.fields.len(), 1);
+        assert_eq!(meters.fields[0].name, "0");
+        let unit = program
+            .structs
+            .iter()
+            .find(|structure| structure.name.starts_with("Unit"))
+            .expect("unit struct must be lowered");
+        assert!(unit.fields.is_empty());
+        assert!(find_fn(&program, "Point::set_x").is_some());
+    }
+
+    #[test]
+    fn rejects_tuple_struct_constructor_arity_mismatch() {
+        let diagnostics = expect_errors(
+            "struct Point(i64, i64);
+fn main() { let p = Point(1); }",
+        );
+        assert!(
+            has_code(&diagnostics, "E0061"),
+            "expected an arity diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_tuple_struct_pattern_arity_mismatch() {
+        let diagnostics = expect_errors(
+            r#"struct Point(i64, i64);
+fn main() {
+    let p = Point(1, 2);
+    match p {
+        Point(x) => { println!("{}", x); }
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0023"),
+            "expected a pattern arity diagnostic: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn unsuffixed_integer_literals_default_to_i32() {
+        // An unsuffixed literal adapts to every integer context it meets, and
+        // only falls back to its default type when no context constrains it.
+        expect_ok(
+            r#"fn take_i32(value: i32) -> i32 { value }
+fn take_i64(value: i64) -> i64 { value }
+fn main() {
+    let small = 1 + 2;
+    let wide = 3;
+    println!("{} {}", take_i32(small), take_i64(wide));
+}"#,
+        );
+        // The default is i32: an unconstrained literal that does not fit i32 is
+        // rejected even though i64 could hold it.
+        let diagnostics =
+            expect_errors(r#"fn main() { let value = 3000000000; println!("{}", value); }"#);
+        assert!(
+            has_code(&diagnostics, "E0080"),
+            "an unconstrained literal must be range checked against i32: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn suffixed_integer_literals_use_their_suffix_and_range() {
+        expect_ok(
+            r#"fn main() {
+    let small: u8 = 255u8;
+    let low: i8 = -128i8;
+    let wide = 3000000000i64;
+    println!("{} {} {}", small, low, wide);
+}"#,
+        );
+        let diagnostics =
+            expect_errors(r#"fn main() { let value = 128i8; println!("{}", value); }"#);
+        assert!(
+            has_code(&diagnostics, "E0080"),
+            "a suffixed literal must be range checked: {:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics =
+            expect_errors(r#"fn main() { let value: i8 = 128; println!("{}", value); }"#);
+        assert!(
+            has_code(&diagnostics, "E0080"),
+            "a contextually typed literal must be range checked: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn vector_indices_require_usize() {
+        expect_ok(
+            r#"fn main() {
+    let values = vec![10i64, 20i64, 30i64];
+    let index = 1;
+    println!("{}", values[index]);
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let values = vec![10i64, 20i64, 30i64];
+    let index: i32 = 1;
+    println!("{}", values[index]);
+}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "mismatched types"),
+            "an i32 index must not be accepted: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn string_literals_adapt_to_str_parameters() {
+        expect_ok(
+            r#"fn greet(name: &str) -> i64 { 1 }
+fn main() {
+    let text = String::from("x");
+    println!("{} {}", greet("world"), text);
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn greet(name: &str) -> i64 { 1 }
+fn main() {
+    let text = String::from("x");
+    println!("{}", greet(text));
+}"#,
+        );
+        assert!(
+            has_message(&diagnostics, "mismatched types"),
+            "an owned String must not implicitly become &str: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn string_concatenation_requires_a_borrowed_text_operand() {
+        expect_ok(
+            r#"fn main() {
+    let mut text = String::from("a");
+    text += "b";
+    let joined = text + "c";
+    println!("{}", joined);
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn main() { let joined = String::from("a") + String::from("b"); println!("{}", joined); }"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "String + String must be rejected: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn mutable_parameters_are_assignable_in_the_body() {
+        expect_ok(
+            r#"fn bump(mut value: i64) -> i64 { value += 1; value }
+fn main() { println!("{}", bump(1)); }"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn bump(value: i64) -> i64 { value += 1; value }
+fn main() { println!("{}", bump(1)); }"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0596"),
+            "assigning an immutable parameter must be rejected: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_generic_bound_violation_even_when_the_bound_is_unused() {
+        let diagnostics = expect_errors(
+            r#"trait Sized2 { fn size(&self) -> i64; }
+fn accepts<T: Sized2>(value: &T) -> i64 { return 0; }
+fn main() { let number = 3; println!("{}", accepts(&number)); }"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "an unsatisfied bound must be reported at the call site: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(
+                &diagnostics,
+                "the trait bound (i32: Sized2) is not satisfied"
+            ),
+            "the diagnostic must name the violating type and the bound: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            !has_code(&diagnostics, "E0599"),
+            "the bound must not be discovered inside the monomorphized body: {:?}",
+            messages(&diagnostics)
+        );
+        // The regression fixture checks the same rule when the body calls the
+        // bound method: the body is legal under the declared bound and the
+        // violation is reported at the instantiation, not as E0599 inside it.
+        let diagnostics = check_source_with_embedded_stdlib(
+            r#"trait Sized2 { fn size(&self) -> i64; }
+fn measure<T: Sized2>(value: &T) -> i64 { return value.size(); }
+fn main() { let number = 3; println!("{}", measure(&number)); }"#,
+        )
+        .expect_err("an unsatisfied bound must be rejected at the call site");
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "the bound violation must be E0277: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            !has_code(&diagnostics, "E0599"),
+            "the body must not report a missing method: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn accepts_satisfied_generic_bounds() {
+        expect_ok(
+            r#"trait Doubles { fn double(&self) -> i64; }
+struct Number { value: i64 }
+impl Doubles for Number { fn double(&self) -> i64 { return self.value * 2; } }
+fn apply<T: Doubles>(value: &T) -> i64 { let doubled = value.double(); return doubled; }
+fn main() { let number = Number { value: 3 }; println!("{}", apply(&number)); }"#,
+        );
+    }
+
+    #[test]
+    fn rejects_a_missing_bound_when_only_some_are_satisfied() {
+        let diagnostics = expect_errors(
+            r#"trait First2 { fn first(&self) -> i64; }
+trait Second2 { fn second(&self) -> i64; }
+impl First2 for i64 { fn first(&self) -> i64 { return 1; } }
+fn both<T: First2 + Second2>(value: &T) -> i64 { return 0; }
+fn main() { let number: i64 = 3; println!("{}", both(&number)); }"#,
+        );
+        assert!(
+            has_message(
+                &diagnostics,
+                "the trait bound (i64: Second2) is not satisfied"
+            ),
+            "the missing bound must be reported even when another one is satisfied: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    /// Type check a user program against the embedded standard library, exactly
+    /// like the compiler driver does.
+    fn check_source_with_embedded_stdlib(source: &str) -> Result<hir::Program, Diagnostics> {
+        let (program, file, diagnostics) = parse_source(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected parse errors: {:?}",
+            messages(&diagnostics)
+        );
+        let stdlib = crate::stdlib::program().expect("the embedded standard library must parse");
+        check_with_prelude(&program, Some(stdlib), &file)
+    }
+
+    #[test]
+    fn generic_parse_uses_the_typed_parse_errors() {
+        let program = check_source_with_embedded_stdlib(
+            r#"fn main() {
+    let direct: Result<i64, ParseIntError> = "42".parse_i64();
+    let from_generic = "42".parse::<i64>();
+    let typed: Result<i64, ParseIntError> = from_generic;
+    let float: Result<f64, ParseFloatError> = "2.5".parse::<f64>();
+    println!("{} {}", direct.unwrap_or(0), typed.unwrap_or(0));
+    println!("{}", float.unwrap_or(0.0));
+}"#,
+        )
+        .unwrap_or_else(|diagnostics| {
+            panic!(
+                "parse::<T> must return the typed error of the stdlib method: {:#?}",
+                diagnostics
+            )
+        });
+        assert!(find_fn(&program, "main").is_some());
+        let diagnostics = check_source_with_embedded_stdlib(
+            r#"fn main() {
+    let wrong: Result<i64, String> = "42".parse::<i64>();
+    println!("{}", wrong);
+}"#,
+        )
+        .expect_err("a String error type must not match ParseIntError");
+        assert!(
+            has_message(&diagnostics, "mismatched types"),
+            "parse::<i64> must type the error as ParseIntError: {:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = check_source_with_embedded_stdlib(
+            r#"fn main() {
+    let unsupported = "42".parse::<i32>();
+    println!("{:?}", unsupported);
+}"#,
+        )
+        .expect_err("only i64 and f64 parse targets are supported");
+        assert!(
+            has_code(&diagnostics, "E0107"),
+            "other parse targets must stay rejected: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn lowers_v21_iterator_adapters_to_prelude_calls() {
+        expect_ok_with_prelude(
+            r#"fn main() {
+    let zipped: Vec<(i64, i64)> = vec![1i64, 2i64, 3i64]
+        .iter()
+        .zip(vec![4i64, 5i64, 6i64].iter())
+        .collect();
+    let chained: Vec<i64> = vec![1i64, 2i64]
+        .iter()
+        .chain(vec![3i64, 4i64].iter())
+        .collect();
+    let filtered: Vec<(i64, i64)> = vec![1i64, 2i64, 3i64]
+        .iter()
+        .filter(|value| *value > 1)
+        .map(|value| value * 2)
+        .zip(vec![9i64, 8i64].iter())
+        .collect();
+    let mapped: Vec<i64> = vec![1i64, 2i64, 3i64, 4i64]
+        .iter()
+        .filter_map(|value| {
+            if value % 2 == 0 {
+                return Some(value * 10);
+            }
+            return None;
+        })
+        .collect();
+    let prefix: Vec<i64> = vec![1i64, 2i64, 3i64, 4i64]
+        .iter()
+        .take_while(|value| *value < 3)
+        .collect();
+    let rest: Vec<i64> = vec![1i64, 2i64, 3i64, 4i64]
+        .iter()
+        .skip_while(|value| *value < 3)
+        .collect();
+    let stepped: Vec<i64> = vec![1i64, 2i64, 3i64, 4i64, 5i64]
+        .iter()
+        .step_by(2)
+        .collect();
+    let inspected: Vec<i64> = vec![1i64, 2i64]
+        .iter()
+        .inspect(|value| {
+            println!("{}", *value);
+        })
+        .collect();
+    vec![1i64, 2i64, 3i64].iter().for_each(|value| {
+        println!("{}", value);
+    });
+    let position: Option<usize> = vec![1i64, 2i64, 3i64]
+        .iter()
+        .position(|value| value == 3i64);
+    let last: Option<i64> = vec![1i64, 2i64, 3i64].iter().last();
+    let third: Option<i64> = vec![1i64, 2i64, 3i64].iter().nth(2);
+    let reduced: Option<i64> = vec![1i64, 2i64, 3i64]
+        .iter()
+        .reduce(|acc, value| acc + value);
+    println!(
+        "{} {} {} {} {} {} {} {}",
+        zipped.len(),
+        chained.len(),
+        filtered.len(),
+        mapped.len(),
+        prefix.len(),
+        rest.len(),
+        stepped.len(),
+        inspected.len()
+    );
+    println!(
+        "{} {:?} {:?} {:?}",
+        position.unwrap_or(0),
+        last,
+        third,
+        reduced
+    );
+}"#,
+        );
+    }
+
+    #[test]
+    fn numeric_terminal_methods_use_their_specialized_helpers() {
+        check_source_with_embedded_stdlib(
+            r#"fn main() {
+    let sum_int: i32 = vec![1, 2, 3].iter().sum();
+    let product_int: i32 = vec![1, 2, 3].iter().product();
+    let sum_wide: i64 = vec![1i64, 2i64, 3i64].iter().sum();
+    let product_wide: i64 = vec![1i64, 2i64, 3i64].iter().product();
+    let sum_count: usize = vec![1usize, 2usize, 3usize].iter().sum();
+    let product_count: usize = vec![1usize, 2usize, 3usize].iter().product();
+    let sum_float: f64 = vec![1.5, 2.5].iter().sum();
+    let product_float: f64 = vec![1.5, 2.5].iter().product();
+    println!(
+        "{} {} {} {} {} {} {} {}",
+        sum_int,
+        product_int,
+        sum_wide,
+        product_wide,
+        sum_count,
+        product_count,
+        sum_float,
+        product_float
+    );
+}"#,
+        )
+        .unwrap_or_else(|diagnostics| {
+            panic!(
+                "sum/product must dispatch on the item type: {:#?}",
+                diagnostics
+            )
+        });
+    }
+
+    #[test]
+    fn rejects_unsupported_iterator_sugar_uses() {
+        let diagnostics = expect_errors_with_prelude(
+            r#"fn main() {
+    let words: Vec<String> = vec![String::from("a")];
+    let total = words.iter().sum();
+    let product = words.iter().product();
+    let _ = total;
+    let _ = product;
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "sum/product must reject non-numeric items: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(
+                &diagnostics,
+                "only supported for iterators of i32, i64, usize or f64"
+            ),
+            "the diagnostic must list the supported item types: {:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = expect_errors_with_prelude(
+            r#"fn main() {
+    let values: Vec<i64> = vec![1, 2, 3];
+    let zipped = values.iter().zip(5);
+    let _ = zipped;
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0277"),
+            "zip needs an iterator as its second argument: {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "needs an iterator argument"),
+            "the zip diagnostic must explain the argument requirement: {:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = expect_errors_with_prelude(
+            r#"fn main() {
+    let values: Vec<i64> = vec![1, 2, 3];
+    let other: Vec<u8> = vec![4u8];
+    let chained = values.iter().chain(other.iter());
+    let _ = chained;
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "chain requires matching element types: {:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = expect_errors_with_prelude(
+            r#"fn main() {
+    let values: Vec<i64> = vec![1, 2, 3];
+    let zipped = values.iter().zip();
+    let _ = zipped;
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0061"),
+            "zip takes exactly one argument: {:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = expect_errors_with_prelude(
+            r#"fn main() {
+    let values: Vec<i64> = vec![1, 2, 3];
+    let zipped = values.iter().zip::<i64>(values.iter());
+    let _ = zipped;
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0107"),
+            "only collect accepts a type argument: {:?}",
+            messages(&diagnostics)
+        );
     }
 }

@@ -8,9 +8,9 @@ the compiler generated one copy of each function per type (see
 default and the cheaper choice; trait objects are the opt-in tool for heterogeneous
 collections and for APIs that must agree at run time.
 
-The examples on this page use the 2.0 syntax. They are part of the 2.0
+The examples on this page use the 2.1.0 syntax. They are part of the 2.1.0
 documentation test plan and are executed by the documentation verifier against
-the 2.0 compiler.
+the 2.1.0 compiler.
 
 ## The `dyn` type
 
@@ -38,7 +38,7 @@ a return type, an element of a `Vec`) is error `E0001`:
 > trait objects are unsized; use `Box<dyn Trait>`, `Rc<dyn Trait>` or `&dyn Trait`
 
 The restriction matches the one on references: references to heap values can be
-created and passed around, but they cannot be stored inside aggregates in 2.0.
+created and passed around, but they cannot be stored inside aggregates in 2.1.0.
 
 ## Creating a trait object
 
@@ -126,7 +126,7 @@ Receivers keep their meaning:
   trait object itself is reachable mutably - through `&mut dyn T`, a mutable
   `Box<dyn T>` binding or a mutable `Rc<dyn T>` place. Calling a `&mut self` method
   through a shared receiver is `E0596`;
-* traits cannot declare associated functions in 2.0 (a trait `fn` without a
+* traits cannot declare associated functions in 2.1.0 (a trait `fn` without a
   receiver is `E0001`), so a trait object has no associated functions; inherent
   methods of the concrete type are not part of the object's interface, so calling
   one on a trait object is `E0599` (`no method named ... found for type
@@ -171,7 +171,7 @@ methods
 * use `Self` only in the receiver, not in parameters or return types.
 
 Generic methods, associated functions, associated types and associated constants
-cannot be declared in 2.0 traits at all, so they can never make a trait that does
+cannot be declared in 2.1.0 traits at all, so they can never make a trait that does
 compile non-object-safe: a generic method is `E0001` (trait methods cannot be
 generic), an associated function is `E0001` (trait methods must take a self
 receiver), and an associated type or constant is a parse error. A trait with
@@ -220,7 +220,7 @@ A `Box<dyn Trait>` is therefore the owning, cloneable container: cloning it give
 independent concrete value. An `Rc<dyn Trait>` is the shared container: cloning it
 gives another handle to the same value. Both reference forms are `Copy`: copying a
 `&dyn Trait` or a `&mut dyn Trait` copies its two words, exactly like copying any
-other reference in 2.0.
+other reference in 2.1.0.
 
 Coercing an `Rc<T>` to `Rc<dyn Trait>` counts as a share, not a move: the original
 `Rc<T>` handle stays valid alongside the trait object, and both point at the same
@@ -264,7 +264,7 @@ cell and `describe()` is an ordinary static call; only `object` is a trait objec
 
 A `dyn Trait` coerces to the same `dyn Trait` (for example `Box<dyn Trait>` to
 `&dyn Trait` through a borrow), but there is no upcasting: a `dyn Sub` cannot be
-turned into a `dyn Super`, because traits cannot declare supertraits in 2.0.
+turned into a `dyn Super`, because traits cannot declare supertraits in 2.1.0.
 
 ## Equality, formatting and drop
 
@@ -314,7 +314,7 @@ objects.
 The order in which trait objects and vtables are registered is deterministic (first
 use in the flattened program), which keeps the generated C reproducible.
 
-## Known limitations in 2.0
+## Known limitations in 2.1.0
 
 * No upcasting from `dyn Sub` to `dyn Super` (supertraits do not exist).
 * No trait objects of non-object-safe traits (`E0038`). Traits cannot declare
@@ -327,7 +327,7 @@ use in the flattened program), which keeps the generated C reproducible.
   object names exactly one trait, and there are no auto traits.
 * Trait objects cannot be stored directly in structs, enums or `Vec` elements -
   always through `Box`, `Rc` or a reference, and references themselves cannot be
-  stored in aggregates in 2.0.
+  stored in aggregates in 2.1.0.
 * The vtable layout is an implementation detail and may change; do not rely on
   slot numbers from lsaca code.
 

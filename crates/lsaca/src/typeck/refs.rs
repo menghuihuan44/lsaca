@@ -7,7 +7,7 @@
 
 use super::check::Checker;
 use super::itype::{ITy, VarKind};
-use super::tree::{TExpr, TExprKind};
+use super::tree::{TExpr, TExprKind, TLit};
 use crate::ast;
 use crate::diag::Diagnostic;
 use crate::span::Span;
@@ -354,6 +354,20 @@ impl<'a> Checker<'a> {
             let _ = self.unify_quiet(&actual, &wanted);
             return expr;
         }
+        // A string literal in a &str-expected context becomes a static string
+        // slice: only the expression type changes, the lowerer emits a literal
+        // that points at interned bytes instead of an owned String allocation.
+        // This must come before the reference coercions because the literal is
+        // an owned String value, not a reference, so no borrow is introduced.
+        if let TExprKind::Lit(TLit::Str(_)) = &expr.kind
+            && let ITy::Ref {
+                mutable: false,
+                inner,
+            } = &wanted
+            && matches!(self.infer.resolve(inner), ITy::Str)
+        {
+            return TExpr::new(wanted.clone(), expr.kind, span);
+        }
         // Trait-object and slice/str coercions (DESIGN 2.0 sections 7 and 8) are
         // tried before the reference reborrow block: `&mut Vec<T>` to `&[T]`
         // must lower to a slice node, not to a plain reference reborrow.
@@ -511,7 +525,7 @@ impl<'a> Checker<'a> {
                 // literal and report the concrete type instead of the generic
                 // annotations-needed error.
                 let literal_default = match self.infer.var_kind(id) {
-                    VarKind::IntLiteral => Some(ITy::i64()),
+                    VarKind::IntLiteral => Some(ITy::i32()),
                     VarKind::FloatLiteral => Some(ITy::f64()),
                     VarKind::General => None,
                 };

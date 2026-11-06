@@ -35,7 +35,7 @@ There are exactly nine kinds:
 | Item | Keyword | Purpose |
 | --- | --- | --- |
 | Function | `fn` | A named function, including `main`. |
-| Struct | `struct` | A record with named fields. |
+| Struct | `struct` | A record with named fields, or — since 2.1.0 — a tuple struct with positional fields or a unit struct with none. |
 | Enum | `enum` | A tagged union of unit or tuple variants. |
 | Impl | `impl` | Methods and associated functions for a struct or enum type. |
 | Constant | `const` | A compile-time constant with a required type annotation. |
@@ -417,7 +417,7 @@ visibility across crate boundaries.
 
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 2.0.0 parser. Optional parts
+The grammar below is the authoritative EBNF of the 2.1.0 parser. Optional parts
 are written with `[...]`, repetitions with `*` and `+`, and alternatives with
 `|`. It is reproduced here for reference; the individual pages explain each
 construct in detail.
@@ -434,10 +434,11 @@ genericParam = IDENT ( ":" bound ( "+" bound )* )? ;
 bound        = callableBound | pathType ;
 callableBound= "Fn" "(" typeArgs? ")" ( "->" type )? ;
 params       = param ( "," param )* ","? ;
-param        = "self" | "&" "self" | "&" "mut" "self" | IDENT ":" type ;
-structItem   = vis "struct" IDENT genericParams? "{" fieldDefs? "}" ;
+param        = "self" | "&" "self" | "&" "mut" "self" | "mut"? IDENT ":" type ;
+structItem   = vis "struct" IDENT genericParams? ( "{" fieldDefs? "}" | tupleTypes? ";" ) ;
 fieldDefs    = fieldDef ( "," fieldDef )* ","? ;
 fieldDef     = [ "pub" ] IDENT ":" type ;
+tupleTypes   = type ( "," type )* ","? ;
 enumItem     = vis "enum" IDENT genericParams? "{" variants? "}" ;
 variants     = variant ( "," variant )* ","? ;
 variant      = [ "pub" ] IDENT ( "(" typeArgs? ")" )? ;
@@ -527,7 +528,7 @@ typeArgs     = type ( "," type )* ","? ;
 A few productions deserve a warning because the parser is more permissive than
 the type checker: `methodCall` parses `::<...>` (turbofish) after the method
 name, but the type checker rejects generic methods (traits have no generic
-methods in 2.0.0); and `break expr` / `return expr` parse even where a value
+methods in 2.1.0); and `break expr` / `return expr` parse even where a value
 cannot be carried. `CHAR` is a character literal such as `'a'` or `'\u{4F60}'`;
 it is accepted wherever a literal expression or a literal pattern is accepted.
 
@@ -554,12 +555,13 @@ Output:
 small big other
 ```
 
-## Syntax added in 1.5 to 2.0
+## Syntax added in 1.5 to 2.1
 
 The grammar above already contains the productions added for generics, traits,
-character literals, modules and imports, slices and str, trait objects and
-extern declarations. This section collects those forms, the turbofish, and the
-syntax restrictions that the parser and the item collector enforce.
+character literals, modules and imports, slices and str, trait objects,
+extern declarations, and the 2.1 tuple and unit structs and `mut` parameters.
+This section collects those forms, the turbofish, and the syntax restrictions
+that the parser and the item collector enforce.
 
 ### Generic parameter lists and bounds
 
@@ -623,7 +625,7 @@ Explicit type arguments are written with the Rust-style turbofish `::<…>`:
   `HashMap::<String, i64>::new()`;
 * a generic struct literal: `Pair::<i64> { first: 3, second: 4 }`;
 * a method call: `value.method::<i64>()` parses, but trait methods are not
-  generic in 2.0.0, so the type checker rejects the turbofish with `E0107`
+  generic in 2.1.0, so the type checker rejects the turbofish with `E0107`
   (`method get takes 0 generic arguments but 1 was supplied`).
 
 In expression position use the turbofish; in type position the arguments are
@@ -665,6 +667,30 @@ with no body. Only the `std` crate may do this — it is how the standard librar
 connects to compiler intrinsics — and a user crate gets `E0001`. An extern
 function is not a value: using its name in expression position is `E0425`. See
 [Functions](09-functions.md#extern-functions).
+
+### 2.1 additions
+
+Version 2.1.0 adds three surface forms; each has its own production in the
+grammar above:
+
+* **A literal may end in a type suffix** — `42i64`, `1u8`, `1_000_000usize`,
+  `1.5f32` — written directly against the last digit. A plain integer literal
+  now has type `i32` unless its context asks for another integer type. See
+  [Lexical structure](03-lexical-structure.md#integer-literals) and
+  [Types](04-types.md#integers).
+* **A parameter may be marked `mut`** — `fn count(mut n: i64)` — which allows
+  the body to reassign the parameter binding. The argument is still passed by
+  value. A `self` parameter cannot be marked `mut`; see
+  [Functions](09-functions.md).
+* **A struct may be a tuple struct or a unit struct**: `struct Point(i64, i64);`
+  with positional fields reached as `.0`, `.1`, or `struct Marker;` with no
+  fields and constructed as `Marker`. Named-field structs are unchanged. See
+  [Structs, enums and impl](10-structs-enums-and-impl.md#tuple-and-unit-structs).
+
+No other grammar productions changed in 2.1.0: loop labels and `break` with a
+value are still not accepted (see
+[Statements and control flow](08-statements-and-control-flow.md#break-and-continue)),
+and the nine item kinds are the same.
 
 ### `Self` in expression position
 

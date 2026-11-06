@@ -1,88 +1,120 @@
-# time: clocks, dates and sleeping
+# time: clocks, sleeps and dates
 
-**Status in 2.0.0.** Implemented. The module is implemented in
-`stdlib/src/time.ls`. Time points are `i64` values, never floating-point
-seconds.
+**Status in 2.1.0.** Implemented in `stdlib/src/time.ls`. Since 2.1.0 the module
+provides the Rust-shaped values `Duration`, `Instant` and `SystemTime` plus
+`sleep(Duration)`. The older `now_ms`, `monotonic_ns`, `sleep_ms` and
+`DateTime` helpers remain for compatibility and are marked deprecated in the
+source; new code should use the new types.
 
-## Clock and sleep
+Failures are [`io::Error`](io.md) values, never panics: the wall clock can move
+backwards (NTP or a manual change), and the operations that compare wall clock
+readings report `ErrorKind::InvalidInput` instead of producing a negative
+duration.
 
-| Function | Signature | Meaning |
-| --- | --- | --- |
-| `now_ms` | `() -> i64` | wall-clock time in milliseconds since the Unix epoch |
-| `monotonic_ns` | `() -> i64` | monotonic clock in nanoseconds; only differences are meaningful |
-| `sleep_ms` | `(i64)` | suspends the calling thread for at least the given milliseconds |
+## Duration
 
-`now_ms` follows the system clock: it can jump forwards or backwards when the
-clock is adjusted or when the machine wakes from sleep. `monotonic_ns` never
-goes backwards and is the clock to use for durations and timeouts; it wraps after
-about 292 years of uptime, which no practical program observes.
-
-Sleep is blocking. lsaca has no async runtime, so `sleep_ms` stops the process
-until the delay elapses. The sleep lasts at least the requested duration and may
-be slightly longer because of scheduling.
-
-## Dates and times
-
-`DateTime` is a plain struct of `i64` fields. It is `Copy`, because a struct
-whose fields are all `Copy` is `Copy` (see [Ownership and
-moves](../language/11-ownership-and-moves.md)):
+A span of time, split into whole seconds and a subsecond part in nanoseconds.
+The fields are private; build durations with the constructors.
 
 ```rust
-pub struct DateTime {
-    year: i64,
-    month: i64,
-    day: i64,
-    hour: i64,
-    minute: i64,
-    second: i64,
-    weekday: i64,
-    yearday: i64,
+pub struct Duration {
+    seconds: u64,
+    nanos: u32,
 }
 ```
 
-| Function | Signature | Meaning |
+| Method | Signature | Notes |
 | --- | --- | --- |
-| `DateTime::now_local` | `() -> Result<DateTime, io::Error>` | the current date and time in the local time zone |
-| `DateTime::now_utc` | `() -> Result<DateTime, io::Error>` | the current date and time in UTC |
+| `Duration::new` | `(seconds: u64, nanos: u32) -> Duration` | nanoseconds at or above one billion roll over into whole seconds |
+| `from_secs` | `(u64) -> Duration` | whole seconds |
+| `from_millis` | `(u64) -> Duration` | whole milliseconds |
+| `from_micros` | `(u64) -> Duration` | whole microseconds |
+| `from_nanos` | `(u64) -> Duration` | whole nanoseconds |
+| `as_secs` | `(&self) -> u64` | whole seconds |
+| `subsec_nanos` | `(&self) -> u32` | the subsecond part |
+| `as_millis` / `as_micros` / `as_nanos` | `(&self) -> u64` | the whole span in that unit, saturating at the largest `u64` |
+| `is_zero` | `(&self) -> bool` | whether the duration is zero |
+| `checked_add` | `(&self, other: Duration) -> Option<Duration>` | `None` on overflow |
+| `checked_sub` | `(&self, other: Duration) -> Option<Duration>` | `None` when the result would be negative |
 
-The conversion can fail when the operating system cannot provide a calendar
-breakdown; the error carries the runtime classification.
+## Instant
 
-| Accessor | Returns | Range |
+A reading of the monotonic clock, for measuring elapsed time. `Instant` is a
+`Copy` value, not a handle.
+
+| Method | Signature | Notes |
 | --- | --- | --- |
-| `year` | `i64` | the full year (`2026`, not `126`) |
-| `month` | `i64` | `1`-`12` |
-| `day` | `i64` | `1`-`31` |
-| `hour` | `i64` | `0`-`23` |
-| `minute` / `second` | `i64` | `0`-`59` |
-| `weekday` | `i64` | `0` Sunday through `6` Saturday |
-| `yearday` | `i64` | zero-based day of the year |
+| `Instant::now` | `() -> Instant` | the current monotonic reading |
+| `elapsed` | `(&self) -> Duration` | time since this reading; a clock that went backwards yields zero |
+| `duration_since` | `(&self, earlier: Instant) -> Duration` | time between `earlier` and this reading, saturating at zero |
+| `checked_duration_since` | `(&self, earlier: Instant) -> Option<Duration>` | `None` when `earlier` is later than this reading |
 
-Formatting helpers return owned `String` values:
+## SystemTime
 
-| Method | Returns | Example |
+A wall clock reading measured from the Unix epoch, in milliseconds. `SystemTime`
+is a `Copy` value, not a handle.
+
+| Method | Signature | Notes |
 | --- | --- | --- |
-| `format_date` | `String` | `2026-11-02` |
-| `format_time` | `String` | `13:45:09` |
-| `format_datetime` | `String` | `2026-11-02 13:45:09` |
-| `weekday_name` | `String` | `Monday` |
+| `SystemTime::now` | `() -> SystemTime` | the current wall clock time |
+| `from_unix_ms` | `(i64) -> SystemTime` | a time at the given milliseconds after the epoch |
+| `unix_ms` | `(&self) -> i64` | milliseconds since the epoch |
+| `elapsed` | `(&self) -> Result<Duration, Error>` | time since this reading; `InvalidInput` when the clock moved backwards |
+| `duration_since` | `(&self, earlier: SystemTime) -> Result<Duration, Error>` | time between the two readings; `InvalidInput` when `earlier` is later |
+| `checked_duration_since` | `(&self, earlier: SystemTime) -> Option<Duration>` | `None` when the clock moved backwards |
+| `unix_epoch` | `() -> SystemTime` | the Unix epoch (`0` milliseconds) |
+
+Rust spells the epoch as the constant `UNIX_EPOCH`; a lsaca `const` cannot have
+a struct type in 2.1.0, so the standard library provides it as a function:
+
+```rust
+let start: SystemTime = unix_epoch();
+```
+
+## sleep
+
+`sleep(duration: Duration)` suspends the current thread. The runtime sleeps in
+whole milliseconds, so the duration is rounded down; a duration longer than the
+largest `i64` millisecond count is clamped rather than overflowing. Sleeping for
+zero returns immediately. There is no async timer type.
+
+## Compatibility helpers
+
+These remain available but are deprecated in 2.1.0:
+
+| Helper | Signature | Replacement |
+| --- | --- | --- |
+| `now_ms` | `() -> i64` | `SystemTime::now().unix_ms()` |
+| `monotonic_ns` | `() -> i64` | `Instant::now()` with `elapsed()` |
+| `sleep_ms` | `(milliseconds: i64)` | `sleep(Duration::from_millis(...))` |
+| `DateTime` | `now_local` / `now_utc` -> `Result<DateTime, Error>` | keep `SystemTime`, convert only for display |
+
+`DateTime` breaks a wall clock value into parts: `year`, `month` (`1`-`12`),
+`day`, `hour`, `minute`, `second`, `weekday` (`0` Sunday through `6` Saturday)
+and `yearday` (`0` based day of the year). `format_date`, `format_time`,
+`format_datetime` and `weekday_name` return fixed-format `String` text.
 
 ## Cross-platform notes
 
-Local time comes from the operating system: time-zone rules and daylight-saving
-changes are whatever the host reports, so the same instant can have a different
-local `DateTime` on two machines. The conversion from milliseconds to calendar
-fields is implemented in lsaca on top of the `__time_local_parts` and
-`__time_utc_parts` intrinsics, so apart from the time zone the results are
-identical on Windows, macOS and Linux.
+* The wall clock follows the operating system's clock and time zone; local time
+  is the platform's local time.
+* The monotonic clock is the platform's monotonic counter. Its origin is
+  unspecified, so only differences between readings are meaningful.
+* Millisecond resolution is the guaranteed granularity of the wall clock; the
+  monotonic clock may be finer.
+* Times before the Unix epoch have negative millisecond counts, and `modified()`
+  in [fs](fs.md) reports an error for them.
 
-## Limits in 2.0
+## Limits in 2.1.0
 
-There are no timer or async APIs, no `Duration` or `Instant` types, no
-time-zone database and no date parsing in 2.0.
+There is no calendar arithmetic (add days or months to a date), no date parsing,
+no formatting beyond the `DateTime` helpers, no time zone database beyond the
+platform's local time, no `UNIX_EPOCH` constant and no negative `Duration`.
+`DateTime` remains a compatibility type: new code should store `SystemTime` and
+format only at the point of display.
 
 ## See also
 
-* [process](process.md) and [env](env.md) - the other operating-system modules.
-* [Standard library chapter](../language/15-standard-library.md#io-and-process) -
-  the 1.7 I/O and process free functions.
+* [io](io.md) - the `Error` type shared with the clock operations.
+* [fs](fs.md) - `SystemTime` in file metadata.
+* [Standard library chapter](../language/15-standard-library.md#io-and-process).

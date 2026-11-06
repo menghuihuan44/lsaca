@@ -12,7 +12,9 @@ objects](25-trait-objects.md) and [Default method bodies](#default-method-bodies
 A trait declaration contains method signatures, each ending with a semicolon,
 plus optionally default method bodies (see [Default method
 bodies](#default-method-bodies)). Every method takes a receiver: `self`, `&self`
-or `&mut self`. For example, a trait that describes drawable values would be
+or `&mut self`. A receiver cannot carry `mut`: writing `fn f(mut self)` is
+`E0001` in an impl and in a trait declaration alike — mutability of the
+receiver is expressed by `&mut self`. For example, a trait that describes drawable values would be
 declared as `trait Describe { fn describe(&self) -> String; }` — the declaration
 names the method without a body; an impl block supplies it.
 
@@ -467,6 +469,7 @@ Person` exists. See [Trait objects](25-trait-objects.md) for the full rules.
 * No associated functions (`Trait::method()` without a receiver), no associated
   types, no constants and no generic methods.
 * No supertraits and no `where` clauses; bounds are written inline.
+* No `mut` receiver: `fn f(mut self)` is `E0001`; use `&mut self`.
 * `impl Trait for Type` only for user-defined structs and enums; a
   builtin target is `E0118`.
 * No associated items or generic methods, so only *object safe* traits can be

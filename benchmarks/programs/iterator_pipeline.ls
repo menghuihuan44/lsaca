@@ -2,7 +2,8 @@
 // iter().filter(even).map(x * x).fold(0, add) and print the folded sum. The
 // checksum is order-independent.
 fn make_numbers(n: i64) -> Vec<i64> {
-    let mut values: Vec<i64> = Vec::with_capacity(n);
+    let capacity: usize = n as usize;
+    let mut values: Vec<i64> = Vec::with_capacity(capacity);
     let mut value = 0;
     while value < n {
         values.push(value);

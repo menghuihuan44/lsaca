@@ -275,7 +275,7 @@ fn cases() -> Vec<Case> {
             name: "try_result_err",
             source: include_str!("programs/try_result_err.ls"),
             args: &[],
-            stdout: "ok 42\nerr invalid integer\n",
+            stdout: "ok 42\nerr invalid digit found in string\n",
             exit: 0,
             stderr_contains: &[],
         },
@@ -291,7 +291,7 @@ fn cases() -> Vec<Case> {
             name: "combo_map",
             source: include_str!("programs/combo_map.ls"),
             args: &[],
-            stdout: "42\n-1\n7\nfalse\ntrue\n22\nerr INVALID INTEGER\n",
+            stdout: "42\n-1\n7\nfalse\ntrue\n22\nerr INVALID DIGIT FOUND IN STRING\n",
             exit: 0,
             stderr_contains: &[],
         },
@@ -372,6 +372,70 @@ fn cases() -> Vec<Case> {
             source: include_str!("programs/if_let.ls"),
             args: &[],
             stdout: "got 5\n6\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "tuple_structs",
+            source: include_str!("programs/tuple_structs.ls"),
+            args: &[],
+            stdout: "3 4 7\n14\n7\nunit ok\n1 2\n14\nPoint(10, 4)\nMeters(7)\nUnit\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "mut_params",
+            source: include_str!("programs/mut_params.ls"),
+            args: &[],
+            stdout: "10 11\nhi there! bye\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "int_suffixes",
+            source: include_str!("programs/int_suffixes.ls"),
+            args: &[],
+            stdout: "3\n255 -128 2000000000 1.5\n3.25\n255 10 63\n3000000000 20\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "usize_lengths",
+            source: include_str!("programs/usize_lengths.ls"),
+            args: &[],
+            stdout: "4\n2\n4\n100\n30\ntrue\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "str_params",
+            source: include_str!("programs/str_params.ls"),
+            args: &[],
+            stdout: "hello, world\nhello, lsaca\nhello, rust!\nababab\nhey you\nxy\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "iterator_adapters",
+            source: include_str!("programs/iterator_adapters.ls"),
+            args: &[],
+            stdout: "[(1, 10), (2, 20), (3, 30), (4, 40)]\n[1, 2, 3, 4]\n[20, 40, 60]\n[1, 2, 3]\n[3, 4, 5, 6]\n[1, 3, 5]\ninspect 1\ninspect 2\n[1, 2]\neach 1\neach 2\n3\n6\n3\n21\n720\n21\n6\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "collections_std",
+            source: include_str!("programs/collections_std.ls"),
+            args: &[],
+            stdout: "2 true false\n3 true false\n1 true false\n1 true false\n[\"apple\", \"orange\", \"pear\"] apple pear\n[\"a\", \"b\"] [1, 2] 2\n[1, 2, 3] 1 2\n7 7 2\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "strings_std",
+            source: include_str!("programs/strings_std.ls"),
+            args: &[],
+            stdout: "\"hello, world\"\n\"hello, world  \"\n\"  hello, world\"\n[\"hello,\", \"world\"]\n[\"a\", \"b\", \"c\"]\n3\n  hello, lsaca  \na\n7\nparsed 42\ntrue\n",
             exit: 0,
             stderr_contains: &[],
         },
@@ -1449,6 +1513,16 @@ fn io_cases() -> Vec<IoCase> {
             exit: 0,
             stderr_contains: &[],
         },
+        IoCase {
+            name: "system_std",
+            source: include_str!("programs/system_std.ls"),
+            args: &[],
+            stdin: None,
+            envs: &[("LSACA_E2E_PRESENT", "yes")],
+            stdout: "true\n1 500000000\n150\ntrue 0\ntrue\ntrue\nhello\n5\nfile\ntrue\ntrue\nabsolute\ntrue\ntrue true\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
     ]
 }
 
@@ -1551,6 +1625,15 @@ fn frontend_rejects_invalid_programs() {
             "bad_dyn_unsized",
             include_str!("programs/bad_dyn_unsized.ls"),
         ),
+        ("bad_int_suffix", include_str!("programs/bad_int_suffix.ls")),
+        ("bad_int_range", include_str!("programs/bad_int_range.ls")),
+        (
+            "bad_default_overflow",
+            include_str!("programs/bad_default_overflow.ls"),
+        ),
+        ("bad_index_type", include_str!("programs/bad_index_type.ls")),
+        ("bad_str_arg", include_str!("programs/bad_str_arg.ls")),
+        ("bad_mut_param", include_str!("programs/bad_mut_param.ls")),
     ];
     let mut problems: Vec<String> = Vec::new();
     for (name, source) in programs {
@@ -1994,7 +2077,7 @@ fn v15_feature_errors_are_reported() {
             include_str!("programs/bad_generic_bound.ls"),
             &[
                 "error[E0277]",
-                "the trait bound (i64: Sized2) is not satisfied",
+                "the trait bound (i32: Sized2) is not satisfied",
             ],
         ),
         (
@@ -2078,11 +2161,117 @@ fn v15_feature_errors_are_reported() {
             ],
         ),
         (
-            "bad_iter_zip",
-            include_str!("programs/bad_iter_zip.ls"),
+            "bad_mixed_int_arith",
+            include_str!("programs/bad_mixed_int_arith.ls"),
+            &["error[E0308]", "mismatched types"],
+        ),
+        (
+            "bad_usize_to_i64",
+            include_str!("programs/bad_usize_to_i64.ls"),
+            &["error[E0308]", "mismatched types"],
+        ),
+        (
+            "bad_mixed_int_compare",
+            include_str!("programs/bad_mixed_int_compare.ls"),
+            &["error[E0308]", "mismatched types"],
+        ),
+        (
+            "bad_tuple_struct_arity",
+            include_str!("programs/bad_tuple_struct_arity.ls"),
             &[
-                "error[E0599]",
-                "no method named zip found for type VecIter<i64>",
+                "error[E0061]",
+                "this struct takes 2 arguments but 1 was supplied",
+            ],
+        ),
+        (
+            "bad_tuple_field_index",
+            include_str!("programs/bad_tuple_field_index.ls"),
+            &[
+                "error[E0609]",
+                "tuple index 2 is out of bounds for struct Point with 2 field(s)",
+            ],
+        ),
+        (
+            "bad_unit_struct_call",
+            include_str!("programs/bad_unit_struct_call.ls"),
+            &[
+                "error[E0532]",
+                "expected tuple struct or tuple variant, found unit struct Marker",
+            ],
+        ),
+        (
+            "bad_tuple_pattern_arity",
+            include_str!("programs/bad_tuple_pattern_arity.ls"),
+            &[
+                "error[E0023]",
+                "this pattern expects 2 field(s) but 1 were supplied",
+            ],
+        ),
+        (
+            "bad_mut_self",
+            include_str!("programs/bad_mut_self.ls"),
+            &["'self' cannot be declared 'mut'"],
+        ),
+        (
+            "bad_slice_by_value",
+            include_str!("programs/bad_slice_by_value.ls"),
+            &[
+                "error[E0001]",
+                "slices are unsized; use a reference such as &[T]",
+            ],
+        ),
+        (
+            "bad_str_index",
+            include_str!("programs/bad_str_index.ls"),
+            &["error[E0608]", "cannot index into a value of type str"],
+        ),
+        (
+            "bad_parse_target",
+            include_str!("programs/bad_parse_target.ls"),
+            &["error[E0107]", "unsupported type argument for parse: u8"],
+        ),
+        (
+            "bad_strong_count_type",
+            include_str!("programs/bad_strong_count_type.ls"),
+            &["error[E0308]", "mismatched types"],
+        ),
+        (
+            "bad_shutdown_type",
+            include_str!("programs/bad_shutdown_type.ls"),
+            &["error[E0308]", "mismatched types"],
+        ),
+        (
+            "bad_slice_storage",
+            include_str!("programs/bad_slice_storage.ls"),
+            &[
+                "error[E0498]",
+                "references cannot be stored in this type (found &[i64])",
+            ],
+        ),
+        (
+            "bad_str_concat_views",
+            include_str!("programs/bad_str_concat_views.ls"),
+            &[
+                "error[E0369]",
+                "binary operation + cannot be applied to type &str",
+            ],
+        ),
+        (
+            "bad_owned_string_concat",
+            include_str!("programs/bad_owned_string_concat.ls"),
+            &["error[E0277]", "cannot add"],
+        ),
+        (
+            "bad_slice_return",
+            include_str!("programs/bad_slice_return.ls"),
+            &["error[E0106]", "missing lifetime specifier"],
+        ),
+        (
+            "bad_mut_tuple_field",
+            include_str!("programs/bad_mut_tuple_field.ls"),
+            &[
+                "error[E0596]",
+                "cannot assign to immutable value: the binding has not been declared as mutable",
             ],
         ),
     ];

@@ -22,14 +22,14 @@ fn main() {
             None => 1,
         };
         counts.insert(word, next);
-        array[bucket] = array[bucket] + 1;
+        array[bucket as usize] = array[bucket as usize] + 1;
         position += 1;
     }
-    assert_eq!(counts.len(), distinct);
+    assert_eq!(counts.len(), distinct as usize);
     let mut total: i64 = 0;
     let mut bucket: i64 = 0;
     while bucket < distinct {
-        total += array[bucket];
+        total += array[bucket as usize];
         bucket += 1;
     }
     assert_eq!(total, tokens);
@@ -49,7 +49,7 @@ fn main() {
     let mut checksum_array: i64 = 0;
     let mut position_again: i64 = 0;
     while position_again < distinct {
-        let value = array[position_again];
+        let value = array[position_again as usize];
         checksum_array += value * value;
         position_again += 1;
     }

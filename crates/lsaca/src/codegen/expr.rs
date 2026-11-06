@@ -139,8 +139,17 @@ impl<'a> Gen<'a> {
         // Operands of every binary operator are borrowed: comparisons read
         // through references and the string operators never take ownership.
         let left = self.gen_borrowed(lhs);
-        let right = self.gen_borrowed(rhs);
         let operand_ty = lhs.ty.clone();
+        // `String + &str` appends borrowed text: the right hand side is a
+        // fat `LsStr` value, while the runtime concatenation helper takes a
+        // `const LsString*`. A read only stack descriptor bridges the two
+        // shapes without copying or allocating. An owned `String` operand is
+        // already the right shape and is borrowed directly.
+        let right = if op == HBinaryOp::Add && operand_ty.is_string() && !rhs.ty.is_string() {
+            self.string_text_argument(rhs, "String addition")
+        } else {
+            self.gen_borrowed(rhs)
+        };
         let result_ty = ty.clone();
         // Release builds keep division and remainder checked because the runtime
         // reports division by zero, but a remainder by a positive constant can
@@ -346,7 +355,15 @@ impl<'a> Gen<'a> {
             Some(binop) => {
                 let old = self.declare_temp(&place_ty);
                 self.emit_copy_into(&old, &place_ty, &lvalue);
-                let right = self.gen_owned(value);
+                // `text += &str` concatenates borrowed text: bridge a fat
+                // `LsStr` right hand side to the `const LsString*` the
+                // runtime helper expects (see `gen_binary`).
+                let right =
+                    if binop == HBinaryOp::Add && place_ty.is_string() && !value.ty.is_string() {
+                        self.string_text_argument(value, "String addition assignment")
+                    } else {
+                        self.gen_owned(value)
+                    };
                 let expression = self.binop_value(binop, &place_ty, &place_ty, &old, &right, span);
                 let stored = self.declare_temp(&place_ty);
                 self.w.line(format!("{} = {};", stored, expression));
@@ -636,6 +653,14 @@ impl<'a> Gen<'a> {
         }
         let mut crossed_cell = false;
         for _ in 0..8 {
+            // Methods implemented on Rc<T>/Box<T> itself take the cell handle,
+            // not its payload: the impl self type is the cell type, so stop as
+            // soon as the receiver already has it. Only method calls that
+            // auto-dereference through the cell (self type is the pointee)
+            // need to cross it.
+            if ty == *self_ty {
+                break;
+            }
             match &ty {
                 Ty::Rc(inner) | Ty::Box(inner) => {
                     lvalue = format!("(({})->payload)", lvalue);

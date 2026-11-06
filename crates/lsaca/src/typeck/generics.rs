@@ -10,12 +10,12 @@ use std::collections::HashMap;
 
 use super::check::Checker;
 use super::items::{EnumInfo, FnInfo, FnSig, StructInfo, sanitize_c_ident};
-use super::itype::{ITy, VarKind};
+use super::itype::ITy;
 use super::modules::ModuleId;
 use crate::ast::{EnumDecl, FnDecl, GenericParam, StructDecl, TraitRef, TypeExpr, Visibility};
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::span::Span;
-use crate::types::{FloatTy, IntTy, SelfKind};
+use crate::types::SelfKind;
 
 /// Where an item came from: the user program or the embedded standard library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,14 +182,14 @@ impl<'a> Checker<'a> {
     // -----------------------------------------------------------------------
 
     /// Resolve an instantiation argument to a fully concrete type. Integer and
-    /// float literal variables default to i64 and f64; a remaining general
+    /// float literal variables default to i32 and f64; a remaining general
     /// inference variable cannot name a concrete instance.
     pub fn normalize_instance_arg(&mut self, ty: &ITy) -> Option<ITy> {
         let resolved = self.infer.resolve(ty);
         let resolved = match resolved {
             ITy::Var(id) => match self.infer.var_kind(id) {
                 super::itype::VarKind::IntLiteral => {
-                    let _ = self.infer.unify(&ITy::Var(id), &ITy::i64());
+                    let _ = self.infer.unify(&ITy::Var(id), &ITy::i32());
                     self.infer.resolve(&ITy::Var(id))
                 }
                 super::itype::VarKind::FloatLiteral => {
@@ -214,7 +214,7 @@ impl<'a> Checker<'a> {
         match self.infer.resolve(ty) {
             ITy::Var(id) => match self.infer.var_kind(id) {
                 super::itype::VarKind::IntLiteral => {
-                    let _ = self.infer.unify(&ITy::Var(id), &ITy::i64());
+                    let _ = self.infer.unify(&ITy::Var(id), &ITy::i32());
                     self.infer.resolve(&ITy::Var(id))
                 }
                 super::itype::VarKind::FloatLiteral => {
@@ -276,6 +276,108 @@ impl<'a> Checker<'a> {
             ITy::Ref { inner, .. } => self.contains_unresolved(&inner),
             _ => false,
         }
+    }
+
+    /// Whether `ty` still mentions an unresolved inference variable, including
+    /// one nested inside the argument list of a user generic struct or enum
+    /// instance (those arguments live in the instance table, not in the `ITy`
+    /// node itself).
+    pub fn ty_has_open_args(&self, ty: &ITy) -> bool {
+        match self.infer.resolve(ty) {
+            ITy::Var(_) => true,
+            ITy::Vec(inner) | ITy::Rc(inner) | ITy::Box(inner) | ITy::Option(inner) => {
+                self.ty_has_open_args(&inner)
+            }
+            ITy::Result(ok, err) => self.ty_has_open_args(&ok) || self.ty_has_open_args(&err),
+            ITy::HashMap(key, value) => {
+                self.ty_has_open_args(&key) || self.ty_has_open_args(&value)
+            }
+            ITy::Tuple(elems) => elems.iter().any(|elem| self.ty_has_open_args(elem)),
+            ITy::Fn(params, ret) => {
+                params.iter().any(|param| self.ty_has_open_args(param))
+                    || self.ty_has_open_args(&ret)
+            }
+            ITy::Ref { inner, .. } => self.ty_has_open_args(&inner),
+            ITy::Slice(inner) => self.ty_has_open_args(&inner),
+            ITy::Struct(id) => {
+                let args = self
+                    .structs
+                    .get(id)
+                    .and_then(|info| info.generic.as_ref())
+                    .map(|instance| instance.args.clone());
+                match args {
+                    Some(args) => args.iter().any(|arg| self.ty_has_open_args(arg)),
+                    None => false,
+                }
+            }
+            ITy::Enum(id) => {
+                let args = self
+                    .enums
+                    .get(id)
+                    .and_then(|info| info.generic.as_ref())
+                    .map(|instance| instance.args.clone());
+                match args {
+                    Some(args) => args.iter().any(|arg| self.ty_has_open_args(arg)),
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Canonicalize a user defined generic struct instance whose type
+    /// arguments have all resolved.
+    ///
+    /// Deferred signature inference may mint several instances of one
+    /// definition while their arguments are still open (for example two
+    /// `VecIter<T>` adapters over two unannotated vector literals). Once the
+    /// arguments resolve to the same types those instances denote one type, so
+    /// a lookup must resolve to the same nominal instance id that
+    /// `instantiate_struct_resolved` would pick: an exact cache hit first and
+    /// otherwise the first cached instance whose resolved arguments match.
+    /// The alias is recorded in the instance cache so later instantiations land
+    /// on the same id. Open instances are returned unchanged.
+    pub fn canonical_instance_ty(&mut self, ty: &ITy) -> ITy {
+        let resolved = self.infer.resolve(ty);
+        let (def_id, args) = match &resolved {
+            ITy::Struct(id) => match self.structs.get(*id).and_then(|info| info.generic.as_ref()) {
+                Some(instance) => (instance.def_id, instance.args.clone()),
+                None => return resolved,
+            },
+            _ => return resolved,
+        };
+        if self.ty_has_open_args(&resolved) {
+            return resolved;
+        }
+        let concrete: Vec<ITy> = args.iter().map(|arg| self.infer.resolve(arg)).collect();
+        let Some(instances) = self
+            .generic_structs
+            .get(def_id)
+            .map(|def| def.instances.clone())
+        else {
+            return resolved;
+        };
+        if let Some(&canonical) = instances.get(&concrete) {
+            return ITy::Struct(canonical);
+        }
+        let mut canonical = None;
+        for (key, &existing) in instances.iter() {
+            if key.len() != concrete.len() {
+                continue;
+            }
+            let key_concrete: Vec<ITy> = key.iter().map(|arg| self.infer.resolve(arg)).collect();
+            if key_concrete == concrete {
+                canonical = Some(existing);
+                break;
+            }
+        }
+        let Some(canonical) = canonical else {
+            return resolved;
+        };
+        if let Some(def) = self.generic_structs.get_mut(def_id) {
+            def.instances.insert(concrete, canonical);
+        }
+        ITy::Struct(canonical)
     }
 
     pub fn normalize_args(&mut self, args: &[ITy]) -> Option<Vec<ITy>> {
@@ -398,6 +500,44 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
+        // The declaration of a generic struct may carry trait bounds. They are a
+        // precondition of the instantiation and are checked here, at the use
+        // site, exactly like the bounds of a generic function. Probes resolve
+        // candidate types and must not report user-facing bound errors.
+        if !self.probing
+            && !self.probe_quiet
+            && let Some(def) = self.generic_structs.get(def_id).cloned()
+        {
+            self.validate_generic_bounds(&def.generics, &args, span, def.module);
+        }
+        self.instantiate_struct_resolved(def_id, args, span)
+    }
+
+    /// Instantiate a user generic struct whose arguments may still contain
+    /// unresolved inference variables (an "open instance").
+    ///
+    /// Deferred generic function signatures mention user generic structs
+    /// (`__lsaca_VecIter<T>`) whose arguments are not concrete yet. Naming such
+    /// an instance with normalized arguments would default its literal variables
+    /// immediately and lose the constraint a later use (for example
+    /// `.collect::<Vec<i64>>()`) provides. The open instance is registered and
+    /// reused once its arguments resolve.
+    pub fn instantiate_struct_open(
+        &mut self,
+        def_id: usize,
+        args: Vec<ITy>,
+        span: Span,
+    ) -> Option<usize> {
+        let args: Vec<ITy> = args.iter().map(|arg| self.infer.resolve(arg)).collect();
+        self.instantiate_struct_resolved(def_id, args, span)
+    }
+
+    fn instantiate_struct_resolved(
+        &mut self,
+        def_id: usize,
+        args: Vec<ITy>,
+        span: Span,
+    ) -> Option<usize> {
         let def = {
             let def = self.generic_structs.get(def_id)?;
             def.clone()
@@ -420,6 +560,29 @@ impl<'a> Checker<'a> {
         if let Some(&id) = def.instances.get(&args) {
             return Some(id);
         }
+        // A deferred signature may have minted this instance while some of its
+        // arguments were still inference variables. Reuse that instance once the
+        // variables have resolved, instead of creating a duplicate nominal type
+        // whose fields would be identical: codegen emits one C type per struct
+        // id, so two ids for one definition would produce incompatible C types.
+        for (key_args, &existing) in def.instances.iter() {
+            if key_args.len() != args.len() {
+                continue;
+            }
+            let resolved: Vec<ITy> = key_args.iter().map(|arg| self.infer.resolve(arg)).collect();
+            if resolved == args {
+                let name = self.instance_display(&def.name, &args);
+                let c_name = self.instance_c_name(&def.c_name_base, &args);
+                if let Some(info) = self.structs.get_mut(existing) {
+                    info.name = name;
+                    info.c_name = c_name;
+                }
+                if let Some(def) = self.generic_structs.get_mut(def_id) {
+                    def.instances.insert(args.clone(), existing);
+                }
+                return Some(existing);
+            }
+        }
         let name = self.instance_display(&def.name, &args);
         let c_name = self.instance_c_name(&def.c_name_base, &args);
         let id = self.structs.len();
@@ -432,7 +595,9 @@ impl<'a> Checker<'a> {
                 args: args.clone(),
             }),
             span: def.decl.span,
-            decl_fields: def.decl.fields.clone(),
+            decl_fields: def.decl.kind.fields(),
+            tuple: matches!(def.decl.kind, crate::ast::StructKind::Tuple(_)),
+            unit: matches!(def.decl.kind, crate::ast::StructKind::Unit),
             fields: Vec::new(),
             fields_resolved: false,
         });
@@ -464,6 +629,9 @@ impl<'a> Checker<'a> {
             let def = self.generic_enums.get(def_id)?;
             def.clone()
         };
+        if !self.probing && !self.probe_quiet {
+            self.validate_generic_bounds(&def.generics, &args, span, def.module);
+        }
         let arity = def.generics.len();
         if args.len() != arity {
             self.error_code(
@@ -550,6 +718,16 @@ impl<'a> Checker<'a> {
             };
             args.push(ty);
         }
+        // An open generic instance receiver (still-unresolved arguments) keeps
+        // its arguments open: the structural match above already validated the
+        // impl self type, and defaulting the variables would name an instance
+        // that no longer matches the receiver. A later use of the returned
+        // arguments is expected to determine them.
+        if args.iter().any(|arg| self.ty_has_open_args(arg))
+            && matches!(self.infer.resolve(receiver), ITy::Struct(_) | ITy::Enum(_))
+        {
+            return Some(args);
+        }
         let args = match self.normalize_args(&args) {
             Some(args) => args,
             None => {
@@ -568,7 +746,7 @@ impl<'a> Checker<'a> {
             checker.resolve_ty(&info.self_ty, None)
         });
         self.pop_generic_env();
-        let matched = match concrete_self {
+        let matched = match concrete_self.clone() {
             Some(ty) => self.infer.unify(&ty, receiver).is_ok(),
             None => false,
         };
@@ -818,28 +996,12 @@ impl<'a> Checker<'a> {
                 }
             }
         } else {
-            // Deferred instantiation: only literal inference variables are
-            // normalized (they have a fixed type); general variables are kept
-            // so the instance is shared and resolved once the caller settles.
-            let mut resolved = Vec::with_capacity(args.len());
-            for arg in &args {
-                let arg = self.infer.resolve(arg);
-                match &arg {
-                    ITy::Var(id) => match self.infer.var_kind(*id) {
-                        VarKind::IntLiteral => {
-                            let _ = self.unify_quiet(&arg, &ITy::Int(IntTy::I64));
-                            resolved.push(self.infer.resolve(&arg));
-                        }
-                        VarKind::FloatLiteral => {
-                            let _ = self.unify_quiet(&arg, &ITy::Float(FloatTy::F64));
-                            resolved.push(self.infer.resolve(&arg));
-                        }
-                        VarKind::General => resolved.push(arg),
-                    },
-                    _ => resolved.push(arg),
-                }
-            }
-            resolved
+            // Deferred instantiation: every inference variable stays open so a
+            // later constraint (an expected type at the caller, a turbofish at
+            // the outer method call) can still determine it. Literal variables
+            // fall back to their default type when the instance body is finally
+            // checked (see `check_fn`).
+            args.iter().map(|arg| self.infer.resolve(arg)).collect()
         };
         // Remember the user call site when the instance still has unresolved
         // type arguments: its standard-library body calls generic functions that
@@ -853,9 +1015,10 @@ impl<'a> Checker<'a> {
             .unwrap_or(true);
         let deferred_span = if require_concrete || !caller_is_user {
             None
-        } else if self.normalize_args(&args).is_none() {
-            // At least one argument is still an open variable. Variables pinned
-            // to a literal normalize to i64/f64, so such instances stay checkable.
+        } else if args.iter().any(|arg| self.contains_unresolved(arg)) {
+            // At least one argument is still open. Literal variables are given
+            // their default type right before the body is checked, so only a
+            // genuinely general variable makes the body uncheckable.
             Some(span)
         } else {
             None
@@ -906,7 +1069,14 @@ impl<'a> Checker<'a> {
             }
             GenericOwner::Free => None,
         };
-        let sig = self.generic_signature(&def, &args, self_ty.as_ref())?;
+        // While a deferred signature is resolved, user generic structs and
+        // enums it mentions are instantiated with their inference variables
+        // still open; see `instantiate_struct_open`.
+        let previous_defer = self.defer_open_instances;
+        self.defer_open_instances = !require_concrete;
+        let sig = self.generic_signature(&def, &args, self_ty.as_ref());
+        self.defer_open_instances = previous_defer;
+        let sig = sig?;
         let display = match def.owner {
             GenericOwner::TraitImpl(impl_id) => {
                 let info = self.impls.get(impl_id)?.clone();

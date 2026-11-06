@@ -56,14 +56,16 @@ Output:
 7 9 16
 ```
 
-A struct with no fields — a marker type — is declared with empty braces and
-constructed with the same empty braces:
+A struct with no fields — a marker type — can be written as a unit struct with a
+semicolon or with empty braces and constructed with the matching form:
 
 ```ls
 struct Ready {}
+struct Marker;
 
 fn describe(_flag: bool) -> String {
-    let _marker = Ready {};
+    let _a = Ready {};
+    let _b = Marker;
     String::from("done")
 }
 
@@ -77,54 +79,70 @@ Output:
 done
 ```
 
-`_flag` and `_marker` are ordinary identifiers starting with an underscore;
+`_flag`, `_a` and `_b` are ordinary identifiers starting with an underscore;
 lsaca has no unused-variable warnings, so this is only a convention.
 
-There are no tuple structs and no struct-update syntax (`..base`); both are parse
-errors:
+### Tuple and unit structs
 
-```ls,compile-fail
+Since 2.1.0 a struct may be declared with unnamed fields — a **tuple struct** —
+or with no fields at all — a **unit struct**:
+
+```ls
 struct Meters(i64);
+struct Pair(i64, String);
+struct Marker;
 
 fn main() {
-    let m = Meters(5);
+    let distance = Meters(42);
+    let pair = Pair(1, String::from("one"));
+    let marker = Marker;
+    println!("{} {} {}", distance.0, pair.0, pair.1.len());
+    let _ = marker;
 }
 ```
 
-Error:
+Output:
 ```text
-error: expected '{', found (
-  --> example-04.ls:1:14
-   |
- 1 | struct Meters(i64);
-   |              ^
-
-error: expected field name, found (
-  --> example-04.ls:1:14
-   |
- 1 | struct Meters(i64);
-   |              ^
-
-error: expected ':' after field name, found identifier i64
-  --> example-04.ls:1:15
-   |
- 1 | struct Meters(i64);
-   |               ^^^
-
-error: expected '}', found )
-  --> example-04.ls:1:18
-   |
- 1 | struct Meters(i64);
-   |                  ^
-
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found )
-  --> example-04.ls:1:18
-   |
- 1 | struct Meters(i64);
-   |                  ^
-
-lsaca: example-04.ls: could not compile example-04.ls due to previous error(s)
+42 1 3
 ```
+
+Tuple struct fields are accessed by index: `distance.0`, `pair.1`. Unlike named
+struct fields, tuple-struct fields are **implicitly public**: code in another
+module can construct the value with `Meters(42)` and read `.0` directly. (This
+is a deviation from Rust, where tuple-struct fields are private unless marked
+`pub`; lsaca has no visibility marker on a positional field.)
+
+The usual newtype idiom is a one-field tuple struct:
+
+```ls
+struct Meters(i64);
+
+impl Meters {
+    fn to_feet(&self) -> f64 {
+        self.0 as f64 * 3.28084
+    }
+}
+
+fn main() {
+    let m = Meters(2);
+    println!("{:.2}", m.to_feet());
+}
+```
+
+Output:
+```text
+6.56
+```
+
+A unit struct is a value of its type with no storage; it is declared
+`struct Marker;` and constructed by naming it, `Marker`. A `struct Marker {}`
+declared with empty braces is also a marker type, but it is constructed with
+`Marker {}`; the two forms are distinct types.
+
+Tuple structs are matched with tuple patterns (`Point(x, y)`) — see
+[Pattern matching](13-pattern-matching.md).
+
+Struct-update syntax (`..base`) is still not supported:
 
 ```ls,compile-fail
 struct Point {
@@ -142,48 +160,48 @@ fn main() {
 Error:
 ```text
 error: expected field name, found ..
-  --> example-05.ls:8:33
+  --> example-06.ls:8:33
    |
  8 |     let shifted = Point { x: 3, ..base };
    |                                 ^^
 
 error: expected '}' after struct literal, found identifier base
-  --> example-05.ls:8:35
+  --> example-06.ls:8:35
    |
  8 |     let shifted = Point { x: 3, ..base };
    |                                   ^^^^
 
 error: expected ';' after let statement, found identifier base
-  --> example-05.ls:8:35
+  --> example-06.ls:8:35
    |
  8 |     let shifted = Point { x: 3, ..base };
    |                                   ^^^^
 
 error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found ;
-  --> example-05.ls:8:41
+  --> example-06.ls:8:41
    |
  8 |     let shifted = Point { x: 3, ..base };
    |                                         ^
 
 error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found identifier println
-  --> example-05.ls:9:5
+  --> example-06.ls:9:5
    |
  9 |     println!("{}", shifted.x);
    |     ^^^^^^^
 
 error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found }
-   --> example-05.ls:10:1
+   --> example-06.ls:10:1
     |
  10 | }
     | ^
 
 error: unexpected token
-   --> example-05.ls:10:1
+   --> example-06.ls:10:1
     |
  10 | }
     | ^
 
-lsaca: example-05.ls: could not compile example-05.ls due to previous error(s)
+lsaca: example-06.ls: could not compile example-06.ls due to previous error(s)
 ```
 
 ### Value semantics
@@ -232,12 +250,12 @@ fn main() {
 Error:
 ```text
 error[E0596]: cannot assign to immutable value: the binding has not been declared as mutable
-  --> example-07.ls:7:5
+  --> example-08.ls:7:5
    |
  7 |     counter.value = counter.value + 1;
    |     ^^^^^^^^^^^^^
 
-lsaca: example-07.ls: could not compile example-07.ls due to previous error(s)
+lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
 ```
 
 ## Enums
@@ -533,12 +551,12 @@ fn main() {
 Error:
 ```text
 error[E0596]: cannot mutate through this receiver: the binding is not declared as mutable
-   --> example-16.ls:13:5
+   --> example-17.ls:13:5
     |
  13 |     c.bump();
     |     ^
 
-lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
+lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
 ```
 
 ### Methods on enums
@@ -638,12 +656,12 @@ fn main() {
 Error:
 ```text
 error[E0063]: missing field y in initializer of Point
-  --> example-19.ls:7:13
+  --> example-20.ls:7:13
    |
  7 |     let p = Point { x: 1 };
    |             ^^^^^^^^^^^^^^
 
-lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
+lsaca: example-20.ls: could not compile example-20.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -661,12 +679,12 @@ fn main() {
 Error:
 ```text
 error[E0560]: struct Point has no field named z; did you mean x?
-  --> example-20.ls:7:33
+  --> example-21.ls:7:33
    |
  7 |     let p = Point { x: 1, y: 2, z: 3 };
    |                                 ^
 
-lsaca: example-20.ls: could not compile example-20.ls due to previous error(s)
+lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
 ```
 
 Accessing a field that does not exist and calling a method that does not exist
@@ -687,12 +705,12 @@ fn main() {
 Error:
 ```text
 error[E0609]: no field z on type Point; did you mean x?
-  --> example-21.ls:8:20
+  --> example-22.ls:8:20
    |
  8 |     println!("{}", p.z);
    |                    ^^^
 
-lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
+lsaca: example-22.ls: could not compile example-22.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -710,12 +728,12 @@ fn main() {
 Error:
 ```text
 error[E0599]: no method named frobnicate found for type Point in the current scope
-  --> example-22.ls:8:22
+  --> example-23.ls:8:22
    |
  8 |     println!("{}", p.frobnicate());
    |                      ^^^^^^^^^^
 
-lsaca: example-22.ls: could not compile example-22.ls due to previous error(s)
+lsaca: example-23.ls: could not compile example-23.ls due to previous error(s)
 ```
 
 Declaring the same field twice is rejected as well:
@@ -734,20 +752,21 @@ fn main() {
 Error:
 ```text
 error[E0124]: field 'x' is already declared
-  --> example-23.ls:3:5
+  --> example-24.ls:3:5
    |
  3 |     x: String,
    |     ^
-   = note: example-23.ls:2:5: previous declaration of 'x' here
+   = note: example-24.ls:2:5: previous declaration of 'x' here
 
-lsaca: example-23.ls: could not compile example-23.ls due to previous error(s)
+lsaca: example-24.ls: could not compile example-24.ls due to previous error(s)
 ```
 
 ## Printing and equality
 
 Structs and enums have no user-defined formatting. `Display` and `Debug` both
-print a structural form: `Point { x: 1, y: 2 }`, `Shape::Circle(2)`,
-`Shape::Empty`. Strings nested inside a composite are printed quoted, exactly as
+print a structural form: `Point { x: 1, y: 2 }` for a named struct,
+`Meters(2)` for a tuple struct, `Marker` for a unit struct, and `Shape::Circle(2)`
+or `Shape::Empty` for enum variants. Strings nested inside a composite are printed quoted, exactly as
 in Debug; a top-level `String` prints unquoted. Width, fill and alignment apply
 to the whole structural form (so `{:30}` pads a struct or enum as a unit), while
 the `+`/\`0\` sign flags and precision are only accepted for numbers and strings

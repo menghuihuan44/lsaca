@@ -1,5 +1,7 @@
 //! Call expressions, method calls, enum constructors and macros.
 
+use std::collections::HashMap;
+
 use super::combinators::is_combinator_method;
 use crate::ast::{self, ExprKind};
 use crate::hir::{HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HMacroKind};
@@ -14,7 +16,7 @@ use crate::typeck::iterators::is_iterator_sugar_name;
 use crate::typeck::itype::{ITy, VarKind};
 use crate::typeck::modules::{DefRef, ModuleId};
 use crate::typeck::tree::{TExpr, TExprKind, TFormatPart, TFormatPartKind, TMacroCall};
-use crate::types::{IntTy, SelfKind};
+use crate::types::{FloatTy, IntTy, SelfKind};
 
 /// Maximum number of path segments resolved by one call path. Module paths may
 /// be arbitrarily deep, so this is only an anti-DoS guard.
@@ -74,6 +76,363 @@ impl<'a> Checker<'a> {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Tuple and unit struct construction
+    // -----------------------------------------------------------------------
+
+    /// Check a call whose callee names a struct. Tuple struct constructors are
+    /// the only structs callable like functions; calling a named or unit struct
+    /// is an error. Returns None when the name does not resolve to a struct.
+    fn check_struct_ctor_call(
+        &mut self,
+        path: &ast::PathExpr,
+        args: &[ast::Expr],
+        span: Span,
+        hint: Option<&ITy>,
+    ) -> Option<TExpr> {
+        let segment = path.segments.last()?;
+        let name = segment.name.clone();
+        let explicit = segment.generics.clone();
+        if let Some(def_id) = self.lookup_generic_struct(&name) {
+            return Some(self.check_generic_tuple_struct_call(def_id, &explicit, args, span, hint));
+        }
+        let id = self.lookup_struct(&name)?;
+        let (tuple, unit) = (self.structs[id].tuple, self.structs[id].unit);
+        if !tuple {
+            let kind = if unit { "unit struct" } else { "struct" };
+            self.error_code(
+                format!(
+                    "expected tuple struct or tuple variant, found {} {}",
+                    kind, name
+                ),
+                span,
+                "E0532",
+            );
+            return Some(self.check_ctor_plain_args(args, span));
+        }
+        self.ensure_struct_fields(id);
+        let fields = self.struct_fields(id);
+        if fields.len() != args.len() {
+            self.error_code(
+                format!(
+                    "this struct takes {} argument{} but {} {} supplied",
+                    fields.len(),
+                    if fields.len() == 1 { "" } else { "s" },
+                    args.len(),
+                    if args.len() == 1 { "was" } else { "were" }
+                ),
+                span,
+                "E0061",
+            );
+            return Some(self.check_ctor_plain_args(args, span));
+        }
+        let values = self.check_struct_ctor_fields(&fields, args);
+        Some(self.finish_struct_ctor(id, values, span, hint))
+    }
+
+    fn check_ctor_plain_args(&mut self, args: &[ast::Expr], span: Span) -> TExpr {
+        for arg in args {
+            let _ = self.check_expr(arg, None);
+        }
+        self.never_expr(span)
+    }
+
+    fn check_generic_tuple_struct_call(
+        &mut self,
+        def_id: usize,
+        explicit: &[ast::TypeExpr],
+        args: &[ast::Expr],
+        span: Span,
+        hint: Option<&ITy>,
+    ) -> TExpr {
+        let def = match self.generic_structs.get(def_id) {
+            Some(def) => def.clone(),
+            None => return self.never_expr(span),
+        };
+        if !matches!(def.decl.kind, ast::StructKind::Tuple(_)) {
+            self.error_code(
+                format!(
+                    "expected tuple struct or tuple variant, found struct {}",
+                    def.name
+                ),
+                span,
+                "E0532",
+            );
+            return self.check_ctor_plain_args(args, span);
+        }
+        let field_defs = def.decl.kind.fields();
+        if field_defs.len() != args.len() {
+            self.error_code(
+                format!(
+                    "this struct takes {} argument{} but {} {} supplied",
+                    field_defs.len(),
+                    if field_defs.len() == 1 { "" } else { "s" },
+                    args.len(),
+                    if args.len() == 1 { "was" } else { "were" }
+                ),
+                span,
+                "E0061",
+            );
+            return self.check_ctor_plain_args(args, span);
+        }
+        let owner = if !explicit.is_empty() {
+            match self.resolve_concrete_type_args(explicit, span) {
+                Some(type_args) => self.instantiate_struct(def_id, type_args, span),
+                None => return self.never_expr(span),
+            }
+        } else if let Some(ITy::Struct(id)) = self.hinted_instance_of(&def.name, hint) {
+            Some(id)
+        } else {
+            // Infer the type arguments from the argument types: check the
+            // arguments without a hint, then match the declared field types
+            // against the types those arguments produced.
+            let checked: Vec<TExpr> = args.iter().map(|arg| self.check_expr(arg, None)).collect();
+            let type_args = match self.infer_struct_type_args(def_id, &checked, span) {
+                Some(type_args) => type_args,
+                None => return self.never_expr(span),
+            };
+            let id = match self.instantiate_struct(def_id, type_args, span) {
+                Some(id) => id,
+                None => return self.never_expr(span),
+            };
+            self.ensure_struct_fields(id);
+            let fields = self.struct_fields(id);
+            let mut values = Vec::with_capacity(checked.len());
+            for (index, (value, field)) in checked.into_iter().zip(fields.iter()).enumerate() {
+                let expected = field.2.clone();
+                let value = self.coerce_to(value, &expected, args[index].span);
+                let resolved = self.infer.resolve(&expected);
+                self.validate_storage_type(&resolved, args[index].span);
+                values.push((index, value));
+            }
+            return self.finish_struct_ctor(id, values, span, hint);
+        };
+        let id = match owner {
+            Some(id) => id,
+            None => return self.never_expr(span),
+        };
+        self.ensure_struct_fields(id);
+        let fields = self.struct_fields(id);
+        let values = self.check_struct_ctor_fields(&fields, args);
+        self.finish_struct_ctor(id, values, span, hint)
+    }
+
+    fn check_struct_ctor_fields(
+        &mut self,
+        fields: &[(String, Span, ITy)],
+        args: &[ast::Expr],
+    ) -> Vec<(usize, TExpr)> {
+        let mut values = Vec::with_capacity(args.len());
+        for (index, (arg, field)) in args.iter().zip(fields.iter()).enumerate() {
+            let expected = field.2.clone();
+            let value = self.check_expr(arg, Some(&expected));
+            let value = self.coerce_to(value, &expected, arg.span);
+            let resolved = self.infer.resolve(&expected);
+            self.validate_storage_type(&resolved, arg.span);
+            values.push((index, value));
+        }
+        values
+    }
+
+    fn finish_struct_ctor(
+        &mut self,
+        id: usize,
+        values: Vec<(usize, TExpr)>,
+        span: Span,
+        hint: Option<&ITy>,
+    ) -> TExpr {
+        let ty = ITy::Struct(id);
+        self.apply_hint(&ty, hint);
+        TExpr::new(
+            ty,
+            TExprKind::StructLit {
+                struct_id: id,
+                fields: values,
+            },
+            span,
+        )
+    }
+
+    /// Infer the generic arguments of a tuple struct from the argument types,
+    /// matching the declared field type expressions structurally.
+    fn infer_struct_type_args(
+        &mut self,
+        def_id: usize,
+        checked: &[TExpr],
+        span: Span,
+    ) -> Option<Vec<ITy>> {
+        let def = self.generic_structs.get(def_id)?.clone();
+        let field_defs = def.decl.kind.fields();
+        let mut env: HashMap<String, ITy> = HashMap::new();
+        for (field, value) in field_defs.iter().zip(checked.iter()) {
+            let actual = self.infer.resolve(&value.ty);
+            let actual = match self.concretize_inference_ty(&actual) {
+                Some(actual) => actual,
+                None => {
+                    self.error_code("type annotations needed".to_string(), span, "E0282");
+                    return None;
+                }
+            };
+            self.match_inference_ty(&field.ty, &actual, &def.generics, &mut env);
+        }
+        let mut out = Vec::with_capacity(def.generics.len());
+        for param in &def.generics {
+            match env.get(&param.name) {
+                Some(ty) => out.push(ty.clone()),
+                None => {
+                    self.error_code(
+                        format!(
+                            "type annotations needed: cannot infer type argument {}",
+                            param.name
+                        ),
+                        span,
+                        "E0282",
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Replace still-unconstrained literal variables with their default type so
+    /// they can be matched against declared generic field types.
+    fn concretize_inference_ty(&self, ty: &ITy) -> Option<ITy> {
+        match ty {
+            ITy::Var(id) => match self.infer.var_kind(*id) {
+                VarKind::IntLiteral => Some(ITy::i32()),
+                VarKind::FloatLiteral => Some(ITy::f64()),
+                VarKind::General => None,
+            },
+            ITy::Ref { mutable, inner } => Some(ITy::Ref {
+                mutable: *mutable,
+                inner: Box::new(self.concretize_inference_ty(inner)?),
+            }),
+            ITy::Slice(elem) => Some(ITy::slice(self.concretize_inference_ty(elem)?)),
+            ITy::Vec(elem) => Some(ITy::vec(self.concretize_inference_ty(elem)?)),
+            ITy::Rc(elem) => Some(ITy::rc(self.concretize_inference_ty(elem)?)),
+            ITy::Box(elem) => Some(ITy::box_(self.concretize_inference_ty(elem)?)),
+            ITy::Option(elem) => Some(ITy::option(self.concretize_inference_ty(elem)?)),
+            ITy::Result(ok, err) => Some(ITy::result(
+                self.concretize_inference_ty(ok)?,
+                self.concretize_inference_ty(err)?,
+            )),
+            ITy::HashMap(key, value) => Some(ITy::hash_map(
+                self.concretize_inference_ty(key)?,
+                self.concretize_inference_ty(value)?,
+            )),
+            ITy::Tuple(elems) => {
+                let elems: Option<Vec<ITy>> = elems
+                    .iter()
+                    .map(|elem| self.concretize_inference_ty(elem))
+                    .collect();
+                Some(ITy::Tuple(elems?))
+            }
+            ITy::Fn(params, ret) => {
+                let params: Option<Vec<ITy>> = params
+                    .iter()
+                    .map(|param| self.concretize_inference_ty(param))
+                    .collect();
+                Some(ITy::function(params?, self.concretize_inference_ty(ret)?))
+            }
+            other => Some(other.clone()),
+        }
+    }
+
+    /// Structurally match a declared field type expression against an argument
+    /// type, recording type parameters seen for the first time.
+    fn match_inference_ty(
+        &mut self,
+        type_expr: &ast::TypeExpr,
+        actual: &ITy,
+        params: &[ast::GenericParam],
+        env: &mut HashMap<String, ITy>,
+    ) {
+        match type_expr {
+            ast::TypeExpr::Path { name, generics, .. } => {
+                if generics.is_empty() && params.iter().any(|param| param.name == *name) {
+                    match env.get(name) {
+                        Some(existing) => {
+                            let existing = existing.clone();
+                            let _ = self.unify_quiet(&existing, actual);
+                        }
+                        None => {
+                            env.insert(name.clone(), actual.clone());
+                        }
+                    }
+                    return;
+                }
+                let resolved = self.infer.resolve(actual);
+                match (generics.as_slice(), &resolved) {
+                    ([elem], ITy::Vec(inner))
+                    | ([elem], ITy::Rc(inner))
+                    | ([elem], ITy::Box(inner))
+                    | ([elem], ITy::Option(inner))
+                    | ([elem], ITy::Slice(inner)) => {
+                        let inner = (**inner).clone();
+                        self.match_inference_ty(elem, &inner, params, env);
+                    }
+                    ([ok, err], ITy::Result(ok_ty, err_ty)) => {
+                        let ok_ty = (**ok_ty).clone();
+                        let err_ty = (**err_ty).clone();
+                        self.match_inference_ty(ok, &ok_ty, params, env);
+                        self.match_inference_ty(err, &err_ty, params, env);
+                    }
+                    ([key, value], ITy::HashMap(key_ty, value_ty)) => {
+                        let key_ty = (**key_ty).clone();
+                        let value_ty = (**value_ty).clone();
+                        self.match_inference_ty(key, &key_ty, params, env);
+                        self.match_inference_ty(value, &value_ty, params, env);
+                    }
+                    _ => {}
+                }
+            }
+            ast::TypeExpr::Ref { inner, .. } => {
+                if let ITy::Ref {
+                    inner: actual_inner,
+                    ..
+                } = self.infer.resolve(actual)
+                {
+                    let actual_inner = (*actual_inner).clone();
+                    self.match_inference_ty(inner, &actual_inner, params, env);
+                }
+            }
+            ast::TypeExpr::Slice { elem, .. } => {
+                if let ITy::Slice(actual_elem) = self.infer.resolve(actual) {
+                    let actual_elem = (*actual_elem).clone();
+                    self.match_inference_ty(elem, &actual_elem, params, env);
+                }
+            }
+            ast::TypeExpr::Tuple { elems, .. } => {
+                if let ITy::Tuple(actual_elems) = self.infer.resolve(actual)
+                    && actual_elems.len() == elems.len()
+                {
+                    for (elem, actual_elem) in elems.iter().zip(actual_elems.iter()) {
+                        let actual_elem = actual_elem.clone();
+                        self.match_inference_ty(elem, &actual_elem, params, env);
+                    }
+                }
+            }
+            ast::TypeExpr::Fn {
+                params: param_exprs,
+                ret,
+                ..
+            } => {
+                if let ITy::Fn(actual_params, actual_ret) = self.infer.resolve(actual)
+                    && actual_params.len() == param_exprs.len()
+                {
+                    for (param_expr, actual_param) in param_exprs.iter().zip(actual_params.iter()) {
+                        let actual_param = actual_param.clone();
+                        self.match_inference_ty(param_expr, &actual_param, params, env);
+                    }
+                    let actual_ret = (*actual_ret).clone();
+                    self.match_inference_ty(ret, &actual_ret, params, env);
+                }
+            }
+            ast::TypeExpr::Dyn(_) => {}
+        }
+    }
+
     pub fn check_call_path(
         &mut self,
         path: &ast::PathExpr,
@@ -120,6 +479,9 @@ impl<'a> Checker<'a> {
             }
             if builtin_fn(&name).is_some() {
                 return self.check_builtin_fn_call(&name, args, span, hint);
+            }
+            if let Some(expr) = self.check_struct_ctor_call(path, args, span, hint) {
+                return expr;
             }
             let suggestion = self.suggest_callable(&name);
             self.error_suggest(
@@ -628,7 +990,7 @@ impl<'a> Checker<'a> {
             ITy::Never => ITy::never(),
             ITy::Var(id) => match self.infer.var_kind(*id) {
                 VarKind::IntLiteral => {
-                    let ty = ITy::i64();
+                    let ty = ITy::i32();
                     let _ = self.unify_quiet(&resolved, &ty);
                     self.apply_hint(&ty, hint);
                     ty
@@ -821,7 +1183,8 @@ impl<'a> Checker<'a> {
                     None => self.infer.fresh_var(),
                 };
                 let params = if matches!(func, HBuiltinAssoc::VecWithCapacity) {
-                    vec![ITy::i64()]
+                    // `with_capacity` takes a length, i.e. a usize.
+                    vec![ITy::usize()]
                 } else {
                     Vec::new()
                 };
@@ -1155,24 +1518,52 @@ impl<'a> Checker<'a> {
         if !turbofish.is_empty()
             && method == "parse"
             && turbofish.len() == 1
-            && matches!(receiver_ty, ITy::String)
+            && matches!(receiver_ty, ITy::String | ITy::Str)
         {
             let target = self
                 .resolve_ty(&turbofish[0], self.current_self_key())
                 .unwrap_or_else(|| self.infer.fresh_var());
-            if let Some((builtin, ret)) = parse_alias(&target) {
-                let arg_exprs = self.check_call_args(&[], args, span);
-                self.apply_hint(&ret, hint);
-                let receiver_expr = self.wrap_derefs(receiver_expr);
-                return TExpr::new(
-                    ret,
-                    TExprKind::BuiltinMethod {
-                        receiver: Box::new(receiver_expr),
-                        method: builtin,
-                        args: arg_exprs,
-                    },
+            let target = self.infer.resolve(&target);
+            // v2.1: parse::<T>() is sugar for the standard-library method with
+            // the same target type, which returns the typed ParseIntError or
+            // ParseFloatError of that method. Routing through the impl keeps the
+            // generic spelling and the explicit parse_i64/parse_f64 call in
+            // agreement instead of returning the legacy String error.
+            let std_name = match &target {
+                ITy::Int(IntTy::I64) => Some("parse_i64"),
+                ITy::Float(FloatTy::F64) => Some("parse_f64"),
+                _ => None,
+            };
+            if let Some(std_name) = std_name {
+                if let Some(result) = self.check_impl_method_call(
+                    &receiver_expr,
+                    &receiver_ty,
+                    &raw_ty,
+                    std_name,
+                    method_span,
+                    args,
                     span,
-                );
+                    hint,
+                ) {
+                    return result;
+                }
+                // Programs checked without the standard library (the typeck
+                // unit tests) have no ParseIntError/ParseFloatError type, so
+                // the legacy builtin remains as a fallback with its String error.
+                if let Some((builtin, ret)) = parse_alias(&target) {
+                    let arg_exprs = self.check_call_args(&[], args, span);
+                    self.apply_hint(&ret, hint);
+                    let receiver_expr = self.wrap_derefs(receiver_expr);
+                    return TExpr::new(
+                        ret,
+                        TExprKind::BuiltinMethod {
+                            receiver: Box::new(receiver_expr),
+                            method: builtin,
+                            args: arg_exprs,
+                        },
+                        span,
+                    );
+                }
             }
             let described = self.describe_resolved(&target);
             self.error_code(
@@ -1284,10 +1675,11 @@ impl<'a> Checker<'a> {
             let arg_exprs = self.check_call_args(&info.params, args, span);
             // The key and value types come from the map, but `insert` payloads
             // can still be inferred when the map type itself is not annotated.
-            // Validate the resolved parameter types so references are rejected.
+            // Validate the resolved parameter types so references are rejected
+            // inside containers, while top-level borrowed text stays allowed.
             for param in &info.params {
                 let resolved = self.infer.resolve(param);
-                self.validate_storage_type(&resolved, span);
+                self.validate_builtin_param(&resolved, span);
             }
             // MapGetWith returns the closure result by moving it out of the
             // map. References would point into the map and could dangle after
@@ -1326,7 +1718,7 @@ impl<'a> Checker<'a> {
             // call, so validate the resolved parameter types after inference.
             for param in &info.params {
                 let resolved = self.infer.resolve(param);
-                self.validate_storage_type(&resolved, span);
+                self.validate_builtin_param(&resolved, span);
             }
             self.apply_hint(&info.ret, hint);
             let receiver_expr = self.wrap_derefs(receiver_expr);
@@ -1381,6 +1773,26 @@ impl<'a> Checker<'a> {
             }
             None => self.require_mutable_place(receiver, span, action),
         }
+    }
+
+    /// Validate a resolved parameter type of a built-in method.
+    ///
+    /// Parameters of the legacy fallback table are mostly owned payloads that
+    /// the method stores, so references nested inside them are rejected. The
+    /// one documented exception is a shared `&str` text input (for example
+    /// `String::push_str` or `String::contains`): it is a borrowed view that
+    /// the method only reads, and version 2.1 moved every standard-library text
+    /// parameter to `&str`.
+    fn validate_builtin_param(&mut self, ty: &ITy, span: Span) -> bool {
+        if let ITy::Ref {
+            mutable: false,
+            inner,
+        } = ty
+            && matches!(self.infer.resolve(inner), ITy::Str)
+        {
+            return true;
+        }
+        self.validate_storage_type(ty, span)
     }
 
     pub fn suggest_method(&self, receiver_ty: &ITy, method: &str) -> Option<String> {

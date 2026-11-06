@@ -36,7 +36,7 @@ Exit status: 0 when every example matches, 1 when any example fails.
 
 The compiler is selected with --bin, or the LSACA_DOCS_COMPILER environment
 variable, or LSACA_BIN; otherwise the first existing path in BIN_CANDIDATES is
-used. target/lead-rel2/release/lsaca.exe is preferred so the official 2.0.0
+used. target/lead-rel2/release/lsaca.exe is preferred so the official 2.1.0
 release binary is what the examples are checked against.
 """
 

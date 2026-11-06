@@ -361,6 +361,42 @@ impl<'a> Gen<'a> {
         format!("&({})", view)
     }
 
+    /// Read-only LsString view over a borrowed str argument.
+    ///
+    /// Runtime path and name parameters take a const LsString pointer and only
+    /// read it, so a `&str` argument is bridged with a stack descriptor over
+    /// its borrowed bytes: no copy and no allocation.
+    pub(crate) fn str_argument_view(&mut self, argument: &HExpr) -> String {
+        let fat = self.fat_value(argument, "str_arg");
+        let data = format!("(({}).data)", fat);
+        let len = format!("(size_t)(({}).len)", fat);
+        self.read_only_string_view(&data, &len)
+    }
+
+    /// C expression for the text of a String or &str argument as a
+    /// const LsString* pointer.
+    ///
+    /// `context` names the caller in internal errors only; the front end
+    /// decides whether a text parameter is an owned String or a borrowed
+    /// slice, so both shapes are accepted here.
+    pub(crate) fn string_text_argument(&mut self, argument: &HExpr, context: &str) -> String {
+        if argument.ty.is_string() {
+            return self.gen_borrowed(argument);
+        }
+        if let Ty::Ref { inner, .. } = &argument.ty
+            && inner.is_string()
+        {
+            return self.place_through_reference(argument);
+        }
+        if is_str_value(&argument.ty) {
+            return self.str_argument_view(argument);
+        }
+        util::internal_error(format!(
+            "{} expects a String or &str argument, found {:?}",
+            context, argument.ty
+        ))
+    }
+
     /// Release one owned handle and mark it released.
     fn release_handle(&mut self, handle: &str) {
         self.emit_release(&Ty::String, handle);
@@ -456,7 +492,8 @@ impl<'a> Gen<'a> {
                     return false;
                 }
                 let fat = self.fat_value(arg, "slice");
-                self.line(format!("{} = (int64_t)(({}).len);", target, fat));
+                let ctype = self.ctype(ty);
+                self.line(format!("{} = ({})(({}).len);", target, ctype, fat));
                 true
             }
             "slice_get" => {
@@ -532,7 +569,8 @@ impl<'a> Gen<'a> {
                     return false;
                 }
                 let fat = self.fat_value(arg, "str");
-                self.line(format!("{} = (int64_t)(({}).len);", target, fat));
+                let ctype = self.ctype(ty);
+                self.line(format!("{} = ({})(({}).len);", target, ctype, fat));
                 true
             }
             "str_as_bytes" => {

@@ -17,15 +17,15 @@ fn main() {
     let mut token: i64 = 0;
     while token < tokens {
         let index = token % DISTINCT;
-        let current = counts[index];
-        counts[index] = current + 1;
+        let current = counts[index as usize];
+        counts[index as usize] = current + 1;
         token = token + 1;
     }
     let mut checksum: i64 = 0;
     let mut max_count: i64 = 0;
     let mut k: i64 = 0;
     while k < DISTINCT {
-        let count = counts[k];
+        let count = counts[k as usize];
         checksum = checksum + count * count;
         if count > max_count {
             max_count = count;

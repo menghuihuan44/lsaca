@@ -17,6 +17,7 @@ use crate::ast::{self, ExprKind};
 use crate::diag::Diagnostic;
 use crate::hir::HFieldRef;
 use crate::span::Span;
+use crate::types::{FloatTy, IntTy};
 
 impl<'a> Checker<'a> {
     /// Check one expression, using the hint as the expected type where that
@@ -94,13 +95,49 @@ impl<'a> Checker<'a> {
 
     fn check_literal(&mut self, lit: &ast::Lit, hint: Option<&ITy>, span: Span) -> TExpr {
         match lit {
-            ast::Lit::Int { value, raw } => {
-                let ty = self.infer.int_literal(*value, raw.clone(), span);
+            ast::Lit::Int { value, raw, suffix } => {
+                let ty = match suffix.as_deref() {
+                    Some(suffix) => match IntTy::from_name(suffix) {
+                        Some(int_ty) => self.infer.int_literal_typed(
+                            ITy::Int(int_ty),
+                            *value,
+                            raw.clone(),
+                            span,
+                        ),
+                        None => {
+                            self.error_code(
+                                format!("invalid suffix {} on numeric literal", suffix),
+                                span,
+                                "E0001",
+                            );
+                            self.infer.int_literal(*value, raw.clone(), span)
+                        }
+                    },
+                    None => self.infer.int_literal(*value, raw.clone(), span),
+                };
                 self.apply_hint(&ty, hint);
                 TExpr::new(ty, TExprKind::Lit(TLit::Int(*value)), span)
             }
-            ast::Lit::Float { value, raw } => {
-                let ty = self.infer.float_literal(*value, raw.clone(), span);
+            ast::Lit::Float { value, raw, suffix } => {
+                let ty = match suffix.as_deref() {
+                    Some(suffix) => match FloatTy::from_name(suffix) {
+                        Some(float_ty) => self.infer.float_literal_typed(
+                            ITy::Float(float_ty),
+                            *value,
+                            raw.clone(),
+                            span,
+                        ),
+                        None => {
+                            self.error_code(
+                                format!("invalid suffix {} on numeric literal", suffix),
+                                span,
+                                "E0001",
+                            );
+                            self.infer.float_literal(*value, raw.clone(), span)
+                        }
+                    },
+                    None => self.infer.float_literal(*value, raw.clone(), span),
+                };
                 self.apply_hint(&ty, hint);
                 TExpr::new(ty, TExprKind::Lit(TLit::Float(*value)), span)
             }
@@ -268,12 +305,33 @@ impl<'a> Checker<'a> {
             inclusive,
         } = &iter.kind
         {
-            let start_expr = self.check_expr(start, Some(&ITy::i64()));
-            self.require_i64(&start_expr.ty, start.span);
-            let end_expr = self.check_expr(end, Some(&ITy::i64()));
-            self.require_i64(&end_expr.ty, end.span);
+            // The loop variable takes the type of the range operands, so
+            // 0..values.len() iterates usize and 0..3i64 iterates i64. The
+            // start operand is checked first without a hint so that an
+            // unsuffixed literal stays flexible, then the end operand is
+            // checked against its type.
+            let start_expr = self.check_expr(start, None);
+            let end_expr = self.check_expr(end, Some(&start_expr.ty));
+            let mut elem_ty = self.infer.resolve(&start_expr.ty);
+            if self.unify_quiet(&elem_ty, &end_expr.ty) {
+                elem_ty = self.infer.resolve(&elem_ty);
+            }
+            // An unsuffixed range bound is still an unresolved integer
+            // literal variable here; it stays flexible so that a later use can
+            // pin it (for example 0..values.len() iterates usize) and
+            // default_literals only gives it i32 at the very end.
+            let elem_is_integer = match &elem_ty {
+                ITy::Int(_) | ITy::Never => true,
+                ITy::Var(id) => self.infer.var_kind(*id) == super::itype::VarKind::IntLiteral,
+                _ => false,
+            };
+            if !elem_is_integer {
+                let expected = ITy::i32();
+                self.report_mismatch(&expected, &elem_ty, span);
+                elem_ty = expected;
+            }
             self.push_scope();
-            let pat = self.check_irrefutable_pattern(pat, &ITy::i64(), pat.span);
+            let pat = self.check_irrefutable_pattern(pat, &elem_ty, pat.span);
             self.bump_loop_depth(1);
             let body = self.check_block(body, None);
             self.bump_loop_depth(-1);
@@ -887,10 +945,12 @@ impl<'a> Checker<'a> {
                 let checked = self.check_expr(value, Some(&elem_ty));
                 let value = self.coerce_to(checked, &elem_ty, value_span);
                 self.validate_storage_type(&elem_ty, span);
-                let count = self.check_expr(count, Some(&ITy::i64()));
-                if !self.unify_quiet(&ITy::i64(), &count.ty) {
+                // The repeat count is a length, so it is a usize like every
+                // other length and index parameter in the standard library.
+                let count = self.check_expr(count, Some(&ITy::usize()));
+                if !self.unify_quiet(&ITy::usize(), &count.ty) {
                     let resolved = self.infer.resolve(&count.ty);
-                    self.report_mismatch(&ITy::i64(), &resolved, count.span);
+                    self.report_mismatch(&ITy::usize(), &resolved, count.span);
                 }
                 if let Some(known) = self.const_i64(&count)
                     && known < 0
@@ -1258,6 +1318,52 @@ impl<'a> Checker<'a> {
                     self.never_expr(span)
                 }
             }
+            ITy::Struct(id) => {
+                let id = *id;
+                self.ensure_struct_fields(id);
+                let tuple = self.structs[id].tuple;
+                if !tuple {
+                    let struct_name = self.struct_name(id);
+                    self.error_code(
+                        format!("no tuple field {} on type {}", index, struct_name),
+                        span,
+                        "E0609",
+                    );
+                    return self.never_expr(span);
+                }
+                let fields = self.struct_fields(id);
+                match fields.get(index) {
+                    Some((_, _, field_ty)) => {
+                        let field_ty = field_ty.clone();
+                        self.apply_hint(&field_ty, hint);
+                        TExpr::new(
+                            field_ty,
+                            TExprKind::Field {
+                                base: Box::new(base_expr),
+                                field: HFieldRef::Struct {
+                                    struct_id: id,
+                                    index,
+                                },
+                            },
+                            span,
+                        )
+                    }
+                    None => {
+                        let struct_name = self.struct_name(id);
+                        self.error_code(
+                            format!(
+                                "tuple index {} is out of bounds for struct {} with {} field(s)",
+                                index,
+                                struct_name,
+                                fields.len()
+                            ),
+                            span,
+                            "E0609",
+                        );
+                        self.never_expr(span)
+                    }
+                }
+            }
             ITy::Var(_) => {
                 self.error_code(
                     "type annotations needed: cannot access a tuple field on a value of unknown type"
@@ -1288,10 +1394,11 @@ impl<'a> Checker<'a> {
         hint: Option<&ITy>,
     ) -> TExpr {
         let base_expr = self.check_expr(base, None);
-        let index_expr = self.check_expr(index, Some(&ITy::i64()));
-        if !self.unify_quiet(&ITy::i64(), &index_expr.ty) {
+        let index_ty = ITy::usize();
+        let index_expr = self.check_expr(index, Some(&index_ty));
+        if !self.unify_quiet(&index_ty, &index_expr.ty) {
             let resolved = self.infer.resolve(&index_expr.ty);
-            self.report_mismatch(&ITy::i64(), &resolved, index.span);
+            self.report_mismatch(&index_ty, &resolved, index.span);
         }
         let raw_ty = self.infer.resolve(&base_expr.ty);
         let base_ty = self.peel_refs(&raw_ty);
@@ -1372,17 +1479,6 @@ impl<'a> Checker<'a> {
                 self.report_mismatch(&ITy::bool_(), &found, span);
             }
             _ => self.report_mismatch(&ITy::bool_(), &resolved, span),
-        }
-    }
-
-    pub fn require_i64(&mut self, ty: &ITy, span: Span) {
-        let resolved = self.infer.resolve(ty);
-        match &resolved {
-            ITy::Int(crate::types::IntTy::I64) | ITy::Never => {}
-            ITy::Var(_) => {
-                let _ = self.unify_quiet(&resolved, &ITy::i64());
-            }
-            _ => self.report_mismatch(&ITy::i64(), &resolved, span),
         }
     }
 

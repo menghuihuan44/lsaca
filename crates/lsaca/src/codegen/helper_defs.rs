@@ -7,7 +7,7 @@ use crate::codegen::ops;
 use crate::codegen::types::{
     DYN_DATA_FIELD, DYN_VTABLE_FIELD, EMPTY_STRUCT_FIELD, FN_ENV_FIELD, OPTION_SOME_MEMBER,
     RESULT_ERR_MEMBER, RESULT_OK_MEMBER, TypeNames, TypeRegistry, UNION_FIELD, field_cname,
-    positional_field, variant_member,
+    positional_field, positional_field_index, variant_member,
 };
 use crate::codegen::util;
 use crate::hir;
@@ -195,6 +195,9 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
                     }
                 }
                 _ => {
+                    // Unit structs have no field to read, so the parameter is
+                    // only kept for the uniform helper signature.
+                    w.line("(void)v;");
                     w.line(format!("out.{} = 0;", EMPTY_STRUCT_FIELD));
                 }
             }
@@ -571,6 +574,17 @@ fn emit_debug_append(w: &mut CWriter, names: &TypeNames, ty: &Ty, value: &str) {
     }
 }
 
+/// True when the debug code for a field actually reads the struct value.
+///
+/// A field of type `()` (or a reference to it) is rendered as the literal
+/// `()` and never touches the operand, so a struct whose fields are all unit
+/// values needs an explicit `(void)v;` to stay warning-free.
+fn debug_field_reads_value(names: &TypeNames, ty: &Ty, value: &str) -> bool {
+    ops::debug_append_statement(names, ty, "acc", value)
+        .map(|stmt| stmt.contains(value))
+        .unwrap_or(false)
+}
+
 fn emit_debug_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty) {
     match ty {
         Ty::Vec(elem) => {
@@ -631,27 +645,73 @@ fn emit_debug_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, t
         }
         Ty::Struct(index) => match struct_item(program, *index) {
             Some((name, fields)) if !fields.is_empty() => {
-                push_cstr(w, &name);
-                push_cstr(w, " { ");
-                for (field_index, (field_name, field_ty)) in fields.iter().enumerate() {
-                    if field_index > 0 {
-                        w.line("acc = ls_format_push_cstr(acc, \", \");");
-                    }
-                    w.line(format!(
-                        "acc = ls_format_push_cstr(acc, {});",
-                        util::c_string_literal(&format!("{}: ", field_name))
-                    ));
-                    emit_debug_append(
-                        w,
+                // A struct of unit-like fields renders them as literals and
+                // never reads the operand (ParseIntError and ParseFloatError
+                // are such types), so suppress the unused parameter.
+                let reads_value = fields.iter().any(|(field_name, field_ty)| {
+                    debug_field_reads_value(
                         names,
                         field_ty,
                         &format!("v.{}", field_cname(field_name)),
-                    );
+                    )
+                });
+                if !reads_value {
+                    w.line("(void)v;");
                 }
-                push_cstr(w, " }");
+                // Tuple structs name their fields after the position, so the
+                // names alone tell the two layouts apart (identifiers cannot
+                // start with a digit). Their Debug output follows Rust: a
+                // positional list instead of named fields.
+                let positional = fields
+                    .iter()
+                    .enumerate()
+                    .all(|(position, (field_name, _))| {
+                        positional_field_index(field_name) == Some(position)
+                    });
+                push_cstr(w, &name);
+                if positional {
+                    push_cstr(w, "(");
+                    for (field_index, (field_name, field_ty)) in fields.iter().enumerate() {
+                        if field_index > 0 {
+                            w.line("acc = ls_format_push_cstr(acc, \", \");");
+                        }
+                        emit_debug_append(
+                            w,
+                            names,
+                            field_ty,
+                            &format!("v.{}", field_cname(field_name)),
+                        );
+                    }
+                    push_cstr(w, ")");
+                } else {
+                    push_cstr(w, " { ");
+                    for (field_index, (field_name, field_ty)) in fields.iter().enumerate() {
+                        if field_index > 0 {
+                            w.line("acc = ls_format_push_cstr(acc, \", \");");
+                        }
+                        w.line(format!(
+                            "acc = ls_format_push_cstr(acc, {});",
+                            util::c_string_literal(&format!("{}: ", field_name))
+                        ));
+                        emit_debug_append(
+                            w,
+                            names,
+                            field_ty,
+                            &format!("v.{}", field_cname(field_name)),
+                        );
+                    }
+                    push_cstr(w, " }");
+                }
             }
-            Some((name, _)) => push_cstr(w, &name),
-            None => push_cstr(w, "<struct>"),
+            Some((name, _)) => {
+                // Unit structs have no fields to print.
+                w.line("(void)v;");
+                push_cstr(w, &name);
+            }
+            None => {
+                w.line("(void)v;");
+                push_cstr(w, "<struct>");
+            }
         },
         Ty::Enum(index) => match enum_item(program, *index) {
             Some(item) => {
@@ -843,11 +903,29 @@ fn emit_eq_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
             w.line("return true;");
         }
         Ty::Struct(index) => {
-            if let Some((_, fields)) = struct_item(program, *index) {
-                for (field_name, field_ty) in &fields {
-                    let a = format!("a.{}", field_cname(field_name));
-                    let b = format!("b.{}", field_cname(field_name));
-                    emit_eq_check(w, names, field_ty, &a, &b);
+            match struct_item(program, *index) {
+                Some((_, fields)) if !fields.is_empty() => {
+                    // Unit-like fields compare equal without touching the
+                    // operands; a struct made only of them would otherwise
+                    // have two unused parameters.
+                    let reads_operands = fields
+                        .iter()
+                        .any(|(_, field_ty)| ops::eq_expr(names, field_ty, "a", "b") != "true");
+                    if !reads_operands {
+                        w.line("(void)a;");
+                        w.line("(void)b;");
+                    }
+                    for (field_name, field_ty) in &fields {
+                        let a = format!("a.{}", field_cname(field_name));
+                        let b = format!("b.{}", field_cname(field_name));
+                        emit_eq_check(w, names, field_ty, &a, &b);
+                    }
+                }
+                _ => {
+                    // Unit structs (and unknown structs) compare equal and
+                    // never read their operands.
+                    w.line("(void)a;");
+                    w.line("(void)b;");
                 }
             }
             w.line("return true;");

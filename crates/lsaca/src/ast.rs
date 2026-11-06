@@ -230,6 +230,9 @@ pub use crate::types::SelfKind as ReceiverKind;
 pub struct Param {
     pub name: String,
     pub name_span: Span,
+    /// True for a `mut name: T` parameter. Parameters are owned values, so
+    /// this only allows assignments to the parameter binding inside the body.
+    pub mutable: bool,
     pub ty: TypeExpr,
 }
 
@@ -239,8 +242,44 @@ pub struct StructDecl {
     pub name_span: Span,
     pub vis: Visibility,
     pub generics: Vec<GenericParam>,
-    pub fields: Vec<FieldDef>,
+    pub kind: StructKind,
     pub span: Span,
+}
+
+/// The shape of a struct declaration.
+#[derive(Debug, Clone)]
+pub enum StructKind {
+    /// A named-field struct: `struct Point { x: i64, y: i64 }`.
+    Named(Vec<FieldDef>),
+    /// A tuple struct such as `struct Meters(i64);`, a newtype such as
+    /// `struct UserId(u64);` or a multi-field variant of both. Fields are
+    /// positional; the rest of the compiler sees them under their index as
+    /// name ("0", "1", ...) so field access and the HIR stay uniform.
+    Tuple(Vec<TypeExpr>),
+    /// A unit struct such as `struct Marker;`.
+    Unit,
+}
+
+impl StructKind {
+    /// All fields in declaration order, with positional tuple fields named by
+    /// their index. This is the uniform view used by the type checker, the
+    /// HIR and the code generator.
+    pub fn fields(&self) -> Vec<FieldDef> {
+        match self {
+            StructKind::Named(fields) => fields.clone(),
+            StructKind::Tuple(types) => types
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| FieldDef {
+                    name: index.to_string(),
+                    name_span: ty.span(),
+                    vis: Visibility::Public,
+                    ty: ty.clone(),
+                })
+                .collect(),
+            StructKind::Unit => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -707,10 +746,15 @@ pub enum Lit {
     Int {
         value: i128,
         raw: String,
+        /// The suffix as written ("i32", "u8", "usize", ...), if any. The
+        /// lexer validates the spelling; the type checker applies it.
+        suffix: Option<String>,
     },
     Float {
         value: f64,
         raw: String,
+        /// The suffix as written ("f32" or "f64"), if any.
+        suffix: Option<String>,
     },
     Bool(bool),
     /// A character literal such as 'a' or '\n'. The value is a Unicode
@@ -722,8 +766,14 @@ pub enum Lit {
 impl Lit {
     pub fn describe(&self) -> String {
         match self {
-            Lit::Int { raw, .. } => raw.clone(),
-            Lit::Float { raw, .. } => raw.clone(),
+            Lit::Int { raw, suffix, .. } => match suffix {
+                Some(suffix) => format!("{}{}", raw, suffix),
+                None => raw.clone(),
+            },
+            Lit::Float { raw, suffix, .. } => match suffix {
+                Some(suffix) => format!("{}{}", raw, suffix),
+                None => raw.clone(),
+            },
             Lit::Bool(value) => value.to_string(),
             Lit::Char(value) => format!("{:?}", value),
             Lit::Str(_) => "string".to_string(),
@@ -1043,8 +1093,18 @@ impl StructDecl {
         for param in &mut self.generics {
             param.for_each_span_mut(visit);
         }
-        for field in &mut self.fields {
-            field.for_each_span_mut(visit);
+        match &mut self.kind {
+            StructKind::Named(fields) => {
+                for field in fields {
+                    field.for_each_span_mut(visit);
+                }
+            }
+            StructKind::Tuple(types) => {
+                for ty in types {
+                    ty.for_each_span_mut(visit);
+                }
+            }
+            StructKind::Unit => {}
         }
     }
 }

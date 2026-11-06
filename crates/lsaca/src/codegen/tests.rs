@@ -116,7 +116,7 @@ fn does_not_redefine_runtime_provided_types() {
     assert!(main_c.contains("ls_vec_string_push("));
 }
 
-const ARITH: &str = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = a + b;\n    let d = a / b;\n    println!(\"{} {}\", c, d);\n}\n";
+const ARITH: &str = "fn main() {\n    let a: i64 = 1;\n    let b: i64 = 2;\n    let c = a + b;\n    let d = a / b;\n    println!(\"{} {}\", c, d);\n}\n";
 
 #[test]
 fn debug_checks_emit_checked_arithmetic_with_locations() {
@@ -244,8 +244,7 @@ fn lowers_assert_ne_with_its_own_diagnostic() {
     );
 }
 
-const VEC: &str =
-    "fn main() {\n    let v = vec![10, 20, 30];\n    let x = v[1];\n    println!(\"{}\", x);\n}\n";
+const VEC: &str = "fn main() {\n    let v = vec![10i64, 20i64, 30i64];\n    let x = v[1];\n    println!(\"{}\", x);\n}\n";
 
 #[test]
 fn emits_vec_storage_and_bounds_checks() {
@@ -411,11 +410,13 @@ struct Node {
 }
 
 fn main() {
-    let a = Box::new(10);
+    // Box payloads are explicit i64 so the generated cell type is LsBox_i64
+    // (unsuffixed literals default to i32 in v2.1).
+    let a = Box::new(10i64);
     let mut b = a.clone();
-    b.set(20);
+    b.set(20i64);
     println!("{} {}", a.get(), b.get());
-    println!("{}", b == Box::new(20));
+    println!("{}", b == Box::new(20i64));
     let chain = Node {
         value: 1,
         next: Some(Box::new(Node { value: 2, next: None })),
@@ -674,7 +675,7 @@ fn main() {
     names.push(String::from("b"));
     let mut total = String::new();
     for name in names {
-        total.push_str(name);
+        total.push_str(&name);
     }
     println!("{}", total);
 }
@@ -784,50 +785,88 @@ fn emits_inline_vec_push_fast_path_and_by_value_slow_helper() {
     );
 }
 
-const FORMAT_INTO_PUSH_PROGRAM: &str = r#"
+// Borrowing the result of format! is the only way to pass formatted text to
+// push_str: the front end rejects borrowing a temporary. The code generator
+// must therefore hand the borrowed text over as a read only view instead of
+// copying it into an owned temporary.
+const BORROWED_FORMAT_PUSH_PROGRAM: &str = r#"
 fn main() {
     let mut text = String::new();
-    text.push_str(format!("{},", 7));
+    let formatted = format!("{},", 7);
+    text.push_str(&formatted);
     println!("{}", text.len());
 }
 "#;
 
 #[test]
-fn fuses_format_into_a_push_on_a_local_string() {
-    let (main_c, _) = generate_source("format_push_fixture", FORMAT_INTO_PUSH_PROGRAM, true);
-    let body = main_function_body(&main_c);
-
-    // The formatted argument is appended straight to the receiver instead of
-    // allocating a temporary format buffer.
-    assert!(
-        !body.contains("ls_str_push_str("),
-        "the formatted push still goes through a temporary String:\n{body}"
-    );
-    let push_line = body
-        .lines()
-        .find(|line| line.contains(" = ls_format_push_cstr("))
-        .expect("no literal append to the receiver");
-    let receiver = push_line
-        .split(" = ")
-        .next()
-        .expect("malformed append line")
-        .trim();
-    assert!(
-        body.contains(&format!("{} = ls_fmt_i64({}, ", receiver, receiver)),
-        "the formatted argument is not appended to the receiver:\n{body}"
-    );
-    assert!(
-        body.contains(&format!("ls_format_push_cstr({}, {:?})", receiver, ",")),
-        "the literal part of the format is not appended to the receiver:\n{body}"
-    );
-    // The only remaining format buffer is the one built by println!. The
-    // standard-library forwarder emitted after main has its own unreachable
-    // panic path, so only the user main body is inspected.
+fn bridges_a_borrowed_format_result_into_push_str() {
+    let (main_c, _) = generate_source("format_push_fixture", BORROWED_FORMAT_PUSH_PROGRAM, true);
     let main_only = user_main_body(&main_c);
+
+    assert!(
+        main_only.contains("= ls_str_data(") && main_only.contains("= ls_str_len("),
+        "the borrowed push does not read the source string:\n{main_only}"
+    );
+    assert!(
+        !main_only.contains("ls_str_from_parts("),
+        "the call site copies the borrowed text into a temporary:\n{main_only}"
+    );
+    // format! and println! each need one format buffer; the push adds none.
     assert_eq!(
         main_only.matches("ls_format_begin(0)").count(),
-        1,
-        "a temporary format buffer was created for the push:\n{body}"
+        2,
+        "an unexpected temporary format buffer was created:\n{main_only}"
+    );
+}
+
+const BORROWED_TEXT_CONCAT: &str = r#"
+fn main() {
+    let text = String::from_str("a");
+    let suffix = String::from_str("b");
+    let joined = text + &suffix;
+    let mut appended = joined;
+    appended += "c";
+    println!("{}", appended);
+}
+"#;
+
+#[test]
+fn bridges_borrowed_text_into_string_addition_and_assignment() {
+    let (main_c, _) = generate_source("borrowed_text_concat", BORROWED_TEXT_CONCAT, false);
+    let body = user_main_body(&main_c);
+    let concat_lines: Vec<&str> = body
+        .lines()
+        .filter(|line| line.contains("= ls_str_concat("))
+        .collect();
+    assert_eq!(
+        concat_lines.len(),
+        2,
+        "the addition and the assignment must both go through the concat runtime:\n{body}"
+    );
+    for line in concat_lines {
+        assert!(
+            line.contains("&(str_view"),
+            "a borrowed text operand is not bridged into a read only view: {line}"
+        );
+    }
+}
+
+#[test]
+fn renames_user_types_that_collide_with_builtin_names() {
+    let source =
+        "struct Unit;\n\nfn main() {\n    let value = Unit;\n    println!(\"{:?}\", value);\n}\n";
+    let (main_c, _) = generate_source("unit_struct", source, false);
+    assert!(
+        main_c.contains("typedef struct LsUnit {"),
+        "the builtin unit value type must keep its definition:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("struct LsUnitValue {"),
+        "a user type named Unit must not reuse the builtin tag:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("lsaca_copy_UnitValue("),
+        "the helpers for the renamed user type must use the new name:\n{main_c}"
     );
 }
 
@@ -3920,7 +3959,7 @@ fn expands_every_phase_c_intrinsic_into_a_runtime_call() {
 
     // Name, parameter types, return type and the runtime entry point the call
     // site must reach, in Appendix C order.
-    let table: [(&str, Vec<Ty>, Ty, &str); 40] = [
+    let table: [(&str, Vec<Ty>, Ty, &str); 41] = [
         ("__io_stdin", Vec::new(), Ty::i64(), "ls_io_stdin()"),
         ("__io_stdout", Vec::new(), Ty::i64(), "ls_io_stdout()"),
         ("__io_stderr", Vec::new(), Ty::i64(), "ls_io_stderr()"),
@@ -4116,6 +4155,7 @@ fn expands_every_phase_c_intrinsic_into_a_runtime_call() {
             string_vector.clone(),
             "ls_args_at(",
         ),
+        ("__proc_exit", vec![Ty::i32()], Ty::unit(), "ls_exit("),
     ];
 
     let bytes_local = HExpr::new(
@@ -4352,7 +4392,7 @@ fn fuses_for_loop_over_iterator_pipeline() {
     );
 }
 
-const FUSED_ENUMERATE: &str = "fn main() {\n    let values: Vec<i64> = vec![4, 5, 6];\n    let mut total = 0;\n    for pair in values.iter().enumerate() {\n        let (index, value) = pair;\n        total += index * value;\n    }\n    println!(\"{}\", total);\n}\n";
+const FUSED_ENUMERATE: &str = "fn main() {\n    let values: Vec<usize> = vec![4, 5, 6];\n    let mut total: usize = 0;\n    for pair in values.iter().enumerate() {\n        let (index, value) = pair;\n        total += index * value;\n    }\n    println!(\"{}\", total);\n}\n";
 
 #[test]
 fn fuses_enumerate_pairs_without_nesting_the_element_tuple() {
@@ -4364,12 +4404,12 @@ fn fuses_enumerate_pairs_without_nesting_the_element_tuple() {
         body
     );
     assert!(
-        body.contains("LsTup2_i64_i64 pair"),
-        "the fused enumerate pair must be a plain (i64, i64) tuple: {}",
+        body.contains("LsTup2_usize_usize pair"),
+        "the fused enumerate pair must be a plain (usize, usize) tuple: {}",
         body
     );
     assert!(
-        !body.contains("LsTup2_i64_LsTup2"),
+        !body.contains("LsTup2_usize_LsTup2"),
         "the fused enumerate pair nested the element tuple: {}",
         body
     );
@@ -4442,6 +4482,252 @@ fn borrows_place_keys_in_map_lookups() {
     assert!(
         !body.contains("ls_retain("),
         "a map lookup over a place key must not retain the key: {}",
+        body
+    );
+}
+const BORROWED_TEXT: &str = r#"
+fn main() {
+    let text: &str = "hello";
+    let length = text.len();
+    println!("{}", length);
+}
+"#;
+
+#[test]
+fn emits_borrowed_string_literals_as_static_views() {
+    let (main_c, _) = generate_source("borrowed_text", BORROWED_TEXT, false);
+    let marker = "((LsStr){ .data = ((uint8_t*)((";
+    let start = main_c
+        .find(marker)
+        .expect("the &str literal must be emitted as a static LsStr view");
+    let rest = &main_c[start + marker.len()..];
+    let end = rest.find(')').expect("the static LsStr view is malformed");
+    let handle = &rest[..end];
+    assert!(
+        handle.starts_with("lsaca_lit_"),
+        "unexpected interned handle in the static view: {}",
+        handle
+    );
+    assert!(
+        main_c.contains(&format!("(({})->len)", handle)),
+        "the static view must read the length from the interned literal: {}",
+        main_c
+    );
+    assert!(
+        !main_c.contains(&format!("ls_retain((void*)({})", handle)),
+        "a borrowed string literal must not be retained: {}",
+        main_c
+    );
+}
+
+const OWNED_TEXT: &str = r#"
+fn main() {
+    let text: String = "hello";
+    println!("{}", text);
+}
+"#;
+
+#[test]
+fn emits_owned_string_literals_as_retained_handles() {
+    let (main_c, _) = generate_source("owned_text", OWNED_TEXT, false);
+    assert!(
+        main_c.contains("ls_retain((void*)(lsaca_lit_"),
+        "an owned String literal must be a retained interned handle: {}",
+        main_c
+    );
+    assert!(
+        !main_c.contains("((LsStr){ .data = ((uint8_t*)(("),
+        "an owned String literal must not be emitted as a static slice: {}",
+        main_c
+    );
+}
+
+const DEFAULT_I32: &str = r#"
+fn main() {
+    let first = 1;
+    let second = 2;
+    let total = first + second;
+    println!("{}", total);
+}
+"#;
+
+#[test]
+fn defaults_unsuffixed_integer_literals_to_i32() {
+    let (main_c, _) = generate_source("default_i32", DEFAULT_I32, true);
+    let body = user_main_body(&main_c);
+    assert!(
+        body.contains("ls_add_i32_checked("),
+        "unsuffixed integers must default to i32: {}",
+        body
+    );
+}
+
+const SUFFIXED_LITERALS: &str = r#"
+fn main() {
+    let small: u8 = 200u8;
+    let wide: i64 = 5i64;
+    println!("{} {}", small, wide);
+}
+"#;
+
+#[test]
+fn emits_suffixed_integer_literals_with_their_own_type() {
+    let (main_c, _) = generate_source("suffixed_literals", SUFFIXED_LITERALS, false);
+    let body = user_main_body(&main_c);
+    assert!(
+        body.contains("((uint8_t)200u)"),
+        "a u8 suffixed literal must carry the u8 cast: {}",
+        body
+    );
+    assert!(
+        body.contains("((int64_t)5)"),
+        "an i64 suffixed literal must carry the i64 cast: {}",
+        body
+    );
+}
+
+const TUPLE_STRUCTS: &str = r#"
+struct Point(i32, i32);
+struct Marker;
+
+fn main() {
+    let point = Point(10, 20);
+    let x = point.0;
+    let marker = Marker;
+    println!("{:?} {} {:?}", point, x, marker);
+}
+"#;
+
+#[test]
+fn emits_tuple_and_unit_struct_layouts_and_debug_output() {
+    let (main_c, _) = generate_source("tuple_structs", TUPLE_STRUCTS, false);
+    let body = user_main_body(&main_c);
+    assert!(
+        main_c.contains("int32_t f0;") && main_c.contains("int32_t f1;"),
+        "a tuple struct must lay its fields out positionally: {}",
+        main_c
+    );
+    assert!(
+        main_c.contains("ls_format_push_cstr(acc, \"Point\")")
+            && main_c.contains("ls_format_push_cstr(acc, \"(\")")
+            && main_c.contains("ls_format_push_cstr(acc, \")\")"),
+        "tuple struct Debug output must use the positional form: {}",
+        main_c
+    );
+    assert!(
+        !main_c.contains("\"Point { \""),
+        "tuple struct Debug output must not use named fields: {}",
+        main_c
+    );
+    assert!(
+        main_c.contains("v.f0") && main_c.contains("v.f1"),
+        "tuple struct Debug output reads the positional fields: {}",
+        main_c
+    );
+    assert!(
+        main_c.contains("\"Marker\""),
+        "a unit struct renders just its name in Debug: {}",
+        main_c
+    );
+    assert!(
+        body.contains(".f0") && body.contains(".f1"),
+        "tuple struct fields are constructed and read positionally: {}",
+        body
+    );
+}
+
+const UNIT_FIELD_STRUCT: &str = r#"
+struct Marker {
+    internal: (),
+}
+
+fn main() {
+    let marker = Marker { internal: () };
+    println!("{:?}", marker);
+}
+"#;
+
+#[test]
+fn suppresses_unused_parameters_in_unit_field_struct_helpers() {
+    let (main_c, _) = generate_source("unit_field_struct", UNIT_FIELD_STRUCT, false);
+
+    // A unit-typed field is printed as the literal () and compared as true,
+    // so neither helper reads its operand. Both suppress the parameters to
+    // stay clean under gcc -Wall -Wextra, while the rendered text is
+    // unchanged.
+    assert!(
+        main_c.contains("ls_format_push_cstr(acc, \"internal: \")"),
+        "the named field is still rendered:\n{main_c}"
+    );
+
+    let debug_start = main_c
+        .find("LsString* lsaca_debug_Marker(LsString* acc, LsMarker v) {")
+        .expect("the debug helper is not emitted");
+    let debug_body = &main_c[debug_start..];
+    let debug_body = &debug_body[..debug_body.find("\n}").expect("unterminated debug helper")];
+    assert!(
+        debug_body.contains("(void)v;"),
+        "the debug helper does not suppress its unused operand:\n{debug_body}"
+    );
+
+    let eq_start = main_c
+        .find("bool lsaca_eq_Marker(LsMarker a, LsMarker b) {")
+        .expect("the equality helper is not emitted");
+    let eq_body = &main_c[eq_start..];
+    let eq_body = &eq_body[..eq_body.find("\n}").expect("unterminated equality helper")];
+    assert!(
+        eq_body.contains("(void)a;") && eq_body.contains("(void)b;"),
+        "the equality helper does not suppress its unused operands:\n{eq_body}"
+    );
+}
+
+const USIZE_LENGTHS: &str = r#"
+fn main() {
+    let text: String = "hello";
+    let length: usize = text.len();
+    let doubled: usize = length * 2;
+    println!("{}", doubled);
+}
+"#;
+
+#[test]
+fn emits_lengths_and_counts_as_usize() {
+    let (main_c, _) = generate_source("usize_lengths", USIZE_LENGTHS, true);
+    let body = user_main_body(&main_c);
+    assert!(
+        body.contains("uintptr_t"),
+        "usize values must use the pointer sized C type: {}",
+        body
+    );
+    assert!(
+        body.contains("ls_mul_u64_checked("),
+        "usize multiplication must use the u64 checked helper: {}",
+        body
+    );
+}
+
+const USIZE_INDEX: &str = r#"
+fn main() {
+    let mut values: Vec<i64> = Vec::new();
+    values.push(7);
+    let index: usize = 1;
+    let selected = values[index];
+    println!("{}", selected);
+}
+"#;
+
+#[test]
+fn bounds_checks_usize_indexes_without_signed_narrowing() {
+    let (main_c, _) = generate_source("usize_index", USIZE_INDEX, false);
+    let body = user_main_body(&main_c);
+    assert!(
+        body.contains("ls_panic_bounds("),
+        "a vector index must be bounds checked: {}",
+        body
+    );
+    assert!(
+        body.contains(") >= (uint64_t)("),
+        "the bounds check must compare the index as an unsigned value: {}",
         body
     );
 }

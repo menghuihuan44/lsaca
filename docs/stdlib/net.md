@@ -1,13 +1,14 @@
-# net: TCP networking
+# net: TCP sockets
 
-**Status in 2.0.0.** Implemented. The module is implemented in `stdlib/src/net.ls`
-and provides plain TCP only: no TLS, no UDP, no Unix-domain sockets and no
-async I/O.
+**Status in 2.1.0.** Implemented in `stdlib/src/net.ls`. The module provides
+plain, blocking TCP over addresses as text: `bind` and `connect` take a
+`"host:port"` string. There is no TLS, no UDP, no DNS lookup API beyond the
+resolver built into `connect`, and no async I/O in 2.1.0.
 
-Addresses are owned `String` values in the form `"host:port"`, for example
-`"127.0.0.1:8080"`. A port of `0` asks the operating system for an ephemeral
-port, which `local_port` reports. Failures are `io::Error` values with an
-`ErrorKind`, never panics.
+Failures are [`io::Error`](io.md) values, never panics. A refused connection, a
+reset peer, an address already in use and a timeout are reported with the
+matching `ErrorKind`: `ConnectionRefused`, `ConnectionReset`, `AddrInUse`,
+`TimedOut`, `WouldBlock`, and so on.
 
 ## TcpListener
 
@@ -17,17 +18,16 @@ pub struct TcpListener {
 }
 ```
 
-| Method | Signature | Meaning |
+| Method | Signature | Notes |
 | --- | --- | --- |
-| `TcpListener::bind` | `(String) -> Result<TcpListener, io::Error>` | binds a listening socket to `"host:port"` |
-| `local_port` | `(&self) -> i64` | the bound port (useful after binding port `0`) |
-| `accept` | `(&self) -> Result<TcpStream, io::Error>` | waits for and returns the next connection |
-| `handle` | `(&self) -> i64` | the raw runtime handle |
-| `Drop` | - | closes the listening socket |
+| `TcpListener::bind` | `(address: &str) -> Result<TcpListener, Error>` | binds and starts listening; a port of `0` in the address picks a free port |
+| `local_port` | `(&self) -> i64` | the port the listener is bound to |
+| `accept` | `(&self) -> Result<TcpStream, Error>` | waits for the next connection |
+| `handle` | `(&self) -> i64` | the raw runtime table index |
+| `TcpListener` `Drop` | - | closes the listener |
 
-`accept` blocks the calling thread. On a non-blocking listener with no pending
-connection the error kind is `ErrorKind::WouldBlock`; make the listener
-non-blocking through the platform handle if you need polling.
+`bind` is the only constructor and there is no `set_nonblocking` on a listener;
+a timeout is set on accepted streams instead.
 
 ## TcpStream
 
@@ -37,29 +37,50 @@ pub struct TcpStream {
 }
 ```
 
-| Method | Signature | Meaning |
+| Method | Signature | Notes |
 | --- | --- | --- |
-| `TcpStream::connect` | `(String) -> Result<TcpStream, io::Error>` | connects to `"host:port"` |
-| `handle` | `(&self) -> i64` | the raw runtime handle |
-| `read` | `(&mut self, &mut [u8]) -> Result<i64, io::Error>` | reads bytes; `0` at end of stream |
-| `write` | `(&mut self, &[u8]) -> Result<i64, io::Error>` | writes bytes |
-| `set_timeout` | `(&self, milliseconds: i64) -> Result<(), io::Error>` | read and write timeout in milliseconds; `0` disables it |
-| `shutdown` | `(&self, how: i64) -> Result<(), io::Error>` | shuts down `0` read, `1` write or `2` both directions |
-| `Drop` | - | shuts down both directions and closes the socket |
+| `TcpStream::connect` | `(address: &str) -> Result<TcpStream, Error>` | opens a connection to `"host:port"` |
+| `handle` | `(&self) -> i64` | the raw runtime table index |
+| `read` | `(&mut self, buffer: &mut [u8]) -> Result<usize, Error>` | bytes read; `0` when the peer closed the connection |
+| `write` | `(&mut self, buffer: &[u8]) -> Result<usize, Error>` | bytes written |
+| `set_timeout` | `(&self, milliseconds: i64) -> Result<(), Error>` | sets the read and write timeout; `0` disables it |
+| `shutdown` | `(&self, how: Shutdown) -> Result<(), Error>` | shuts down the read side, the write side or both |
+| `TcpStream` `Drop` | - | shuts both directions down and closes the socket |
 
-Failures are classified: a refused connection is
-`ErrorKind::ConnectionRefused`, a reset connection is
-`ErrorKind::ConnectionReset`, an address already in use is
-`ErrorKind::AddressInUse` and a timeout is `ErrorKind::TimedOut`.
+`shutdown` takes the `Shutdown` enum added in 2.1.0, replacing the numeric
+`how` argument of 2.0.0:
 
-## Limits in 2.0
+```rust
+pub enum Shutdown {
+    Read,
+    Write,
+    Both,
+}
+```
 
-Plain TCP only: no TLS, no UDP, no Unix-domain sockets and no asynchronous I/O.
-There is no DNS API; use a numeric address or `localhost`. There are no threads
-in 2.0.0, so a server handles one connection at a time unless it multiplexes
-manually.
+The byte counts are `usize`, as in [io](io.md). Dropping a stream shuts both
+directions down and then closes the socket; dropping a listener closes it. A
+peer that closes the connection is not an error: `read` returns `Ok(0)`, and a
+later `write` reports `ErrorKind::BrokenPipe`.
+
+Sending and receiving use byte buffers. `Vec<u8>` is the only growable byte
+container in 2.1.0 (there are no arrays), and `&mut buffer` coerces to
+`&mut [u8]` when passed to `read`:
+
+```rust
+let mut buffer: Vec<u8> = Vec::with_capacity(1024);
+stream.read(&mut buffer)?;
+stream.write(&buffer[0..count])?;
+```
+
+## Limits in 2.1.0
+
+The module is TCP only: no UDP, no Unix domain sockets, no TLS, no `SocketAddr`
+type, no DNS lookup API, no listener iterator and no async I/O. Addresses are
+strings resolved by the runtime. There is no `set_nonblocking` on sockets and no
+half-close inspection.
 
 ## See also
 
-* [io](io.md), [fs](fs.md) and [error](error.md).
-* [Roadmap](../language/16-roadmap.md) - threads are not part of 2.0.
+* [io](io.md) - errors and handles.
+* [Standard library chapter](../language/15-standard-library.md#io-and-process).

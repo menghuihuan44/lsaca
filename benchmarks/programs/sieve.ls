@@ -4,15 +4,16 @@ fn main() {
     // Optional argument: upper limit; the default is the medium scale.
     let all = args();
     let limit: i64 = if all.len() > 0 { all[0].clone().parse_i64().unwrap() } else { 2000000 };
-    let mut flags = vec![0; limit + 1];
+    let size: usize = (limit + 1) as usize;
+    let mut flags: Vec<i64> = vec![0; size];
     let mut primes = 0;
     let mut i = 2;
     while i <= limit {
-        if flags[i] == 0 {
+        if flags[i as usize] == 0 {
             primes += 1;
             let mut j = i * i;
             while j <= limit {
-                flags[j] = 1;
+                flags[j as usize] = 1;
                 j += i;
             }
         }

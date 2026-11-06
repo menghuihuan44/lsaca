@@ -7,10 +7,10 @@ fn next_value(seed: i64) -> i64 {
 fn insertion_sort(values: Vec<i64>) -> Vec<i64> {
     let mut data = values;
     let count = data.len();
-    let mut index: i64 = 1;
+    let mut index: usize = 1;
     while index < count {
         let current = data[index];
-        let mut position = index;
+        let mut position: usize = index;
         while position > 0 {
             let previous = data[position - 1];
             if previous > current {
@@ -27,10 +27,10 @@ fn insertion_sort(values: Vec<i64>) -> Vec<i64> {
 }
 
 fn main() {
-    let count: i64 = 2000;
+    let count: usize = 2000;
     let mut values: Vec<i64> = Vec::new();
     let mut seed: i64 = 12345;
-    let mut index: i64 = 0;
+    let mut index: usize = 0;
     let mut sum_before: i64 = 0;
     let mut min_before: i64 = 0;
     let mut max_before: i64 = 0;
@@ -56,7 +56,7 @@ fn main() {
     assert_eq!(sorted.len(), count);
     let mut sum_after: i64 = 0;
     let mut ordered = true;
-    let mut position: i64 = 0;
+    let mut position: usize = 0;
     while position < count {
         let value = sorted[position];
         sum_after += value;

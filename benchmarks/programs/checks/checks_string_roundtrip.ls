@@ -6,14 +6,15 @@ fn main() {
     let mut text = String::new();
     let mut index: i64 = 0;
     while index < tokens {
-        text.push_str(format!("v{},", index));
+        let piece = format!("v{},", index);
+        text.push_str(&piece);
         index += 1;
     }
     assert_eq!(text.char_count(), text.len());
     let parts = text.split(",");
     let mut seen: i64 = 0;
     let mut sum: i64 = 0;
-    let mut longest: i64 = 0;
+    let mut longest: usize = 0;
     for part in parts {
         if part.len() > 0 {
             let value = part.substring(1, part.len() - 1).parse_i64().unwrap();

@@ -38,6 +38,20 @@ fn i64() -> ITy {
     ITy::i64()
 }
 
+fn usize_() -> ITy {
+    ITy::usize()
+}
+
+/// A shared read-only `&str` text parameter or result type. The fallback table
+/// mirrors the final standard-library signatures: text inputs are borrowed,
+/// while owning results stay `String`.
+fn str_ref() -> ITy {
+    ITy::Ref {
+        mutable: false,
+        inner: Box::new(ITy::Str),
+    }
+}
+
 /// Look up a built-in method on a resolved receiver type.
 pub fn builtin_method(recv: &ITy, name: &str) -> Option<BuiltinMethodInfo> {
     match recv {
@@ -54,35 +68,31 @@ pub fn builtin_method(recv: &ITy, name: &str) -> Option<BuiltinMethodInfo> {
 fn string_method(name: &str) -> Option<BuiltinMethodInfo> {
     use HBuiltinMethod::*;
     let info = match name {
-        "len" => method(StrLen, vec![], i64()),
+        "len" => method(StrLen, vec![], usize_()),
         "is_empty" => method(StrIsEmpty, vec![], ITy::bool_()),
-        "push_str" => mutating(StrPushStr, vec![ITy::string()], ITy::Unit),
+        "push_str" => mutating(StrPushStr, vec![str_ref()], ITy::Unit),
         "clear" => mutating(StrClear, vec![], ITy::Unit),
-        "contains" => method(StrContains, vec![ITy::string()], ITy::bool_()),
-        "starts_with" => method(StrStartsWith, vec![ITy::string()], ITy::bool_()),
-        "ends_with" => method(StrEndsWith, vec![ITy::string()], ITy::bool_()),
-        "find" => method(StrFind, vec![ITy::string()], ITy::option(i64())),
-        "replace" => method(
-            StrReplace,
-            vec![ITy::string(), ITy::string()],
-            ITy::string(),
-        ),
+        "contains" => method(StrContains, vec![str_ref()], ITy::bool_()),
+        "starts_with" => method(StrStartsWith, vec![str_ref()], ITy::bool_()),
+        "ends_with" => method(StrEndsWith, vec![str_ref()], ITy::bool_()),
+        "find" => method(StrFind, vec![str_ref()], ITy::option(usize_())),
+        "replace" => method(StrReplace, vec![str_ref(), str_ref()], ITy::string()),
         "to_uppercase" => method(StrToUppercase, vec![], ITy::string()),
         "to_lowercase" => method(StrToLowercase, vec![], ITy::string()),
-        "trim" => method(StrTrim, vec![], ITy::string()),
-        "split" => method(StrSplit, vec![ITy::string()], ITy::vec(ITy::string())),
-        "substring" => method(StrSubstring, vec![i64(), i64()], ITy::string()),
-        "repeat" => method(StrRepeat, vec![i64()], ITy::string()),
+        "trim" => method(StrTrim, vec![], str_ref()),
+        "split" => method(StrSplit, vec![str_ref()], ITy::vec(ITy::string())),
+        "substring" => method(StrSubstring, vec![usize_(), usize_()], ITy::string()),
+        "repeat" => method(StrRepeat, vec![usize_()], ITy::string()),
         "parse_i64" => method(StrParseI64, vec![], ITy::result(i64(), ITy::string())),
         "parse_f64" => method(StrParseF64, vec![], ITy::result(ITy::f64(), ITy::string())),
         // Version 1.6 UTF-8 aware String API: character indices are scalar
         // positions, byte-indexed methods use `is_char_boundary`.
-        "char_count" => method(StrCharCount, vec![], i64()),
+        "char_count" => method(StrCharCount, vec![], usize_()),
         "chars" => method(StrChars, vec![], ITy::vec(ITy::char_())),
-        "char_at" => method(StrCharAt, vec![i64()], ITy::option(ITy::char_())),
+        "char_at" => method(StrCharAt, vec![usize_()], ITy::option(ITy::char_())),
         "push" => mutating(StrPush, vec![ITy::char_()], ITy::Unit),
         "pop" => mutating(StrPop, vec![], ITy::option(ITy::char_())),
-        "is_char_boundary" => method(StrIsCharBoundary, vec![i64()], ITy::bool_()),
+        "is_char_boundary" => method(StrIsCharBoundary, vec![usize_()], ITy::bool_()),
         _ => return None,
     };
     Some(info)
@@ -92,16 +102,16 @@ fn vec_method(elem: &ITy, name: &str) -> Option<BuiltinMethodInfo> {
     use HBuiltinMethod::*;
     let elem = elem.clone();
     let info = match name {
-        "len" => method(VecLen, vec![], i64()),
+        "len" => method(VecLen, vec![], usize_()),
         "is_empty" => method(VecIsEmpty, vec![], ITy::bool_()),
         "push" => mutating(VecPush, vec![elem], ITy::Unit),
         "pop" => mutating(VecPop, vec![], ITy::option(elem)),
-        "insert" => mutating(VecInsert, vec![i64(), elem], ITy::Unit),
-        "remove" => mutating(VecRemove, vec![i64()], elem),
+        "insert" => mutating(VecInsert, vec![usize_(), elem], ITy::Unit),
+        "remove" => mutating(VecRemove, vec![usize_()], elem),
         "clear" => mutating(VecClear, vec![], ITy::Unit),
         "first" => method(VecFirst, vec![], ITy::option(elem)),
         "last" => method(VecLast, vec![], ITy::option(elem)),
-        "get" => method(VecGet, vec![i64()], ITy::option(elem)),
+        "get" => method(VecGet, vec![usize_()], ITy::option(elem)),
         "extend" => mutating(VecExtend, vec![ITy::vec(elem)], ITy::Unit),
         "reverse" => mutating(VecReverse, vec![], ITy::Unit),
         _ => return None,
@@ -117,7 +127,7 @@ fn rc_method(elem: &ITy, name: &str) -> Option<BuiltinMethodInfo> {
         // The cell is shared and mutated through the handle, so `set` needs
         // only a shared (immutable) binding, not a mutable one.
         "set" => method(RcSet, vec![elem], ITy::Unit),
-        "strong_count" => method(RcStrongCount, vec![], i64()),
+        "strong_count" => method(RcStrongCount, vec![], usize_()),
         _ => return None,
     };
     Some(info)

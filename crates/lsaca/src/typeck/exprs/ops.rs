@@ -176,7 +176,22 @@ impl<'a> Checker<'a> {
                 | AstBinaryOp::Ge
         );
         let left = self.check_expr(lhs, if comparison { None } else { hint });
-        let right = self.check_expr(rhs, Some(&left.ty));
+        // String concatenation only accepts &str on the right-hand side: check
+        // the operand without a String hint and coerce it to &str, so a String
+        // variable needs an explicit borrow and a literal becomes a slice.
+        let string_concat = !comparison
+            && matches!(op, AstBinaryOp::Add)
+            && matches!(self.infer.resolve(&left.ty), ITy::String);
+        let right = if string_concat {
+            let right = self.check_expr(rhs, None);
+            let str_ref = ITy::Ref {
+                mutable: false,
+                inner: Box::new(ITy::Str),
+            };
+            self.coerce_to(right, &str_ref, rhs.span)
+        } else {
+            self.check_expr(rhs, Some(&left.ty))
+        };
         let (hop, result) = self.check_binary_op_semantics(op, &left.ty, &right.ty, span);
         self.apply_hint(&result, hint);
         TExpr::new(
@@ -255,6 +270,33 @@ impl<'a> Checker<'a> {
         let left = self.infer.resolve(lhs_ty);
         let right = self.infer.resolve(rhs_ty);
         let hop = Self::hop_of(op);
+        // String concatenation has its own rule: String + &str is allowed and
+        // yields String, while String + String (and String + anything else)
+        // does not exist. A &str right-hand side never unifies with String, so
+        // this case must be handled before the generic operand unification.
+        if matches!(op, AstBinaryOp::Add) {
+            let right_is_str_ref = matches!(
+                &right,
+                ITy::Ref {
+                    mutable: false,
+                    inner,
+                } if matches!(self.infer.resolve(inner), ITy::Str)
+            );
+            if matches!(&left, ITy::String) {
+                if right_is_str_ref {
+                    return (hop, ITy::string());
+                }
+                let described = self.describe_resolved(&right);
+                self.error_code_note(
+                    format!("cannot add `{}` to `String`", described),
+                    span,
+                    "E0277",
+                    "String concatenation only accepts a string slice: borrow the operand (s + &other) or use a string literal"
+                        .to_string(),
+                );
+                return (hop, ITy::string());
+            }
+        }
         let same = self.unify_quiet(&left, &right);
         let unified = self.infer.resolve(&left);
         if !same && !left.is_never() && !right.is_never() {
@@ -415,11 +457,24 @@ impl<'a> Checker<'a> {
             );
         }
         let target_ty = self.infer.resolve(&target_expr.ty);
-        let value_expr = self.check_expr(value, Some(&target_ty));
-        // Route the assigned value through coerce_to so that trait-object and
-        // slice/str coercions are available on assignment as well. coerce_to
-        // reports its own mismatch diagnostic.
-        let value_expr = self.coerce_to(value_expr, &target_ty, value.span);
+        // String += only accepts &str, exactly like String + &str: coerce the
+        // right-hand side to &str instead of the String target type.
+        let string_concat =
+            matches!(op, Some(AstBinaryOp::Add)) && matches!(target_ty, ITy::String);
+        let value_expr = if string_concat {
+            let value_expr = self.check_expr(value, None);
+            let str_ref = ITy::Ref {
+                mutable: false,
+                inner: Box::new(ITy::Str),
+            };
+            self.coerce_to(value_expr, &str_ref, value.span)
+        } else {
+            let value_expr = self.check_expr(value, Some(&target_ty));
+            // Route the assigned value through coerce_to so that trait-object
+            // and slice/str coercions are available on assignment as well.
+            // coerce_to reports its own mismatch diagnostic.
+            self.coerce_to(value_expr, &target_ty, value.span)
+        };
         let hop = match op {
             Some(ast_op) => {
                 if matches!(ast_op, AstBinaryOp::And | AstBinaryOp::Or) {

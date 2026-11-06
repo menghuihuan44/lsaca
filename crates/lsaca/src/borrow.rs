@@ -2189,6 +2189,82 @@ mod tests {
         );
     }
 
+    /// Rejected-program counterpart of [expect_accepted_with_prelude]: the
+    /// stdlib prelude is required by v2.1 sources that call stdlib methods
+    /// such as String::as_str and String::len.
+    fn expect_rejected_with_prelude(source: &str, code: &str) {
+        let diagnostics = match check_source_with_prelude(source) {
+            Ok(program) => {
+                let diagnostics = check(&program);
+                panic!(
+                    "borrow checker accepted invalid program (expected {}): {}",
+                    code,
+                    messages(&diagnostics)
+                );
+            }
+            Err(diagnostics) => diagnostics,
+        };
+        let found = diagnostics
+            .as_slice()
+            .iter()
+            .any(|diagnostic| diagnostic.code == Some(code));
+        assert!(
+            found,
+            "expected a {} diagnostic, got: {}",
+            code,
+            messages(&diagnostics)
+        );
+    }
+
+    /// Front end and type check a program against the embedded v2.1 standard
+    /// library, exactly like the compiler driver does. Methods that live in
+    /// the standard library (String::as_str, str::len and so on) only resolve
+    /// against the complete library, not against the v1.5 iterator prelude.
+    fn check_source_with_stdlib(source: &str) -> Result<hir::Program, Diagnostics> {
+        let file = SourceFile::new("test.ls", source);
+        let program = parse_ast(source, &file);
+        let stdlib = crate::stdlib::program().expect("the embedded standard library must parse");
+        typeck::check_with_prelude(&program, Some(stdlib), &file)
+    }
+
+    fn expect_accepted_with_stdlib(source: &str) {
+        let program = match check_source_with_stdlib(source) {
+            Ok(program) => program,
+            Err(diagnostics) => panic!("valid program was rejected: {}", messages(&diagnostics)),
+        };
+        // Pin down that the borrow checker stays a pure read-only pass.
+        let diagnostics = check(&program);
+        assert!(
+            !diagnostics.has_errors(),
+            "borrow checker rejected valid program: {}",
+            messages(&diagnostics)
+        );
+    }
+
+    fn expect_rejected_with_stdlib(source: &str, code: &str) {
+        let diagnostics = match check_source_with_stdlib(source) {
+            Ok(program) => {
+                let diagnostics = check(&program);
+                panic!(
+                    "borrow checker accepted invalid program (expected {}): {}",
+                    code,
+                    messages(&diagnostics)
+                );
+            }
+            Err(diagnostics) => diagnostics,
+        };
+        let found = diagnostics
+            .as_slice()
+            .iter()
+            .any(|diagnostic| diagnostic.code == Some(code));
+        assert!(
+            found,
+            "expected a {} diagnostic, got: {}",
+            code,
+            messages(&diagnostics)
+        );
+    }
+
     // -- programs the borrow checker must accept -------------------------
 
     #[test]
@@ -2977,7 +3053,7 @@ mod tests {
 
     #[test]
     fn if_condition_mutable_borrow_then_move_is_accepted() {
-        expect_accepted(
+        expect_accepted_with_prelude(
             "fn bump(r: &mut String) -> bool {
                  r.push_str(\"!\");
                  r.len() > 2
@@ -3189,7 +3265,7 @@ mod tests {
                  let value = scores.get(String::from(\"k\"));
                  let n = borrowed.len();
                  scores.insert(String::from(\"j\"), 2);
-                 println!(\"{}\", value.unwrap() + n);
+                 println!(\"{} {}\", value.unwrap(), n);
              }",
         );
     }
@@ -3257,7 +3333,7 @@ mod tests {
     #[test]
     fn two_disjoint_borrows_of_different_locals_in_one_call_is_accepted() {
         expect_accepted(
-            "fn combine(left: &String, right: &String) -> i64 {
+            "fn combine(left: &String, right: &String) -> usize {
                  left.len() + right.len()
              }
              fn main() {
@@ -3268,6 +3344,130 @@ mod tests {
              }",
         );
     }
+    // -- v2.1: ownership around string slices, usize and stdlib methods -----
+
+    #[test]
+    fn string_slice_borrow_then_move_is_rejected() {
+        expect_rejected_with_stdlib(
+            r#"fn main() {
+                let text = String::from("hello");
+                let slice: &str = text.as_str();
+                let moved = text;
+                println!("{} {}", slice, moved);
+            }"#,
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn string_slice_borrow_ends_then_move_is_accepted() {
+        expect_accepted_with_stdlib(
+            r#"fn main() {
+                let text = String::from("hello");
+                let length = text.as_str().len();
+                let moved = text;
+                println!("{} {}", length, moved);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn vector_element_borrow_then_move_is_rejected() {
+        expect_rejected(
+            r#"fn main() {
+                let items: Vec<i64> = vec![1, 2, 3];
+                let first = &items[0];
+                let moved = items;
+                println!("{} {}", *first, moved.len());
+            }"#,
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn vector_element_borrow_ends_then_move_is_accepted() {
+        expect_accepted(
+            r#"fn main() {
+                let items: Vec<i64> = vec![1, 2, 3];
+                let first = &items[0];
+                let value = *first;
+                let moved = items;
+                println!("{} {}", value, moved.len());
+            }"#,
+        );
+    }
+
+    #[test]
+    fn map_key_borrow_then_move_into_insert_is_rejected() {
+        expect_rejected_with_prelude(
+            r#"fn main() {
+                let mut scores: HashMap<String, i64> = HashMap::new();
+                let key = String::from("k");
+                let borrowed = &key;
+                scores.insert(key, 1);
+                println!("{}", borrowed.len());
+            }"#,
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn string_concatenation_does_not_move_the_left_operand() {
+        expect_accepted_with_prelude(
+            r#"fn main() {
+                let left = String::from("x");
+                let right = String::from("y");
+                let joined = left + &right;
+                let moved = left;
+                println!("{} {}", joined, moved);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn plus_assign_then_move_is_accepted() {
+        expect_accepted_with_prelude(
+            r#"fn main() {
+                let mut text = String::from("a");
+                let suffix = String::from("b");
+                text += &suffix;
+                let moved = text;
+                println!("{} {}", moved, suffix);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn string_coercion_borrow_ends_then_move_is_accepted() {
+        expect_accepted_with_stdlib(
+            r#"fn take(text: &str) -> usize {
+                text.len()
+            }
+            fn main() {
+                let path = String::from("file");
+                let length = take(&path);
+                let moved = path;
+                println!("{} {}", length, moved);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn moving_a_struct_while_a_field_slice_is_borrowed_is_rejected() {
+        expect_rejected_with_stdlib(
+            r#"struct Holder {
+                text: String,
+            }
+            fn main() {
+                let holder = Holder { text: String::from("abc") };
+                let borrowed: &str = holder.text.as_str();
+                let moved = holder;
+                println!("{} {}", borrowed, moved.text);
+            }"#,
+            "E0505",
+        );
+    }
+
     // -- v2.0 Phase B: slices and trait objects, checked at the HIR level ----
     //
     // Slices and trait objects are lowered by the type checker in the same

@@ -84,7 +84,7 @@ impl<T> Stack<T> {
 
     pub fn with_capacity(capacity: i64) -> Stack<T> {
         Stack {
-            items: Vec::with_capacity(capacity),
+            items: Vec::with_capacity(capacity as usize),
         }
     }
 
@@ -115,7 +115,7 @@ pub fn maybe_or_i64(value: Maybe<i64>, fallback: i64) -> i64 {
 pub fn maybe_text_length(value: Maybe<String>) -> i64 {
     match value {
         Maybe::Nothing => 0,
-        Maybe::Just(inner) => inner.len(),
+        Maybe::Just(inner) => inner.len() as i64,
     }
 }
 
@@ -130,19 +130,19 @@ pub fn maybe_join(left: Maybe<String>, right: Maybe<String>) -> String {
     let mut joined = String::from("");
     match left {
         Maybe::Nothing => joined.push_str("empty"),
-        Maybe::Just(inner) => joined.push_str(format!("{}", inner)),
+        Maybe::Just(inner) => joined.push_str(inner.as_str()),
     }
     joined.push_str(":");
     match right {
         Maybe::Nothing => joined.push_str("empty"),
-        Maybe::Just(inner) => joined.push_str(format!("{}", inner)),
+        Maybe::Just(inner) => joined.push_str(inner.as_str()),
     }
     joined
 }
 
 pub fn either_code(value: Either<String, i64>) -> i64 {
     match value {
-        Either::Left(text) => text.len(),
+        Either::Left(text) => text.len() as i64,
         Either::Right(number) => number,
     }
 }
@@ -238,7 +238,7 @@ pub fn stack_text_total(words: Vec<String>) -> i64 {
             None => continue_loop = false,
         }
     }
-    total
+    total as i64
 }
 
 pub fn drain_length<T>(values: Vec<T>) -> i64 {
@@ -286,7 +286,7 @@ pub fn pair_checksum(pair: Pair<i64>) -> i64 {
 }
 
 pub fn pair_text_checksum(pair: Pair<String>) -> i64 {
-    pair.first.len() * 31 + pair.second.len()
+    (pair.first.len() as i64) * 31 + pair.second.len() as i64
 }
 
 pub fn triple_checksum(triple: Triple<i64>) -> i64 {
@@ -307,11 +307,11 @@ pub fn checksum(seed: i64) -> i64 {
 
     acc = (acc * 31 + identity(42)) % MODULUS;
 
-    let pair = Pair::new(3, 4);
+    let pair = Pair::<i64>::new(3, 4);
     let swapped = swap_pair(pair);
     acc = (acc * 31 + pair_checksum(swapped)) % MODULUS;
 
-    let first = first_of_pair(Pair::new(7, 9));
+    let first = first_of_pair(Pair::<i64>::new(7, 9));
     acc = (acc * 31 + first) % MODULUS;
 
     let words = Pair::<String>::new(String::from("left"), String::from("right"));
@@ -323,7 +323,7 @@ pub fn checksum(seed: i64) -> i64 {
     let chosen = choose(true, 11, 22);
     acc = (acc * 31 + chosen) % MODULUS;
     let chosen_text = choose(false, String::from("no"), String::from("yes"));
-    acc = (acc * 31 + chosen_text.len()) % MODULUS;
+    acc = (acc * 31 + chosen_text.len() as i64) % MODULUS;
 
     acc = (acc * 31 + maybe_or_i64(Maybe::Just(8), 0)) % MODULUS;
     acc = (acc * 31 + maybe_or_i64(Maybe::Nothing, 5)) % MODULUS;
@@ -338,12 +338,12 @@ pub fn checksum(seed: i64) -> i64 {
         Maybe::Just(String::from("a")),
         Maybe::Just(String::from("b")),
     );
-    acc = (acc * 31 + joined.len()) % MODULUS;
+    acc = (acc * 31 + joined.len() as i64) % MODULUS;
 
     acc = (acc * 31 + either_code(Either::Left(String::from("xy")))) % MODULUS;
     acc = (acc * 31 + either_code(Either::Right(9))) % MODULUS;
     let described = either_describe(Either::Left(12));
-    acc = (acc * 31 + described.len()) % MODULUS;
+    acc = (acc * 31 + described.len() as i64) % MODULUS;
 
     acc = (acc * 31 + stack_i64_sum(5)) % MODULUS;
     acc = (acc * 31 + stack_i64_levels(7)) % MODULUS;
@@ -360,7 +360,7 @@ pub fn checksum(seed: i64) -> i64 {
 
     let fallback = String::from("fallback");
     let first_text = first_or(vec![String::from("only")], fallback);
-    acc = (acc * 31 + first_text.len()) % MODULUS;
+    acc = (acc * 31 + first_text.len() as i64) % MODULUS;
 
     let first_number = first_or(vec![1, 2, 3], 0);
     acc = (acc * 31 + first_number) % MODULUS;
