@@ -8,3 +8,5 @@
 *.ls text eol=lf
 *.yml text eol=lf
 *.ps1 text eol=crlf
+*.out text eol=lf
+examples/programs/data/* text eol=lf

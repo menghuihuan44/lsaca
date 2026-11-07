@@ -382,8 +382,10 @@ jobs:
             name="$(basename "$example" .ls)"
             out="$workdir/$name"
             ./target/release/lsaca emit-c -r -o "$out" "$example"
+            # The emitted project is main.c, the runtime sources and, for a
+            # large program, extra translation units next to main.c.
             gcc -std=c17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
-              -fno-omit-frame-pointer -I "$out" "$out/main.c" "$out"/lsaca_rt*.c \
+              -fno-omit-frame-pointer -I "$out" "$out"/*.c \
               -lm -o "$out/$name"
             "$out/$name" > /dev/null
           done
@@ -430,8 +432,10 @@ jobs:
             out="$workdir/$name"
             echo "::group::Generating $name"
             ./target/release/lsaca emit-c -r -o "$out" "$example"
+            # Compile main.c together with the extra translation units emitted
+            # for a large program and the runtime sources.
             gcc -std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -I "$out" \
-              "$out/main.c" "$out"/lsaca_rt*.c -lm -o "$out/$name"
+              "$out"/*.c -lm -o "$out/$name"
             if [ "$name" = "hello" ]; then
               output="$("$out/$name")"
               if [ "$output" != "hello, world!" ]; then

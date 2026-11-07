@@ -1456,6 +1456,10 @@ fn real_programs_match_expected_output() {
         };
         let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
         let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        // The golden files are embedded with include_str!, so on a Windows
+        // checkout they carry whatever line endings the working tree has.
+        // Normalise both sides so a CRLF checkout cannot fail the comparison.
+        let expected = normalize(expected);
         let label = if args.is_empty() {
             name.to_string()
         } else {
