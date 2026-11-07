@@ -1,6 +1,6 @@
 # binary_heap: BinaryHeap<T>
 
-**Status in 2.1.0.** Implemented in `stdlib/src/collections.ls`.
+**Status in 2.2.0.** Implemented in `stdlib/src/collections.ls`.
 
 `BinaryHeap<T>` is a maximum heap: the largest value is at the top, and the
 container is the natural priority queue. Overlapping or duplicate values are
@@ -33,7 +33,7 @@ largest to smallest rather than in a tree layout.
   which makes `elements()` a sorted read.
 * Lengths are `usize` since 2.1.0.
 
-## Limitations in 2.1.0
+## Limitations in 2.2.0
 
 There is no `for` loop over a `BinaryHeap` yet: read the values with
 `elements()`; `peek` returns `Option<T>` (a clone), not `Option<&T>`. There is no

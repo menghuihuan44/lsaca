@@ -36,7 +36,7 @@ cargo build --release
 Expected output:
 
 ```text
-lsaca 2.1.0
+lsaca 2.2.0
 ```
 
 The compiler is a single binary at `target/release/lsaca` (`lsaca.exe` on
@@ -101,7 +101,7 @@ without lsaca.
 ## A slightly larger tour
 
 The following program uses a struct, an `impl` block, a `Box<T>`, an `Rc<T>`
-cell, the `?` operator and a format specifier, all verified to work in 2.1.0:
+cell, the `?` operator and a format specifier, all verified to work in 2.2.0:
 
 ```ls
 struct Point {
@@ -338,8 +338,9 @@ runtime defines.
 
 ## Command-line interface
 
-`lsaca` takes one command. `run`, `build`, `emit-c` and `check` also take an
-optional `FILE.ls`; with no file they operate on the nearest package:
+`lsaca` takes one command. The compile commands `run`, `build`, `emit-c` and
+`check` take an optional `FILE.ls`; with no file they operate on the nearest
+package. `fmt` takes exactly one file:
 
 | Command | Description |
 | --- | --- |
@@ -347,6 +348,7 @@ optional `FILE.ls`; with no file they operate on the nearest package:
 | `lsaca build [FILE.ls]` | Compile and build a native executable in the output directory (default: next to the source). |
 | `lsaca emit-c [FILE.ls]` | Write the generated C project only; do not compile or link it. |
 | `lsaca check [FILE.ls]` | Run the front end only: module loading, lexing, parsing, name resolution and type checking. Fast; useful in editors and CI. |
+| `lsaca fmt <FILE.ls> [--check] [--stdout]` | Rewrite one source file with canonical indentation and whitespace, or report whether it would change (`--check`) or print the result (`--stdout`). See [Formatting source files](#formatting-source-files). |
 | `lsaca new <DIR>` | Create a new binary package in `DIR`: an `lsaca.toml` manifest and a hello-world `src/main.ls`. |
 | `lsaca version` | Print the compiler version. |
 | `lsaca help` | Print the help text. |
@@ -370,10 +372,10 @@ package but finds no manifest exits with code `2` and
 `lsaca: no lsaca.toml found in this directory or any parent directory`;
 `lsaca new` is the only command that always needs an explicit directory.
 
-The complete help text of version 2.1.0:
+The complete help text of version 2.2.0:
 
 ```console
-lsaca 2.1.0 - a small statically typed language with an ORC memory model
+lsaca 2.2.0 - a small statically typed language with an ORC memory model
 
 USAGE:
     lsaca <COMMAND> [OPTIONS] [FILE.ls]
@@ -383,6 +385,7 @@ COMMANDS:
     build [FILE.ls]              compile and build a native executable
     emit-c [FILE.ls]             write the generated C project only
     check [FILE.ls]              run the front end and report diagnostics
+    fmt <FILE.ls> [--check]      rewrite a source file with canonical indentation
     new <DIR>                    create a new binary package
     version                      print the compiler version
     help                         print this help
@@ -420,6 +423,60 @@ fail with `lsaca: unexpected argument '--cmake' for 'lsaca version'`
 (respectively `'--cmake' for 'lsaca help'`) and exit with `2`. A bare argument that
 ends in `.ls` is treated as `lsaca run <file>`; `lsaca new` takes exactly one
 directory and no other options.
+
+### Formatting source files
+
+`lsaca fmt` rewrites one source file with a canonical layout. It is deliberately
+conservative: it normalizes indentation and whitespace, but never reflows tokens,
+merges or splits lines, or changes the spaces *inside* an expression.
+
+* Each nesting level is indented with four spaces. A line whose first token is a
+  closing delimiter (`}`, `)` or `]`) is dedented one level, and a continuation
+  line that begins with `.` (a method chain) is indented one level deeper than
+  the line it continues.
+* Trailing whitespace is removed from every line, CRLF line endings become LF,
+  runs of blank lines collapse to one blank line, and the file ends with exactly
+  one newline. Comments are preserved.
+* A file with syntax errors is never rewritten: the parser reports its
+  diagnostics, the command exits with code `1` and the final line is
+  `lsaca: <file>: could not be formatted due to previous error(s)`.
+* Formatting is idempotent: running `lsaca fmt` on a canonical file changes
+  nothing.
+
+For example, this file:
+
+```text
+fn main() {
+      let x=1;
+   let value = vec![1, 2, 3]
+      .len();
+}
+```
+
+becomes:
+
+```text
+fn main() {
+    let x=1;
+    let value = vec![1, 2, 3]
+        .len();
+}
+```
+
+Note that `x=1` keeps its token spacing: the formatter only aligns lines and
+their indentation.
+
+Two flags control what happens:
+
+* `--check` writes nothing. If the file would change it prints
+  `lsaca: would format <file>` to stderr and exits with code `1`; a file that is
+  already canonical exits with `0`.
+* `--stdout` prints the formatted source to standard output and leaves the file
+  untouched.
+
+`lsaca fmt` works on a single file: it does not follow `mod` declarations, and
+it needs an explicit file (`lsaca fmt` with no file exits with code `2`). The
+formatter is part of the compiler binary, so no separate tool is installed.
 
 ## Exit codes
 

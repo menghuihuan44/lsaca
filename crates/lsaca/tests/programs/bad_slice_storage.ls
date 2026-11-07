@@ -1,6 +1,6 @@
-// References and slices cannot be stored in user types (v2.1).
+// A Vec of slices is still rejected: references cannot be stored in containers.
 struct Holder {
-    values: &[i64],
+    values: Vec<&[i64]>,
 }
 
 fn main() {

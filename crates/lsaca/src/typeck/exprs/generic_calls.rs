@@ -12,7 +12,7 @@ use crate::span::Span;
 
 use crate::typeck::check::Checker;
 use crate::typeck::generics::ImplInfo;
-use crate::typeck::items::TypeKey;
+use crate::typeck::items::{TypeKey, only_type_args};
 use crate::typeck::itype::{ITy, VarKind};
 use crate::typeck::modules::{BuiltinTypeKind, DefRef, ModuleId};
 use crate::typeck::tree::{TExpr, TExprKind};
@@ -21,7 +21,10 @@ use crate::types::SelfKind;
 impl<'a> Checker<'a> {
     /// How many generic parameters a definition has, for arity messages.
     fn generic_arity(generics: &[ast::GenericParam]) -> usize {
-        generics.len()
+        generics
+            .iter()
+            .filter(|param| !param.kind.is_lifetime())
+            .count()
     }
 
     /// Expression hint taken from a callable bound on a bare type parameter.
@@ -376,6 +379,8 @@ impl<'a> Checker<'a> {
         hint: Option<&ITy>,
         span: Span,
     ) -> Option<ITy> {
+        let explicit = only_type_args(explicit);
+        let explicit: &[ast::TypeExpr] = &explicit;
         if !explicit.is_empty() {
             let args = self.resolve_concrete_type_args(explicit, span)?;
             return kind.resolve(&args);
@@ -484,6 +489,8 @@ impl<'a> Checker<'a> {
             Some(def) => def.clone(),
             None => return self.check_plain_args(args, span),
         };
+        let explicit = only_type_args(explicit);
+        let explicit: &[ast::TypeExpr] = &explicit;
         let arity = Self::generic_arity(&def.generics);
         if !explicit.is_empty() {
             if explicit.len() != arity {
@@ -524,7 +531,7 @@ impl<'a> Checker<'a> {
         let (env, checked, ok) =
             self.infer_callable_args(&def.generics, &def.decl.params, args, span, def.module);
         let Some(type_args) = self.resolve_open_type_args(&def.generics, &env, span) else {
-            return TExpr::new(ITy::Never, TExprKind::Break, span);
+            return TExpr::new(ITy::Never, TExprKind::Break { label: None }, span);
         };
         let fn_id = match self.concrete_call_args(&type_args) {
             Some(concrete) => self.instantiate_generic_fn(def_id, concrete, span),
@@ -537,12 +544,12 @@ impl<'a> Checker<'a> {
                     span,
                     "E0283",
                 );
-                return TExpr::new(ITy::Never, TExprKind::Break, span);
+                return TExpr::new(ITy::Never, TExprKind::Break { label: None }, span);
             }
         };
         match fn_id {
             Some(fn_id) => self.finish_generic_call(fn_id, None, checked, ok, span, hint),
-            None => TExpr::new(ITy::Never, TExprKind::Break, span),
+            None => TExpr::new(ITy::Never, TExprKind::Break { label: None }, span),
         }
     }
 
@@ -598,6 +605,8 @@ impl<'a> Checker<'a> {
         span: Span,
         hint: Option<&ITy>,
     ) -> TExpr {
+        let explicit = only_type_args(explicit);
+        let explicit: &[ast::TypeExpr] = &explicit;
         if !explicit.is_empty() {
             let owner = match self.resolve_generic_instance(type_name, explicit, span) {
                 Some(owner) => owner,
@@ -642,7 +651,7 @@ impl<'a> Checker<'a> {
         let (env, checked, ok) =
             self.infer_callable_args(&info.generics, &gfn.decl.params, args, span, info.module);
         let Some(impl_args) = self.resolve_open_type_args(&info.generics, &env, span) else {
-            return TExpr::new(ITy::Never, TExprKind::Break, span);
+            return TExpr::new(ITy::Never, TExprKind::Break { label: None }, span);
         };
         let fn_id = match self.concrete_call_args(&impl_args) {
             Some(concrete) => {
@@ -658,12 +667,12 @@ impl<'a> Checker<'a> {
                     span,
                     "E0283",
                 );
-                return TExpr::new(ITy::Never, TExprKind::Break, span);
+                return TExpr::new(ITy::Never, TExprKind::Break { label: None }, span);
             }
         };
         match fn_id {
             Some(fn_id) => self.finish_generic_call(fn_id, None, checked, ok, span, hint),
-            None => TExpr::new(ITy::Never, TExprKind::Break, span),
+            None => TExpr::new(ITy::Never, TExprKind::Break { label: None }, span),
         }
     }
 
@@ -844,6 +853,8 @@ impl<'a> Checker<'a> {
         span: Span,
         hint: Option<&ITy>,
     ) -> TExpr {
+        let explicit = only_type_args(explicit);
+        let explicit: &[ast::TypeExpr] = &explicit;
         if !explicit.is_empty() {
             let owner = match self.resolve_generic_instance(type_name, explicit, span) {
                 Some(owner) => owner,

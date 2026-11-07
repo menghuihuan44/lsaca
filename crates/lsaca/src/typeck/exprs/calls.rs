@@ -15,7 +15,7 @@ use crate::typeck::items::{TypeKey, closest_name};
 use crate::typeck::iterators::is_iterator_sugar_name;
 use crate::typeck::itype::{ITy, VarKind};
 use crate::typeck::modules::{DefRef, ModuleId};
-use crate::typeck::tree::{TExpr, TExprKind, TFormatPart, TFormatPartKind, TMacroCall};
+use crate::typeck::tree::{TExpr, TExprKind, TFormatPart, TFormatPartKind, TLit, TMacroCall};
 use crate::types::{FloatTy, IntTy, SelfKind};
 
 /// Maximum number of path segments resolved by one call path. Module paths may
@@ -202,7 +202,7 @@ impl<'a> Checker<'a> {
                 let expected = field.2.clone();
                 let value = self.coerce_to(value, &expected, args[index].span);
                 let resolved = self.infer.resolve(&expected);
-                self.validate_storage_type(&resolved, args[index].span);
+                self.validate_field_type(&resolved, args[index].span);
                 values.push((index, value));
             }
             return self.finish_struct_ctor(id, values, span, hint);
@@ -228,7 +228,7 @@ impl<'a> Checker<'a> {
             let value = self.check_expr(arg, Some(&expected));
             let value = self.coerce_to(value, &expected, arg.span);
             let resolved = self.infer.resolve(&expected);
-            self.validate_storage_type(&resolved, arg.span);
+            self.validate_field_type(&resolved, arg.span);
             values.push((index, value));
         }
         values
@@ -429,6 +429,13 @@ impl<'a> Checker<'a> {
                     self.match_inference_ty(ret, &actual_ret, params, env);
                 }
             }
+            ast::TypeExpr::Array { elem, .. } => {
+                if let ITy::Array(actual_elem, _) = self.infer.resolve(actual) {
+                    let actual_elem = (*actual_elem).clone();
+                    self.match_inference_ty(elem, &actual_elem, params, env);
+                }
+            }
+            ast::TypeExpr::Lifetime(_) => {}
             ast::TypeExpr::Dyn(_) => {}
         }
     }
@@ -664,6 +671,27 @@ impl<'a> Checker<'a> {
                     }
                     return self.check_direct_call(fn_id, None, args, span, hint);
                 }
+                // v2.2: trait associated functions (From::from) live in the
+                // trait impl method table rather than the inherent method map.
+                let owner_ty = match owner {
+                    TypeKey::Struct(id) => ITy::Struct(id),
+                    TypeKey::Enum(id) => ITy::Enum(id),
+                };
+                if let Some(fn_id) = self.dispatch_associated_fn(&owner_ty, &item, span) {
+                    if !self.method_visible(fn_id) {
+                        let owner_name = self.type_name(owner);
+                        self.error_code(
+                            format!("associated function {}::{} is private", owner_name, item),
+                            span,
+                            "E0624",
+                        );
+                        for arg in args {
+                            let _ = self.check_expr(arg, None);
+                        }
+                        return self.never_expr(span);
+                    }
+                    return self.check_direct_call(fn_id, None, args, span, hint);
+                }
                 let owner_name = self.type_name(owner);
                 let suggestion = self.suggest_associated(owner, &item);
                 self.error_suggest(
@@ -675,6 +703,40 @@ impl<'a> Checker<'a> {
                     span,
                     "E0599",
                 );
+                for arg in args {
+                    let _ = self.check_expr(arg, None);
+                }
+                return self.never_expr(span);
+            }
+            // v2.2: the builtin marker types (Rc, Box, Vec, ...) are not user
+            // types, so a call such as Rc::strong_count(&x) used to fall
+            // through to a misleading E0412 "cannot find type Rc". The name
+            // exists; the real problem is that the item is a method that needs
+            // a receiver.
+            if let Some(kind) = self.builtin_marker_kind(&type_name) {
+                let fresh: Vec<ITy> = (0..kind.arity()).map(|_| self.infer.fresh_var()).collect();
+                let receiver_ty = kind.resolve(&fresh).unwrap_or(ITy::Unit);
+                let owner_name = kind.name();
+                if builtin_method(&receiver_ty, &item).is_some() {
+                    self.error_code_note(
+                        format!(
+                            "method {}::{} cannot be called as an associated function",
+                            owner_name, item
+                        ),
+                        span,
+                        "E0599",
+                        format!("call it on a value instead, for example value.{}()", item),
+                    );
+                } else {
+                    self.error_code(
+                        format!(
+                            "no function or associated item named {} found for type {}",
+                            item, owner_name
+                        ),
+                        span,
+                        "E0599",
+                    );
+                }
                 for arg in args {
                     let _ = self.check_expr(arg, None);
                 }
@@ -1291,7 +1353,7 @@ impl<'a> Checker<'a> {
         // run after inference; a pre-check on the unresolved variable would
         // accept a reference payload and crash when the owner moves.
         let resolved_elem = self.infer.resolve(&elem);
-        self.validate_storage_type(&resolved_elem, args[0].span);
+        self.validate_value_type(&resolved_elem, args[0].span);
         TExpr::new(
             ITy::option(elem),
             TExprKind::OptionSome(Box::new(value)),
@@ -1326,7 +1388,7 @@ impl<'a> Checker<'a> {
             },
             None => self.infer.fresh_var(),
         };
-        self.validate_storage_type(&elem, span);
+        self.validate_value_type(&elem, span);
         let ty = ITy::option(elem);
         self.apply_hint(&ty, hint);
         TExpr::new(ty, TExprKind::OptionNone, span)
@@ -1361,7 +1423,7 @@ impl<'a> Checker<'a> {
         // Validate after inference: `Ok(&x)` infers the payload as a
         // reference only while checking the argument.
         let resolved_ok = self.infer.resolve(&ok_ty);
-        self.validate_storage_type(&resolved_ok, args[0].span);
+        self.validate_value_type(&resolved_ok, args[0].span);
         TExpr::new(
             ITy::result(ok_ty, err_ty),
             TExprKind::ResultOk(Box::new(value)),
@@ -1397,7 +1459,7 @@ impl<'a> Checker<'a> {
         let value = self.coerce_to(value, &err_ty, args[0].span);
         // See check_result_ok_ctor: the error payload may be inferred.
         let resolved_err = self.infer.resolve(&err_ty);
-        self.validate_storage_type(&resolved_err, args[0].span);
+        self.validate_value_type(&resolved_err, args[0].span);
         TExpr::new(
             ITy::result(ok_ty, err_ty),
             TExprKind::ResultErr(Box::new(value)),
@@ -1702,6 +1764,24 @@ impl<'a> Checker<'a> {
                 },
                 span,
             );
+        }
+        // Arrays have a compile-time length, so `.len()` folds to the array
+        // length and `.is_empty()` to the matching boolean literal. Neither
+        // needs a runtime intrinsic.
+        if let ITy::Array(_, len) = &receiver_ty
+            && matches!(method, "len" | "is_empty")
+        {
+            let _ = self.check_call_args(&[], args, span);
+            let folded = if method == "len" {
+                let ret = ITy::usize();
+                self.apply_hint(&ret, hint);
+                TExpr::new(ret, TExprKind::Lit(TLit::Int(*len as i128)), span)
+            } else {
+                let ret = ITy::bool_();
+                self.apply_hint(&ret, hint);
+                TExpr::new(ret, TExprKind::Lit(TLit::Bool(*len == 0)), span)
+            };
+            return folded;
         }
         if let Some(info) = builtin_method(&receiver_ty, method) {
             if info.mutable_receiver {
@@ -2116,9 +2196,11 @@ impl<'a> Checker<'a> {
             // Rc<T> handles compare by identity (the generated code compares
             // the cell pointers), so the pointee never matters.
             ITy::Rc(_) => true,
-            ITy::Box(inner) | ITy::Ref { inner, .. } | ITy::Vec(inner) | ITy::Option(inner) => {
-                self.equality_supported_inner(&inner, structs, enums)
-            }
+            ITy::Box(inner)
+            | ITy::Ref { inner, .. }
+            | ITy::Vec(inner)
+            | ITy::Array(inner, _)
+            | ITy::Option(inner) => self.equality_supported_inner(&inner, structs, enums),
             ITy::Result(ok, err) => {
                 self.equality_supported_inner(&ok, structs, enums)
                     && self.equality_supported_inner(&err, structs, enums)

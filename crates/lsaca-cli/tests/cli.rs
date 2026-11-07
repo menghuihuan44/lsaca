@@ -736,3 +736,131 @@ fn package_dependencies_are_built_together() {
     );
     assert_eq!(stdout, "hello, package\n");
 }
+
+#[test]
+fn fmt_rewrites_indentation_and_line_endings() {
+    let dir = unique_dir("fmt-rewrite");
+    let file = write_program(
+        &dir,
+        "unformatted.ls",
+        "fn main() {  \r\nlet x = 1;\r\nif x > 0 {\r\nprintln!(\"{}\", x);\r\n}\r\n}\r\n",
+    );
+    let output = lsaca()
+        .arg("fmt")
+        .arg(&file)
+        .output()
+        .expect("could not run lsaca");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "fmt failed: {:?}", stderr);
+    assert!(output.stdout.is_empty(), "fmt must not print to stdout");
+    let formatted = fs::read_to_string(&file).expect("could not read the formatted file");
+    let expected =
+        "fn main() {\n    let x = 1;\n    if x > 0 {\n        println!(\"{}\", x);\n    }\n}\n";
+    assert_eq!(formatted, expected);
+    // A second run reports the file as already formatted.
+    let check = lsaca()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(check.status.code(), Some(0));
+    assert!(check.stdout.is_empty());
+    assert!(check.stderr.is_empty());
+}
+
+#[test]
+fn fmt_check_reports_but_does_not_modify() {
+    let dir = unique_dir("fmt-check");
+    let original = "fn main() {\nlet x = 1;\n}\n";
+    let file = write_program(&dir, "messy.ls", original);
+    let output = lsaca()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("would format"),
+        "unexpected fmt --check output: {:?}",
+        stderr
+    );
+    let unchanged = fs::read_to_string(&file).expect("could not read the file");
+    assert_eq!(unchanged, original);
+}
+
+#[test]
+fn fmt_stdout_prints_without_modifying() {
+    let dir = unique_dir("fmt-stdout");
+    let original = "fn main() {\nlet x = 1;\n}\n";
+    let file = write_program(&dir, "inline.ls", original);
+    let output = lsaca()
+        .arg("fmt")
+        .arg("--stdout")
+        .arg(&file)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "fn main() {\n    let x = 1;\n}\n");
+    let unchanged = fs::read_to_string(&file).expect("could not read the file");
+    assert_eq!(unchanged, original);
+}
+
+#[test]
+fn fmt_refuses_files_with_syntax_errors() {
+    let dir = unique_dir("fmt-syntax-error");
+    let original = "fn main( {\n";
+    let file = write_program(&dir, "broken.ls", original);
+    let output = lsaca()
+        .arg("fmt")
+        .arg(&file)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error"),
+        "expected a diagnostic, got {:?}",
+        stderr
+    );
+    let unchanged = fs::read_to_string(&file).expect("could not read the file");
+    assert_eq!(unchanged, original);
+}
+
+#[test]
+fn fmt_validates_its_command_line() {
+    let output = lsaca().arg("fmt").output().expect("could not run lsaca");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("needs a file"),
+        "unexpected usage error: {:?}",
+        stderr
+    );
+    let dir = unique_dir("fmt-usage");
+    let file = write_program(&dir, "ok.ls", "fn main() {}\n");
+    let both = lsaca()
+        .arg("fmt")
+        .arg("--check")
+        .arg("--stdout")
+        .arg(&file)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(both.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&both.stderr);
+    assert!(
+        stderr.contains("not both"),
+        "unexpected usage error: {:?}",
+        stderr
+    );
+    let unknown = lsaca()
+        .arg("fmt")
+        .arg("--frobnicate")
+        .arg(&file)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(unknown.status.code(), Some(2));
+}

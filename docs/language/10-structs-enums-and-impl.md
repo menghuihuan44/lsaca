@@ -455,10 +455,14 @@ Output:
 1
 ```
 
-Struct and enum fields cannot themselves be references; a reference is a
-non-owning view and may only live in a local, a parameter or a return value
-(see [References and borrowing](12-references-and-borrowing.md)). Storing one
-in a field is an `E0498` error.
+Struct and enum fields may themselves be references since 2.2.0: a struct,
+enum, tuple struct or `Option` can hold a `&'a T` or `&'a mut T` field when the
+type declares a named lifetime parameter (see [Reference fields and lifetime
+parameters](#reference-fields-and-lifetime-parameters) below and
+[Lifetimes](29-lifetimes.md)). Storing a reference in a `Vec`, `Result`,
+`HashMap`, `Rc`, `Box`, an array or a closure is still an `E0498` error, and a
+reference field never keeps its referent alive: the borrow checker instead
+requires the borrowed value to outlive the aggregate.
 
 `Self` is a type name usable inside `impl` blocks — in `-> Self` return types and
 parameter types, and since 1.5.0 also in expression position: `Self { … }` builds
@@ -558,6 +562,57 @@ error[E0596]: cannot mutate through this receiver: the binding is not declared a
 
 lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
 ```
+
+### Reference fields and lifetime parameters
+
+Since 2.2.0 a value type can hold a reference, provided the type is generic over
+a lifetime parameter and every reference field uses it:
+
+```rust
+struct View<'a> {
+    data: &'a [i64],
+    label: &'a str,
+}
+```
+
+`View<'a>` is read as "a view borrowing data and a label for some lifetime
+`'a`"; the caller supplies the concrete lifetime, usually by constructing the
+value from locals that outlive it:
+
+```rust
+fn main() {
+    let values: Vec<i64> = vec![1, 2, 3];
+    let view = View { data: &values, label: "odds" };
+    println!("{} {}", view.data.len(), view.label);
+}
+```
+
+The rules are:
+
+* The lifetime parameter is declared with the type (`struct View<'a>`,
+  `enum Node<'a>`, `struct Pair<'a>(&'a i64, &'a i64)`) and named on each
+  reference field (`&'a T`, `&'a mut T`). An elided field reference is
+  `E0106` ("missing lifetime specifier"), whose note asks for a named
+  parameter; a lifetime the type does not declare is `E0261`.
+* An unused lifetime parameter is `E0392` ("lifetime parameter `'a` is never
+  used"), unlike unused type parameters, which are accepted.
+* The `'static` lifetime is not a supported field lifetime in 2.2.0:
+  `struct View<'a> { text: &'static str }` is `E0498` ("the 'static lifetime
+  is not supported yet"). Declare a named parameter and use it instead.
+* An `impl` block repeats the parameter: `impl<'a> View<'a> { fn first(&self)
+  -> &i64 { return self.data[0]; } }`. Lifetime parameters are erased before
+  code generation; they do not create generic instantiations and do not change
+  layout.
+* A struct, enum or tuple whose fields are all references is `Copy` following
+  the normal rules, so assigning it copies the two-word views and both bindings
+  stay usable.
+* `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures cannot
+  store references (`E0498`); a reference field cannot be returned from a
+  method whose receiver does not decide its lifetime.
+* Lifetime checking is deliberately small: it checks that no reference field
+  outlives the value it borrows, using the same conservative `E0515`/`E0597`
+  rules as locals and returns, with no variance, outlives relations or named
+  lifetime equality. See [Lifetimes](29-lifetimes.md) for the full contract.
 
 ### Methods on enums
 

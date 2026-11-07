@@ -3357,7 +3357,10 @@ fn lowers_slice_ranges_with_the_rust_panic_wording() {
     let program = phase_b_slice_program();
     let main_c = generate(&program, &CodegenOptions::default()).main_c;
 
-    assert!(main_c.contains(" = (v1).data;"));
+    assert!(
+        main_c.contains(" = (int64_t*)(v1).data;"),
+        "an immutable slice base reached through a const reference is cast back to the frozen layout pointer type: {main_c}"
+    );
     assert!(main_c.contains(" = (v1).len;"));
     assert!(main_c.contains("int64_t slice_start"));
     assert!(main_c.contains("int64_t slice_end"));
@@ -4461,7 +4464,7 @@ fn calls_a_function_value_through_its_place_without_copying() {
     );
 }
 
-const MAP_PLACE_KEYS: &str = "fn main() {\n    let mut counts: HashMap<String, i64> = HashMap::new();\n    counts.insert(format!(\"a\"), 1);\n    let absent = format!(\"b\");\n    let hit = counts.contains_key(absent);\n    let value = counts.get(absent).unwrap_or(0);\n    counts.remove(absent);\n    println!(\"{}, {}\", hit, value);\n}\n";
+const MAP_PLACE_KEYS: &str = "fn main() {\n    let mut counts: HashMap<String, i64> = HashMap::new();\n    counts.insert(format!(\"a\"), 1);\n    let absent = format!(\"b\");\n    let hit = counts.contains_key(absent);\n    let value = match counts.get(&absent) { Some(view) => *view, None => 0 };\n    counts.remove(absent);\n    println!(\"{}, {}\", hit, value);\n}\n";
 
 #[test]
 fn borrows_place_keys_in_map_lookups() {
@@ -4469,7 +4472,6 @@ fn borrows_place_keys_in_map_lookups() {
     let body = user_main_body(&main_c);
     for lookup in [
         "lsaca_map_contains_String_i64(",
-        "lsaca_map_get_String_i64(",
         "lsaca_map_remove_String_i64(",
     ] {
         assert!(
@@ -4480,11 +4482,71 @@ fn borrows_place_keys_in_map_lookups() {
         );
     }
     assert!(
+        main_c.contains("lsaca_map_get_ptr_String_i64("),
+        "the borrowed get must read the stored value through the pointer helper: {}",
+        main_c
+    );
+    assert!(
         !body.contains("ls_retain("),
         "a map lookup over a place key must not retain the key: {}",
         body
     );
 }
+const BORROWED_MUTABLE_ACCESSORS: &str = r#"
+fn main() {
+    let mut values: Vec<i64> = vec![1i64, 2i64];
+    let vref = &mut values;
+    if let Some(slot) = vref.get_mut(0) {
+        *slot = 7i64;
+    }
+
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    counts.insert(format!("a"), 1);
+    let key = format!("a");
+    let mapref = &mut counts;
+    match mapref.get_mut(&key) {
+        Some(slot) => { *slot = *slot + 1; }
+        None => {}
+    }
+
+    let mut data: Vec<i64> = vec![5i64, 6i64];
+    let view = &mut data[..];
+    if let Some(slot) = view.get_mut(0) {
+        *slot = 8i64;
+    }
+}
+"#;
+
+#[test]
+fn emits_borrowed_mutable_accessors_through_pointer_helpers() {
+    let (main_c, _) = generate_source("borrowed_mut_accessors", BORROWED_MUTABLE_ACCESSORS, false);
+    let body = user_main_body(&main_c);
+    assert!(
+        main_c.contains("lsaca_map_get_ptr_String_i64("),
+        "a mutable map lookup must go through the pointer helper: {}",
+        main_c
+    );
+    assert!(
+        main_c.contains(".u.some = (int64_t*)(borrowed_slot"),
+        "a mutable map lookup must return a pointer to the stored value: {}",
+        main_c
+    );
+    assert!(
+        body.contains("vec_lsaca_fn_Vec_get_mut_args_i64(")
+            && main_c.contains(".data[(size_t)(vec_index")
+            && main_c.contains("(uint64_t)(vec_index"),
+        "a mutable Vec lookup must bounds check the index and point into the storage: {}",
+        body
+    );
+    assert!(
+        body.contains("get_mut_args_i64(")
+            && main_c.contains("borrowed_slice")
+            && main_c.contains(".data[(size_t)(slice_index"),
+        "a mutable slice lookup must copy the fat view and point into the storage: {}",
+        body
+    );
+}
+
 const BORROWED_TEXT: &str = r#"
 fn main() {
     let text: &str = "hello";
@@ -4729,5 +4791,220 @@ fn bounds_checks_usize_indexes_without_signed_narrowing() {
         body.contains(") >= (uint64_t)("),
         "the bounds check must compare the index as an unsigned value: {}",
         body
+    );
+}
+
+const ARRAY_LAYOUT: &str = r#"
+fn main() {
+    let mut values = [10i64, 20i64, 30i64];
+    let index: usize = 1;
+    values[index] = 7;
+    println!("{}", values[index]);
+}
+"#;
+
+#[test]
+fn emits_fixed_array_layout_and_bounds_checked_index() {
+    let (main_c, _) = generate_source("array_layout", ARRAY_LAYOUT, false);
+    assert!(
+        main_c.contains("struct LsArray_i64_3 {"),
+        "a fixed array is emitted as one C struct with an inline element array"
+    );
+    assert!(
+        main_c.contains("int64_t data[3];"),
+        "the element storage is a plain C array field"
+    );
+    let body = user_main_body(&main_c);
+    assert!(
+        body.contains(".data[(size_t)("),
+        "an array index addresses the inline element store: {body}"
+    );
+    assert!(
+        body.contains(") >= (uint64_t)(3)"),
+        "an array index is bounds checked against the constant length: {body}"
+    );
+    assert!(
+        body.contains("ls_panic_bounds("),
+        "an out of bounds array index panics before the access: {body}"
+    );
+}
+
+const ZERO_LENGTH_ARRAY: &str = r#"
+fn main() {
+    let empty: [i64; 0] = [];
+    println!("{:?}", empty);
+}
+"#;
+
+#[test]
+fn emits_zero_length_arrays_without_indexing_their_storage() {
+    let (main_c, _) = generate_source("zero_array", ZERO_LENGTH_ARRAY, false);
+    assert!(
+        main_c.contains("struct LsArray_i64_0 {"),
+        "a zero length array still needs a type definition"
+    );
+    assert!(
+        main_c.contains("int64_t data[1];"),
+        "a zero length array stores one unused element so the C field stays legal"
+    );
+    let debug_start = main_c
+        .find("LsString* lsaca_debug_Array_i64_0(LsString* acc, LsArray_i64_0 v) {")
+        .expect("the array debug helper is not emitted");
+    let debug_body = &main_c[debug_start..];
+    let debug_body = &debug_body[..debug_body
+        .find("\n}")
+        .expect("unterminated array debug helper")];
+    assert!(
+        debug_body.contains("ls_format_push_cstr(acc, \"[\");")
+            && debug_body.contains("ls_format_push_cstr(acc, \"]\");"),
+        "a zero length array debug prints the empty brackets: {debug_body}"
+    );
+    assert!(
+        !debug_body.contains("data["),
+        "a zero length array must not read its storage: {debug_body}"
+    );
+}
+
+const STRING_ARRAY: &str = r#"
+fn main() {
+    let names = [String::from("a"), String::from("b")];
+    println!("{:?}", names);
+}
+"#;
+
+#[test]
+fn emits_array_of_strings_copy_and_release_helpers() {
+    let (main_c, _) = generate_source("string_array", STRING_ARRAY, false);
+    assert!(
+        main_c.contains("struct LsArray_String_2 {"),
+        "an array of strings needs its own type definition"
+    );
+    assert!(
+        main_c.contains("LsString* data[2];"),
+        "the array stores the owned string handles inline"
+    );
+    let copy_start = main_c
+        .find("LsArray_String_2 lsaca_copy_Array_String_2(LsArray_String_2 v) {")
+        .expect("the array copy helper is not emitted");
+    let copy_body = &main_c[copy_start..];
+    let copy_body = &copy_body[..copy_body
+        .find("\n}")
+        .expect("unterminated array copy helper")];
+    assert!(
+        copy_body.contains("out.data[i] = ((LsString*)ls_retain((void*)(v.data[i])));"),
+        "copying an array of strings retains every element: {copy_body}"
+    );
+    let release_start = main_c
+        .find("void lsaca_release_Array_String_2(LsArray_String_2 v) {")
+        .expect("the array release helper is not emitted");
+    let release_body = &main_c[release_start..];
+    let release_body = &release_body[..release_body
+        .find("\n}")
+        .expect("unterminated array release helper")];
+    assert!(
+        release_body.contains("ls_release((void*)(v.data[i]));"),
+        "releasing an array of strings releases every element: {release_body}"
+    );
+}
+
+const ARRAY_REPEAT: &str = r#"
+fn main() {
+    let filled = [7i64; 40];
+    println!("{}", filled[3]);
+}
+"#;
+
+#[test]
+fn emits_array_repeat_with_a_loop_for_a_long_length() {
+    let (main_c, _) = generate_source("array_repeat", ARRAY_REPEAT, false);
+    let body = user_main_body(&main_c);
+    assert!(
+        body.contains("for (size_t "),
+        "a long array repeat fills the storage with a loop: {body}"
+    );
+    assert!(
+        body.contains(".data["),
+        "the repeated value is copied into the inline element slots: {body}"
+    );
+}
+
+const ARRAY_REPEAT_SHORT: &str = r#"
+fn main() {
+    let pair = [5i64; 2];
+    println!("{}", pair[1]);
+}
+"#;
+
+#[test]
+fn emits_short_array_repeat_by_unrolling_the_slots() {
+    let (main_c, _) = generate_source("array_repeat_short", ARRAY_REPEAT_SHORT, false);
+    let body = user_main_body(&main_c);
+    assert!(
+        body.contains(".data[0] =") && body.contains(".data[1] ="),
+        "a short array repeat assigns every slot directly: {body}"
+    );
+    assert!(
+        !body.contains("for (size_t "),
+        "a short array repeat needs no loop: {body}"
+    );
+}
+
+const LABELLED_LOOPS: &str = r#"
+fn main() {
+    let mut total = 0i64;
+    'outer: for i in 0i64..4i64 {
+        for j in 0i64..4i64 {
+            if j == 2i64 {
+                continue 'outer;
+            }
+            if i == 3i64 {
+                break 'outer;
+            }
+            total += i + j;
+        }
+    }
+    println!("{}", total);
+}
+"#;
+
+#[test]
+fn emits_labelled_loop_jumps_as_gotos() {
+    let (main_c, _) = generate_source("labelled_loops", LABELLED_LOOPS, false);
+    let body = user_main_body(&main_c);
+    assert_eq!(
+        body.matches("goto ").count(),
+        2,
+        "the labelled continue and break both jump: {body}"
+    );
+    assert!(
+        body.matches(":;").count() >= 2,
+        "every used jump target needs a C label: {body}"
+    );
+}
+
+const UNLABELLED_LOOPS: &str = r#"
+fn main() {
+    let mut total = 0i64;
+    for i in 0i64..3i64 {
+        if i == 1i64 {
+            continue;
+        }
+        total += i;
+    }
+    println!("{}", total);
+}
+"#;
+
+#[test]
+fn emits_unlabelled_loop_jumps_without_extra_labels() {
+    let (main_c, _) = generate_source("unlabelled_loops", UNLABELLED_LOOPS, false);
+    let body = user_main_body(&main_c);
+    assert!(
+        body.contains("goto lsaca_for_next_"),
+        "an unlabelled continue still jumps to the loop continue label: {body}"
+    );
+    assert!(
+        body.contains("lsaca_for_next_") && body.contains(":;"),
+        "the used continue target needs a C label: {body}"
     );
 }

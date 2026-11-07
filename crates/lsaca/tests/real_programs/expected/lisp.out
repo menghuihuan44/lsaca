@@ -1,0 +1,29 @@
+lisp: a small Lisp interpreter
+embedded script lines: 28
+42
+144
+720
+42
+(1 2 3)
+1
+(2 3)
+(0 1 2)
+3
+"less"
+12
+(a b c)
+sym
+43
+1
+1
+true
+true
+true
+true
+true
+false
+"done"
+expressions evaluated: 183
+values printed: 23
+parse error demo: expected ')' but reached end of input at line 1 column 7
+parse error demo: unterminated string literal at line 1 column 14

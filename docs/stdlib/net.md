@@ -1,9 +1,9 @@
 # net: TCP sockets
 
-**Status in 2.1.0.** Implemented in `stdlib/src/net.ls`. The module provides
+**Status in 2.2.0.** Implemented in `stdlib/src/net.ls`. The module provides
 plain, blocking TCP over addresses as text: `bind` and `connect` take a
 `"host:port"` string. There is no TLS, no UDP, no DNS lookup API beyond the
-resolver built into `connect`, and no async I/O in 2.1.0.
+resolver built into `connect`, and no async I/O in 2.2.0.
 
 Failures are [`io::Error`](io.md) values, never panics. A refused connection, a
 reset peer, an address already in use and a timeout are reported with the
@@ -63,8 +63,8 @@ directions down and then closes the socket; dropping a listener closes it. A
 peer that closes the connection is not an error: `read` returns `Ok(0)`, and a
 later `write` reports `ErrorKind::BrokenPipe`.
 
-Sending and receiving use byte buffers. `Vec<u8>` is the only growable byte
-container in 2.1.0 (there are no arrays), and `&mut buffer` coerces to
+Sending and receiving use byte buffers. A `Vec<u8>` gives a growable buffer, and
+since 2.2.0 a fixed-size array `[u8; N]` works too; `&mut buffer` coerces to
 `&mut [u8]` when passed to `read`:
 
 ```rust
@@ -73,7 +73,7 @@ stream.read(&mut buffer)?;
 stream.write(&buffer[0..count])?;
 ```
 
-## Limits in 2.1.0
+## Limits in 2.2.0
 
 The module is TCP only: no UDP, no Unix domain sockets, no TLS, no `SocketAddr`
 type, no DNS lookup API, no listener iterator and no async I/O. Addresses are

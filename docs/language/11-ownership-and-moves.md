@@ -18,7 +18,7 @@ lsaca decides at compile time whether a type is Copy. The rule is structural: a 
 | Copy | `i64` and the other integer types, `f64` and the other float types, `bool`, `char`, unit `()`; shared references `&T` and mutable references `&mut T`; tuples, `Option` and `Result` whose parts are all Copy; user structs and enums whose fields are all Copy and that do not implement `Drop` |
 | Move-only | `String`, `Vec<T>`, `Rc<T>`, `Box<T>`; function values and closures; user structs and enums that contain a move-only type or implement `Drop` |
 
-Copy is derived automatically. There is no `impl Copy for ...` syntax in version 2.1.0; writing one is rejected. Move-only is the default for owned data, so the compiler derives move-onlyness the same way: a struct with a `String` field is move-only, while a struct with only `i64` fields is Copy. There are no ownership annotations to write: the type structure decides.
+Copy is derived automatically. There is no `impl Copy for ...` syntax in version 2.2.0; writing one is rejected. Move-only is the default for owned data, so the compiler derives move-onlyness the same way: a struct with a `String` field is move-only, while a struct with only `i64` fields is Copy. There are no ownership annotations to write: the type structure decides.
 
 ### Copy values can be used repeatedly
 
@@ -199,7 +199,7 @@ The note points at the place where the value was moved and suggests `.clone()` w
 
 ### Moving out of a place (E0507)
 
-A move takes the whole value. You cannot move one field out of a value, one element out of a vector or the payload out of a dereference; those operations would leave the original place partially uninitialised, which 2.1.0 still rejects. Clone the field instead, or move the whole value. Destructuring a whole tuple or struct with a `let` pattern copies it rather than moving parts out (see [Variables](06-variables-and-mutability.md#destructuring-bindings)); `match` still moves the scrutinee.
+A move takes the whole value. You cannot move one field out of a value, one element out of a vector or the payload out of a dereference; those operations would leave the original place partially uninitialised, which 2.2.0 still rejects. Clone the field instead, or move the whole value. Destructuring a whole tuple or struct with a `let` pattern copies it rather than moving parts out (see [Variables](06-variables-and-mutability.md#destructuring-bindings)); `match` still moves the scrutinee.
 
 ```ls,compile-fail
 struct Config {
@@ -465,7 +465,7 @@ A value with a Drop impl cannot be moved out of a field, an indexed element or a
 
 ### Drop order and timing
 
-Drop order is deterministic in version 2.1.0. When a value is released:
+Drop order is deterministic in version 2.2.0. When a value is released:
 
 1. The type's own hook runs first (if it has one).
 2. Then the value's fields are released in declaration order, each running its own hook in turn.
@@ -842,10 +842,13 @@ Mutable references to a user struct or enum are supported only when the type is 
 * User-defined generics and traits exist since 1.5.0, and `Copy`, `Clone` and `Drop` remain the only compiler-known traits; since 2.0 a trait value can be used behind a pointer as a trait object (`Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait`) with calls dispatched through a vtable (see [Trait objects](25-trait-objects.md)).
 * Since 1.5.0 user structs, enums, tuples, `Vec`, `Option`, `Result`, references and `HashMap` compare with `==`; function values do not (`E0369`).
 
-## Known limitations in version 2.1.0
+## Known limitations in version 2.2.0
 
 * `Copy` and `Clone` cannot be implemented (both are derived automatically); `Drop` keeps its special form, and user-defined traits can be implemented since 1.5.0.
-* There is no explicit lifetime syntax and references cannot be stored in struct or enum fields.
+* Lifetime syntax covers reference fields only: since 2.2.0 a struct, enum, tuple or
+  `Option` field may hold `&'a T`/`&'a mut T` with a declared lifetime parameter, and
+  there are no lifetime bounds or relations; references cannot be stored in `Vec`,
+  `HashMap`, `Result`, `Box`, arrays or closures (see [Lifetimes](29-lifetimes.md)).
 * A value with a Drop impl cannot be cloned, and a container whose elements have drop glue (for example `Vec<Guard>`) cannot be cloned either.
 * Moving out of a field, an indexed element or a dereference is rejected (E0507); clone the part or move the whole value. Destructuring a whole value with a `let` pattern copies it instead of moving non-`Copy` parts; `match` still moves the scrutinee (see [Variables](06-variables-and-mutability.md#destructuring-bindings)).
 * Partial moves are not supported: a value is either moved as a whole or not at all; a `let` pattern that destructures the whole value copies it.

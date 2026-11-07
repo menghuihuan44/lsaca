@@ -378,7 +378,7 @@ jobs:
         run: |
           set -euo pipefail
           workdir="$(mktemp -d)"
-          for example in examples/*.ls; do
+          for example in examples/*.ls examples/programs/*.ls; do
             name="$(basename "$example" .ls)"
             out="$workdir/$name"
             ./target/release/lsaca emit-c -r -o "$out" "$example"
@@ -425,7 +425,7 @@ jobs:
           set -euo pipefail
           workdir="$(mktemp -d)"
           echo "Generated projects are written to $workdir"
-          for example in examples/*.ls; do
+          for example in examples/*.ls examples/programs/*.ls; do
             name="$(basename "$example" .ls)"
             out="$workdir/$name"
             echo "::group::Generating $name"

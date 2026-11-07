@@ -17,6 +17,9 @@
 //!    lsaca_rt.h, lsaca_rt.c, CMakeLists.txt).
 //! 5. driver orchestrates the pipeline and the native build; the CLI crate
 //!    wraps the driver.
+//!
+//! The [fmt] module is not part of the pipeline: it rewrites a source file with
+//! canonical indentation and is driven by `lsaca fmt`.
 
 #![forbid(unsafe_code)]
 
@@ -25,6 +28,7 @@ pub mod borrow;
 pub mod codegen;
 pub mod diag;
 pub mod driver;
+pub mod fmt;
 pub mod hir;
 pub mod lexer;
 pub mod moveck;

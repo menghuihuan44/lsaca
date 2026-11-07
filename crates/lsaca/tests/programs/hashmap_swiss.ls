@@ -9,7 +9,7 @@ fn main() {
     let mut probe = 0;
     while probe < 2000 {
         if values.contains_key(probe) {
-            sum = sum + values.get(probe).unwrap();
+            sum = sum + *values.get(&probe).unwrap();
         }
         probe = probe + 1;
     }

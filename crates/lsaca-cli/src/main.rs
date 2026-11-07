@@ -10,7 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 use lsaca::codegen::CodegenOptions;
 use lsaca::diag::Diagnostics;
 use lsaca::driver::{self, BuildOptions, Frontend, LoadError};
-use lsaca::span::SourceMap;
+use lsaca::span::{SourceFile, SourceMap};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -62,6 +62,7 @@ fn dispatch(args: &[String]) -> CliResult {
         "build" => command_build(&args[1..]),
         "emit-c" => command_emit_c(&args[1..]),
         "check" => command_check(&args[1..]),
+        "fmt" => command_fmt(&args[1..]),
         "new" => command_new(&args[1..]),
         "version" | "--version" | "-V" => {
             reject_extra_args("version", &args[1..])?;
@@ -274,6 +275,102 @@ fn command_check(args: &[String]) -> CliResult {
             )))
         }
     }
+}
+
+/// Parsed command line options for 'lsaca fmt'.
+struct FmtOptions {
+    file: PathBuf,
+    check: bool,
+    stdout: bool,
+}
+
+fn parse_fmt_options(args: &[String]) -> Result<FmtOptions, Cli> {
+    let mut file: Option<PathBuf> = None;
+    let mut check = false;
+    let mut stdout = false;
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => return Err(Cli::Help),
+            "--check" => check = true,
+            "--stdout" => stdout = true,
+            other if other.starts_with('-') && other != "-" => {
+                return Err(Cli::Usage(format!(
+                    "unknown option '{}' for 'lsaca fmt'",
+                    other
+                )));
+            }
+            other => {
+                if file.is_some() {
+                    return Err(Cli::Usage(format!(
+                        "unexpected argument '{}': 'lsaca fmt' takes one file",
+                        other
+                    )));
+                }
+                file = Some(PathBuf::from(other));
+            }
+        }
+    }
+    let Some(file) = file else {
+        return Err(Cli::Usage("'lsaca fmt' needs a file to format".to_string()));
+    };
+    if check && stdout {
+        return Err(Cli::Usage(
+            "'lsaca fmt' accepts either --check or --stdout, not both".to_string(),
+        ));
+    }
+    Ok(FmtOptions {
+        file,
+        check,
+        stdout,
+    })
+}
+
+/// Rewrite a source file with canonical indentation.
+///
+/// The file is only touched when it parses cleanly: a syntax error leaves the
+/// original bytes untouched and reports the usual diagnostics. With --check the
+/// command reports whether the file would change and exits with 1 in that case;
+/// with --stdout the formatted text goes to standard output instead of the file.
+fn command_fmt(args: &[String]) -> CliResult {
+    let options = parse_fmt_options(args)?;
+    let source = fs::read_to_string(&options.file).map_err(|error| {
+        Cli::Failure(format!(
+            "failed to read {}: {}",
+            options.file.display(),
+            error
+        ))
+    })?;
+    let file = SourceFile::new(options.file.display().to_string(), source.clone());
+    let (tokens, mut diagnostics) = lsaca::lexer::tokenize_file(&file);
+    let (_, parse_diagnostics) = lsaca::parser::parse(&tokens, &file);
+    diagnostics.extend(parse_diagnostics);
+    if diagnostics.has_errors() {
+        eprint!("{}", diagnostics.render(&file));
+        return Err(Cli::Failure(format!(
+            "{}: could not be formatted due to previous error(s)",
+            options.file.display()
+        )));
+    }
+    let formatted = lsaca::fmt::format_source(&source);
+    if options.stdout {
+        print!("{}", formatted);
+        return Ok(0);
+    }
+    if formatted == source {
+        return Ok(0);
+    }
+    if options.check {
+        eprintln!("lsaca: would format {}", options.file.display());
+        return Ok(1);
+    }
+    fs::write(&options.file, formatted.as_bytes()).map_err(|error| {
+        Cli::Failure(format!(
+            "failed to write {}: {}",
+            options.file.display(),
+            error
+        ))
+    })?;
+    Ok(0)
 }
 
 /// Create a new binary package: lsaca.toml plus src/main.ls.
@@ -562,6 +659,7 @@ COMMANDS:
     build [FILE.ls]              compile and build a native executable
     emit-c [FILE.ls]             write the generated C project only
     check [FILE.ls]              run the front end and report diagnostics
+    fmt <FILE.ls> [--check]      rewrite a source file with canonical indentation
     new <DIR>                    create a new binary package
     version                      print the compiler version
     help                         print this help

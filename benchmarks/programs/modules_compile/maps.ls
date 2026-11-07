@@ -21,8 +21,8 @@ impl Counter {
     }
 
     pub fn add(&mut self, word: &String) -> i64 {
-        let next = match self.counts.get(word.clone()) {
-            Some(count) => count + 1,
+        let next = match self.counts.get(word) {
+            Some(count) => *count + 1,
             None => 1,
         };
         self.counts.insert(format!("{}", word), next);
@@ -31,8 +31,8 @@ impl Counter {
     }
 
     pub fn add_owned(&mut self, word: String) -> i64 {
-        let next = match self.counts.get(word.clone()) {
-            Some(count) => count + 1,
+        let next = match self.counts.get(&word) {
+            Some(count) => *count + 1,
             None => 1,
         };
         self.counts.insert(word, next);
@@ -41,8 +41,8 @@ impl Counter {
     }
 
     pub fn count_of(&self, word: &String) -> i64 {
-        match self.counts.get(word.clone()) {
-            Some(count) => count,
+        match self.counts.get(word) {
+            Some(count) => *count,
             None => 0,
         }
     }
@@ -59,7 +59,7 @@ impl Counter {
         let mut best = 0;
         let keys = self.counts.keys();
         for key in keys {
-            let count = self.counts.get(key).unwrap();
+            let count = *self.counts.get(&key).unwrap();
             if count > best {
                 best = count;
             }
@@ -72,7 +72,7 @@ impl Counter {
         let mut chosen = String::from("");
         let keys = self.counts.keys();
         for key in keys {
-            let count = self.counts.get(key).unwrap();
+            let count = *self.counts.get(&key).unwrap();
             if count > best {
                 best = count;
                 chosen = format!("{}", key);
@@ -85,7 +85,7 @@ impl Counter {
         let mut count = 0;
         let keys = self.counts.keys();
         for key in keys {
-            let value = self.counts.get(key).unwrap();
+            let value = *self.counts.get(&key).unwrap();
             if value > limit {
                 count += 1;
             }
@@ -97,7 +97,7 @@ impl Counter {
         let mut total = 0;
         let keys = self.counts.keys();
         for key in keys {
-            let count = self.counts.get(key).unwrap();
+            let count = *self.counts.get(&key).unwrap();
             total += count * count;
         }
         total
@@ -116,7 +116,7 @@ impl Counter {
         let mut total = 0;
         let keys = self.counts.keys();
         for key in keys {
-            let count = self.counts.get(key).unwrap();
+            let count = *self.counts.get(&key).unwrap();
             total += count * 31 + key.len() as i64;
         }
         total % MODULUS
@@ -126,8 +126,8 @@ impl Counter {
 pub fn word_frequencies(words: Vec<String>) -> HashMap<String, i64> {
     let mut counts: HashMap<String, i64> = HashMap::new();
     for word in words {
-        let next = match counts.get(word) {
-            Some(count) => count + 1,
+        let next = match counts.get(&word) {
+            Some(count) => *count + 1,
             None => 1,
         };
         counts.insert(word, next);
@@ -139,8 +139,8 @@ pub fn digit_frequencies(numbers: Vec<i64>) -> HashMap<i64, i64> {
     let mut counts: HashMap<i64, i64> = HashMap::new();
     for number in numbers {
         let key = number % 10;
-        let next = match counts.get(key) {
-            Some(count) => count + 1,
+        let next = match counts.get(&key) {
+            Some(count) => *count + 1,
             None => 1,
         };
         counts.insert(key, next);
@@ -153,8 +153,8 @@ pub fn bucket_frequencies(limit: i64, modulus: i64) -> HashMap<i64, i64> {
     let mut value = 0;
     while value < limit {
         let key = (value * value) % modulus;
-        let next = match counts.get(key) {
-            Some(count) => count + 1,
+        let next = match counts.get(&key) {
+            Some(count) => *count + 1,
             None => 1,
         };
         counts.insert(key, next);
@@ -174,8 +174,8 @@ pub fn build_lookup(entries: i64) -> HashMap<String, i64> {
 }
 
 pub fn lookup_or(table: &HashMap<String, i64>, key: &String, fallback: i64) -> i64 {
-    match table.get(key.clone()) {
-        Some(value) => value,
+    match table.get(key) {
+        Some(value) => *value,
         None => fallback,
     }
 }
@@ -184,7 +184,7 @@ pub fn lookup_total(table: &HashMap<String, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = table.get(key).unwrap();
+        let value = *table.get(&key).unwrap();
         total += value;
     }
     total
@@ -194,7 +194,7 @@ pub fn lookup_squares(table: &HashMap<String, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = table.get(key).unwrap();
+        let value = *table.get(&key).unwrap();
         total += value * value;
     }
     total
@@ -204,7 +204,7 @@ pub fn lookup_checksum(table: &HashMap<String, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = table.get(key).unwrap();
+        let value = *table.get(&key).unwrap();
         total += value * 31 + key.len() as i64;
     }
     total % MODULUS
@@ -214,7 +214,7 @@ pub fn int_table_checksum(table: &HashMap<i64, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = table.get(key).unwrap();
+        let value = *table.get(&key).unwrap();
         total += key * 31 + value;
     }
     total % MODULUS
@@ -224,7 +224,7 @@ pub fn int_table_total(table: &HashMap<i64, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = table.get(key).unwrap();
+        let value = *table.get(&key).unwrap();
         total += value;
     }
     total

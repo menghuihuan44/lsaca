@@ -6,6 +6,16 @@
 
 use crate::error::Error as ErrorTrait;
 
+/// Conversion between error types, used by the `?` operator (v2.2).
+///
+/// A `?` on a `Result<T, E>` whose error type differs from the enclosing
+/// function's error type converts the error with `From::from`. Programs
+/// implement this trait for their own error types (and may reuse the standard
+/// library implementations such as `From<String> for io::Error`).
+pub trait From<T> {
+    fn from(value: T) -> Self;
+}
+
 pub struct Option<T> {
     internal: (),
 }

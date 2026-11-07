@@ -3,8 +3,9 @@
 This page describes the raw text of a program: how source files are encoded, the
 character set of identifiers, the keywords, comments, and the exact forms of
 integer, float, string, character, boolean and unit literals. It describes
-lsaca 2.1.0, whose integer literals default to `i32` and may carry a type
-suffix.
+lsaca 2.2.0, whose integer literals default to `i32` and may carry a type
+suffix, and whose apostrophe introduces either a character literal or a
+lifetime/loop-label token.
 
 ## Source files and encoding
 
@@ -501,6 +502,30 @@ There are still no byte-string literals (`b"..."`) and no raw strings.
 Character literals are also valid patterns: the match arms in
 [Pattern matching](13-pattern-matching.md) can use them directly.
 
+### Lifetimes and loop labels
+
+The apostrophe does double duty. A `'` followed by an identifier run is a
+lifetime token — `'a`, `'outer`, `'static` — except when the identifier run is
+immediately followed by the closing apostrophe or by an escape, in which case it
+is a character literal (`'a'`, and the malformed multi-codepoint forms such as
+`'ab'` that the character-literal lexer reports). So `'a'` is a character and
+`'a` is a lifetime. The stored lifetime name does not include the apostrophe.
+
+Lifetime tokens appear in three places:
+
+* generic parameter and argument lists: `struct View<'a> { … }`, `impl<'a>
+  View<'a>`, `View<'a>`;
+* reference types: `&'a T` and `&'a mut T`;
+* loop labels: a lifetime followed by a colon at the start of a loop
+  (`'outer: loop { … }`) and directly after `break` or `continue`
+  (`break 'outer;`). A lifetime token in expression position that does not
+  start a loop is a syntax error.
+
+`'static` is a normal lifetime token with a fixed meaning: a `&'static T`
+reference borrows for the whole program (string literals have this type behind
+`&str`). See [Lifetimes](29-lifetimes.md), [Loop labels](28-loop-labels.md) and
+[Arrays](27-arrays.md).
+
 ## Whitespace and semicolons
 
 Whitespace (spaces, tabs, newlines, carriage returns and form feeds) separates
@@ -530,3 +555,6 @@ Output:
 * The types these literals inhabit: [Types](04-types.md).
 * Operators and their precedence: [Operators](07-operators.md).
 * All built-in string methods: [Standard library](15-standard-library.md).
+* Reference fields and lifetimes: [Lifetimes](29-lifetimes.md).
+* Labelled loops: [Loop labels](28-loop-labels.md).
+* Fixed-length arrays: [Arrays](27-arrays.md).

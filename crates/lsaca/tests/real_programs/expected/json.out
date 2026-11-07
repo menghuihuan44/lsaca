@@ -1,0 +1,42 @@
+json: parse, validate and canonicalize JSON
+documents: 8
+[1] parsed
+  canonical: {"active":true,"escaped":"line\nbreak\ttab \"quoted\" back\\slash","final":null,"meta":{"empty":[],"nothing":{},"tags":["lsaca","json","v2.2"]},"name":"lsaca","scores":[1,2.5,3.75],"unicode":"café","version":2.2}
+  stats: nodes=18 objects=3 arrays=3 strings=6 numbers=4 bools=1 nulls=1 depth=4
+  pretty:
+{
+  "active": true,
+  "escaped": "line\nbreak\ttab \"quoted\" back\\slash",
+  "final": null,
+  "meta": {
+    "empty": [],
+    "nothing": {},
+    "tags": [
+      "lsaca",
+      "json",
+      "v2.2"
+    ]
+  },
+  "name": "lsaca",
+  "scores": [
+    1,
+    2.5,
+    3.75
+  ],
+  "unicode": "café",
+  "version": 2.2
+}
+[2] parsed
+  canonical: [1,2,3]
+  stats: nodes=4 objects=0 arrays=1 strings=0 numbers=3 bools=0 nulls=0 depth=2
+[3] parsed
+  canonical: {"a":2,"z":1}
+  stats: nodes=3 objects=1 arrays=0 strings=0 numbers=2 bools=0 nulls=0 depth=2
+[4] parsed
+  canonical: "plain string"
+  stats: nodes=1 objects=0 arrays=0 strings=1 numbers=0 bools=0 nulls=0 depth=1
+[5] rejected: duplicate object key at line 1 column 16
+[6] rejected: trailing comma in array at line 1 column 7
+[7] rejected: unicode escapes above U+00FF are not supported in this build at line 1 column 16
+[8] rejected: unterminated string at line 1 column 18
+summary: 4 accepted, 4 rejected

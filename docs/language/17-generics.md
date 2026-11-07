@@ -11,7 +11,7 @@ dynamic dispatch through trait objects as well — `Box<dyn Trait>`, `Rc<dyn
 Trait>` and `&dyn Trait` — but that is a separate mechanism, covered on
 [Trait objects](25-trait-objects.md); generics themselves stay static.
 
-The rules on this page describe lsaca 2.1.0.
+The rules on this page describe lsaca 2.2.0.
 
 ## Generic structs
 
@@ -194,6 +194,23 @@ possible when `T` is Copy. That is fine for the instantiation above, and it is
 an example of late checking: the same generic body is rejected for
 `Pair<String>` only if that instantiation is actually used (see [How generics
 are compiled](#how-generics-are-compiled)).
+
+## Lifetime parameters
+
+A type can also be generic over a lifetime: `struct View<'a> { data: &'a [i64] }`
+stores a reference and names the lifetime on the field. Lifetime parameters are
+written in the same `<…>` list as type parameters (`struct Pair<'a, T> { first:
+&'a T, second: T }`), but they are erased before code generation, so they never
+create monomorphic instantiations, never change a type's layout and are not
+counted as type arguments for inference. An `impl` block repeats them:
+`impl<'a> View<'a> { … }`.
+
+Only reference fields use a lifetime parameter in 2.2.0, and every reference field
+must name a declared parameter; an unused lifetime parameter is `E0392`, and a
+field with an elided reference lifetime is `E0106`. A struct type path may omit
+the lifetime argument, as in `fn first(view: View) -> i64`; the omitted
+lifetime is inferred from the argument. See [Lifetimes](29-lifetimes.md) and
+[Reference fields and lifetime parameters](10-structs-enums-and-impl.md#reference-fields-and-lifetime-parameters).
 
 ## Bounds
 
@@ -436,6 +453,8 @@ lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
   through generic parameters: a generic use is always monomorphic. A trait
   object can be stored inside a generic type, as in `Vec<Box<dyn Trait>>`.
 * No const generics, no default type parameters, no specialization.
+* No lifetime bounds, outlives relations or variance: a lifetime parameter only
+  names reference fields (2.2.0).
 * A generic function's body only has to be valid for the instantiations that
   are actually used; invalid unused instantiations are not diagnosed.
 * Generic items are limited to structs, enums, free functions, inherent impls
@@ -447,7 +466,8 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 
 * Structs, enums, functions, inherent impls and trait impls can be generic with
   `<T>` parameter lists and `: Bound` bounds; since 2.1.0 a generic struct may
-  also be a tuple or unit struct.
+  also be a tuple or unit struct, and since 2.2.0 a type may take lifetime
+  parameters for reference fields.
 * `Self` and `Self::new(...)` / `Self { ... }` work inside generic impls.
 * Types are inferred from arguments and context, or named with the turbofish
   form `pair::<i64>(...)`.

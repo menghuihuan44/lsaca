@@ -1,6 +1,6 @@
 # fmt: formatting
 
-**Status in 2.1.0.** The format machinery is implemented by the compiler.
+**Status in 2.2.0.** The format machinery is implemented by the compiler.
 `std::fmt` is the module that documents the supported surface; it does not
 expose user-implementable formatting traits.
 

@@ -1,11 +1,11 @@
 # fs: the file system
 
-**Status in 2.1.0.** Implemented in `stdlib/src/fs.ls` on top of the handle and
+**Status in 2.2.0.** Implemented in `stdlib/src/fs.ls` on top of the handle and
 path primitives of [io](io.md). Every path argument is a read-only `&str` slice
 and every failure is an [`io::Error`](io.md), never a panic.
 
 Paths are text: pass a literal directly, or `&owned` for a `String` variable.
-The module has no `Path` or `PathBuf` type in 2.1.0; paths are platform strings
+The module has no `Path` or `PathBuf` type in 2.2.0; paths are platform strings
 and the operating system decides what they mean.
 
 ## Functions
@@ -106,7 +106,7 @@ pub enum FileType {
 * Modification times come from the operating system and may have coarse
   resolution (`modified_ms` exposes the raw millisecond count).
 
-## Limits in 2.1.0
+## Limits in 2.2.0
 
 There is no `Path`, `PathBuf` or `OsStr` type, no directory-entry iterator, no
 symbolic-link API, no permission or ownership API, no file watching and no

@@ -1,6 +1,6 @@
 # process: arguments and exit
 
-**Status in 2.1.0.** Implemented. Both functions are defined in
+**Status in 2.2.0.** Implemented. Both functions are defined in
 `stdlib/src/process.ls` and re-exported from the crate root, so `args()` and
 `exit(code)` keep working unqualified and `std::process::args` /
 `std::process::exit` name the same items.
@@ -26,7 +26,7 @@ returning unit; at run time it never returns to the caller. The exit code is an
 process exit status; `0` means success by convention, and positive small codes
 are the portable choice because POSIX systems report only the low 8 bits.
 
-## Limits in 2.1.0
+## Limits in 2.2.0
 
 There is no `spawn`, no `wait`, no pipe or signal API and no way to clear the
 environment of a child process.

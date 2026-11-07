@@ -1,11 +1,10 @@
-// Instantiating a user generic struct with a reference is E0498.
+// Instantiating a user generic struct with a container of references is rejected.
 struct Holder<T> {
     value: T,
 }
 
 fn main() {
     let number = 1;
-    let reference = &number;
-    let holder: Holder<&i64> = Holder { value: reference };
-    println!("{}", *holder.value);
+    let holder: Holder<Vec<&i64>> = Holder { value: vec![&number] };
+    println!("{}", holder.value.len());
 }

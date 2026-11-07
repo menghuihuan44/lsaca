@@ -17,8 +17,8 @@ fn main() {
         seed = (seed * 1103515245 + 12345) % 2147483648;
         let bucket = seed % distinct;
         let word = format!("w{}", bucket);
-        let next = match counts.get(word) {
-            Some(count) => count + 1,
+        let next = match counts.get(&word) {
+            Some(count) => *count + 1,
             None => 1,
         };
         counts.insert(word, next);
@@ -36,14 +36,14 @@ fn main() {
     let mut counted: i64 = 0;
     let keys = counts.keys();
     for key in keys {
-        let value = counts.get(key).unwrap();
+        let value = *counts.get(&key).unwrap();
         counted += value;
     }
     assert_eq!(counted, tokens);
     let mut checksum_map: i64 = 0;
     let keys_again = counts.keys();
     for key in keys_again {
-        let value = counts.get(key).unwrap();
+        let value = *counts.get(&key).unwrap();
         checksum_map += value * value;
     }
     let mut checksum_array: i64 = 0;

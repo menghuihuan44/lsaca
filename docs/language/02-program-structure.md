@@ -417,7 +417,7 @@ visibility across crate boundaries.
 
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 2.1.0 parser. Optional parts
+The grammar below is the authoritative EBNF of the 2.2.0 parser. Optional parts
 are written with `[...]`, repetitions with `*` and `+`, and alternatives with
 `|`. It is reproduced here for reference; the individual pages explain each
 construct in detail.
@@ -430,7 +430,8 @@ vis          = [ "pub" | "pub" "(" "crate" ")" ] ;
 fnItem       = vis "fn" IDENT genericParams? "(" params? ")" ( "->" type )? block ;
 externFnItem = vis "extern" "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
 genericParams= "<" genericParam ( "," genericParam )* ","? ">" ;
-genericParam = IDENT ( ":" bound ( "+" bound )* )? ;
+genericParam = lifetimeParam | IDENT ( ":" bound ( "+" bound )* )? ;
+lifetimeParam= LIFETIME ;
 bound        = callableBound | pathType ;
 callableBound= "Fn" "(" typeArgs? ")" ( "->" type )? ;
 params       = param ( "," param )* ","? ;
@@ -484,21 +485,24 @@ primary      = INT | FLOAT | CHAR | STRING | "true" | "false"
              | "(" ")" | "(" expr ")" | tupleExpr
              | path | structLiteral | vecExpr | macroCall
              | ifExpr | matchExpr | loopExpr | whileExpr | forExpr | block
-             | closure | "break" expr? | "continue" | "return" expr? ;
+             | closure | "break" label? expr? | "continue" label? | "return" expr?
+             | arrayExpr ;
 path         = pathIdent ( ( "::" pathIdent ) | ( "::" "<" typeArgs ">" ) )* ;
 pathIdent    = IDENT | "self" | "Self" ;
 tupleExpr    = "(" expr "," ")" | "(" expr ( "," expr )+ ","? ")" ;
 structLiteral= path "{" ( fieldInit ( "," fieldInit )* ","? )? "}" ;
 fieldInit    = IDENT ":" expr | IDENT ;
+arrayExpr    = "[" ( expr ( "," expr )* ","? | expr ";" expr )? "]" ;
 vecExpr      = "vec" "!" ( "[" vecItems? "]" | "(" vecItems? ")" ) ;
 vecItems     = expr ( "," expr )* ","? | expr ";" expr ;
 macroCall    = IDENT "!" "(" args? ")" ;
 ifExpr       = "if" ( "let" pattern "=" expr | expr ) block ( "else" ( ifExpr | block ) )? ;
 matchExpr    = "match" expr "{" matchArm* "}" ;
 matchArm     = pattern ( "if" expr )? "=>" expr ","? ;
-loopExpr     = "loop" block ;
-whileExpr    = "while" ( "let" pattern "=" expr | expr ) block ;
-forExpr      = "for" pattern "in" ( expr ( ".." | "..=" ) expr | expr ) block ;
+loopExpr     = label? "loop" block ;
+whileExpr    = label? "while" ( "let" pattern "=" expr | expr ) block ;
+forExpr      = label? "for" pattern "in" ( expr ( ".." | "..=" ) expr | expr ) block ;
+label        = LIFETIME ;
 closure      = "move"? ( "||" | "|" closureParams? "|" ) ( "->" type )? expr ;
 closureParams= closureParam ( "," closureParam )* ","? ;
 closureParam = primaryPattern ( ":" type )? ;
@@ -514,21 +518,23 @@ patternList  = pattern ( "," pattern )* ","? ;
 tuplePattern = "(" pattern "," ")" | "(" pattern ( "," pattern )+ ","? ")" ;
 fieldPat     = IDENT ( ":" pattern )? ;
 
-type         = refType | pathType | tupleType | fnType | dynType | sliceType ;
-refType      = "&" [ "mut" ] type ;
+type         = refType | pathType | tupleType | fnType | dynType | sliceType | arrayType ;
+refType      = "&" LIFETIME? [ "mut" ] type ;
 pathType     = typeIdent ( "::" typeIdent )* ( "::" "<" typeArgs ">" | "<" typeArgs ">" )? ;
 typeIdent    = IDENT | "Self" ;
 tupleType    = "(" ")" | "(" type ")" | "(" type "," ")" | "(" type ( "," type )* ","? ")" ;
 fnType       = "fn" "(" typeArgs? ")" ( "->" type )? ;
 dynType      = "dyn" pathType ;
 sliceType    = "[" type "]" ;
-typeArgs     = type ( "," type )* ","? ;
+arrayType    = "[" type ";" expr "]" ;
+typeArgs     = typeArg ( "," typeArg )* ","? ;
+typeArg      = type | LIFETIME ;
 ```
 
 A few productions deserve a warning because the parser is more permissive than
 the type checker: `methodCall` parses `::<...>` (turbofish) after the method
 name, but the type checker rejects generic methods (traits have no generic
-methods in 2.1.0); and `break expr` / `return expr` parse even where a value
+methods in 2.2.0); and `break expr` / `return expr` parse even where a value
 cannot be carried. `CHAR` is a character literal such as `'a'` or `'\u{4F60}'`;
 it is accepted wherever a literal expression or a literal pattern is accepted.
 
@@ -555,13 +561,14 @@ Output:
 small big other
 ```
 
-## Syntax added in 1.5 to 2.1
+## Syntax added in 1.5 to 2.2
 
 The grammar above already contains the productions added for generics, traits,
 character literals, modules and imports, slices and str, trait objects,
-extern declarations, and the 2.1 tuple and unit structs and `mut` parameters.
-This section collects those forms, the turbofish, and the syntax restrictions
-that the parser and the item collector enforce.
+extern declarations, the 2.1 tuple and unit structs and `mut` parameters, and
+the 2.2 arrays, loop labels and lifetime parameters. This section collects
+those forms, the turbofish, and the syntax restrictions that the parser and the
+item collector enforce.
 
 ### Generic parameter lists and bounds
 
@@ -625,7 +632,7 @@ Explicit type arguments are written with the Rust-style turbofish `::<…>`:
   `HashMap::<String, i64>::new()`;
 * a generic struct literal: `Pair::<i64> { first: 3, second: 4 }`;
 * a method call: `value.method::<i64>()` parses, but trait methods are not
-  generic in 2.1.0, so the type checker rejects the turbofish with `E0107`
+  generic in 2.2.0, so the type checker rejects the turbofish with `E0107`
   (`method get takes 0 generic arguments but 1 was supplied`).
 
 In expression position use the turbofish; in type position the arguments are
@@ -687,10 +694,35 @@ grammar above:
   fields and constructed as `Marker`. Named-field structs are unchanged. See
   [Structs, enums and impl](10-structs-enums-and-impl.md#tuple-and-unit-structs).
 
-No other grammar productions changed in 2.1.0: loop labels and `break` with a
-value are still not accepted (see
-[Statements and control flow](08-statements-and-control-flow.md#break-and-continue)),
-and the nine item kinds are the same.
+### 2.2 additions
+
+Version 2.2.0 adds array types and literals, loop labels and lifetime
+parameters; the grammar above carries their productions.
+
+* **Array types and literals.** `[T; N]` is a type whose length is an integer
+  literal or a path to an integer constant (`[i64; 4]`, `[u8; SIZE]`).
+  Expressions may be array literals `[1, 2, 3]`, repeat literals `[0; 4]`, or
+  the empty `[]`. Indexing keeps the `postfixExpr` production, and
+  `&array[a..b]` still goes through `indexOrSlice`. See
+  [Arrays](27-arrays.md).
+* **Loop labels.** A loop expression may be prefixed with a lifetime token and a
+  colon: `'outer: loop { … }`, `'outer: while cond { … }`,
+  `'outer: for x in values { … }`, and `'outer: while let Some(x) = … { … }`.
+  `break` and `continue` accept the same label (`break 'outer;`,
+  `continue 'outer;`). The colon is required; a missing colon or a label before
+  a non-loop item is error `E0001`, and an unknown label is `E0426`. See
+  [Loop labels](28-loop-labels.md).
+* **Lifetime parameters and reference fields.** A struct or enum may declare a
+  lifetime parameter (`struct View<'a> { … }`) and use it on reference field
+  types (`&'a T`, `&'a mut T`); an impl block writes the argument the same way
+  (`impl<'a> View<'a> { … }`). A lifetime parameter cannot carry bounds, and
+  `'static` is always valid. See [Lifetimes](29-lifetimes.md).
+
+`break` with a value (`break 'outer 5;`) still parses — the grammar keeps
+`break expr?` — but the type checker rejects it with `E0308`, and loops still
+have type `()` (see
+[Statements and control flow](08-statements-and-control-flow.md#break-and-continue)).
+The nine item kinds are unchanged.
 
 ### `Self` in expression position
 

@@ -1,6 +1,6 @@
 # time: clocks, sleeps and dates
 
-**Status in 2.1.0.** Implemented in `stdlib/src/time.ls`. Since 2.1.0 the module
+**Status in 2.2.0.** Implemented in `stdlib/src/time.ls`. Since 2.1.0 the module
 provides the Rust-shaped values `Duration`, `Instant` and `SystemTime` plus
 `sleep(Duration)`. The older `now_ms`, `monotonic_ns`, `sleep_ms` and
 `DateTime` helpers remain for compatibility and are marked deprecated in the
@@ -65,7 +65,7 @@ is a `Copy` value, not a handle.
 | `unix_epoch` | `() -> SystemTime` | the Unix epoch (`0` milliseconds) |
 
 Rust spells the epoch as the constant `UNIX_EPOCH`; a lsaca `const` cannot have
-a struct type in 2.1.0, so the standard library provides it as a function:
+a struct type in 2.2.0, so the standard library provides it as a function:
 
 ```rust
 let start: SystemTime = unix_epoch();
@@ -105,7 +105,7 @@ and `yearday` (`0` based day of the year). `format_date`, `format_time`,
 * Times before the Unix epoch have negative millisecond counts, and `modified()`
   in [fs](fs.md) reports an error for them.
 
-## Limits in 2.1.0
+## Limits in 2.2.0
 
 There is no calendar arithmetic (add days or months to a date), no date parsing,
 no formatting beyond the `DateTime` helpers, no time zone database beyond the

@@ -53,9 +53,9 @@ Every lsaca value is represented in one of three ways:
    *fat* value: a data pointer plus a length for `&[T]`/`&mut [T]`/`&str`/
    `&mut str`, or a data pointer plus a vtable pointer for `&dyn Trait`/
    `&mut dyn Trait`. A reference is a non-owning view of an existing place; it
-   is never retained or released, and it cannot be stored inside a struct, enum,
-   tuple, `Vec`, `Option`, `Result` or `Box`, so it never appears as a field or
-   element of an aggregate.
+   is never retained or released. Since 2.2.0 it may be a field of a struct, enum,
+   tuple or `Option` that names a lifetime parameter; `Vec`, `HashMap`, `Result`,
+   `Box`, arrays and closures still reject it (`E0498`).
 
 `Copy` and `Clone` are derived automatically from a type's definition;
 `Drop` is the one builtin trait you can implement (user-defined traits also
@@ -698,9 +698,13 @@ That split of responsibility is the whole memory model:
 
 Version 1.4 also allows mutable borrows of owned heap values: `&mut String`,
 `&mut Vec<T>`, `&mut Rc<T>` and `&mut Box<T>` are legal as parameters, locals and
-return types, and mutating methods work through them. References still cannot be
-stored inside aggregates or captured by closures; they live in locals,
-parameters and return values.
+return types, and mutating methods work through them. References cannot be
+captured by closures, and most aggregates cannot store one: `Vec`, `Result`,
+`HashMap`, `Rc`, `Box` and arrays reject a reference field with `E0498`. Since
+2.2.0 a struct, enum, tuple struct or `Option` may hold a reference field when
+its declaration names a lifetime parameter (`struct View<'a> { data: &'a [i64] }`);
+such aggregates are `Copy` when every field is a reference. See
+[Lifetimes](29-lifetimes.md).
 
 Since 2.0 the same rule extends to the *fat* references: `&[T]`, `&mut [T]`,
 `&str`, `&mut str`, `&dyn Trait` and `&mut dyn Trait` are non-owning views too.
@@ -708,7 +712,8 @@ They are produced by coercion (`&Vec<T>` to `&[T]`, `&mut Vec<T>` to
 `&mut [T]`, `&String` to `&str`, `&mut String` to `&mut str`, `&T` to
 `&dyn Trait`) or by taking a slice with `&values[1..3]`; copying one copies the
 two words and never touches a reference count, and none of them can be stored
-inside an aggregate. Since 2.1.0 a string literal used where a `&str` is
+in a `Vec`, `HashMap`, `Result`, `Box` or an array (a struct, enum, tuple or
+`Option` field may hold one since 2.2.0). Since 2.1.0 a string literal used where a `&str` is
 expected — `greet("hello")`, `s.contains("x")`, `let t: &str = "x";` — is a
 **static slice**: the bytes live in the program image, the two-word view
 points at them, and no `String` is allocated or reference-counted. An owned

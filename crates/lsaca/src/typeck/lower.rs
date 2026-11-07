@@ -490,37 +490,49 @@ impl<'a> Checker<'a> {
                     })
                     .collect(),
             },
-            TExprKind::Loop { body } => HExprKind::Loop {
+            TExprKind::Loop { label, body } => HExprKind::Loop {
+                label: label.clone(),
                 body: self.lower_block(body),
             },
-            TExprKind::While { cond, body } => HExprKind::While {
+            TExprKind::While { label, cond, body } => HExprKind::While {
+                label: label.clone(),
                 cond: Box::new(self.lower_expr(cond)),
                 body: self.lower_block(body),
             },
             TExprKind::ForRange {
+                label,
                 pat,
                 start,
                 end,
                 inclusive,
                 body,
             } => HExprKind::ForRange {
+                label: label.clone(),
                 pat: self.lower_pat(pat),
                 start: Box::new(self.lower_expr(start)),
                 end: Box::new(self.lower_expr(end)),
                 inclusive: *inclusive,
                 body: self.lower_block(body),
             },
-            TExprKind::ForVec { pat, vec, body } => HExprKind::ForVec {
+            TExprKind::ForVec {
+                label,
+                pat,
+                vec,
+                body,
+            } => HExprKind::ForVec {
+                label: label.clone(),
                 pat: self.lower_pat(pat),
                 vec: Box::new(self.lower_expr(vec)),
                 body: self.lower_block(body),
             },
             TExprKind::ForIter {
+                label,
                 iter,
                 next_fn,
                 pat,
                 body,
             } => HExprKind::ForIter {
+                label: label.clone(),
                 iter: Box::new(self.lower_expr(iter)),
                 next_fn: *next_fn,
                 pat: self.lower_pat(pat),
@@ -542,6 +554,13 @@ impl<'a> Checker<'a> {
             TExprKind::VecRepeat { value, count } => HExprKind::VecRepeat {
                 value: Box::new(self.lower_expr(value)),
                 count: Box::new(self.lower_expr(count)),
+            },
+            TExprKind::Array { elems } => HExprKind::Array {
+                elems: elems.iter().map(|elem| self.lower_expr(elem)).collect(),
+            },
+            TExprKind::ArrayRepeat { value, len } => HExprKind::ArrayRepeat {
+                value: Box::new(self.lower_expr(value)),
+                len: *len,
             },
             TExprKind::EnumLit {
                 enum_id,
@@ -576,9 +595,17 @@ impl<'a> Checker<'a> {
                 ret,
                 value_c_name,
                 error_c_name,
+                error_conversion,
             } => {
                 let operand = self.lower_expr(expr);
-                self.lower_try(operand, ret, value_c_name, error_c_name, span)
+                self.lower_try(
+                    operand,
+                    ret,
+                    value_c_name,
+                    error_c_name,
+                    *error_conversion,
+                    span,
+                )
             }
             TExprKind::DynCoerce { value, vtable } => HExprKind::DynCoerce {
                 value: Box::new(self.lower_expr(value)),
@@ -623,8 +650,12 @@ impl<'a> Checker<'a> {
                     expr: Box::new(slice),
                 }
             }
-            TExprKind::Break => HExprKind::Break,
-            TExprKind::Continue => HExprKind::Continue,
+            TExprKind::Break { label } => HExprKind::Break {
+                label: label.clone(),
+            },
+            TExprKind::Continue { label } => HExprKind::Continue {
+                label: label.clone(),
+            },
             TExprKind::Return(value) => {
                 HExprKind::Return(value.as_ref().map(|value| Box::new(self.lower_expr(value))))
             }
@@ -740,12 +771,14 @@ impl<'a> Checker<'a> {
     /// Lower a try expression into a match that returns the payload in the
     /// success arm and propagates None or Err with an early return in the
     /// failure arm. The operand expression is evaluated exactly once.
+    #[allow(clippy::too_many_arguments)]
     fn lower_try(
         &mut self,
         operand: HExpr,
         ret: &ITy,
         value_c_name: &str,
         error_c_name: &str,
+        error_conversion: Option<usize>,
         span: Span,
     ) -> HExprKind {
         let ret_ty = self.finalize_ty(ret, span);
@@ -846,11 +879,31 @@ impl<'a> Checker<'a> {
                     },
                     span,
                 );
+                // v2.2: convert the propagated error with the instantiated
+                // `From::from` when the checker found one.
+                let err_value = match error_conversion {
+                    Some(fn_id) => {
+                        let expected_err = match &ret_ty {
+                            Ty::Result(_, expected) => (**expected).clone(),
+                            _ => err_ty.clone(),
+                        };
+                        HExpr::new(
+                            expected_err,
+                            HExprKind::DirectCall {
+                                fn_id,
+                                receiver: None,
+                                args: vec![err_local],
+                            },
+                            span,
+                        )
+                    }
+                    None => err_local,
+                };
                 let err_return = HExpr::new(
                     Ty::Unit,
                     HExprKind::Return(Some(Box::new(HExpr::new(
                         ret_ty.clone(),
-                        HExprKind::ResultErr(Box::new(err_local)),
+                        HExprKind::ResultErr(Box::new(err_value)),
                         span,
                     )))),
                     span,

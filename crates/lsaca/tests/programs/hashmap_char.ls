@@ -5,7 +5,7 @@ fn main() {
     for index in 0..chars.len() {
         let letter = chars.get(index).unwrap();
         if counts.contains_key(letter) {
-            let previous = counts.get(letter).unwrap();
+            let previous = *counts.get(&letter).unwrap();
             counts.insert(letter, previous + 1);
         } else {
             counts.insert(letter, 1);
@@ -16,7 +16,7 @@ fn main() {
     for index in 0..probes.len() {
         let probe = probes[index];
         if counts.contains_key(probe) {
-            total = total + counts.get(probe).unwrap();
+            total = total + *counts.get(&probe).unwrap();
         }
     }
     println!("{} {}", counts.len(), total);

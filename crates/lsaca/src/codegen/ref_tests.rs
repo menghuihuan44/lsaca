@@ -9,7 +9,7 @@ use super::{CodegenOptions, generate};
 use crate::hir::{
     FormatSpec, HArm, HBinaryOp, HBuiltinAssoc, HBuiltinMethod, HClosure, HConst, HEnum, HExpr,
     HExprKind, HField, HFieldRef, HFn, HFormatPart, HFormatPartKind, HMacroCall, HMacroKind,
-    HParam, HPat, HPatKind, HStmt, HStruct, Program,
+    HParam, HPat, HPatKind, HStmt, HStruct, HVariant, Program,
 };
 use crate::span::Span;
 use crate::types::{IntTy, SelfKind, Ty};
@@ -1825,6 +1825,7 @@ fn for_iter_stmt(body: crate::hir::HBlock) -> HStmt {
     HStmt::Expr(HExpr::new(
         Ty::unit(),
         HExprKind::ForIter {
+            label: None,
             iter: Box::new(local("it", "v0", iterator_ty())),
             next_fn: 0,
             pat: bind_pat(int_ty(), "v1"),
@@ -1905,7 +1906,11 @@ fn releases_the_iterator_once_when_the_loop_breaks() {
             for_iter_stmt(block(
                 vec![
                     print_iteration(),
-                    HStmt::Expr(HExpr::new(Ty::unit(), HExprKind::Break, sp())),
+                    HStmt::Expr(HExpr::new(
+                        Ty::unit(),
+                        HExprKind::Break { label: None },
+                        sp(),
+                    )),
                 ],
                 None,
             )),
@@ -2403,7 +2408,10 @@ fn does_not_store_unit_completion_values_for_diverging_loops() {
             Vec::new(),
             Some(HExpr::new(
                 Ty::unit(),
-                HExprKind::Loop { body: loop_body },
+                HExprKind::Loop {
+                    label: None,
+                    body: loop_body,
+                },
                 sp(),
             )),
         ),
@@ -2494,5 +2502,453 @@ fn does_not_trace_borrowed_reference_slots() {
     assert!(
         !generated.contains("lsaca_trace_Ref_String"),
         "a borrowed reference must not be traced: {generated}"
+    );
+}
+
+/// A struct holding a reference field never owns the referent: the generated
+/// helpers copy the pointer, skip it when releasing, read through it for Debug
+/// and compare referents, so no reference counting traffic is emitted for the
+/// field.
+#[test]
+fn emits_reference_fields_without_refcount_traffic() {
+    let shared_i64 = ref_ty(false, int_ty());
+    let holder = HStruct {
+        name: "Holder".to_string(),
+        c_name: "Holder".to_string(),
+        fields: vec![
+            HField {
+                name: "name".to_string(),
+                ty: Ty::string(),
+            },
+            HField {
+                name: "shared".to_string(),
+                ty: shared_i64,
+            },
+        ],
+        span: sp(),
+    };
+    let holder_ty = Ty::Struct(0);
+    let holder_lit = |name: &str| {
+        struct_lit(
+            0,
+            holder_ty.clone(),
+            vec![
+                (0, str_lit(name)),
+                (1, borrow(local("number", "v0", int_ty()), false)),
+            ],
+        )
+    };
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(int_ty(), "v0"), int_lit(7)),
+            let_stmt(bind_pat(holder_ty.clone(), "v1"), holder_lit("hi")),
+            let_stmt(bind_pat(holder_ty.clone(), "v2"), holder_lit("hi")),
+            HStmt::Expr(println_of(vec![debug_arg(local(
+                "first",
+                "v1",
+                holder_ty.clone(),
+            ))])),
+            HStmt::Expr(println_of(vec![display_arg(HExpr::new(
+                Ty::Bool,
+                HExprKind::Binary {
+                    op: HBinaryOp::Eq,
+                    lhs: Box::new(local("first", "v1", holder_ty.clone())),
+                    rhs: Box::new(local("second", "v2", holder_ty.clone())),
+                },
+                sp(),
+            ))])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "ref_fields",
+        &program("ref_fields", vec![holder], vec![main], 0),
+    );
+
+    let copy = function_body(&main_c, "lsaca_copy_Holder");
+    assert!(
+        copy.contains("out.f_shared = v.f_shared;"),
+        "a reference field is copied as a bare pointer: {copy}"
+    );
+    assert_eq!(
+        copy.matches("ls_retain").count(),
+        1,
+        "only the owned String field is retained: {copy}"
+    );
+
+    let release = function_body(&main_c, "lsaca_release_Holder");
+    assert!(
+        !release.contains("f_shared"),
+        "a reference field is never released: {release}"
+    );
+    assert!(
+        release.contains("ls_release((void*)(v.f_name));"),
+        "the owned String field is still released: {release}"
+    );
+
+    let debug = function_body(&main_c, "lsaca_debug_Holder");
+    assert!(
+        debug.contains("(*(v.f_shared))"),
+        "Debug reads through the reference: {debug}"
+    );
+    assert!(
+        !debug.contains("ls_retain"),
+        "Debug does not retain a reference field: {debug}"
+    );
+
+    let eq = function_body(&main_c, "lsaca_eq_Holder");
+    assert!(
+        eq.contains("(*(a.f_shared))") && eq.contains("(*(b.f_shared))"),
+        "equality compares the referents of reference fields: {eq}"
+    );
+}
+
+/// Push_str over a borrowed format temporary appends the formatted pieces
+/// straight to the string: the HIR arrives as a slice of the format expression
+/// and the emitter must not build an intermediate accumulator string.
+#[test]
+fn fuses_a_borrowed_format_temporary_into_push_str() {
+    let format_expr = HExpr::new(
+        Ty::string(),
+        HExprKind::Format {
+            parts: vec![literal_part("value="), display_arg(int_lit(7))],
+        },
+        sp(),
+    );
+    let borrowed_str = ref_ty(false, Ty::Str);
+    let argument = HExpr::new(
+        borrowed_str,
+        HExprKind::Slice {
+            base: Box::new(format_expr),
+            start: None,
+            end: None,
+            inclusive: false,
+        },
+        sp(),
+    );
+    let push = HExpr::new(
+        Ty::unit(),
+        HExprKind::BuiltinMethod {
+            receiver: Box::new(local("text", "v0", Ty::string())),
+            method: HBuiltinMethod::StrPushStr,
+            args: vec![argument],
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(Ty::string(), "v0"), str_lit("")),
+            HStmt::Expr(push),
+            HStmt::Expr(println_of(vec![display_arg(local(
+                "text",
+                "v0",
+                Ty::string(),
+            ))])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "format_push",
+        &program("format_push", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+
+    assert!(
+        body.contains("ls_format_push_cstr(v0, \"value=\")"),
+        "the literal piece is appended to the receiver: {body}"
+    );
+    assert!(
+        !body.contains("ls_str_push_str("),
+        "the fused path must not call push_str: {body}"
+    );
+    assert_eq!(
+        body.matches("ls_format_begin").count(),
+        1,
+        "only the println accumulator is built, the pushed text is not: {body}"
+    );
+}
+
+// ----- v2.2: borrowed references stored inside aggregates -----
+
+/// Builds a program whose registry also contains user enums. The plain
+/// [program] helper always emits an empty enum list, but a borrowed reference
+/// may also appear as an enum payload.
+fn program_with_enums(
+    name: &str,
+    structs: Vec<HStruct>,
+    enums: Vec<HEnum>,
+    fns: Vec<HFn>,
+    main_fn: usize,
+) -> Program {
+    let mut program = Program {
+        name: name.to_string(),
+        structs,
+        enums,
+        fns,
+        consts: Vec::<HConst>::new(),
+        closures: Vec::new(),
+        main_fn,
+        copy_structs: Vec::new(),
+        copy_enums: Vec::new(),
+        drop_structs: Vec::new(),
+        drop_enums: Vec::new(),
+        trait_objects: Vec::new(),
+        vtables: Vec::new(),
+    };
+    program.classify_types(Vec::new(), Vec::new());
+    program
+}
+
+fn usize_lit(value: i128) -> HExpr {
+    HExpr::new(
+        Ty::Int(IntTy::Usize),
+        HExprKind::Lit(crate::hir::HLit::Int {
+            value,
+            int_ty: IntTy::Usize,
+        }),
+        sp(),
+    )
+}
+
+/// A string literal already specialised to `&str`: it is emitted as a static
+/// fat view, not as an interned `String` handle.
+fn shared_str_lit(text: &str) -> HExpr {
+    HExpr::new(
+        ref_ty(false, Ty::Str),
+        HExprKind::Lit(crate::hir::HLit::Str(text.to_string())),
+        sp(),
+    )
+}
+
+/// A reference to an unsized pointee is a fat view stored by value in C, so
+/// the view struct must be completely defined before any aggregate that
+/// embeds it; gcc rejects an incomplete by-value field. This covers struct
+/// fields, enum payloads, Option payloads and arrays of references.
+#[test]
+fn orders_fat_reference_views_before_aggregates_that_embed_them() {
+    let shared_str = ref_ty(false, Ty::Str);
+    let shared_slice = ref_ty(false, Ty::slice(int_ty()));
+    let array_of_refs = Ty::array(shared_str.clone(), 2);
+
+    let view = HStruct {
+        name: "View".to_string(),
+        c_name: "View".to_string(),
+        fields: vec![HField {
+            name: "text".to_string(),
+            ty: shared_str.clone(),
+        }],
+        span: sp(),
+    };
+    let slice_view = HStruct {
+        name: "SliceView".to_string(),
+        c_name: "SliceView".to_string(),
+        fields: vec![
+            HField {
+                name: "data".to_string(),
+                ty: shared_slice.clone(),
+            },
+            HField {
+                name: "len".to_string(),
+                ty: Ty::Int(IntTy::Usize),
+            },
+        ],
+        span: sp(),
+    };
+    let maybe = HStruct {
+        name: "Maybe".to_string(),
+        c_name: "Maybe".to_string(),
+        fields: vec![HField {
+            name: "value".to_string(),
+            ty: Ty::option(shared_str.clone()),
+        }],
+        span: sp(),
+    };
+    let named = HStruct {
+        name: "Named".to_string(),
+        c_name: "Named".to_string(),
+        fields: vec![HField {
+            name: "names".to_string(),
+            ty: array_of_refs.clone(),
+        }],
+        span: sp(),
+    };
+    let slot = HEnum {
+        name: "Slot".to_string(),
+        c_name: "Slot".to_string(),
+        variants: vec![
+            HVariant {
+                name: "Empty".to_string(),
+                tag: 0,
+                fields: Vec::new(),
+            },
+            HVariant {
+                name: "Text".to_string(),
+                tag: 1,
+                fields: vec![shared_str.clone()],
+            },
+            HVariant {
+                name: "Data".to_string(),
+                tag: 2,
+                fields: vec![shared_slice.clone()],
+            },
+        ],
+        span: sp(),
+    };
+
+    let array_ty = Ty::array(int_ty(), 2);
+    let view_ty = Ty::Struct(0);
+    let slice_view_ty = Ty::Struct(1);
+    let maybe_ty = Ty::Struct(2);
+    let named_ty = Ty::Struct(3);
+    let slot_ty = Ty::Enum(0);
+
+    let numbers = HExpr::new(
+        array_ty.clone(),
+        HExprKind::Array {
+            elems: vec![int_lit(1), int_lit(2)],
+        },
+        sp(),
+    );
+    let slice_expr = HExpr::new(
+        shared_slice.clone(),
+        HExprKind::Slice {
+            base: Box::new(local("numbers", "v0", array_ty.clone())),
+            start: None,
+            end: None,
+            inclusive: false,
+        },
+        sp(),
+    );
+    let slot_text = HExpr::new(
+        slot_ty.clone(),
+        HExprKind::EnumLit {
+            enum_id: 0,
+            variant: 1,
+            args: vec![local("text", "v1", shared_str.clone())],
+        },
+        sp(),
+    );
+    let maybe_some = struct_lit(
+        2,
+        maybe_ty.clone(),
+        vec![(
+            0,
+            HExpr::new(
+                Ty::option(shared_str.clone()),
+                HExprKind::OptionSome(Box::new(local("text", "v1", shared_str.clone()))),
+                sp(),
+            ),
+        )],
+    );
+    let named_lit = struct_lit(
+        3,
+        named_ty.clone(),
+        vec![(
+            0,
+            HExpr::new(
+                array_of_refs.clone(),
+                HExprKind::Array {
+                    elems: vec![shared_str_lit("a"), shared_str_lit("b")],
+                },
+                sp(),
+            ),
+        )],
+    );
+    let body = block(
+        vec![
+            let_stmt(bind_pat(array_ty, "v0"), numbers),
+            let_stmt(bind_pat(shared_str.clone(), "v1"), shared_str_lit("hi")),
+            let_stmt(
+                bind_pat(view_ty.clone(), "v2"),
+                struct_lit(
+                    0,
+                    view_ty.clone(),
+                    vec![(0, local("text", "v1", shared_str.clone()))],
+                ),
+            ),
+            let_stmt(
+                bind_pat(slice_view_ty.clone(), "v3"),
+                struct_lit(
+                    1,
+                    slice_view_ty.clone(),
+                    vec![(0, slice_expr), (1, usize_lit(2))],
+                ),
+            ),
+            let_stmt(bind_pat(slot_ty.clone(), "v4"), slot_text),
+            let_stmt(bind_pat(maybe_ty.clone(), "v5"), maybe_some),
+            let_stmt(bind_pat(named_ty.clone(), "v6"), named_lit),
+            HStmt::Expr(println_of(vec![debug_arg(local("view", "v2", view_ty))])),
+            HStmt::Expr(println_of(vec![debug_arg(local(
+                "slice_view",
+                "v3",
+                slice_view_ty,
+            ))])),
+            HStmt::Expr(println_of(vec![debug_arg(local("slot", "v4", slot_ty))])),
+            HStmt::Expr(println_of(vec![debug_arg(local("maybe", "v5", maybe_ty))])),
+            HStmt::Expr(println_of(vec![debug_arg(local("named", "v6", named_ty))])),
+        ],
+        None,
+    );
+    let main = main_fn(body);
+    let program = program_with_enums(
+        "ref_aggregates",
+        vec![view, slice_view, maybe, named],
+        vec![slot],
+        vec![main],
+        0,
+    );
+    let main_c = generate_program("ref_aggregates", &program);
+
+    let position = |needle: &str| {
+        main_c
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle} in generated C"))
+    };
+    let str_view = position("struct LsStr {");
+    assert!(
+        str_view < position("struct LsView {"),
+        "the &str view must be defined before the struct embedding it: {main_c}"
+    );
+    assert!(
+        str_view < position("struct LsSlot {"),
+        "the &str view must be defined before the enum payload using it: {main_c}"
+    );
+    assert!(
+        str_view < position("struct LsMaybe {"),
+        "the &str view must be defined before the Option payload using it: {main_c}"
+    );
+    assert!(
+        str_view < position("struct LsNamed {"),
+        "the &str view must be defined before the array of references: {main_c}"
+    );
+    assert!(
+        position("struct LsSlice_i64 {") < position("struct LsSliceView {"),
+        "the &[i64] view must be defined before the struct embedding it: {main_c}"
+    );
+    assert!(
+        position("struct LsSlice_i64 {") < position("struct LsSlot {"),
+        "the &[i64] view must be defined before the enum payload using it: {main_c}"
+    );
+
+    // The helpers read the borrowed views instead of copying them through a
+    // retain, so the operand is used and no reference count traffic appears.
+    let copy = function_body(&main_c, "LsView lsaca_copy_View(LsView v)");
+    assert!(
+        copy.contains("out.f_text = v.f_text;"),
+        "the by-value view is copied bit for bit: {copy}"
+    );
+    assert!(
+        !copy.contains("ls_retain"),
+        "a borrowed view never bumps a reference count: {copy}"
+    );
+    let slice_copy = function_body(&main_c, "LsSliceView lsaca_copy_SliceView(LsSliceView v)");
+    assert!(
+        slice_copy.contains("out.f_data = v.f_data;")
+            && slice_copy.contains("out.f_len = v.f_len;"),
+        "the slice view and its length are copied by value: {slice_copy}"
+    );
+    assert!(
+        main_c.contains("(v.f_text)"),
+        "the debug helper reads the borrowed field: {main_c}"
     );
 }

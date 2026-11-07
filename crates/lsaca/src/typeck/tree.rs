@@ -130,13 +130,16 @@ pub enum TExprKind {
         arms: Vec<TArm>,
     },
     Loop {
+        label: Option<String>,
         body: TBlock,
     },
     While {
+        label: Option<String>,
         cond: Box<TExpr>,
         body: TBlock,
     },
     ForRange {
+        label: Option<String>,
         pat: TPat,
         start: Box<TExpr>,
         end: Box<TExpr>,
@@ -144,6 +147,7 @@ pub enum TExprKind {
         body: TBlock,
     },
     ForVec {
+        label: Option<String>,
         pat: TPat,
         vec: Box<TExpr>,
         body: TBlock,
@@ -151,6 +155,7 @@ pub enum TExprKind {
     /// A loop over a user iterator: the value is moved into the loop and each
     /// iteration drives the instantiated `Iterator::next` function.
     ForIter {
+        label: Option<String>,
         iter: Box<TExpr>,
         next_fn: usize,
         pat: TPat,
@@ -167,6 +172,15 @@ pub enum TExprKind {
     VecRepeat {
         value: Box<TExpr>,
         count: Box<TExpr>,
+    },
+    /// An array literal [a, b, c].
+    Array {
+        elems: Vec<TExpr>,
+    },
+    /// An array repeat expression [value; count] with a constant count.
+    ArrayRepeat {
+        value: Box<TExpr>,
+        len: usize,
     },
     EnumLit {
         enum_id: usize,
@@ -188,8 +202,12 @@ pub enum TExprKind {
         parts: Vec<TFormatPart>,
     },
     Macro(TMacroCall),
-    Break,
-    Continue,
+    Break {
+        label: Option<String>,
+    },
+    Continue {
+        label: Option<String>,
+    },
     Return(Option<Box<TExpr>>),
     /// Coerce a concrete pointer value to a trait object pointer: `&T` to
     /// `&dyn Trait`, `Box<T>` to `Box<dyn Trait>`, and so on.
@@ -229,6 +247,9 @@ pub enum TExprKind {
         value_c_name: String,
         /// Fresh local bound to the error value in the failure arm (Result only).
         error_c_name: String,
+        /// Instantiating `from` function of the `impl From<Found> for Expected`
+        /// that converts the propagated error, when the error types differ.
+        error_conversion: Option<usize>,
     },
 }
 

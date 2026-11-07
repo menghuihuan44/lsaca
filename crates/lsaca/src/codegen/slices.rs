@@ -261,6 +261,12 @@ impl<'a> Gen<'a> {
                 let place = self.gen_place(base);
                 self.vector_view(&place, &elem)
             }
+            Ty::Array(elem, len) => {
+                let elem = (**elem).clone();
+                let len = *len;
+                let place = self.gen_place(base);
+                self.array_view(&place, &elem, len)
+            }
             Ty::String => {
                 let place = self.gen_place(base);
                 self.string_view(&place)
@@ -270,6 +276,12 @@ impl<'a> Gen<'a> {
                     let elem = (**elem).clone();
                     let place = self.place_through_reference(base);
                     self.vector_view(&place, &elem)
+                }
+                Ty::Array(elem, len) => {
+                    let elem = (**elem).clone();
+                    let len = *len;
+                    let place = self.place_through_reference(base);
+                    self.array_view(&place, &elem, len)
                 }
                 Ty::String => {
                     let place = self.place_through_reference(base);
@@ -310,15 +322,37 @@ impl<'a> Gen<'a> {
     }
 
     /// The data pointer and length of a Vec place.
+    ///
+    /// The pointer is taken through an explicit cast: the place is often a
+    /// dereference of a const reference such as `&Vec<T>`, and the frozen slice
+    /// layout stores a plain element pointer. Reading the buffer does not write
+    /// through it, and mutability is enforced by the type checker before the
+    /// slice value is formed.
     fn vector_view(&mut self, place: &str, elem: &Ty) -> SliceView {
         let elem_ctype = self.ctype(elem);
         let data = self.new_plain_of(&format!("{}*", elem_ctype), "slice_data");
-        self.line(format!("{} = ({}).data;", data, place));
+        self.line(format!("{} = ({}*)({}).data;", data, elem_ctype, place));
         let length = self.new_plain_of("size_t", "slice_len");
         self.line(format!("{} = ({}).len;", length, place));
         SliceView {
             data,
             len: format!("(int64_t)({})", length),
+        }
+    }
+
+    /// The data pointer and fixed length of an array place.
+    ///
+    /// The cast mirrors the one in the Vec view: an immutable array reached
+    /// through a const pointer would otherwise decay to a const element
+    /// pointer, which the frozen slice layout cannot store without discarding
+    /// the qualifier in plain C.
+    fn array_view(&mut self, place: &str, elem: &Ty, len: usize) -> SliceView {
+        let elem_ctype = self.ctype(elem);
+        let data = self.new_plain_of(&format!("{}*", elem_ctype), "slice_data");
+        self.line(format!("{} = ({}*)({}).data;", data, elem_ctype, place));
+        SliceView {
+            data,
+            len: format!("(int64_t){}", len),
         }
     }
 

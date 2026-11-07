@@ -1,6 +1,6 @@
 # string: String and str
 
-**Status in 2.1.0.** Implemented. The `String` type and its methods live in
+**Status in 2.2.0.** Implemented. The `String` type and its methods live in
 `stdlib/src/string.ls` (`std::string`); the borrowed `str` type is a builtin
 unsized type (see [Slices and str](../language/26-slices-and-str.md)) and every
 `str` method is also implemented there. `impl String` forwards each `str`
@@ -62,7 +62,7 @@ The `str` methods mirror the `String` ones with a borrowed receiver:
 supported. Integer parsing is typed: `parse_i64` returns
 `Result<i64, ParseIntError>`, `parse_f64` returns
 `Result<f64, ParseFloatError>`. The generic `.parse::<T>()` method accepts `i64`
-and `f64` in 2.1.0 and reports the same typed errors (`ParseIntError` for
+and `f64` in 2.2.0 and reports the same typed errors (`ParseIntError` for
 integers, `ParseFloatError` for floats); other type arguments are rejected with
 `E0107` and the broader set is planned for a later release. The error types
 implement `std::error::Error` (see [error](error.md)).

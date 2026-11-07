@@ -17,6 +17,11 @@ builtin table) and the API described here is unchanged, so the same methods work
 through `use std::collections::HashMap` or through the prelude re-export. See
 the standard library reference for [HashMap](../stdlib/collections/hash-map.md).
 
+Version 2.2.0 makes the lookups borrowed: `get` takes the key by reference
+(`map.get(&key)`) and returns `Option<&V>`, while `get_mut` returns
+`Option<&mut V>`; both avoid cloning the stored value. `contains_key`,
+`remove` and `get_with` still take the key by value.
+
 Unlike `Vec`, the key type is restricted: it must be one of `i64`, `u64`,
 `isize`, `usize`, `bool`, `String` or `char`. The value type may be any valid
 value type, including move-only types and types that implement `Drop`. The
@@ -57,7 +62,8 @@ The turbofish form names the type arguments explicitly:
 fn main() {
     let mut ages = HashMap::<String, i64>::new();
     ages.insert(String::from("ana"), 30);
-    println!("{:?}", ages.get(String::from("ana")));
+    let key = String::from("ana");
+    println!("{:?}", ages.get(&key));
 }
 ```
 
@@ -77,7 +83,8 @@ type arguments, the compiler reports `E0282`.
 | --- | --- | --- |
 | `HashMap::new()` | `→ HashMap<K, V>` | creates an empty map |
 | `insert(key, value)` | `→ Option<V>` | moves both arguments into the map; returns the previous value for the key, if any |
-| `get(key)` | `→ Option<V>` | copies the key argument; clones the stored value, so `V` must be cloneable |
+| `get(&key)` | `→ Option<&V>` | borrows the key argument; returns a shared reference to the stored value, no clone |
+| `get_mut(&key)` | `→ Option<&mut V>` | borrows the key argument; returns a mutable reference to the stored value; needs a mutable binding |
 | `get_with(key, f)` | `→ Option<U>` | copies the key argument; `f` has type `Fn(&V) -> U` and is called with a reference to the stored value |
 | `contains_key(key)` | `→ bool` | copies the key argument |
 | `remove(key)` | `→ Option<V>` | copies the key argument; moves the stored value out of the map |
@@ -87,8 +94,9 @@ type arguments, the compiler reports `E0282`.
 | `keys()` | `→ Vec<K>` | clones every key into a vector |
 | `values()` | `→ Vec<V>` | clones every value into a vector |
 
-`insert`, `remove` and `clear` mutate the map, so they need a mutable binding
-(`let mut map`); the other methods take `&self` and work on a shared binding.
+`insert`, `remove`, `get_mut` and `clear` mutate the map, so they need a mutable
+binding (`let mut map`); the other methods take `&self` and work on a shared
+binding.
 
 Keys are compared by value. A `String` key is compared by its text, so
 `String::from("a")` finds an entry inserted with a different `String` holding
@@ -105,7 +113,8 @@ fn main() {
     let first = ages.insert(String::from("ana"), 30);
     let second = ages.insert(String::from("ana"), 31);
     println!("{:?} {:?}", first, second);
-    println!("{:?}", ages.get(String::from("ana")));
+    let key = String::from("ana");
+    println!("{:?}", ages.get(&key));
 }
 ```
 
@@ -115,9 +124,10 @@ None Some(30)
 Some(31)
 ```
 
-The key argument of `get`, `contains_key`, `remove` and `get_with` is copied by
-the compiler, so the caller keeps ownership of it. This example looks up a
-`String` key and then prints the same local again:
+`get` and `get_mut` take the key by reference (`&K`), and `contains_key`,
+`remove` and `get_with` copy the key argument, so in every case the caller
+keeps ownership of it. This example looks up a `String` key and then prints
+the same local again:
 
 ```ls
 fn main() {
@@ -125,6 +135,7 @@ fn main() {
     counts.insert(String::from("a"), 1);
 
     let lookup = String::from("a");
+    println!("{:?}", counts.get(&lookup));
     println!("{}", counts.contains_key(lookup));
     println!("{}", lookup);
 }
@@ -132,21 +143,21 @@ fn main() {
 
 Output:
 ```text
+Some(1)
 true
 a
 ```
 
-`get` returns an owned `Option<V>`: it clones the stored value, so the map keeps
-its own copy and remains usable. The value type must be cloneable for `get` and
-`values()` to be available; see [Values that cannot be
-cloned](#values-that-cannot-be-cloned).
+`get` returns a borrowed `Option<&V>`: it does not clone the stored value, so it
+works for every value type. The map stays usable; the returned reference borrows
+from it until the last use of that reference.
 
 ```ls
 fn main() {
     let mut names: HashMap<i64, String> = HashMap::new();
     names.insert(1, String::from("one"));
 
-    let value = names.get(1);
+    let value = names.get(&1);
     println!("{:?}", value);
     println!("{}", names.len());
 }
@@ -158,8 +169,32 @@ Some("one")
 1
 ```
 
-`get_with` avoids the clone. It takes the key and a closure `Fn(&V) -> U` and
-returns the closure's result instead of the value:
+`get_mut` returns `Option<&mut V>` and writes through the returned reference.
+A `match` or `if let` can use the call directly as its scrutinee: the mutable
+borrow lasts for the whole match, assigning through the bound reference modifies
+the stored value in place, and the map is usable again once the match ends:
+
+```ls
+fn main() {
+    let mut totals: HashMap<String, i64> = HashMap::new();
+    totals.insert(String::from("a"), 10);
+
+    let key = String::from("a");
+    match totals.get_mut(&key) {
+        Some(value) => { *value += 5; }
+        None => {}
+    }
+    println!("{:?}", totals.get_with(key, |value| *value));
+}
+```
+
+Output:
+```text
+Some(15)
+```
+
+`get_with` copies the key argument and avoids cloning the value. It takes the key
+and a closure `Fn(&V) -> U` and returns the closure's result instead:
 
 ```ls
 fn main() {
@@ -281,13 +316,13 @@ fn main() {
 Error:
 ```text
 error[E0277]: HashMap keys must be one of i64, u64, isize, usize, bool, char or String, found Vec<i64>
-  --> example-11.ls:2:18
+  --> example-12.ls:2:18
    |
  2 |     let mut map: HashMap<Vec<i64>, i64> = HashMap::new();
    |                  ^^^^^^^
    = note: only the listed key types are supported; use a struct field or a String key instead
 
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 ```
 
 A `char` is a `Copy` scalar and a valid key type. Characters compare by
@@ -299,7 +334,7 @@ fn main() {
     letters.insert('a', 1);
     letters.insert('é', 2);
 
-    println!("{:?} {:?}", letters.get('a'), letters.get('\u{61}'));
+    println!("{:?} {:?}", letters.get(&'a'), letters.get(&'\u{61}'));
     println!("{}", letters.contains_key('é'));
     println!("{}", letters.len());
 }
@@ -354,12 +389,10 @@ documentation quotes - see [Benchmarks](21-benchmarks.md).
 
 ## Values that cannot be cloned
 
-`get` and `values()` clone the stored values, while `keys()` clones the keys
-(which are always cloneable). A value type that implements `Drop` cannot be
-cloned (`E0277`), so a map with such values supports `insert`, `get_with`,
-`contains_key`, `remove`, `clear`, `keys()` and the length queries, but not
-`get` or `values()`.
-`get_with` is the way to inspect a non-cloneable value in place:
+`get` and `get_mut` borrow from the map, so they work for any value type,
+including a type that implements `Drop`. The methods that clone are `values()`
+and `keys()` — a `Drop` value cannot be cloned (`E0277`), so `values()` is not
+available for it:
 
 ```ls,compile-fail
 struct Guard {
@@ -375,27 +408,30 @@ impl Drop for Guard {
 fn main() {
     let mut guards: HashMap<i64, Guard> = HashMap::new();
     guards.insert(1, Guard { name: String::from("g") });
-    println!("{:?}", guards.get(1));
+    println!("{:?}", guards.values());
 }
 ```
 
 Error:
 
 ```text
-error[E0277]: HashMap::get cannot clone values of type Guard because it implements Drop; use get_with(...) instead
-   --> example-13.ls:14:29
+error[E0277]: HashMap::values cannot clone values of type Guard because it implements Drop; use get_with(...) instead
+   --> example-14.ls:14:29
     |
- 14 |     println!("{:?}", guards.get(1));
-    |                             ^^^
+ 14 |     println!("{:?}", guards.values());
+    |                             ^^^^^^
     = note: get_with borrows the stored value, so it works for types with drop glue
 
-lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
+
+`get`, `get_mut` and `get_with` inspect a value with drop glue without cloning it;
+`get_with` hands a reference to the stored value to a closure and returns the
+closure result.
 
 ## No for-loop iteration
 
-A `HashMap` cannot be iterated with `for` in 1.7.0, and 2.1.0 does not add
-one either: it does not implement
+A `HashMap` cannot be iterated with `for` in 2.2.0: it does not implement
 `Iterator<T>`. Use `keys()` or `values()` and iterate the resulting vector:
 
 ```ls,compile-fail
@@ -412,24 +448,28 @@ Error:
 
 ```text
 error[E0277]: cannot iterate over a value of type HashMap<i64, i64>; for loops require a range, a Vec<T>, or a type that implements Iterator<T>
-  --> example-14.ls:4:18
+  --> example-15.ls:4:18
    |
  4 |     for entry in scores {
    |                  ^^^^^^
    = note: call keys() or values() to get a Vec and iterate over that
 
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
 ```
 
-## Known limitations in 2.1.0
+## Known limitations in 2.2.0
 
 * Key types are limited to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and
   `char`; user structs, enums and other types cannot be keys.
 * There is no entry API, no `HashMap::from`, no `insert_or_update`, and no
   iteration over the map; `keys()` and `values()` allocate a vector.
-* `get` and `values()` require a cloneable value type; a `Drop` value cannot
-  be read with `get` or `values()`, only with `get_with` (keys are always
+* `values()` requires a cloneable value type; a `Drop` value can be read with
+  `get`, `get_mut` or `get_with`, but not with `values()` (keys are always
   cloneable).
+* `get` and `get_mut` borrow the map: `get_mut` needs a mutable binding, and the
+  returned reference keeps the map borrowed until the last use of that
+  reference (a `match` or `if let` scrutinee ends the borrow at the end of the
+  statement).
 * The printed order of entries is the internal slot order, not insertion order
   (it is deterministic for a given sequence of operations, but it is not part
   of the documented contract).
@@ -448,14 +488,15 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
   value type.
 * `HashMap::new()` creates a map; type arguments come from annotations,
   parameters, return types or the turbofish.
-* `insert` moves key and value and returns the previous value; `get` copies the
-  key and clones the value; `get_with` inspects without cloning; `remove` moves
-  the value out; `contains_key`, `len`, `is_empty`, `clear`, `keys` and
-  `values` round out the API.
-* `insert`, `remove` and `clear` need a mutable binding.
+* `insert` moves key and value and returns the previous value; `get(&key)`
+  borrows the key and returns `Option<&V>`, `get_mut(&key)` returns
+  `Option<&mut V>`; `get_with` inspects through a closure; `remove` moves the
+  value out; `contains_key`, `len`, `is_empty`, `clear`, `keys` and `values`
+  round out the API.
+* `insert`, `remove`, `get_mut` and `clear` need a mutable binding.
 * `==` compares contents, ignoring insertion order; `{}` and `{:?}` print the
   entries in slot order.
-* There is no `for`-loop iteration over a map in 2.1.0 either.
+* There is no `for`-loop iteration over a map in 2.2.0.
 
 ## What next
 

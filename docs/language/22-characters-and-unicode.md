@@ -694,23 +694,23 @@ them. The end-to-end test harness covers the three cases with raw byte streams.
 ## `char` in a `HashMap`
 
 `char` is a valid `HashMap` key type alongside the integer types, `bool` and
-`String`. Keys are copied into the map; the usual rule that `insert` moves
-its arguments applies to the `char` key trivially (it is `Copy`). The hash of
-a character is the hash of its scalar value.
+`String`. A lookup borrows the key (`counts.get(&c)`, `counts.get(&'h')`);
+`insert` copies the key into the map, and for a `char` key that copy is trivial
+because `char` is `Copy`. The hash of a character is the hash of its scalar value.
 
 ```ls
 fn main() {
     let mut counts: HashMap<char, i64> = HashMap::new();
     let text = String::from("hello");
     for c in text.chars() {
-        let previous: Option<i64> = counts.get(c);
-        match previous {
-            Some(n) => { counts.insert(c, n + 1); }
-            None => { counts.insert(c, 1); }
-        }
+        let next = match counts.get(&c) {
+            Some(n) => *n + 1,
+            None => 1,
+        };
+        counts.insert(c, next);
     }
-    let h: Option<i64> = counts.get('h');
-    let z: Option<i64> = counts.get('z');
+    let h: Option<&i64> = counts.get(&'h');
+    let z: Option<&i64> = counts.get(&'z');
     println!("{:?} {:?} {}", h, z, counts.len());
 
     let mut one: HashMap<char, i64> = HashMap::new();
@@ -732,7 +732,7 @@ The printed order of a `HashMap` is not specified; the map prints its slots
 in the order the implementation stores them, which is deterministic for a given
 sequence of operations but is not an insertion order and is not a language
 guarantee. Content equality (`==`) ignores insertion order. The map is not
-iterable with `for` in 1.7.0 (unchanged in 2.1.0); use `keys()` or `values()`
+iterable with `for` in 1.7.0 (unchanged in 2.2.0); use `keys()` or `values()`
 first. See [HashMap](20-hashmap.md) for the implementation and hashing notes.
 
 ## Differences from Rust
@@ -769,7 +769,7 @@ The character support follows Rust closely but stays inside lsaca's design:
   (`usize`); `s[0]` is still rejected with E0608 (2.0 adds byte-range slicing
   `&s[0..1]`, but there is still no `char` indexing).
 
-## Known limitations in 2.1.0
+## Known limitations in 2.2.0
 
 * The `char` methods cover ASCII only; the Unicode predicates and Unicode
   case conversion are not implemented ([char](../stdlib/char.md)), and the
@@ -779,7 +779,7 @@ The character support follows Rust closely but stays inside lsaca's design:
   values.
 * No locale-aware collation: comparisons and sorting use code point order.
 * `substring` panics instead of returning an `Option` (so does out-of-range
-  byte-range slicing); a panic cannot be caught in 2.1.0.
+  byte-range slicing); a panic cannot be caught in 2.2.0.
 * Invalid UTF-8 on stdin or in arguments panics rather than returning an error.
 * `chars()` allocates a `Vec`; there is no borrowing character iterator.
 * `HashMap` iteration is still not available; keys with either `String` or
@@ -788,7 +788,7 @@ The character support follows Rust closely but stays inside lsaca's design:
 * Formatting a character ignores East Asian display width; a character counts
   as one column for width and alignment.
 
-See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-210)
+See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-220)
 for the complete list.
 
 ## Summary
@@ -816,7 +816,7 @@ for the complete list.
   and formatting rules.
 * [HashMap](20-hashmap.md) - the builtin map, including `char` keys.
 * [char](../stdlib/char.md) - the `std::char` classification module (the ASCII
-  methods are implemented; the Unicode helpers are not implemented in 2.1.0 and
+  methods are implemented; the Unicode helpers are not implemented in 2.2.0 and
   are planned for a later release).
 * [Roadmap and differences from Rust](16-roadmap.md) - the full set of
-  limitations in 2.1.0.
+  limitations in 2.2.0.

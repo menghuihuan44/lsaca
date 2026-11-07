@@ -102,6 +102,11 @@ impl Checker<'_> {
             checker.push_generic_env(env);
             let mut methods = Vec::new();
             for method in &info.methods {
+                // Associated functions (no receiver) are called statically and
+                // never enter a vtable (v2.2 From).
+                if method.self_kind.is_none() {
+                    continue;
+                }
                 let mut params = Vec::new();
                 let mut failed = false;
                 for param in method.params.iter().skip(1) {
@@ -434,5 +439,7 @@ fn type_mentions_self(ty: &ast::TypeExpr) -> bool {
         ast::TypeExpr::Ref { inner, .. } => type_mentions_self(inner),
         ast::TypeExpr::Dyn(trait_ref) => trait_ref.args.iter().any(type_mentions_self),
         ast::TypeExpr::Slice { elem, .. } => type_mentions_self(elem),
+        ast::TypeExpr::Array { elem, .. } => type_mentions_self(elem),
+        ast::TypeExpr::Lifetime(_) => false,
     }
 }

@@ -55,9 +55,16 @@ impl<'a> Checker<'a> {
             ExprKind::If(if_expr) => self.check_if(if_expr, hint),
             ExprKind::Match(match_expr) => self.check_match(match_expr, hint),
             ExprKind::Block(block) => self.check_block_expr(block, hint, span),
-            ExprKind::Loop { body } => self.check_loop(body, span),
-            ExprKind::While { cond, body } => self.check_while(cond, body, span),
-            ExprKind::For { pat, iter, body } => self.check_for(pat, iter, body, span),
+            ExprKind::Loop { label, body } => self.check_loop(label.as_ref(), body, span),
+            ExprKind::While { label, cond, body } => {
+                self.check_while(label.as_ref(), cond, body, span)
+            }
+            ExprKind::For {
+                label,
+                pat,
+                iter,
+                body,
+            } => self.check_for(label.as_ref(), pat, iter, body, span),
             ExprKind::Range { .. } => {
                 self.error_code(
                     "range expressions are only allowed as the iterable of a for loop".to_string(),
@@ -70,9 +77,13 @@ impl<'a> Checker<'a> {
             ExprKind::StructLit { path, fields } => self.check_struct_lit(path, fields, span, hint),
             ExprKind::Tuple(elems) => self.check_tuple(elems, span, hint),
             ExprKind::Vec(vec_lit) => self.check_vec_lit(vec_lit, span, hint),
+            ExprKind::Array { elems } => self.check_array(elems, span, hint),
+            ExprKind::ArrayRepeat { value, len } => self.check_array_repeat(value, len, span, hint),
             ExprKind::Macro(mac) => self.check_macro(mac, span, hint),
-            ExprKind::Break(value) => self.check_break(value.as_deref(), span),
-            ExprKind::Continue => self.check_continue(span),
+            ExprKind::Break { label, value } => {
+                self.check_break(label.as_ref(), value.as_deref(), span)
+            }
+            ExprKind::Continue { label } => self.check_continue(label.as_ref(), span),
             ExprKind::Return(value) => self.check_return(value.as_deref(), span),
             ExprKind::Try { expr: inner } => self.check_try(inner, span, hint),
             ExprKind::Ref {
@@ -269,22 +280,29 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn check_loop(&mut self, body: &ast::Block, span: Span) -> TExpr {
-        self.bump_loop_depth(1);
+    fn check_loop(&mut self, label: Option<&ast::Label>, body: &ast::Block, span: Span) -> TExpr {
+        let label = self.push_loop(label);
         let body = self.check_block(body, None);
-        self.bump_loop_depth(-1);
-        TExpr::new(ITy::never(), TExprKind::Loop { body }, span)
+        self.pop_loop();
+        TExpr::new(ITy::never(), TExprKind::Loop { label, body }, span)
     }
 
-    fn check_while(&mut self, cond: &ast::Expr, body: &ast::Block, span: Span) -> TExpr {
+    fn check_while(
+        &mut self,
+        label: Option<&ast::Label>,
+        cond: &ast::Expr,
+        body: &ast::Block,
+        span: Span,
+    ) -> TExpr {
         let cond = self.check_expr(cond, Some(&ITy::bool_()));
         self.require_bool(&cond.ty, cond.span);
-        self.bump_loop_depth(1);
+        let label = self.push_loop(label);
         let body = self.check_block(body, None);
-        self.bump_loop_depth(-1);
+        self.pop_loop();
         TExpr::new(
             ITy::unit(),
             TExprKind::While {
+                label,
                 cond: Box::new(cond),
                 body,
             },
@@ -294,11 +312,13 @@ impl<'a> Checker<'a> {
 
     fn check_for(
         &mut self,
+        label: Option<&ast::Label>,
         pat: &ast::Pattern,
         iter: &ast::Expr,
         body: &ast::Block,
         span: Span,
     ) -> TExpr {
+        let loop_label = label.map(|label| label.name.clone());
         if let ExprKind::Range {
             start,
             end,
@@ -332,13 +352,14 @@ impl<'a> Checker<'a> {
             }
             self.push_scope();
             let pat = self.check_irrefutable_pattern(pat, &elem_ty, pat.span);
-            self.bump_loop_depth(1);
+            self.push_loop(label);
             let body = self.check_block(body, None);
-            self.bump_loop_depth(-1);
+            self.pop_loop();
             self.pop_scope();
             return TExpr::new(
                 ITy::unit(),
                 TExprKind::ForRange {
+                    label: loop_label.clone(),
                     pat,
                     start: Box::new(start_expr),
                     end: Box::new(end_expr),
@@ -354,13 +375,14 @@ impl<'a> Checker<'a> {
             let elem_ty = (**elem).clone();
             self.push_scope();
             let pat = self.check_irrefutable_pattern(pat, &elem_ty, pat.span);
-            self.bump_loop_depth(1);
+            self.push_loop(label);
             let body = self.check_block(body, None);
-            self.bump_loop_depth(-1);
+            self.pop_loop();
             self.pop_scope();
             return TExpr::new(
                 ITy::unit(),
                 TExprKind::ForVec {
+                    label: loop_label.clone(),
                     pat,
                     vec: Box::new(iter_expr),
                     body,
@@ -368,7 +390,19 @@ impl<'a> Checker<'a> {
                 span,
             );
         }
-        if !matches!(iter_ty, ITy::Never) {
+        // Arrays are fixed-size values: iterating one by value would move or
+        // copy the whole array on every iteration, so this version only
+        // supports indexing a range. The note documents the workaround.
+        if matches!(iter_ty, ITy::Array(_, _)) {
+            self.error_code_note(
+                "cannot iterate over an array by value; arrays are not iterable in this language version"
+                    .to_string(),
+                iter.span,
+                "E0277",
+                "iterate over the indices instead: for index in 0..array.len()".to_string(),
+            );
+        }
+        if !matches!(iter_ty, ITy::Never | ITy::Array(_, _)) {
             let mut next_fn = None;
             let mut item_ty = ITy::Unit;
             if let Some((impl_id, impl_args)) = self.find_trait_impl(&iter_ty, "Iterator") {
@@ -392,13 +426,14 @@ impl<'a> Checker<'a> {
             if let Some(next_fn) = next_fn {
                 self.push_scope();
                 let pat = self.check_irrefutable_pattern(pat, &item_ty, pat.span);
-                self.bump_loop_depth(1);
+                self.push_loop(label);
                 let body = self.check_block(body, None);
-                self.bump_loop_depth(-1);
+                self.pop_loop();
                 self.pop_scope();
                 return TExpr::new(
                     ITy::unit(),
                     TExprKind::ForIter {
+                        label: loop_label.clone(),
                         iter: Box::new(iter_expr),
                         next_fn,
                         pat,
@@ -425,13 +460,14 @@ impl<'a> Checker<'a> {
         }
         self.push_scope();
         let pat = self.check_irrefutable_pattern(pat, &ITy::Unit, pat.span);
-        self.bump_loop_depth(1);
+        self.push_loop(label);
         let body = self.check_block(body, None);
-        self.bump_loop_depth(-1);
+        self.pop_loop();
         self.pop_scope();
         TExpr::new(
             ITy::unit(),
             TExprKind::ForVec {
+                label: loop_label,
                 pat,
                 vec: Box::new(iter_expr),
                 body,
@@ -440,21 +476,40 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn check_break(&mut self, value: Option<&ast::Expr>, span: Span) -> TExpr {
-        if !self.in_loop() {
-            let mut diagnostic = Diagnostic::error("break outside of a loop".to_string(), span)
-                .with_code("E0268")
-                .with_span_label(span);
-            if self
-                .frames
-                .last()
-                .map(|frame| frame.is_closure)
-                .unwrap_or(false)
-            {
-                diagnostic =
-                    diagnostic.with_note("break cannot cross a closure boundary".to_string());
+    fn check_break(
+        &mut self,
+        label: Option<&ast::Label>,
+        value: Option<&ast::Expr>,
+        span: Span,
+    ) -> TExpr {
+        match label {
+            Some(label) => {
+                if !self.loop_label_exists(&label.name) {
+                    self.error_code(
+                        format!("use of undeclared label '{}'", label.name),
+                        label.name_span,
+                        "E0426",
+                    );
+                }
             }
-            self.diagnostics.push(diagnostic);
+            None => {
+                if !self.in_loop() {
+                    let mut diagnostic =
+                        Diagnostic::error("break outside of a loop".to_string(), span)
+                            .with_code("E0268")
+                            .with_span_label(span);
+                    if self
+                        .frames
+                        .last()
+                        .map(|frame| frame.is_closure)
+                        .unwrap_or(false)
+                    {
+                        diagnostic = diagnostic
+                            .with_note("break cannot cross a closure boundary".to_string());
+                    }
+                    self.diagnostics.push(diagnostic);
+                }
+            }
         }
         if let Some(value) = value {
             let _ = self.check_expr(value, None);
@@ -464,26 +519,214 @@ impl<'a> Checker<'a> {
                 "E0308",
             );
         }
-        TExpr::new(ITy::never(), TExprKind::Break, span)
+        let label = label.map(|label| label.name.clone());
+        TExpr::new(ITy::never(), TExprKind::Break { label }, span)
     }
 
-    fn check_continue(&mut self, span: Span) -> TExpr {
-        if !self.in_loop() {
-            let mut diagnostic = Diagnostic::error("continue outside of a loop".to_string(), span)
-                .with_code("E0268")
-                .with_span_label(span);
-            if self
-                .frames
-                .last()
-                .map(|frame| frame.is_closure)
-                .unwrap_or(false)
-            {
-                diagnostic =
-                    diagnostic.with_note("continue cannot cross a closure boundary".to_string());
+    fn check_continue(&mut self, label: Option<&ast::Label>, span: Span) -> TExpr {
+        match label {
+            Some(label) => {
+                if !self.loop_label_exists(&label.name) {
+                    self.error_code(
+                        format!("use of undeclared label '{}'", label.name),
+                        label.name_span,
+                        "E0426",
+                    );
+                }
             }
-            self.diagnostics.push(diagnostic);
+            None => {
+                if !self.in_loop() {
+                    let mut diagnostic =
+                        Diagnostic::error("continue outside of a loop".to_string(), span)
+                            .with_code("E0268")
+                            .with_span_label(span);
+                    if self
+                        .frames
+                        .last()
+                        .map(|frame| frame.is_closure)
+                        .unwrap_or(false)
+                    {
+                        diagnostic = diagnostic
+                            .with_note("continue cannot cross a closure boundary".to_string());
+                    }
+                    self.diagnostics.push(diagnostic);
+                }
+            }
         }
-        TExpr::new(ITy::never(), TExprKind::Continue, span)
+        let label = label.map(|label| label.name.clone());
+        TExpr::new(ITy::never(), TExprKind::Continue { label }, span)
+    }
+
+    /// Enter a loop, recording its label and raising the loop depth so that
+    /// break and continue are accepted in the body. Returns the label stored
+    /// in the typed tree.
+    pub fn push_loop(&mut self, label: Option<&ast::Label>) -> Option<String> {
+        let name = label.map(|label| label.name.clone());
+        if let Some(frame) = self.frames.last_mut() {
+            frame.loop_depth += 1;
+            frame.loop_labels.push(name.clone());
+        }
+        name
+    }
+
+    /// Leave the innermost loop.
+    pub fn pop_loop(&mut self) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.loop_depth = frame.loop_depth.saturating_sub(1);
+            frame.loop_labels.pop();
+        }
+    }
+
+    /// Whether a loop with this label is open in the current body. Labels do
+    /// not escape a closure because every closure checks in a fresh frame.
+    pub fn loop_label_exists(&self, name: &str) -> bool {
+        self.frames
+            .last()
+            .map(|frame| {
+                frame
+                    .loop_labels
+                    .iter()
+                    .any(|label| label.as_deref() == Some(name))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Check an array literal. The expected type supplies the element type
+    /// when it is an array, so that literals in annotated positions keep their
+    /// flexible integer variables.
+    fn check_array(&mut self, elems: &[ast::Expr], span: Span, hint: Option<&ITy>) -> TExpr {
+        let hinted_elem = match hint.map(|hint| self.infer.resolve(hint)) {
+            Some(ITy::Array(elem, _)) => Some((*elem).clone()),
+            _ => None,
+        };
+        let elem_ty = match hinted_elem {
+            Some(elem) => elem,
+            None => {
+                if elems.is_empty() {
+                    self.error_code(
+                        "type annotations needed: cannot infer the element type of an empty array"
+                            .to_string(),
+                        span,
+                        "E0282",
+                    );
+                }
+                self.infer.fresh_var()
+            }
+        };
+        let mut values = Vec::with_capacity(elems.len());
+        for elem in elems {
+            let checked = self.check_expr(elem, Some(&elem_ty));
+            let checked = self.coerce_to(checked, &elem_ty, elem.span);
+            values.push(checked);
+        }
+        self.validate_storage_type(&elem_ty, span);
+        let ty = ITy::array(elem_ty, values.len());
+        TExpr::new(ty, TExprKind::Array { elems: values }, span)
+    }
+
+    /// Check an array repeat literal. The count must be a constant integer
+    /// expression; arrays are fixed-size values.
+    fn check_array_repeat(
+        &mut self,
+        value: &ast::Expr,
+        len: &ast::Expr,
+        span: Span,
+        hint: Option<&ITy>,
+    ) -> TExpr {
+        let elem_ty = match hint.map(|hint| self.infer.resolve(hint)) {
+            Some(ITy::Array(elem, _)) => (*elem).clone(),
+            _ => self.infer.fresh_var(),
+        };
+        let checked = self.check_expr(value, Some(&elem_ty));
+        let checked = self.coerce_to(checked, &elem_ty, value.span);
+        self.validate_storage_type(&elem_ty, span);
+        let count = self.array_len_value(len, "the array repeat count");
+        let len = count.unwrap_or(0);
+        // Repeating an operand duplicates it slot by slot, which is only sound
+        // for Copy element types when the length is above one (v2.2, E0507).
+        if len > 1 {
+            let resolved_elem = self.infer.resolve(&elem_ty);
+            if !self.is_copy_ty(&resolved_elem) {
+                let described = self.describe(&resolved_elem);
+                self.error_code_note(
+                    format!(
+                        "cannot move out of a value of type {} in an array repeat expression",
+                        described
+                    ),
+                    span,
+                    "E0507",
+                    "array repeat expressions duplicate their operand; the element type must implement Copy when the length is greater than 1"
+                        .to_string(),
+                );
+            }
+        }
+        let ty = ITy::array(elem_ty, len);
+        TExpr::new(
+            ty,
+            TExprKind::ArrayRepeat {
+                value: Box::new(checked),
+                len,
+            },
+            span,
+        )
+    }
+
+    /// Const-evaluate an array length operand and range-check the result.
+    pub fn array_len_value(&mut self, expr: &ast::Expr, what: &str) -> Option<usize> {
+        let value = match self.const_int_expr(expr) {
+            Some(value) => value,
+            None => {
+                self.error_code(
+                    format!("{what} must be an integer literal or an integer constant"),
+                    expr.span,
+                    "E0435",
+                );
+                return None;
+            }
+        };
+        self.validate_array_len(value, expr.span)
+    }
+
+    /// Range-check an evaluated array length and convert it to a count.
+    pub fn validate_array_len(&mut self, value: i128, span: Span) -> Option<usize> {
+        if value < 0 || value > super::items::MAX_ARRAY_LEN as i128 {
+            self.error_code(
+                format!(
+                    "array length must be between 0 and {}: found {}",
+                    super::items::MAX_ARRAY_LEN,
+                    value
+                ),
+                span,
+                "E0080",
+            );
+            return None;
+        }
+        Some(value as usize)
+    }
+
+    /// Evaluate a constant integer expression: an integer literal, a negated
+    /// integer literal or a path to an integer constant.
+    pub fn const_int_expr(&mut self, expr: &ast::Expr) -> Option<i128> {
+        match &expr.kind {
+            ExprKind::Lit(ast::Lit::Int { value, .. }) => Some(*value),
+            ExprKind::Unary {
+                op: ast::UnaryOp::Neg,
+                expr,
+            } => self.const_int_expr(expr).map(|value| -value),
+            ExprKind::Path(path) if path.segments.len() == 1 => {
+                let name = path.simple_name()?.to_string();
+                let id = self.lookup_const(&name)?;
+                self.ensure_const(id);
+                match &self.consts[id].state {
+                    super::items::ConstState::Done {
+                        value: super::items::ConstVal::Int(value),
+                        ..
+                    } => Some(*value),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     fn check_return(&mut self, value: Option<&ast::Expr>, span: Span) -> TExpr {
@@ -537,9 +780,10 @@ impl<'a> Checker<'a> {
     /// The operand must be an Option or a Result, and the enclosing function or
     /// closure must declare the same kind of return type. The operator unwraps
     /// the operand's payload, so the Ok/Some payload type of the enclosing
-    /// function is independent of it. For Result the error types must match
-    /// exactly: there is no From conversion. Lowering desugars the operator into
-    /// a match plus early return.
+    /// function is independent of it. For Result, a mismatched error type is
+    /// converted with an `impl From<Found> for Expected` when one exists (v2.2);
+    /// otherwise the mismatch is reported. Lowering desugars the operator into a
+    /// match plus early return.
     fn check_try(&mut self, inner: &ast::Expr, span: Span, hint: Option<&ITy>) -> TExpr {
         if self.in_const {
             self.error_code(
@@ -562,7 +806,7 @@ impl<'a> Checker<'a> {
             ITy::Option(inner_ty) => {
                 let payload = (**inner_ty).clone();
                 if matches!(resolved_ret, ITy::Option(_)) {
-                    self.finish_try(operand, payload, frame_ret, hint, span, false)
+                    self.finish_try(operand, payload, frame_ret, hint, span, false, None)
                 } else {
                     self.report_try_return_mismatch(&operand_ty, &frame_ret, is_closure, span);
                     self.never_expr(span)
@@ -573,25 +817,40 @@ impl<'a> Checker<'a> {
                 let error = (**err_ty).clone();
                 if let ITy::Result(_, ret_err) = &resolved_ret {
                     let expected_err = (**ret_err).clone();
+                    let mut error_conversion = None;
                     if !self.unify_quiet(&expected_err, &error) {
-                        let expected = self.infer.resolve(&expected_err);
-                        let found = self.infer.resolve(&error);
-                        let diagnostic = Diagnostic::error(
-                            format!(
-                                "the ? operator cannot convert error types: expected {}, found {}",
-                                self.describe(&expected),
-                                self.describe(&found)
-                            ),
-                            span,
-                        )
-                        .with_code("E0308")
-                        .with_note(
-                            "the ? operator requires the error types to match exactly; use map_err or an explicit match to convert"
-                                .to_string(),
-                        );
-                        self.diagnostics.push(diagnostic);
+                        // v2.2: a mismatched error type is converted with
+                        // `impl From<Found> for Expected` when that impl exists.
+                        let resolved_expected = self.infer.resolve(&expected_err);
+                        let resolved_found = self.infer.resolve(&error);
+                        error_conversion =
+                            self.find_error_conversion(&resolved_expected, &resolved_found, span);
+                        if error_conversion.is_none() {
+                            let diagnostic = Diagnostic::error(
+                                format!(
+                                    "the ? operator cannot convert error types: expected {}, found {}",
+                                    self.describe(&resolved_expected),
+                                    self.describe(&resolved_found)
+                                ),
+                                span,
+                            )
+                            .with_code("E0308")
+                            .with_note(
+                                "the ? operator requires the error types to match, or an impl From<Found> for Expected; implement From or use map_err"
+                                    .to_string(),
+                            );
+                            self.diagnostics.push(diagnostic);
+                        }
                     }
-                    self.finish_try(operand, payload, frame_ret, hint, span, true)
+                    self.finish_try(
+                        operand,
+                        payload,
+                        frame_ret,
+                        hint,
+                        span,
+                        true,
+                        error_conversion,
+                    )
                 } else {
                     self.report_try_return_mismatch(&operand_ty, &frame_ret, is_closure, span);
                     self.never_expr(span)
@@ -684,6 +943,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Build the typed try node once the operand and frame return type agree.
+    #[allow(clippy::too_many_arguments)]
     fn finish_try(
         &mut self,
         operand: TExpr,
@@ -692,6 +952,7 @@ impl<'a> Checker<'a> {
         hint: Option<&ITy>,
         span: Span,
         is_result: bool,
+        error_conversion: Option<usize>,
     ) -> TExpr {
         let value_c_name = self.fresh_local_c_name();
         let error_c_name = if is_result {
@@ -707,6 +968,7 @@ impl<'a> Checker<'a> {
                 ret,
                 value_c_name,
                 error_c_name,
+                error_conversion,
             },
             span,
         )
@@ -915,7 +1177,8 @@ impl<'a> Checker<'a> {
             Some(expected) => ITy::tuple(expected),
             None => ITy::tuple(actual),
         };
-        self.validate_storage_type(&ty, span);
+        // Tuples are value positions: a tuple such as (&x, 1) may borrow.
+        self.validate_value_type(&ty, span);
         TExpr::new(ty, TExprKind::Tuple(exprs), span)
     }
 
@@ -1037,7 +1300,7 @@ impl<'a> Checker<'a> {
                     // stay a variable until the value is checked; validate the
                     // resolved type so references cannot be stored.
                     let resolved_expected = self.infer.resolve(&expected);
-                    self.validate_storage_type(&resolved_expected, field.value.span);
+                    self.validate_field_type(&resolved_expected, field.value.span);
                     values.push((index, value));
                 }
                 None => {
@@ -1403,7 +1666,7 @@ impl<'a> Checker<'a> {
         let raw_ty = self.infer.resolve(&base_expr.ty);
         let base_ty = self.peel_refs(&raw_ty);
         match &base_ty {
-            ITy::Vec(elem) | ITy::Slice(elem) => {
+            ITy::Vec(elem) | ITy::Slice(elem) | ITy::Array(elem, _) => {
                 let elem = (**elem).clone();
                 self.apply_hint(&elem, hint);
                 TExpr::new(
@@ -1460,7 +1723,7 @@ impl<'a> Checker<'a> {
     }
 
     pub fn never_expr(&self, span: Span) -> TExpr {
-        TExpr::new(ITy::never(), TExprKind::Break, span)
+        TExpr::new(ITy::never(), TExprKind::Break { label: None }, span)
     }
 
     pub fn require_bool(&mut self, ty: &ITy, span: Span) {
@@ -1482,16 +1745,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub fn bump_loop_depth(&mut self, delta: i32) {
-        if let Some(frame) = self.frames.last_mut() {
-            if delta > 0 {
-                frame.loop_depth += 1;
-            } else {
-                frame.loop_depth = frame.loop_depth.saturating_sub(1);
-            }
-        }
-    }
-
     pub fn check_call_args(
         &mut self,
         expected: &[ITy],
@@ -1509,6 +1762,9 @@ impl<'a> Checker<'a> {
                 "E0061",
             );
         }
+        // A temporary borrowed in an argument position lives until the end of
+        // the call, so it is legal there (unlike in a let or return).
+        self.temp_borrow_depth += 1;
         let mut exprs = Vec::new();
         for (index, arg) in args.iter().enumerate() {
             let expected_ty = expected.get(index).cloned();
@@ -1522,6 +1778,7 @@ impl<'a> Checker<'a> {
             };
             exprs.push(value);
         }
+        self.temp_borrow_depth -= 1;
         exprs
     }
 

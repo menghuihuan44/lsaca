@@ -45,6 +45,10 @@ pub struct Frame {
     pub capture_map: HashMap<String, usize>,
     pub is_closure: bool,
     pub loop_depth: usize,
+    /// Labels of the loops currently open in this frame, innermost last.
+    /// Closures get a fresh frame, so a labelled break cannot cross a
+    /// closure boundary.
+    pub loop_labels: Vec<Option<String>>,
 }
 
 impl Frame {
@@ -56,6 +60,7 @@ impl Frame {
             capture_map: HashMap::new(),
             is_closure: false,
             loop_depth: 0,
+            loop_labels: Vec::new(),
         }
     }
 
@@ -199,6 +204,10 @@ pub struct Checker<'a> {
     pub vtable_index: HashMap<(usize, ITy), usize>,
     /// Traits that already produced an object-safety diagnostic.
     pub reported_object_unsafe: HashSet<usize>,
+    /// Non-zero while checking the arguments of a call: a temporary borrowed
+    /// directly in an argument position only needs to live until the end of
+    /// the call, so the E0745 temporary-value rejection is skipped there.
+    pub temp_borrow_depth: u32,
 }
 
 /// Internal standard-library items are prefixed so user code cannot collide
@@ -264,6 +273,7 @@ impl<'a> Checker<'a> {
             trait_object_index: HashMap::new(),
             vtable_index: HashMap::new(),
             reported_object_unsafe: HashSet::new(),
+            temp_borrow_depth: 0,
         }
     }
 
@@ -467,6 +477,7 @@ impl<'a> Checker<'a> {
             ITy::Float(float_ty) => float_ty.name().to_string(),
             ITy::String => "String".to_string(),
             ITy::Vec(elem) => format!("Vec<{}>", self.describe_resolved(elem)),
+            ITy::Array(elem, len) => format!("[{}; {}]", self.describe_resolved(elem), len),
             ITy::Rc(elem) => format!("Rc<{}>", self.describe_resolved(elem)),
             ITy::Box(elem) => format!("Box<{}>", self.describe_resolved(elem)),
             ITy::Ref { mutable, inner } => {
@@ -689,7 +700,11 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> TExpr {
         if level == 0 {
-            return TExpr::new(ty.clone(), super::tree::TExprKind::Break, span);
+            return TExpr::new(
+                ty.clone(),
+                super::tree::TExprKind::Break { label: None },
+                span,
+            );
         }
         if let Some(info) = self.frames[level - 1].find_local_by_c_name(c_name) {
             return TExpr::new(
@@ -705,7 +720,11 @@ impl<'a> Checker<'a> {
         if self.frames[level - 1].capture_map.contains_key(c_name) {
             return self.ensure_capture(level - 1, name, c_name, ty, mutable, span);
         }
-        TExpr::new(ty.clone(), super::tree::TExprKind::Break, span)
+        TExpr::new(
+            ty.clone(),
+            super::tree::TExprKind::Break { label: None },
+            span,
+        )
     }
 
     /// The impl target of the function currently being checked.

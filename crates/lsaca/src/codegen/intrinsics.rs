@@ -68,6 +68,13 @@ impl<'a> Gen<'a> {
             "__drop" => util::internal_error("intrinsic `__drop` has no emitter in phase A"),
             _ => {}
         }
+        // The borrowed collection accessors (HashMap::get/get_mut, Vec::get_mut,
+        // slice::get_mut) return an Option of a borrow into the collection. They
+        // are emitted before the legacy tables because those only carry the
+        // owned, copying variants.
+        if self.try_gen_borrowed_accessor(name, args, ty, target) {
+            return;
+        }
         // Slice and str intrinsics operate on the by-value fat views and the
         // pointer-and-length pairs, so they are emitted before the legacy
         // builtin tables. They consume fat str values only: a legacy

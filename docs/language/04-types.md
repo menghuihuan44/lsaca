@@ -2,7 +2,7 @@
 
 Every expression in lsaca has a statically known type, checked before any C is
 generated. This page lists the complete type language, explains each builtin
-type, and describes inference and conversions. It describes lsaca 2.1.0, where
+type, and describes inference and conversions. It describes lsaca 2.2.0, where
 unannotated integer literals are `i32` by default, number literals accept
 Rust-style type suffixes, and lengths and indices are `usize`.
 
@@ -24,8 +24,9 @@ Rust-style type suffixes, and lengths and indices are `usize`.
 | `Result<T, E>` | `Ok(T)` or `Err(E)`. | Builtin generic. |
 | `Rc<T>` | Shared, mutable heap cell. | Move-only handle; `.clone()` shares one payload; `get()`/`set()`. |
 | `Box<T>` | Owned heap indirection. | Added in 1.1.0; move-only; `.clone()` deep-copies the payload. |
-| `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. Cannot be stored in aggregates (mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4); see [References and borrowing](12-references-and-borrowing.md). |
+| `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. A struct, enum, tuple or `Option` field may store one since 2.2.0 (with a lifetime parameter); `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures still cannot hold references; mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4; see [References and borrowing](12-references-and-borrowing.md) and [Lifetimes](29-lifetimes.md). |
 | `&[T]` / `&mut [T]` / `&str` / `&mut str` | References to an unsized slice or UTF-8 text value. | Added in 2.0.0; `&[T]` is a `Copy` fat reference (data pointer plus length); produced by coercions from `Vec`/`String`, by slicing a place with `&`/`&mut`, and for string literals in `&str` contexts; see [Slices and str](26-slices-and-str.md). |
+| `[T; N]` | Fixed-length array value. | Added in 2.2.0; `N` is an integer literal or a path to an integer constant; indexed with `usize`; `Copy` when `T` is `Copy`; `&array` coerces to `&[T]`; no array patterns and no by-value `for`; see [Arrays](#arrays). |
 | `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; tuples can nest. |
 | `fn(A, B) -> R` | Function type. | Values of this type are first-class but move-only; since 1.5 they can be stored in aggregates. See [Functions](09-functions.md). |
 | `dyn Trait` | Trait object (unsized). | Added in 2.0.0; only behind a pointer: `Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait`, `&mut dyn Trait`; see [Trait objects](25-trait-objects.md). |
@@ -38,18 +39,21 @@ equal `i64` and `u64`. They are distinct types like every other integer type.
 An unannotated integer literal is an `i32` by default, but it takes the
 type required by its context — including `usize` in a length, index or explicit
 `usize` position; see [Integers](#integers).
-There is no raw pointer type and no array type. `[T]` and `str` are *unsized*
-types: they have no values of their own, and the only usable forms are the
-references `&[T]`, `&mut [T]`, `&str` and `&mut str` (see
-[Slices and str](26-slices-and-str.md)). Generic user types are written with
+There is no raw pointer type. `[T; N]` is a fixed-length array **value** (see
+[Arrays](#arrays)); `[T]` and `str` are *unsized* types: they have no values of
+their own, and the only usable forms are the references `&[T]`, `&mut [T]`,
+`&str` and `&mut str` (see [Slices and str](26-slices-and-str.md)). Generic user types are written with
 generic type arguments, `Name<T, ...>` (see [Generics](17-generics.md)). A bare
 trait name is not a type and using one as a type is `E0412`; since 2.0.0 a trait
 becomes a type only behind `dyn`, as in `Box<dyn Greet>` (see
 [Traits](18-traits.md) and [Trait objects](25-trait-objects.md)). References are
 written `&T` (shared) and `&mut T` (mutable); they are **non-owning** views of
-an existing place, added in 1.3.0, and cannot be stored in aggregates (the slice
-and `str` references follow the same rule). They are described in [References and
-borrowing](12-references-and-borrowing.md). `Self` is not a type available to
+an existing place, added in 1.3.0. Since 2.2.0 a struct, enum, tuple or
+`Option` may hold references in fields when its declaration names a lifetime
+parameter; `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures still
+reject reference payloads. They are described in
+[References and borrowing](12-references-and-borrowing.md) and
+[Lifetimes](29-lifetimes.md). `Self` is not a type available to
 user code in general: it names "the type of this `impl` block" inside an
 `impl`, and is accepted in parameter and return positions there (see [Structs,
 enums and impl](10-structs-enums-and-impl.md)).
@@ -213,6 +217,26 @@ Output:
 4 3 4 abc
 ```
 
+## Arrays
+
+`[T; N]` is a fixed-length array of `N` values of type `T`, added in 2.2.0. It
+is a value type: the length is part of the type and is written as an integer
+literal or a path to an integer constant (`[i64; 4]`, `[u8; WIDTH]`). A computed
+length is rejected with `E0435`; the largest array has 1,048,576 elements, and
+`[T; 0]` is a legal zero-length array.
+
+Array literals write their elements in brackets: `[1, 2, 3]`; a repeat literal
+`[value; N]` copies or clones `value` `N` times; `[]` is an empty array whose
+element type must be inferable (`E0282` otherwise). Elements are indexed with a
+`usize`, and an element place can be borrowed (`&array[i]`, `&mut array[i]`).
+`[T; N]` is `Copy` exactly when `T` is `Copy`; otherwise assigning or passing
+the array moves it. Arrays compare with `==` and `!=` element by element, print
+with `{:?}` as `[1, 2, 3]`, and coerce behind a reference: `&array` is a
+`&[T]`, and `&array[a..b]` is a slice. There is no by-value `for` over an array
+(`E0277`) and no array pattern; iterate over the indices or borrow a slice.
+`&mut array` and references inside an array are not supported. See
+[Arrays](27-arrays.md).
+
 ## Option and Result
 
 `Option<T>` and `Result<T, E>` are builtin enums. `Option<T>` is either
@@ -320,9 +344,11 @@ and the compiler's lightweight borrow checker enforces that (see
 
 Field access, method calls and indexing automatically dereference a reference,
 so `r.field`, `r.method()` and `r.field = value` all work without an explicit
-`*`; `(*r).field = value` is an equivalent spelling. References cannot be stored in structs, enums, tuples, `Vec`,
-`Option`, `Result`, `Box` or closures and cannot be converted with `as`; since
-1.5.0 `==` compares the pointed-to values.
+`*`; `(*r).field = value` is an equivalent spelling. Since 2.2.0 a reference can be a field of a struct, enum, tuple or
+`Option` when the declaration names a lifetime parameter (see
+[Lifetimes](29-lifetimes.md)); it still cannot be stored in a `Vec`, a
+`Result`, a `HashMap`, `Rc`, `Box`, an array or a closure, and it cannot be
+converted with `as`. Since 1.5.0 `==` compares the pointed-to values.
 
 * `&T` — shared reference: any number of shared references may exist; reads only.
 * `&mut T` — mutable reference: exactly one at a time, and no shared reference
@@ -491,6 +517,10 @@ Rules that matter in practice:
   index or in a comparison with a length.
 * A string literal is a `String` unless a `&str` is expected, in which case it
   is a static slice.
+* An array literal unifies its elements into one type, and a repeat literal
+  `[value; N]` takes the type of `value`. An empty `[]` has no element type of
+  its own and needs context, otherwise `E0282`; array lengths are checked
+  against the literal (`E0308`).
 * Context can force a narrower type: `let x: u8 = 1;` makes the literal `u8`.
 * A generic constructor without arguments has no payload type to infer.
   `Vec::new()`, `None`, `Rc::new(None)` and `String::from` need context:
@@ -572,8 +602,8 @@ Output:
 
 The `as` operator converts between scalar types only. It is the *only*
 conversion: assigning an `i32` to an `i64` or passing it where a `f64` is
-expected is a type error. References (`&T` / `&mut T`) cannot be converted
-with `as`. `as` binds tighter than arithmetic but looser than
+expected is a type error. References (`&T` / `&mut T`), arrays, `String`, `Vec<T>` and
+the other aggregates cannot be converted with `as`. `as` binds tighter than arithmetic but looser than
 unary operators; see the precedence table in [Operators](07-operators.md).
 
 The conversion rules follow Rust:
@@ -730,6 +760,8 @@ lsaca: example-21.ls: could not compile example-21.ls due to previous error(s)
 * Operators on each type: [Operators](07-operators.md).
 * Borrow values without giving up ownership: [References and
   borrowing](12-references-and-borrowing.md).
+* Fixed-length arrays: [Arrays](27-arrays.md).
+* Reference fields and lifetimes: [Lifetimes](29-lifetimes.md).
 * Characters and Unicode text: [Characters and
   Unicode](22-characters-and-unicode.md).
 * The full built-in API: [Standard library](15-standard-library.md).

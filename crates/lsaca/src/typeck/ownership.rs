@@ -28,6 +28,7 @@ impl<'a> Checker<'a> {
     fn has_drop_glue_inner(&self, ty: &ITy, visiting: &mut HashSet<TypeKey>) -> bool {
         let ty = self.infer.resolve(ty);
         match &ty {
+            ITy::Array(elem, _) => self.has_drop_glue_inner(elem, visiting),
             ITy::Struct(id) => {
                 let key = TypeKey::Struct(*id);
                 if !visiting.insert(key) {
@@ -135,6 +136,7 @@ impl<'a> Checker<'a> {
     fn is_copy_ty_inner(&mut self, ty: &ITy, visiting: &mut HashSet<TypeKey>) -> bool {
         let ty = self.infer.resolve(ty);
         match &ty {
+            ITy::Array(elem, len) => *len == 0 || self.is_copy_ty_inner(elem, visiting),
             ITy::Struct(id) => {
                 if self.drop_structs.get(*id).and_then(|hook| *hook).is_some() {
                     return false;

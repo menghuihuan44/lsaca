@@ -1,6 +1,6 @@
 # env: environment variables
 
-**Status in 2.1.0.** Implemented. The module is implemented in
+**Status in 2.2.0.** Implemented. The module is implemented in
 `stdlib/src/env.ls`. The environment is read-only: there is no `set_var`, no
 `remove_var` and no way to change the environment of another process.
 
@@ -33,7 +33,7 @@ Unicode and is read directly. Variable names are case-sensitive on POSIX and
 case-insensitive on Windows, so portable programs should use one spelling
 consistently and should not rely on two names differing only by case.
 
-## Limits in 2.1.0
+## Limits in 2.2.0
 
 There is no environment-file loading, no process spawning and no
 platform-specific extension.

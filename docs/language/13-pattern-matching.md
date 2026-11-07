@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-210), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-220), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 2.1.0 are:
+The pattern forms available in 2.2.0 are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -821,7 +821,7 @@ Output:
 7
 ```
 
-Bindings from a `&mut` *aggregate* pattern are writable in version 2.1.0: a struct
+Bindings from a `&mut` *aggregate* pattern are writable in version 2.2.0: a struct
 pattern with several bindings behaves like a single binding, and assignments such as
 `match &mut maybe { Some(value) => { *value = 9; } ... }` compile and update the
 referent (see [References and
@@ -962,11 +962,11 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 2.1.0
+## Known limitations in 2.2.0
 
 Or-patterns, match guards and string-literal patterns are fully supported, and
 2.1.0 adds tuple struct and unit struct patterns. The pattern restrictions that
-remain in 2.1.0 are:
+remain in 2.2.0 are:
 
 * **Guards only in `match`** — `if let` and `while let` take a pattern but no
   guard; nest an `if` inside the body instead.

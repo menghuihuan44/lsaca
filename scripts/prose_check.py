@@ -128,7 +128,7 @@ SOURCES["hashmap_insert"] = r"""fn main() {
     let first = ages.insert(String::from("ana"), 30);
     let second = ages.insert(String::from("ana"), 31);
     println!("{:?} {:?}", first, second);
-    println!("{:?}", ages.get(String::from("ana")));
+    println!("{:?}", ages.get(&String::from("ana")));
 }
 """
 
@@ -168,7 +168,7 @@ SOURCES["hashmap_char_keys"] = r"""fn main() {
     letters.insert('a', 1);
     letters.insert('é', 2);
 
-    println!("{:?} {:?}", letters.get('a'), letters.get('\u{61}'));
+    println!("{:?} {:?}", letters.get(&'a'), letters.get(&'\u{61}'));
     println!("{}", letters.contains_key('é'));
     println!("{}", letters.len());
 }
@@ -177,11 +177,11 @@ SOURCES["hashmap_char_keys"] = r"""fn main() {
 SOURCES["hashmap_pointer_key_types"] = r"""fn main() {
     let mut by_index: HashMap<usize, i64> = HashMap::new();
     by_index.insert(3 as usize, 7);
-    println!("{:?}", by_index.get(3 as usize));
+    println!("{:?}", by_index.get(&(3 as usize)));
 
     let mut offsets: HashMap<isize, i64> = HashMap::new();
     offsets.insert(-2 as isize, 5);
-    println!("{:?}", offsets.get(-2 as isize));
+    println!("{:?}", offsets.get(&(-2 as isize)));
 }
 """
 
@@ -408,7 +408,7 @@ CASES = [
         "kind": "check",
         "source": "hashmap_for_loop",
         "docs": [("docs/language/20-hashmap.md", [
-            "cannot be iterated with for in 1.7.0",
+            "cannot be iterated with `for` in 2.2.0",
         ])],
         "stderr_contains": ["cannot iterate over a value of type HashMap<i64, i64>"],
     },

@@ -157,6 +157,22 @@ struct Mutation {
     span: Span,
 }
 
+/// A loan carried by a value inside a reference field of an aggregate.
+///
+/// Plain references live in reference-typed locals, which the loan table
+/// tracks through `Provenance` and `ref_loan`. v2.2 lets user aggregates
+/// store references, so a struct, enum, tuple, array or `Option` value can
+/// own the loans of its reference fields; the loans follow the value when it
+/// is constructed, copied, moved, overwritten or dropped.
+#[derive(Clone, Debug)]
+struct AggregateLoan {
+    /// Projection path of the reference inside the value, using the same field
+    /// codes as `Target`. An empty path means the value may carry a reference
+    /// at any path (a call result, a match result or a repeated array element).
+    path: Vec<u32>,
+    loan: LoanId,
+}
+
 /// One read of a place (a value use, not a read through a reference).
 #[derive(Clone, Debug)]
 struct Read {
@@ -219,6 +235,12 @@ struct FnChecker<'a> {
     provenance: HashMap<NameId, Provenance>,
     /// Loan of every reference-typed local.
     ref_loan: HashMap<NameId, LoanId>,
+    /// Loans carried inside aggregate-typed locals, keyed by the local.
+    aggregate_loans: HashMap<NameId, Vec<AggregateLoan>>,
+    /// Additional locals whose live range keeps a loan alive: a loan shared by
+    /// several aggregates copied out of the same reference, or a reference
+    /// binding an aggregate was built from.
+    loan_extra_owners: HashMap<LoanId, Vec<NameId>>,
     /// Loan created by every borrow expression, keyed by its HIR address.
     ptr_loan: HashMap<usize, LoanId>,
     /// Scope end event and declaration span of every local.
@@ -232,6 +254,7 @@ struct FnChecker<'a> {
     ref_params: Vec<NameId>,
     /// By-value parameters of the current function or closure (for messages).
     by_value_params: Vec<NameId>,
+    aggregate_params: Vec<NameId>,
     diagnostics: Diagnostics,
 }
 
@@ -272,6 +295,8 @@ impl<'a> FnChecker<'a> {
             last_use: HashMap::new(),
             provenance: HashMap::new(),
             ref_loan: HashMap::new(),
+            aggregate_loans: HashMap::new(),
+            loan_extra_owners: HashMap::new(),
             ptr_loan: HashMap::new(),
             scope_end: HashMap::new(),
             decl_span: HashMap::new(),
@@ -279,6 +304,7 @@ impl<'a> FnChecker<'a> {
             decl_stack: Vec::new(),
             ref_params: Vec::new(),
             by_value_params: Vec::new(),
+            aggregate_params: Vec::new(),
             diagnostics: Diagnostics::new(),
         }
     }
@@ -444,6 +470,12 @@ impl<'a> FnChecker<'a> {
                 self.ref_loan.insert(id, loan);
             } else {
                 self.by_value_params.push(id);
+                // A by-value parameter whose type stores references brings the
+                // caller's loans into the callee; a returned aggregate may
+                // borrow from it.
+                if self.ty_contains_refs(&param.ty) {
+                    self.aggregate_params.push(id);
+                }
             }
         }
         self.walk_block(&function.body);
@@ -556,6 +588,15 @@ impl<'a> FnChecker<'a> {
                     }
                     None => self.loans[index].start,
                 };
+            }
+            // A copy or move of an aggregate gives the loan additional
+            // owners; it has to stay live as long as either value is used.
+            if let Some(owners) = self.loan_extra_owners.get(&index) {
+                for owner in owners {
+                    if let Some(used) = self.last_use.get(owner) {
+                        end = end.max(*used);
+                    }
+                }
             }
             for &(loop_start, loop_end) in &self.loop_ranges {
                 if self.loans[index].start <= loop_start && end >= loop_start {
@@ -841,6 +882,8 @@ impl<'a> FnChecker<'a> {
             Some(SelfKind::Value) | None => {
                 if self.ref_params.len() == 1 {
                     self.ref_params.first().copied()
+                } else if self.ref_params.is_empty() && self.aggregate_params.len() == 1 {
+                    self.aggregate_params.first().copied()
                 } else {
                     None
                 }
@@ -849,7 +892,7 @@ impl<'a> FnChecker<'a> {
     }
 
     fn check_escape(&mut self, expr: &HExpr) {
-        if !self.ret.is_ref() {
+        if !self.ret.is_ref() && !self.ty_contains_refs(&self.ret) {
             return;
         }
         // Every result position must be checked: the returned value may come
@@ -884,6 +927,10 @@ impl<'a> FnChecker<'a> {
                 return;
             }
             _ => {}
+        }
+        if !self.ret.is_ref() {
+            self.check_aggregate_escape(expr);
+            return;
         }
         let Some(expected) = self.expected_return_target() else {
             return;
@@ -926,6 +973,63 @@ impl<'a> FnChecker<'a> {
                 }
             }
             Target::Opaque => {}
+        }
+    }
+
+    /// Reject an aggregate return value whose reference fields may point at a
+    /// local of the returning function: such references could not outlive the
+    /// call. Every carried loan must be derived from an input parameter.
+    fn check_aggregate_escape(&mut self, expr: &HExpr) {
+        let expected = self.expected_return_target();
+        for entry in self.carried_loans(expr) {
+            let loan = entry.loan;
+            let target = match self.loans.get(loan) {
+                Some(item) => item.target.clone(),
+                None => continue,
+            };
+            match target {
+                Target::Local(id, _) => {
+                    if self.aggregate_params.contains(&id) {
+                        continue;
+                    }
+                    let name = self.name(id).to_string();
+                    let kind = if self.by_value_params.contains(&id) {
+                        "function parameter"
+                    } else {
+                        "local variable"
+                    };
+                    self.error(
+                        expr.span,
+                        format!("cannot return a reference to {} {}", kind, name),
+                        "E0515",
+                    );
+                }
+                Target::Capture(_) => {
+                    self.error(
+                        expr.span,
+                        "cannot return a reference to a captured variable".to_string(),
+                        "E0515",
+                    );
+                }
+                Target::Param(id, _) => {
+                    if let Some(expected) = expected
+                        && id != expected
+                    {
+                        let returned = self.name(id).to_string();
+                        let wanted = self.name(expected).to_string();
+                        self.error(
+                            expr.span,
+                            format!(
+                                "cannot return a reference derived from {} when the return \
+                                 type borrows from {}",
+                                returned, wanted
+                            ),
+                            "E0515",
+                        );
+                    }
+                }
+                Target::Opaque => {}
+            }
         }
     }
 
@@ -1079,6 +1183,20 @@ impl<'a> FnChecker<'a> {
                     .collect();
                 Self::merge_provenances(&provenances)
             }
+            // Copying a reference field out of an aggregate reborrows the
+            // aggregate's loan; the loan must be live for that read.
+            HExprKind::Field { .. } | HExprKind::Index { .. } if expr.ty.is_ref() => {
+                let loan = self.carried_reference(expr);
+                let target = match loan.and_then(|loan| self.loans.get(loan)) {
+                    Some(item) => item.target.clone(),
+                    None => self.target_of_place(expr),
+                };
+                Provenance {
+                    target,
+                    mutable: expr.ty.is_ref_mut(),
+                    loan: loan.or_else(|| self.origin_loan(expr)),
+                }
+            }
             HExprKind::DirectCall {
                 fn_id,
                 receiver,
@@ -1131,10 +1249,23 @@ impl<'a> FnChecker<'a> {
         let Some(function) = self.program.fns.get(fn_id) else {
             return opaque;
         };
-        if !function.ret.is_ref() {
+        let returns_refs = function.ret.is_ref() || self.ty_contains_refs(&function.ret);
+        if !returns_refs {
             return opaque;
         }
-        let Some(source_index) = return_source_param(function) else {
+        let source_index = if function.ret.is_ref() {
+            return_source_param(function)
+        } else {
+            // An aggregate return value may borrow from any input that is a
+            // reference or that stores references.
+            return_source_param(function).or_else(|| {
+                function
+                    .params
+                    .iter()
+                    .position(|param| param.ty.is_ref() || self.ty_contains_refs(&param.ty))
+            })
+        };
+        let Some(source_index) = source_index else {
             return opaque;
         };
         let source = if function.is_method() {
@@ -1170,7 +1301,9 @@ impl<'a> FnChecker<'a> {
             // A field or element projection reborrows from the place it is
             // projected out of: either the loan behind an auto-dereferenced
             // reference, or the implicit loan of a `&mut self` receiver.
-            HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => self.origin_loan(base),
+            HExprKind::Field { base, .. } | HExprKind::Index { base, .. } => self
+                .carried_reference(expr)
+                .or_else(|| self.origin_loan(base)),
             HExprKind::Deref { expr } if expr.ty.is_ref() => self.origin_loan(expr),
             HExprKind::Block(block) => block
                 .tail
@@ -1263,15 +1396,31 @@ impl<'a> FnChecker<'a> {
             self.declare(id, pat.span);
             if pat.ty.is_ref() {
                 self.bind_ref_local(id, &pat.ty, init, span);
+                return;
+            }
+            if self.ty_contains_refs(&pat.ty)
+                && let Some(init) = init
+            {
+                let carried = self.carried_loans(init);
+                self.adopt_loans(id, &[], &carried);
             }
             return;
         }
-        self.declare_pattern(pat, None);
+        let carried = match init {
+            Some(init) => self.carried_loans(init),
+            None => Vec::new(),
+        };
+        self.declare_pattern(pat, None, &carried);
     }
 
     /// Declare the bindings of a pattern, creating loans for reference-typed
     /// bindings that come from ref-mode match ergonomics.
-    fn declare_pattern(&mut self, pat: &HPat, base: Option<&Provenance>) {
+    fn declare_pattern(
+        &mut self,
+        pat: &HPat,
+        base: Option<&Provenance>,
+        carried: &[AggregateLoan],
+    ) {
         match &pat.kind {
             HPatKind::Bind { c_name, name } => {
                 let id = self.register(c_name, name);
@@ -1284,6 +1433,31 @@ impl<'a> FnChecker<'a> {
                 }
                 self.declare(id, pat.span);
                 if pat.ty.is_ref() {
+                    if let Some(entry) = carried.first() {
+                        // A reference field projected out of an aggregate
+                        // reuses the loan the aggregate owns instead of
+                        // starting a second, unrelated loan.
+                        let loan = entry.loan;
+                        let target = match self.loans.get(loan) {
+                            Some(item) => item.target.clone(),
+                            None => Target::opaque(),
+                        };
+                        let mutable = pat.ty.is_ref_mut();
+                        if let Some(item) = self.loans.get_mut(loan) {
+                            item.owner = Some(id);
+                            item.mutable = mutable;
+                        }
+                        self.provenance.insert(
+                            id,
+                            Provenance {
+                                target,
+                                mutable,
+                                loan: Some(loan),
+                            },
+                        );
+                        self.ref_loan.insert(id, loan);
+                        return;
+                    }
                     let target = match base {
                         Some(base) => base.target.clone(),
                         None => Target::opaque(),
@@ -1310,43 +1484,57 @@ impl<'a> FnChecker<'a> {
                 } else {
                     self.provenance.remove(&id);
                     self.ref_loan.remove(&id);
+                    if self.ty_contains_refs(&pat.ty) {
+                        self.adopt_loans(id, &[], carried);
+                    }
                 }
             }
             HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => {}
             HPatKind::Tuple(elements) => {
                 for (index, element) in elements.iter().enumerate() {
-                    let child = base.map(|base| base.project(&[index as u32]));
-                    self.declare_pattern(element, child.as_ref());
+                    let path = [index as u32];
+                    let child = base.map(|base| base.project(&path));
+                    let projected = Self::carried_projection(carried, &path);
+                    self.declare_pattern(element, child.as_ref(), &projected);
                 }
             }
             HPatKind::Enum { variant, args, .. } => {
                 for (index, element) in args.iter().enumerate() {
                     let path = [*variant as u32, index as u32];
                     let child = base.map(|base| base.project(&path));
-                    self.declare_pattern(element, child.as_ref());
+                    let projected = Self::carried_projection(carried, &path);
+                    self.declare_pattern(element, child.as_ref(), &projected);
                 }
             }
             HPatKind::OptionSome(inner) => {
-                let child = base.map(|base| base.project(&[1, 0]));
-                self.declare_pattern(inner, child.as_ref());
+                let path = [1, 0];
+                let child = base.map(|base| base.project(&path));
+                let projected = Self::carried_projection(carried, &path);
+                self.declare_pattern(inner, child.as_ref(), &projected);
             }
             HPatKind::ResultOk(inner) => {
-                let child = base.map(|base| base.project(&[0, 0]));
-                self.declare_pattern(inner, child.as_ref());
+                let path = [0, 0];
+                let child = base.map(|base| base.project(&path));
+                let projected = Self::carried_projection(carried, &path);
+                self.declare_pattern(inner, child.as_ref(), &projected);
             }
             HPatKind::ResultErr(inner) => {
-                let child = base.map(|base| base.project(&[1, 0]));
-                self.declare_pattern(inner, child.as_ref());
+                let path = [1, 0];
+                let child = base.map(|base| base.project(&path));
+                let projected = Self::carried_projection(carried, &path);
+                self.declare_pattern(inner, child.as_ref(), &projected);
             }
             HPatKind::Struct { fields, .. } => {
                 for (index, field) in fields {
-                    let child = base.map(|base| base.project(&[*index as u32]));
-                    self.declare_pattern(field, child.as_ref());
+                    let path = [*index as u32];
+                    let child = base.map(|base| base.project(&path));
+                    let projected = Self::carried_projection(carried, &path);
+                    self.declare_pattern(field, child.as_ref(), &projected);
                 }
             }
             HPatKind::Or(alternatives) => {
                 for alternative in alternatives {
-                    self.declare_pattern(alternative, base);
+                    self.declare_pattern(alternative, base, carried);
                 }
             }
         }
@@ -1533,10 +1721,368 @@ impl<'a> FnChecker<'a> {
         }
     }
 
+    /// Whether a v2.2 type owns the loans of the reference fields it stores.
+    ///
+    /// References may be stored in user structs/enums, tuples, arrays and
+    /// `Option`; `Vec`, `Result`, `HashMap`, `Rc`, `Box`, slices and closures
+    /// still reject them, so they are not searched.
+    fn ty_contains_refs(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Ref { .. } => true,
+            Ty::Tuple(elements) => elements
+                .iter()
+                .any(|element| self.ty_contains_refs(element)),
+            Ty::Option(inner) | Ty::Array(inner, _) => self.ty_contains_refs(inner),
+            Ty::Struct(id) => self.program.structs.get(*id).is_some_and(|item| {
+                item.fields
+                    .iter()
+                    .any(|field| self.ty_contains_refs(&field.ty))
+            }),
+            Ty::Enum(id) => self.program.enums.get(*id).is_some_and(|item| {
+                item.variants.iter().any(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .any(|field| self.ty_contains_refs(field))
+                })
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether two aggregate paths can address the same field. `u32::MAX` is
+    /// the wildcard used for a dynamic index, which may reach any field.
+    fn aggregate_paths_overlap(a: &[u32], b: &[u32]) -> bool {
+        let shared = a.len().min(b.len());
+        a[..shared]
+            .iter()
+            .zip(&b[..shared])
+            .all(|(a, b)| *a == u32::MAX || *b == u32::MAX || a == b)
+    }
+
+    /// Given the loans an aggregate owns, return the ones reachable through a
+    /// projection path; the returned paths are relative to the projected value.
+    fn carried_projection(entries: &[AggregateLoan], path: &[u32]) -> Vec<AggregateLoan> {
+        let mut projected = Vec::new();
+        for entry in entries {
+            if Self::aggregate_paths_overlap(&entry.path, path) {
+                projected.push(AggregateLoan {
+                    path: Vec::new(),
+                    loan: entry.loan,
+                });
+            }
+        }
+        projected
+    }
+
+    fn prefix_loans(prefix: &[u32], entries: Vec<AggregateLoan>) -> Vec<AggregateLoan> {
+        entries
+            .into_iter()
+            .map(|entry| {
+                let mut path = prefix.to_vec();
+                path.extend(entry.path);
+                AggregateLoan {
+                    path,
+                    loan: entry.loan,
+                }
+            })
+            .collect()
+    }
+
+    /// The root binding and field path of a place that is a local or a
+    /// projection out of one, with `u32::MAX` for a dynamic index.
+    fn place_projection(&self, expr: &HExpr) -> Option<(NameId, Vec<u32>)> {
+        match &expr.kind {
+            HExprKind::Local { c_name, .. } => self.lookup(c_name).map(|id| (id, Vec::new())),
+            HExprKind::Field { base, field } => {
+                let (id, mut path) = self.place_projection(base)?;
+                path.push(field_code(field));
+                Some((id, path))
+            }
+            HExprKind::Index { base, .. } => {
+                let (id, mut path) = self.place_projection(base)?;
+                path.push(u32::MAX);
+                Some((id, path))
+            }
+            HExprKind::Deref { expr } if matches!(expr.ty, Ty::Box(_) | Ty::Rc(_)) => {
+                self.place_projection(expr)
+            }
+            _ => None,
+        }
+    }
+
+    /// The loan a reference-typed place reborrows when it is a field copied out
+    /// of an aggregate that owns that loan.
+    fn carried_reference(&self, expr: &HExpr) -> Option<LoanId> {
+        if !expr.ty.is_ref() {
+            return None;
+        }
+        let (id, path) = self.place_projection(expr)?;
+        let entries = self.aggregate_loans.get(&id)?;
+        entries
+            .iter()
+            .find(|entry| Self::aggregate_paths_overlap(&entry.path, &path))
+            .map(|entry| entry.loan)
+    }
+
+    /// The loan behind a reference value; a reference derived from a place
+    /// whose loan is not tracked yet gets a fresh loan.
+    fn reference_loan_of(&mut self, expr: &HExpr) -> Option<LoanId> {
+        if let Some(loan) = self.adopted_loan(expr) {
+            return Some(loan);
+        }
+        if let Some(loan) = self.carried_reference(expr) {
+            return Some(loan);
+        }
+        if let Some(loan) = self.origin_loan(expr) {
+            return Some(loan);
+        }
+        let provenance = self.provenance_value(expr);
+        if matches!(provenance.target, Target::Opaque) {
+            return None;
+        }
+        let parent = provenance.loan;
+        Some(self.push_loan(
+            provenance.target.clone(),
+            provenance.mutable,
+            expr.span,
+            None,
+            parent,
+            self.idx,
+        ))
+    }
+
+    /// The loans a value carries because its type stores references. The paths
+    /// are relative to the value.
+    fn carried_loans(&mut self, expr: &HExpr) -> Vec<AggregateLoan> {
+        let mut loans = Vec::new();
+        if expr.ty.is_ref() {
+            if let Some(loan) = self.reference_loan_of(expr) {
+                loans.push(AggregateLoan {
+                    path: Vec::new(),
+                    loan,
+                });
+            }
+            return loans;
+        }
+        if !self.ty_contains_refs(&expr.ty) {
+            return loans;
+        }
+        match &expr.kind {
+            HExprKind::Local { .. } | HExprKind::Capture { .. } => {
+                if let Some((id, _)) = self.place_projection(expr)
+                    && let Some(entries) = self.aggregate_loans.get(&id)
+                {
+                    return entries.clone();
+                }
+            }
+            HExprKind::Field { .. } | HExprKind::Index { .. } | HExprKind::Deref { .. } => {
+                if let Some((id, path)) = self.place_projection(expr)
+                    && let Some(entries) = self.aggregate_loans.get(&id)
+                {
+                    return Self::carried_projection(entries, &path);
+                }
+            }
+            HExprKind::StructLit { fields, .. } => {
+                for (index, value) in fields {
+                    let child = self.carried_loans(value);
+                    loans.extend(Self::prefix_loans(&[*index as u32], child));
+                }
+            }
+            HExprKind::EnumLit { variant, args, .. } => {
+                for (index, value) in args.iter().enumerate() {
+                    let child = self.carried_loans(value);
+                    loans.extend(Self::prefix_loans(&[*variant as u32, index as u32], child));
+                }
+            }
+            HExprKind::Tuple(elements) => {
+                for (index, value) in elements.iter().enumerate() {
+                    let child = self.carried_loans(value);
+                    loans.extend(Self::prefix_loans(&[index as u32], child));
+                }
+            }
+            HExprKind::OptionSome(inner) => {
+                let child = self.carried_loans(inner);
+                loans.extend(Self::prefix_loans(&[1, 0], child));
+            }
+            HExprKind::ResultOk(inner) => {
+                let child = self.carried_loans(inner);
+                loans.extend(Self::prefix_loans(&[0, 0], child));
+            }
+            HExprKind::ResultErr(inner) => {
+                let child = self.carried_loans(inner);
+                loans.extend(Self::prefix_loans(&[1, 0], child));
+            }
+            HExprKind::Array { elems } => {
+                for (index, value) in elems.iter().enumerate() {
+                    let child = self.carried_loans(value);
+                    loans.extend(Self::prefix_loans(&[index as u32], child));
+                }
+            }
+            HExprKind::ArrayRepeat { value, .. } => {
+                let child = self.carried_loans(value);
+                loans.extend(Self::prefix_loans(&[u32::MAX], child));
+            }
+            HExprKind::Block(block) => {
+                if let Some(tail) = &block.tail {
+                    return self.carried_loans(tail);
+                }
+            }
+            HExprKind::If {
+                then_block,
+                else_expr,
+                ..
+            } => {
+                if let Some(tail) = &then_block.tail {
+                    let child = self.carried_loans(tail);
+                    loans.extend(child);
+                }
+                if let Some(else_expr) = else_expr {
+                    let child = self.carried_loans(else_expr);
+                    loans.extend(child);
+                }
+            }
+            HExprKind::Match { arms, .. } => {
+                for arm in arms {
+                    let child = self.carried_loans(&arm.body);
+                    loans.extend(child);
+                }
+            }
+            HExprKind::DynCoerce { .. } => {
+                if let Some(loan) = self.reference_loan_of(expr) {
+                    loans.push(AggregateLoan {
+                        path: Vec::new(),
+                        loan,
+                    });
+                }
+            }
+            HExprKind::DirectCall { .. }
+            | HExprKind::Call { .. }
+            | HExprKind::DynCall { .. }
+            | HExprKind::BuiltinMethod { .. }
+            | HExprKind::BuiltinAssoc { .. }
+            | HExprKind::BuiltinCall { .. } => {
+                let provenance = self.provenance_value(expr);
+                if matches!(provenance.target, Target::Opaque) {
+                    return loans;
+                }
+                let loan = match provenance.loan {
+                    Some(loan) => loan,
+                    None => self.push_loan(
+                        provenance.target.clone(),
+                        provenance.mutable,
+                        expr.span,
+                        None,
+                        None,
+                        self.idx,
+                    ),
+                };
+                loans.push(AggregateLoan {
+                    path: Vec::new(),
+                    loan,
+                });
+            }
+            _ => {}
+        }
+        loans
+    }
+
+    /// Make an aggregate binding own the loans of its reference fields.
+    fn adopt_loans(&mut self, id: NameId, prefix: &[u32], loans: &[AggregateLoan]) {
+        for entry in loans {
+            let loan = entry.loan;
+            let mut path = prefix.to_vec();
+            path.extend(&entry.path);
+            match self.loans.get(loan).and_then(|item| item.owner) {
+                None => {
+                    if let Some(item) = self.loans.get_mut(loan) {
+                        item.owner = Some(id);
+                        item.end = usize::MAX;
+                    }
+                }
+                Some(owner) if owner != id => {
+                    self.loan_extra_owners.entry(loan).or_default().push(id);
+                }
+                _ => {}
+            }
+            self.aggregate_loans
+                .entry(id)
+                .or_default()
+                .push(AggregateLoan { path, loan });
+        }
+    }
+
+    /// End the loans owned by aggregate `id` under a projection that is being
+    /// overwritten.
+    fn release_loans(&mut self, id: NameId, prefix: &[u32]) {
+        let mut released = Vec::new();
+        let mut erased = false;
+        if let Some(entries) = self.aggregate_loans.get_mut(&id) {
+            entries.retain(|entry| {
+                if Self::aggregate_paths_overlap(prefix, &entry.path) {
+                    released.push(entry.loan);
+                    false
+                } else {
+                    true
+                }
+            });
+            erased = entries.is_empty();
+        }
+        if erased {
+            self.aggregate_loans.remove(&id);
+        }
+        for loan in released {
+            let mut other_owner = false;
+            let mut empty = false;
+            if let Some(owners) = self.loan_extra_owners.get_mut(&loan) {
+                owners.retain(|owner| *owner != id);
+                other_owner = !owners.is_empty();
+                empty = owners.is_empty();
+            }
+            if empty {
+                self.loan_extra_owners.remove(&loan);
+            }
+            if other_owner {
+                continue;
+            }
+            if self.loans.get(loan).and_then(|item| item.owner) == Some(id) {
+                let end = self.idx;
+                self.finish_loan(loan, end);
+                if let Some(item) = self.loans.get_mut(loan) {
+                    item.owner = None;
+                }
+            }
+        }
+    }
+
+    /// Overwrite an aggregate place: the reference fields that were in the
+    /// place stop being borrowed. The new value's loans are adopted separately,
+    /// after the value has been walked, so the loans already exist.
+    fn release_place_loans(&mut self, target: &HExpr) {
+        if !self.ty_contains_refs(&target.ty) {
+            return;
+        }
+        if let Some((id, path)) = self.place_projection(target) {
+            self.release_loans(id, &path);
+        }
+    }
+
+    /// Adopt the loans of the value just stored into an aggregate place.
+    fn adopt_value_loans(&mut self, target: &HExpr, value: &HExpr) {
+        if !self.ty_contains_refs(&target.ty) {
+            return;
+        }
+        let Some((id, path)) = self.place_projection(target) else {
+            return;
+        };
+        let carried = self.carried_loans(value);
+        self.adopt_loans(id, &path, &carried);
+    }
+
     fn walk_expr(&mut self, expr: &HExpr) {
         match &expr.kind {
             HExprKind::Lit(_) | HExprKind::ConstRef { .. } | HExprKind::FnRef { .. } => {}
-            HExprKind::OptionNone | HExprKind::Break | HExprKind::Continue => {}
+            HExprKind::OptionNone | HExprKind::Break { .. } | HExprKind::Continue { .. } => {}
             HExprKind::DynCoerce { value, .. } => {
                 // Appendix B contract, mirrored from the move checker:
                 // * Box<T> -> Box<dyn Trait> moves the box handle, and with it
@@ -1731,8 +2277,12 @@ impl<'a> FnChecker<'a> {
             HExprKind::Assign { target, op, value } => {
                 self.walk_place(target);
                 if op.is_none() {
-                    // A plain assignment moves the value into the place.
+                    // A plain assignment moves the value into the place; the
+                    // old reference fields of the place stop being borrowed
+                    // and the new value's reference loans are adopted.
+                    self.release_place_loans(target);
                     self.walk_consumed(value);
+                    self.adopt_value_loans(target, value);
                 } else {
                     self.walk_expr(value);
                 }
@@ -1764,13 +2314,13 @@ impl<'a> FnChecker<'a> {
                 }
             }
             HExprKind::Match { scrutinee, arms } => self.walk_match(scrutinee, arms),
-            HExprKind::Loop { body } => {
+            HExprKind::Loop { body, .. } => {
                 let start = self.idx;
                 self.walk_block(body);
                 let end = self.tick();
                 self.loop_ranges.push((start, end));
             }
-            HExprKind::While { cond, body } => {
+            HExprKind::While { cond, body, .. } => {
                 let start = self.idx;
                 self.walk_expr(cond);
                 self.walk_block(body);
@@ -1788,7 +2338,7 @@ impl<'a> FnChecker<'a> {
                 self.walk_expr(end);
                 self.walk_for(pat, body);
             }
-            HExprKind::ForVec { pat, vec, body } => {
+            HExprKind::ForVec { pat, vec, body, .. } => {
                 // `for x in <vec>` moves the vector into the loop.
                 self.walk_consumed(vec);
                 self.walk_for(pat, body);
@@ -1816,6 +2366,20 @@ impl<'a> FnChecker<'a> {
             HExprKind::VecRepeat { value, count } => {
                 self.walk_consumed(value);
                 self.walk_expr(count);
+            }
+            HExprKind::Array { elems } => {
+                // Every element is moved into the new array value. The array
+                // type is Copy exactly when the element type is, so a Copy
+                // element expression is copied and a moving one moves.
+                for elem in elems {
+                    self.walk_consumed(elem);
+                }
+            }
+            HExprKind::ArrayRepeat { value, .. } => {
+                // `[value; N]` evaluates its operand once and copies or moves
+                // it into the array slots; the length is a constant that has
+                // no runtime expression to walk.
+                self.walk_consumed(value);
             }
             HExprKind::EnumLit { args, .. } => {
                 for arg in args {
@@ -1904,7 +2468,7 @@ impl<'a> FnChecker<'a> {
     fn walk_for(&mut self, pat: &HPat, body: &HBlock) {
         let start = self.idx;
         self.push_scope();
-        self.declare_pattern(pat, None);
+        self.declare_pattern(pat, None, &[]);
         self.walk_block(body);
         let end = self.tick();
         self.pop_scope(end);
@@ -1918,14 +2482,25 @@ impl<'a> FnChecker<'a> {
             // A non-Copy scrutinee is consumed into the match temporary.
             self.walk_consumed(scrutinee);
         }
+        // Rust keeps the scrutinee temporary (and the loans its value carries)
+        // alive for the whole match: the borrows created while evaluating the
+        // scrutinee belong to the enclosing statement, so the loans adopted by
+        // the arm patterns start at the next event instead of colliding with
+        // the borrow the scrutinee itself took.
+        self.tick();
         let base = if scrutinee.ty.is_ref() {
             Some(self.provenance_value(scrutinee))
         } else {
             None
         };
+        let carried = if scrutinee.ty.is_ref() {
+            Vec::new()
+        } else {
+            self.carried_loans(scrutinee)
+        };
         for arm in arms {
             self.push_scope();
-            self.declare_pattern(&arm.pat, base.as_ref());
+            self.declare_pattern(&arm.pat, base.as_ref(), &carried);
             if let Some(guard) = &arm.guard {
                 self.walk_expr(guard);
             }
@@ -4198,6 +4773,7 @@ mod tests {
         let loop_expr = hir::HExpr::new(
             Ty::Unit,
             hir::HExprKind::ForRange {
+                label: None,
                 pat: bind_pat("index", i64_ty()),
                 start: Box::new(int_expr(0)),
                 end: Box::new(int_expr(3)),
@@ -4414,5 +4990,1145 @@ mod tests {
             vec![trait_object()],
         );
         accepted(&program);
+    }
+    // Source-level end-to-end checks for the v2.2 aggregate-reference and
+    // array rules (the HIR-level tests above pin the checker itself; these pin
+    // that the type checker lowers such programs to the shapes it expects).
+
+    #[test]
+    fn source_aggregate_reference_borrow_then_move_is_rejected() {
+        expect_rejected(
+            r#"
+            struct View<'a> {
+                text: &'a String,
+            }
+
+            fn main() {
+                let owned = String::from("hello");
+                let view = View { text: &owned };
+                let moved = owned;
+                let alias = view.text;
+            }
+            "#,
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn source_aggregate_reference_borrow_ends_before_move_is_accepted() {
+        expect_accepted(
+            r#"
+            struct View<'a> {
+                text: &'a String,
+            }
+
+            fn main() {
+                let owned = String::from("hello");
+                let view = View { text: &owned };
+                let alias = view.text;
+                let moved = owned;
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn source_copy_array_is_copied_while_borrowed() {
+        expect_accepted(
+            r#"
+            fn main() {
+                let numbers: [i64; 2] = [1, 2];
+                let view = &numbers;
+                let duplicate = numbers;
+                println!("{}", duplicate[0]);
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn source_non_copy_array_move_while_borrowed_is_rejected() {
+        expect_rejected(
+            r#"
+            fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let view = &words;
+                let moved = words;
+                let alias = view;
+            }
+            "#,
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn source_borrow_of_an_aggregate_field_blocks_moving_the_aggregate() {
+        // The holder must be non-Copy for the binding to be a move: a struct
+        // whose only field is a reference is itself Copy, so copying it leaves
+        // the borrowed value alone (see the next test).
+        expect_rejected(
+            r#"
+            struct Holder<'a> {
+                name: String,
+                text: &'a String,
+            }
+
+            fn main() {
+                let owned = String::from("hello");
+                let holder = Holder { name: String::from("h"), text: &owned };
+                let borrowed = &holder.text;
+                let moved = holder;
+                let alias = borrowed;
+            }
+            "#,
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn source_copying_an_aggregate_carries_its_reference_loans() {
+        expect_rejected(
+            r#"
+            struct View<'a> {
+                text: &'a String,
+            }
+
+            fn main() {
+                let owned = String::from("hello");
+                let first = View { text: &owned };
+                let second = first;
+                let moved = owned;
+                let alias = second.text;
+            }
+            "#,
+            "E0505",
+        );
+    }
+
+    #[test]
+    fn source_array_element_borrow_then_move_is_accepted() {
+        expect_accepted(
+            r#"
+            fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let first = &words[0];
+                let alias = first;
+                let moved = words;
+                println!("{:?}", moved);
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn source_array_element_borrow_blocks_move_while_live() {
+        expect_rejected(
+            r#"
+            fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let first = &words[0];
+                let moved = words;
+                let alias = first;
+            }
+            "#,
+            "E0505",
+        );
+    }
+
+    // ---- v2.2: aggregates holding references, arrays and statement-scoped
+    // ---- temporary borrows (task-99) ----
+
+    fn named_struct(name: &str, fields: Vec<(&str, Ty)>) -> hir::HStruct {
+        hir::HStruct {
+            name: name.to_string(),
+            c_name: format!("Ls{name}"),
+            fields: fields
+                .into_iter()
+                .map(|(field, ty)| hir::HField {
+                    name: field.to_string(),
+                    ty,
+                })
+                .collect(),
+            span: ir_span(),
+        }
+    }
+
+    fn struct_with_ref(inner: Ty) -> hir::HStruct {
+        named_struct("Wrap", vec![("r", ref_ty(false, inner))])
+    }
+
+    fn ty_struct(id: usize) -> Ty {
+        Ty::Struct(id)
+    }
+
+    fn ty_array(elem: Ty, len: usize) -> Ty {
+        Ty::Array(Box::new(elem), len)
+    }
+
+    fn ty_option(inner: Ty) -> Ty {
+        Ty::Option(Box::new(inner))
+    }
+
+    fn ty_tuple(elements: Vec<Ty>) -> Ty {
+        Ty::Tuple(elements)
+    }
+
+    fn struct_lit(struct_id: usize, fields: Vec<(usize, hir::HExpr)>, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::StructLit { struct_id, fields },
+            ir_span(),
+        )
+    }
+
+    fn field_value(base: hir::HExpr, struct_id: usize, index: usize, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::Field {
+                base: Box::new(base),
+                field: hir::HFieldRef::Struct { struct_id, index },
+            },
+            ir_span(),
+        )
+    }
+
+    fn tuple_expr(elements: Vec<hir::HExpr>, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(ty, hir::HExprKind::Tuple(elements), ir_span())
+    }
+
+    fn some_expr(inner: hir::HExpr, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(ty, hir::HExprKind::OptionSome(Box::new(inner)), ir_span())
+    }
+
+    fn assign_expr(target: hir::HExpr, value: hir::HExpr) -> hir::HExpr {
+        hir::HExpr::new(
+            Ty::Unit,
+            hir::HExprKind::Assign {
+                target: Box::new(target),
+                op: None,
+                value: Box::new(value),
+            },
+            ir_span(),
+        )
+    }
+
+    fn array_expr(elements: Vec<hir::HExpr>, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(ty, hir::HExprKind::Array { elems: elements }, ir_span())
+    }
+
+    fn index_value(base: hir::HExpr, index: hir::HExpr, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::Index {
+                base: Box::new(base),
+                index: Box::new(index),
+            },
+            ir_span(),
+        )
+    }
+
+    fn return_value(value: hir::HExpr) -> hir::HExpr {
+        hir::HExpr::new(
+            Ty::Unit,
+            hir::HExprKind::Return(Some(Box::new(value))),
+            ir_span(),
+        )
+    }
+
+    fn program_with_structs(structs: Vec<hir::HStruct>, body: hir::HBlock) -> hir::Program {
+        let mut program = main_program(body, Vec::new());
+        program.copy_structs = vec![false; structs.len()];
+        program.structs = structs;
+        program
+    }
+
+    fn program_with_structs_and_fn(
+        structs: Vec<hir::HStruct>,
+        function: hir::HFn,
+        body: hir::HBlock,
+    ) -> hir::Program {
+        let mut program = program_with_structs(structs, body);
+        program.fns.push(function);
+        program
+    }
+
+    fn user_param(name: &str, ty: Ty) -> hir::HParam {
+        hir::HParam {
+            name: name.to_string(),
+            c_name: format!("lsaca_{name}"),
+            ty,
+        }
+    }
+
+    fn user_fn(name: &str, params: Vec<hir::HParam>, ret: Ty, body: hir::HBlock) -> hir::HFn {
+        hir::HFn {
+            name: name.to_string(),
+            c_name: format!("lsaca_fn_{name}"),
+            params,
+            ret,
+            self_kind: None,
+            intrinsic: false,
+            body,
+            span: ir_span(),
+        }
+    }
+
+    #[test]
+    fn temporary_borrow_as_call_argument_is_accepted() {
+        expect_accepted(
+            r#"
+            fn take(text: &String) {}
+
+            fn main() {
+                take(&format!("value {}", 1));
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn temporary_borrow_bound_to_a_local_is_rejected() {
+        expect_rejected(
+            r#"
+            fn main() {
+                let text = &format!("value");
+                let _copy = text;
+            }
+            "#,
+            "E0745",
+        );
+    }
+
+    #[test]
+    fn borrowing_an_arithmetic_temporary_in_a_let_is_rejected() {
+        expect_rejected(
+            r#"
+            fn main() {
+                let number = &(1 + 2);
+                let _copy = number;
+            }
+            "#,
+            "E0745",
+        );
+    }
+
+    #[test]
+    fn format_temporary_as_method_argument_is_accepted() {
+        expect_accepted_with_stdlib(
+            r#"
+            fn main() {
+                let mut text = String::new();
+                text.push_str(&format!("value {}", 1));
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn aggregate_reference_field_borrow_then_move_is_rejected() {
+        let wrap_ty = ty_struct(0);
+        let program = program_with_structs(
+            vec![struct_with_ref(vec_ty())],
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "wrap",
+                        wrap_ty.clone(),
+                        Some(struct_lit(
+                            0,
+                            vec![(
+                                0,
+                                ref_expr(local("values", vec_ty()), ref_ty(false, vec_ty()), false),
+                            )],
+                            wrap_ty.clone(),
+                        )),
+                    ),
+                    hir::HStmt::Expr(local("values", vec_ty())),
+                    hir::HStmt::Expr(field_value(
+                        local("wrap", wrap_ty.clone()),
+                        0,
+                        0,
+                        ref_ty(false, vec_ty()),
+                    )),
+                ],
+                None,
+            ),
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn aggregate_reference_borrow_ends_before_move_is_accepted() {
+        let wrap_ty = ty_struct(0);
+        let program = program_with_structs(
+            vec![struct_with_ref(vec_ty())],
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "wrap",
+                        wrap_ty.clone(),
+                        Some(struct_lit(
+                            0,
+                            vec![(
+                                0,
+                                ref_expr(local("values", vec_ty()), ref_ty(false, vec_ty()), false),
+                            )],
+                            wrap_ty.clone(),
+                        )),
+                    ),
+                    hir::HStmt::Expr(field_value(
+                        local("wrap", wrap_ty.clone()),
+                        0,
+                        0,
+                        ref_ty(false, vec_ty()),
+                    )),
+                    hir::HStmt::Expr(local("values", vec_ty())),
+                ],
+                None,
+            ),
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn aggregate_field_borrow_blocks_moving_the_aggregate() {
+        let wrap_ty = ty_struct(0);
+        let program = program_with_structs(
+            vec![struct_with_ref(vec_ty())],
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "wrap",
+                        wrap_ty.clone(),
+                        Some(struct_lit(
+                            0,
+                            vec![(
+                                0,
+                                ref_expr(local("values", vec_ty()), ref_ty(false, vec_ty()), false),
+                            )],
+                            wrap_ty.clone(),
+                        )),
+                    ),
+                    let_stmt(
+                        "view",
+                        ref_ty(false, vec_ty()),
+                        Some(ref_expr(
+                            field_value(
+                                local("wrap", wrap_ty.clone()),
+                                0,
+                                0,
+                                ref_ty(false, vec_ty()),
+                            ),
+                            ref_ty(false, vec_ty()),
+                            false,
+                        )),
+                    ),
+                    hir::HStmt::Expr(local("wrap", wrap_ty.clone())),
+                ],
+                Some(local("view", ref_ty(false, vec_ty()))),
+            ),
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn nested_reference_field_borrow_blocks_move() {
+        let inner_ty = ty_struct(0);
+        let outer_ty = ty_struct(1);
+        let program = program_with_structs(
+            vec![
+                struct_with_ref(vec_ty()),
+                named_struct("Outer", vec![("inner", inner_ty.clone())]),
+            ],
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "outer",
+                        outer_ty.clone(),
+                        Some(struct_lit(
+                            1,
+                            vec![(
+                                0,
+                                struct_lit(
+                                    0,
+                                    vec![(
+                                        0,
+                                        ref_expr(
+                                            local("values", vec_ty()),
+                                            ref_ty(false, vec_ty()),
+                                            false,
+                                        ),
+                                    )],
+                                    inner_ty.clone(),
+                                ),
+                            )],
+                            outer_ty.clone(),
+                        )),
+                    ),
+                    hir::HStmt::Expr(local("values", vec_ty())),
+                    hir::HStmt::Expr(field_value(
+                        field_value(local("outer", outer_ty.clone()), 1, 0, inner_ty.clone()),
+                        0,
+                        0,
+                        ref_ty(false, vec_ty()),
+                    )),
+                ],
+                None,
+            ),
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn option_reference_payload_borrow_blocks_move() {
+        let option_ty = ty_option(ref_ty(false, vec_ty()));
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "slot",
+                        option_ty.clone(),
+                        Some(some_expr(
+                            ref_expr(local("values", vec_ty()), ref_ty(false, vec_ty()), false),
+                            option_ty.clone(),
+                        )),
+                    ),
+                    hir::HStmt::Expr(local("values", vec_ty())),
+                ],
+                Some(local("slot", option_ty.clone())),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn tuple_reference_borrow_blocks_move() {
+        let tuple_ty = ty_tuple(vec![ref_ty(false, vec_ty()), i64_ty()]);
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    let_stmt(
+                        "pair",
+                        tuple_ty.clone(),
+                        Some(tuple_expr(
+                            vec![
+                                ref_expr(local("values", vec_ty()), ref_ty(false, vec_ty()), false),
+                                int_expr(1),
+                            ],
+                            tuple_ty.clone(),
+                        )),
+                    ),
+                    hir::HStmt::Expr(local("values", vec_ty())),
+                ],
+                Some(local("pair", tuple_ty.clone())),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn returning_aggregate_with_a_local_reference_is_rejected() {
+        let wrap_ty = ty_struct(0);
+        let make = user_fn(
+            "make",
+            Vec::new(),
+            wrap_ty.clone(),
+            block(
+                vec![
+                    let_stmt("values", vec_ty(), None),
+                    hir::HStmt::Expr(return_value(struct_lit(
+                        0,
+                        vec![(
+                            0,
+                            ref_expr(local("values", vec_ty()), ref_ty(false, vec_ty()), false),
+                        )],
+                        wrap_ty.clone(),
+                    ))),
+                ],
+                None,
+            ),
+        );
+        let program = program_with_structs_and_fn(
+            vec![struct_with_ref(vec_ty())],
+            make,
+            block(Vec::new(), None),
+        );
+        rejected(&program, &["E0515"]);
+    }
+
+    #[test]
+    fn returning_aggregate_with_a_parameter_reference_is_accepted() {
+        let wrap_ty = ty_struct(0);
+        let param_ty = ref_ty(false, vec_ty());
+        let make = user_fn(
+            "make",
+            vec![user_param("values", param_ty.clone())],
+            wrap_ty.clone(),
+            block(
+                vec![hir::HStmt::Expr(return_value(struct_lit(
+                    0,
+                    vec![(0, local("values", param_ty.clone()))],
+                    wrap_ty.clone(),
+                )))],
+                None,
+            ),
+        );
+        let program = program_with_structs_and_fn(
+            vec![struct_with_ref(vec_ty())],
+            make,
+            block(Vec::new(), None),
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn copy_array_is_copied_while_borrowed() {
+        let array_ty = ty_array(i64_ty(), 2);
+        let view_ty = ref_ty(false, array_ty.clone());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt(
+                        "values",
+                        array_ty.clone(),
+                        Some(array_expr(vec![int_expr(1), int_expr(2)], array_ty.clone())),
+                    ),
+                    let_stmt(
+                        "view",
+                        view_ty.clone(),
+                        Some(ref_expr(
+                            local("values", array_ty.clone()),
+                            view_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    let_stmt(
+                        "duplicate",
+                        array_ty.clone(),
+                        Some(local("values", array_ty.clone())),
+                    ),
+                ],
+                Some(local("duplicate", array_ty.clone())),
+            ),
+            Vec::new(),
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn non_copy_array_move_while_borrowed_is_rejected() {
+        let array_ty = ty_array(Ty::String, 1);
+        let view_ty = ref_ty(false, array_ty.clone());
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("text", Ty::String, None),
+                    let_stmt(
+                        "values",
+                        array_ty.clone(),
+                        Some(array_expr(
+                            vec![local("text", Ty::String)],
+                            array_ty.clone(),
+                        )),
+                    ),
+                    let_stmt(
+                        "view",
+                        view_ty.clone(),
+                        Some(ref_expr(
+                            local("values", array_ty.clone()),
+                            view_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    hir::HStmt::Expr(local("values", array_ty.clone())),
+                ],
+                Some(local("view", view_ty.clone())),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn array_element_borrow_ends_before_move_is_accepted() {
+        let array_ty = ty_array(Ty::String, 1);
+        let element_ref_ty = ref_ty(false, Ty::String);
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("text", Ty::String, None),
+                    let_stmt(
+                        "values",
+                        array_ty.clone(),
+                        Some(array_expr(
+                            vec![local("text", Ty::String)],
+                            array_ty.clone(),
+                        )),
+                    ),
+                    let_stmt(
+                        "view",
+                        element_ref_ty.clone(),
+                        Some(ref_expr(
+                            index_value(local("values", array_ty.clone()), int_expr(0), Ty::String),
+                            element_ref_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    use_stmt("view", element_ref_ty.clone()),
+                    hir::HStmt::Expr(local("values", array_ty.clone())),
+                ],
+                None,
+            ),
+            Vec::new(),
+        );
+        accepted(&program);
+    }
+
+    #[test]
+    fn array_element_borrow_blocks_move_while_live() {
+        let array_ty = ty_array(Ty::String, 1);
+        let element_ref_ty = ref_ty(false, Ty::String);
+        let program = main_program(
+            block(
+                vec![
+                    let_stmt("text", Ty::String, None),
+                    let_stmt(
+                        "values",
+                        array_ty.clone(),
+                        Some(array_expr(
+                            vec![local("text", Ty::String)],
+                            array_ty.clone(),
+                        )),
+                    ),
+                    let_stmt(
+                        "view",
+                        element_ref_ty.clone(),
+                        Some(ref_expr(
+                            index_value(local("values", array_ty.clone()), int_expr(0), Ty::String),
+                            element_ref_ty.clone(),
+                            false,
+                        )),
+                    ),
+                    hir::HStmt::Expr(local("values", array_ty.clone())),
+                ],
+                Some(local("view", element_ref_ty.clone())),
+            ),
+            Vec::new(),
+        );
+        rejected(&program, &["E0505"]);
+    }
+
+    #[test]
+    fn overwriting_an_aggregate_ends_the_old_reference_loan() {
+        let wrap_ty = ty_struct(0);
+        let wrap_value = |source: &str| {
+            struct_lit(
+                0,
+                vec![(
+                    0,
+                    ref_expr(local(source, vec_ty()), ref_ty(false, vec_ty()), false),
+                )],
+                wrap_ty.clone(),
+            )
+        };
+        let program = program_with_structs(
+            vec![struct_with_ref(vec_ty())],
+            block(
+                vec![
+                    let_stmt("first", vec_ty(), None),
+                    let_stmt("second", vec_ty(), None),
+                    let_stmt("wrap", wrap_ty.clone(), Some(wrap_value("first"))),
+                    hir::HStmt::Expr(assign_expr(
+                        local("wrap", wrap_ty.clone()),
+                        wrap_value("second"),
+                    )),
+                    hir::HStmt::Expr(local("first", vec_ty())),
+                ],
+                None,
+            ),
+        );
+        accepted(&program);
+    }
+
+    // ---- v2.2 integration: the scrutinee temporary of a match stays
+    // ---- borrowed for the whole match (task-112) ----
+
+    fn option_ref_ty(mutable: bool, inner: Ty) -> Ty {
+        Ty::Option(Box::new(ref_ty(mutable, inner)))
+    }
+
+    fn option_none_expr(ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(ty, hir::HExprKind::OptionNone, ir_span())
+    }
+
+    fn direct_call(
+        fn_id: usize,
+        receiver: Option<hir::HExpr>,
+        args: Vec<hir::HExpr>,
+        ty: Ty,
+    ) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::DirectCall {
+                fn_id,
+                receiver: receiver.map(Box::new),
+                args,
+            },
+            ir_span(),
+        )
+    }
+
+    fn match_expr(scrutinee: hir::HExpr, arms: Vec<hir::HArm>, ty: Ty) -> hir::HExpr {
+        hir::HExpr::new(
+            ty,
+            hir::HExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms,
+            },
+            ir_span(),
+        )
+    }
+
+    fn pat_with(ty: Ty, kind: hir::HPatKind) -> hir::HPat {
+        hir::HPat {
+            ty,
+            kind,
+            span: ir_span(),
+        }
+    }
+
+    fn arm(pat: hir::HPat, body: hir::HBlock) -> hir::HArm {
+        hir::HArm {
+            pat,
+            guard: None,
+            body: hir::HExpr::new(Ty::Unit, hir::HExprKind::Block(body), ir_span()),
+        }
+    }
+
+    fn some_pat(ty: Ty, inner: hir::HPat) -> hir::HPat {
+        pat_with(ty, hir::HPatKind::OptionSome(Box::new(inner)))
+    }
+
+    fn wild_pat(ty: Ty) -> hir::HPat {
+        pat_with(ty, hir::HPatKind::Wild)
+    }
+
+    /// A null-bodied method `fn name(&self|&mut self) -> ret`. The borrow
+    /// checker only inspects the receiver kind and the return type.
+    fn user_method(name: &str, self_ty: Ty, ret: Ty, self_kind: SelfKind) -> hir::HFn {
+        hir::HFn {
+            name: name.to_string(),
+            c_name: format!("lsaca_fn_{name}"),
+            params: vec![user_param("self", self_ty)],
+            ret: ret.clone(),
+            self_kind: Some(self_kind),
+            intrinsic: false,
+            body: block(Vec::new(), Some(option_none_expr(ret))),
+            span: ir_span(),
+        }
+    }
+
+    fn mut_lookup_method() -> hir::HFn {
+        user_method(
+            "lookup_mut",
+            ref_ty(true, vec_ty()),
+            option_ref_ty(true, i64_ty()),
+            SelfKind::RefMut,
+        )
+    }
+
+    fn shared_lookup_method() -> hir::HFn {
+        user_method(
+            "lookup",
+            ref_ty(false, vec_ty()),
+            option_ref_ty(false, i64_ty()),
+            SelfKind::Ref,
+        )
+    }
+
+    /// `let numbers: Vec<i64>; match numbers.<lookup>(0) { arms }` plus a tail.
+    fn match_with_lookup(
+        method: hir::HFn,
+        mutable: bool,
+        arms: Vec<hir::HArm>,
+        tail: Option<hir::HExpr>,
+    ) -> hir::Program {
+        let option_ty = option_ref_ty(mutable, i64_ty());
+        let body = block(
+            vec![
+                let_stmt("numbers", vec_ty(), None),
+                hir::HStmt::Expr(match_expr(
+                    direct_call(
+                        1,
+                        Some(local("numbers", vec_ty())),
+                        vec![int_expr(0)],
+                        option_ty,
+                    ),
+                    arms,
+                    Ty::Unit,
+                )),
+            ],
+            tail,
+        );
+        program_with_structs_and_fn(Vec::new(), method, body)
+    }
+
+    #[test]
+    fn match_scrutinee_mut_method_write_is_accepted() {
+        let option_ty = option_ref_ty(true, i64_ty());
+        let slot_ty = ref_ty(true, i64_ty());
+        let arms = vec![
+            arm(
+                some_pat(option_ty.clone(), bind_pat("slot", slot_ty.clone())),
+                block(
+                    vec![hir::HStmt::Expr(assign_expr(
+                        deref_expr(local("slot", slot_ty.clone()), i64_ty()),
+                        int_expr(9),
+                    ))],
+                    None,
+                ),
+            ),
+            arm(wild_pat(option_ty), block(Vec::new(), None)),
+        ];
+        let program = match_with_lookup(mut_lookup_method(), true, arms, None);
+        accepted(&program);
+    }
+
+    #[test]
+    fn match_scrutinee_mut_method_read_is_accepted() {
+        let option_ty = option_ref_ty(true, i64_ty());
+        let slot_ty = ref_ty(true, i64_ty());
+        let arms = vec![
+            arm(
+                some_pat(option_ty.clone(), bind_pat("slot", slot_ty.clone())),
+                block(
+                    vec![hir::HStmt::Expr(deref_expr(
+                        local("slot", slot_ty),
+                        i64_ty(),
+                    ))],
+                    None,
+                ),
+            ),
+            arm(wild_pat(option_ty), block(Vec::new(), None)),
+        ];
+        let program = match_with_lookup(mut_lookup_method(), true, arms, None);
+        accepted(&program);
+    }
+
+    #[test]
+    fn match_scrutinee_shared_method_is_accepted() {
+        let option_ty = option_ref_ty(false, i64_ty());
+        let slot_ty = ref_ty(false, i64_ty());
+        let arms = vec![
+            arm(
+                some_pat(option_ty.clone(), bind_pat("slot", slot_ty.clone())),
+                block(
+                    vec![hir::HStmt::Expr(deref_expr(
+                        local("slot", slot_ty),
+                        i64_ty(),
+                    ))],
+                    None,
+                ),
+            ),
+            arm(wild_pat(option_ty), block(Vec::new(), None)),
+        ];
+        // The shared loan ends at its last use inside the arm, so the push
+        // after the match is legal.
+        let push = builtin_method(
+            local("numbers", vec_ty()),
+            hir::HBuiltinMethod::VecPush,
+            vec![int_expr(3)],
+            Ty::Unit,
+        );
+        let program = match_with_lookup(shared_lookup_method(), false, arms, Some(push));
+        accepted(&program);
+    }
+
+    #[test]
+    fn conflicting_use_inside_mut_scrutinee_arm_is_rejected() {
+        let option_ty = option_ref_ty(true, i64_ty());
+        let slot_ty = ref_ty(true, i64_ty());
+        let arms = vec![
+            arm(
+                some_pat(option_ty.clone(), bind_pat("slot", slot_ty.clone())),
+                block(
+                    vec![
+                        hir::HStmt::Expr(builtin_method(
+                            local("numbers", vec_ty()),
+                            hir::HBuiltinMethod::VecPush,
+                            vec![int_expr(3)],
+                            Ty::Unit,
+                        )),
+                        hir::HStmt::Expr(assign_expr(
+                            deref_expr(local("slot", slot_ty), i64_ty()),
+                            int_expr(9),
+                        )),
+                    ],
+                    None,
+                ),
+            ),
+            arm(wild_pat(option_ty), block(Vec::new(), None)),
+        ];
+        let program = match_with_lookup(mut_lookup_method(), true, arms, None);
+        rejected(&program, &["E0506"]);
+    }
+
+    #[test]
+    fn stdlib_vec_get_mut_as_match_scrutinee_write_is_accepted() {
+        expect_accepted_with_stdlib(
+            r#"
+            fn main() {
+                let mut numbers: Vec<i64> = Vec::new();
+                numbers.push(10i64);
+                match numbers.get_mut(0) {
+                    Some(slot) => {
+                        *slot = *slot + 1i64;
+                    }
+                    None => { }
+                }
+                println!("{}", numbers.get(0).unwrap());
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn stdlib_vec_get_mut_read_arm_ends_the_loan() {
+        expect_accepted_with_stdlib(
+            r#"
+            fn main() {
+                let mut numbers: Vec<i64> = Vec::new();
+                numbers.push(10i64);
+                match numbers.get_mut(0) {
+                    Some(slot) => {
+                        println!("{}", *slot);
+                    }
+                    None => { }
+                }
+                numbers.push(20i64);
+                println!("{}", numbers.len());
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn stdlib_vec_get_mut_as_if_let_scrutinee_write_is_accepted() {
+        expect_accepted_with_stdlib(
+            r#"
+            fn main() {
+                let mut numbers: Vec<i64> = Vec::new();
+                numbers.push(10i64);
+                if let Some(slot) = numbers.get_mut(0) {
+                    *slot = 42i64;
+                }
+                println!("{}", numbers.get(0).unwrap());
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn stdlib_vec_get_mut_as_while_let_scrutinee_write_is_accepted() {
+        expect_accepted_with_stdlib(
+            r#"
+            fn main() {
+                let mut numbers: Vec<i64> = Vec::new();
+                numbers.push(10i64);
+                while let Some(slot) = numbers.get_mut(0) {
+                    *slot = *slot + 1i64;
+                    break;
+                }
+                println!("{}", numbers.get(0).unwrap());
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn stdlib_hash_map_get_mut_as_match_scrutinee_write_is_accepted() {
+        expect_accepted_with_stdlib(
+            r#"
+            fn main() {
+                let mut map: HashMap<i64, String> = HashMap::new();
+                map.insert(1i64, String::from("a"));
+                match map.get_mut(&1i64) {
+                    Some(slot) => {
+                        *slot = String::from("b");
+                    }
+                    None => { }
+                }
+                println!("{}", map.get(&1i64).unwrap());
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn stdlib_vec_push_inside_mut_scrutinee_arm_is_rejected() {
+        expect_rejected_with_stdlib(
+            r#"
+            fn main() {
+                let mut numbers: Vec<i64> = Vec::new();
+                numbers.push(10i64);
+                match numbers.get_mut(0) {
+                    Some(slot) => {
+                        numbers.push(20i64);
+                        *slot = 9i64;
+                    }
+                    None => { }
+                }
+            }
+            "#,
+            "E0506",
+        );
+    }
+
+    #[test]
+    fn stdlib_shared_get_as_match_scrutinee_is_accepted() {
+        expect_accepted_with_stdlib(
+            r#"
+            fn main() {
+                let mut map: HashMap<i64, i64> = HashMap::new();
+                map.insert(1i64, 10i64);
+                let view: &i64 = map.get(&1i64).unwrap();
+                match map.get(&1i64) {
+                    Some(value) => {
+                        println!("{}", *value);
+                    }
+                    None => { }
+                }
+                println!("{}", *view);
+            }
+            "#,
+        );
+    }
+
+    #[test]
+    fn stdlib_vec_get_mut_binding_form_stays_accepted() {
+        expect_accepted_with_stdlib(
+            r#"
+            fn main() {
+                let mut numbers: Vec<i64> = Vec::new();
+                numbers.push(10i64);
+                let found = numbers.get_mut(0);
+                match found {
+                    Some(slot) => {
+                        *slot = 9i64;
+                    }
+                    None => { }
+                }
+                println!("{}", numbers.get(0).unwrap());
+            }
+            "#,
+        );
     }
 }

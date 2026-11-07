@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use super::check::Checker;
 use super::generics::{GFnDef, GenericOwner, ImplInfo, ImplMethod};
-use super::items::sanitize_c_ident;
+use super::items::{only_type_args, only_type_generics, sanitize_c_ident};
 use super::itype::ITy;
 use super::modules::{DefRef, ModuleId};
 use crate::ast::{self, GenericParam, ImplBlock, TraitDecl, TraitMethod, TraitRef};
@@ -76,14 +76,13 @@ impl<'a> Checker<'a> {
                 continue;
             }
             method_names.insert(method.name.clone(), method.name_span);
-            if method.self_kind.is_none() {
-                self.error_code(
-                    format!("trait method '{}' must take a self receiver", method.name),
-                    method.name_span,
-                    "E0001",
-                );
-            }
-            if !method.params.is_empty() && method.params[0].name != "self" {
+            // v2.2: a trait item without a receiver is an associated function,
+            // which the From trait requires ("fn from(value: T) -> Self"). A
+            // written receiver must still be the first parameter.
+            if method.self_kind.is_some()
+                && !method.params.is_empty()
+                && method.params[0].name != "self"
+            {
                 self.error_code(
                     format!("trait method '{}' must take a self receiver", method.name),
                     method.name_span,
@@ -95,7 +94,7 @@ impl<'a> Checker<'a> {
         self.traits.push(TraitInfo {
             name: decl.name.clone(),
             module,
-            generics: decl.generics.clone(),
+            generics: only_type_generics(&decl.generics),
             methods: decl.methods.clone(),
         });
         self.insert_type_binding(module, &decl.name, DefRef::Trait(id), decl.name_span, vis);
@@ -115,15 +114,17 @@ impl<'a> Checker<'a> {
                 return;
             }
         };
+        let impl_generics = only_type_generics(&block.generics);
+        let trait_args = only_type_args(&trait_ref.args);
         let trait_arity = self.traits[trait_id].generics.len();
-        if trait_ref.args.len() != trait_arity {
+        if trait_args.len() != trait_arity {
             self.error_code(
                 format!(
                     "trait {} takes {} type argument{} but {} were supplied",
                     trait_ref.name,
                     trait_arity,
                     if trait_arity == 1 { "" } else { "s" },
-                    trait_ref.args.len()
+                    trait_args.len()
                 ),
                 trait_ref.span,
                 "E0107",
@@ -142,14 +143,14 @@ impl<'a> Checker<'a> {
             self.report_invalid_impl_target(block);
             return;
         }
-        self.validate_impl_generics(&block.generics);
+        self.validate_impl_generics(&impl_generics);
         self.reject_generic_methods(block);
         let impl_id = self.impls.len();
         let mut methods = Vec::new();
         for func in &block.fns {
             let gfn_id = self.register_generic_method(
                 impl_id,
-                &block.generics,
+                &impl_generics,
                 func,
                 GenericOwner::TraitImpl(impl_id),
                 format!(
@@ -176,7 +177,7 @@ impl<'a> Checker<'a> {
             let func = self.synthesize_default_method(block, trait_ref, trait_id, method);
             let gfn_id = self.register_generic_method(
                 impl_id,
-                &block.generics,
+                &impl_generics,
                 &func,
                 GenericOwner::TraitImpl(impl_id),
                 format!(
@@ -194,7 +195,7 @@ impl<'a> Checker<'a> {
         self.impls.push(ImplInfo {
             id: impl_id,
             module: self.current_module,
-            generics: block.generics.clone(),
+            generics: impl_generics.clone(),
             self_ty: block.ty.clone(),
             trait_ref: Some(trait_ref.clone()),
             methods,
@@ -287,7 +288,10 @@ impl<'a> Checker<'a> {
             // The receiver of a trait method is written as Self (or &Self),
             // while impl methods store the plain self type and let self_kind
             // add the reference layer.
-            let ty = if index == 0 {
+            // Only a receiver parameter is replaced by the impl self type; the
+            // parameters of an associated function all come from the
+            // declaration.
+            let ty = if index == 0 && method.self_kind.is_some() {
                 block.ty.clone()
             } else {
                 substitute_default_ty(&param.ty, &block.ty, &args)
@@ -806,9 +810,15 @@ impl<'a> Checker<'a> {
                 self.check_impl_coherence(impl_id, span);
             }
             self.validate_generic_bounds(&info.generics, &args, span, info.module);
-            if let Some(fn_id) = self.instantiate_generic_fn(gfn_id, args, span) {
-                matches.push(fn_id);
+            let Some(fn_id) = self.instantiate_generic_fn(gfn_id, args.clone(), span) else {
+                continue;
+            };
+            // Associated functions of a trait impl are signature-checked like
+            // methods: From::from must agree with its declaration (E0053).
+            if info.trait_ref.is_some() {
+                self.verify_trait_method_signature(impl_id, &args, name, span, fn_id);
             }
+            matches.push(fn_id);
         }
         if matches.len() > 1 {
             self.error_code(
@@ -855,6 +865,57 @@ impl<'a> Checker<'a> {
                 _ => continue,
             }
             return Some((impl_id, args));
+        }
+        None
+    }
+
+    /// Find the `from` function of an `impl From<Found> for Expected` impl, if
+    /// one exists. The `?` operator uses this to convert a propagated error to
+    /// the enclosing function's error type (v2.2).
+    pub fn find_error_conversion(
+        &mut self,
+        expected: &ITy,
+        found: &ITy,
+        span: Span,
+    ) -> Option<usize> {
+        let trait_id = self.lookup_trait("From")?;
+        if self.traits[trait_id].generics.len() != 1 {
+            return None;
+        }
+        let expected = self.canonical_instance_ty(expected);
+        let found = self.infer.resolve(found);
+        let impl_count = self.impls.len();
+        for impl_id in 0..impl_count {
+            let info = match self.impls.get(impl_id) {
+                Some(info) => info.clone(),
+                None => continue,
+            };
+            let name_match = matches!(
+                &info.trait_ref,
+                Some(trait_ref) if trait_ref.name == "From"
+            );
+            if !name_match {
+                continue;
+            }
+            let args = match self.match_impl_self(impl_id, &expected) {
+                Some(args) => args,
+                None => continue,
+            };
+            let trait_args = match self.trait_impl_args(impl_id, &args) {
+                Some(trait_args) if trait_args.len() == 1 => trait_args,
+                _ => continue,
+            };
+            if !self.types_unify_probe(&trait_args[0], &found) {
+                continue;
+            }
+            let gfn_id = info
+                .methods
+                .iter()
+                .find(|entry| entry.name == "from")
+                .map(|entry| entry.gfn_id)?;
+            let fn_id = self.instantiate_generic_fn(gfn_id, args.clone(), span)?;
+            self.verify_trait_method_signature(impl_id, &args, "from", span, fn_id);
+            return Some(fn_id);
         }
         None
     }
@@ -908,10 +969,12 @@ fn substitute_default_ty(
         },
         ast::TypeExpr::Ref {
             mutable,
+            lifetime,
             inner,
             span,
         } => ast::TypeExpr::Ref {
             mutable: *mutable,
+            lifetime: lifetime.clone(),
             inner: Box::new(substitute_default_ty(inner, self_ty, args)),
             span: *span,
         },
@@ -929,5 +992,11 @@ fn substitute_default_ty(
             elem: Box::new(substitute_default_ty(elem, self_ty, args)),
             span: *span,
         },
+        ast::TypeExpr::Array { elem, len, span } => ast::TypeExpr::Array {
+            elem: Box::new(substitute_default_ty(elem, self_ty, args)),
+            len: len.clone(),
+            span: *span,
+        },
+        ast::TypeExpr::Lifetime(lifetime) => ast::TypeExpr::Lifetime(lifetime.clone()),
     }
 }

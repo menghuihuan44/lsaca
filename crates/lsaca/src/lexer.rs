@@ -32,6 +32,8 @@ pub enum TokenKind {
     },
     Str(String),
     Char(char),
+    /// A lifetime such as `'a` or `'static` (stored without the apostrophe).
+    Lifetime(String),
     // Keywords
     KwFn,
     KwLet,
@@ -144,6 +146,7 @@ impl TokenKind {
             },
             TokenKind::Str(_) => "string literal".to_string(),
             TokenKind::Char(_) => "character literal".to_string(),
+            TokenKind::Lifetime(name) => format!("lifetime '{}", name),
             TokenKind::Eof => "end of file".to_string(),
             other => format!("{}", other),
         }
@@ -170,6 +173,7 @@ impl std::fmt::Display for TokenKind {
             }
             TokenKind::Str(_) => write!(f, "string literal"),
             TokenKind::Char(_) => write!(f, "character literal"),
+            TokenKind::Lifetime(name) => write!(f, "'{}", name),
             TokenKind::KwFn => write!(f, "fn"),
             TokenKind::KwLet => write!(f, "let"),
             TokenKind::KwMut => write!(f, "mut"),
@@ -351,7 +355,7 @@ impl<'a> Lexer<'a> {
             } else if ch == '"' {
                 self.lex_string(start);
             } else if ch == '\'' {
-                self.lex_char(start);
+                self.lex_quote(start);
             } else {
                 self.lex_punctuation(start);
             }
@@ -865,8 +869,52 @@ impl<'a> Lexer<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // Character literals
+    // Character literals and lifetimes
     // -----------------------------------------------------------------------
+
+    /// Lex whichever token starts with an apostrophe: a character literal
+    /// (`'a'`, `'\n'`) or a lifetime (`'a`, `'static`).
+    ///
+    /// The two forms are ambiguous at the apostrophe. A character literal wins
+    /// whenever the text after the apostrophe cannot continue a lifetime (an
+    /// escape, a non-identifier character, or the end of the file) or when an
+    /// identifier run is immediately followed by the closing apostrophe.
+    /// Everything else is a lifetime; the apostrophe is not part of the stored
+    /// name.
+    fn lex_quote(&mut self, start: usize) {
+        let quote_len = '\''.len_utf8();
+        let after = self
+            .source
+            .get(start + quote_len..)
+            .and_then(|rest| rest.chars().next());
+        let after_is_identifier = match after {
+            Some(ch) => ch != '\\' && is_ident_start(ch),
+            None => false,
+        };
+        if !after_is_identifier {
+            // `' '`, `'\n'`, `''` and an apostrophe at the end of the file all
+            // belong to the character-literal lexer.
+            self.lex_char(start);
+            return;
+        }
+        let mut end = start + quote_len;
+        while let Some(ch) = self.source.get(end..).and_then(|rest| rest.chars().next()) {
+            if !is_ident_continue(ch) {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+        let name = self.source.get(start + quote_len..end).unwrap_or("");
+        let closer = self.source.get(end..).and_then(|rest| rest.chars().next());
+        if name.is_empty() || closer == Some('\'') || closer == Some('\\') {
+            // `'a'`, `'ab'` and `'a\u{62}'` are character literals, even when
+            // they are malformed (multiple codepoints); let lex_char report it.
+            self.lex_char(start);
+            return;
+        }
+        self.pos = end;
+        self.push(TokenKind::Lifetime(name.to_string()), start, end);
+    }
 
     /// Lex a character literal such as `'a'` or `'\u{1F600}'`.
     ///
@@ -1875,13 +1923,63 @@ mod tests {
     }
 
     #[test]
+    fn lifetimes_are_tokenized() {
+        use TokenKind::*;
+        assert_eq!(
+            kinds("'a 'static 'a'"),
+            vec![
+                Lifetime("a".to_string()),
+                Lifetime("static".to_string()),
+                Char('a'),
+                Eof
+            ]
+        );
+        assert!(errors("'a 'static 'a'").is_empty());
+        // The apostrophe is not part of the stored name, but both renderings
+        // put it back so diagnostics read like the source code.
+        assert_eq!(
+            TokenKind::Lifetime("a".to_string()).describe(),
+            "lifetime 'a"
+        );
+        assert_eq!(format!("{}", TokenKind::Lifetime("a".to_string())), "'a");
+        // A lifetime is a single token and does not swallow its neighbours.
+        assert_eq!(
+            kinds("'a + 'b'"),
+            vec![Lifetime("a".to_string()), Plus, Char('b'), Eof]
+        );
+        // Spans cover the apostrophe and the name, not surrounding trivia.
+        let (tokens, _) = tokenize(" 'outer ");
+        assert_eq!(tokens[0].kind, Lifetime("outer".to_string()));
+        assert_eq!(tokens[0].span, Span::from_usize(1, 7));
+    }
+
+    #[test]
+    fn apostrophe_prefers_character_literals() {
+        use TokenKind::*;
+        // An identifier run followed by a closing quote is a character literal,
+        // even when it is malformed (more than one codepoint).
+        assert_eq!(kinds("'a'"), vec![Char('a'), Eof]);
+        assert!(error_messages("'ab'")[0].contains("one codepoint"));
+        // `''` is an empty character literal.
+        assert_eq!(
+            error_messages("''"),
+            vec!["empty character literal".to_string()]
+        );
+        // At the end of the file `'a` cannot be a character literal, so it is a
+        // lifetime and does not produce a diagnostic.
+        assert_eq!(kinds("'a"), vec![Lifetime("a".to_string()), Eof]);
+        assert!(errors("'a").is_empty());
+    }
+
+    #[test]
     fn char_literal_errors() {
         assert_eq!(
             error_messages("''"),
             vec!["empty character literal".to_string()]
         );
         assert!(error_messages("'ab'")[0].contains("one codepoint"));
-        assert!(error_messages("'a b'")[0].contains("one codepoint"));
+        // An identifier run followed by an escape is still a character literal.
+        assert!(error_messages("'a\u{62}'")[0].contains("one codepoint"));
         assert!(error_messages(r#"'\u{D800}'"#)[0].contains("unicode scalar"));
         assert!(error_messages(r#"'\u{DFFF}'"#)[0].contains("unicode scalar"));
         assert!(error_messages(r#"'\u{110000}'"#)[0].contains("unicode scalar"));
@@ -1889,9 +1987,9 @@ mod tests {
         assert!(error_messages(r#"'\x80'"#)[0].contains("ASCII"));
         assert!(error_messages(r#"'\x4'"#)[0].contains("hexadecimal"));
         assert!(error_messages(r#"'\u{}'"#)[0].contains("hexadecimal"));
-        assert!(error_messages("'a")[0].contains("unterminated"));
+        assert!(error_messages("' \n")[0].contains("unterminated"));
         // A newline terminates the literal (and is not consumed): one diagnostic.
-        let (tokens, diagnostics) = tokenize("let c = 'a\nlet d = 1;");
+        let (tokens, diagnostics) = tokenize("let c = ' \nlet d = 1;");
         assert!(diagnostics.has_errors());
         assert_eq!(diagnostics.error_count(), 1);
         assert!(
@@ -1909,7 +2007,7 @@ mod tests {
         assert!(
             tokens
                 .iter()
-                .any(|token| token.kind == TokenKind::Char('a'))
+                .any(|token| token.kind == TokenKind::Char(' '))
         );
     }
 
@@ -2175,7 +2273,7 @@ mod tests {
             .filter_map(|diagnostic| diagnostic.code)
             .collect();
         assert_eq!(codes, vec!["E0007"]);
-        let diagnostics = tokenize("'a").1;
+        let diagnostics = tokenize("' ").1;
         let codes: Vec<&str> = diagnostics
             .iter()
             .filter_map(|diagnostic| diagnostic.code)

@@ -9,7 +9,10 @@
 use std::collections::HashMap;
 
 use super::check::Checker;
-use super::items::{EnumInfo, FnInfo, FnSig, StructInfo, sanitize_c_ident};
+use super::items::{
+    EnumInfo, FnInfo, FnSig, StructInfo, has_explicit_lifetime, only_type_args, sanitize_c_ident,
+    type_expr_has_ref, type_is_bare_generic_param,
+};
 use super::itype::ITy;
 use super::modules::ModuleId;
 use crate::ast::{EnumDecl, FnDecl, GenericParam, StructDecl, TraitRef, TypeExpr, Visibility};
@@ -395,8 +398,9 @@ impl<'a> Checker<'a> {
         exprs: &[TypeExpr],
         _span: Span,
     ) -> Option<Vec<ITy>> {
+        let exprs = only_type_args(exprs);
         let mut args = Vec::with_capacity(exprs.len());
-        for expr in exprs {
+        for expr in &exprs {
             let resolved = self.resolve_ty(expr, None)?;
             match self.normalize_instance_arg(&resolved) {
                 Some(ty) => args.push(ty),
@@ -425,6 +429,7 @@ impl<'a> Checker<'a> {
             ITy::Float(float_ty) => float_ty.name().to_string(),
             ITy::String => "String".to_string(),
             ITy::Vec(inner) => format!("Vec_{}", self.mangle_ty(&inner)),
+            ITy::Array(inner, len) => format!("Arr{}_{}", len, self.mangle_ty(&inner)),
             ITy::Rc(inner) => format!("Rc_{}", self.mangle_ty(&inner)),
             ITy::Box(inner) => format!("Box_{}", self.mangle_ty(&inner)),
             ITy::Option(inner) => format!("Opt_{}", self.mangle_ty(&inner)),
@@ -857,7 +862,29 @@ impl<'a> Checker<'a> {
         }
         let mut ret_ref_source: Option<usize> = None;
         let ret_resolved = self.infer.resolve(&ret);
-        if let ITy::Ref { mutable, .. } = ret_resolved {
+        let outer_mutable = matches!(&ret_resolved, ITy::Ref { mutable: true, .. });
+        let explicit_return_lifetime = def
+            .decl
+            .ret
+            .as_ref()
+            .map(has_explicit_lifetime)
+            .unwrap_or(false);
+        // A bare type parameter in return position is not a reference in the
+        // written signature (see items::type_is_bare_generic_param): a `T`
+        // instantiated with `&mut i64` is moved out of an owned parameter.
+        let generic_param_return = def
+            .decl
+            .ret
+            .as_ref()
+            .map(|ty| type_is_bare_generic_param(ty, &def.generics))
+            .unwrap_or(false);
+        let return_names_reference = def
+            .decl
+            .ret
+            .as_ref()
+            .map(type_expr_has_ref)
+            .unwrap_or(false);
+        if return_names_reference && !generic_param_return && self.type_borrows(&ret_resolved) {
             let mut sources: Vec<usize> = Vec::new();
             if matches!(
                 def.decl.self_kind,
@@ -866,7 +893,8 @@ impl<'a> Checker<'a> {
                 sources.push(0);
             } else {
                 for (index, param_ty) in params.iter().enumerate() {
-                    if matches!(self.infer.resolve(param_ty), ITy::Ref { .. }) {
+                    let param_ty = param_ty.clone();
+                    if self.type_borrows(&param_ty) {
                         sources.push(index);
                     }
                 }
@@ -885,7 +913,7 @@ impl<'a> Checker<'a> {
                             .to_string(),
                     );
                 self.diagnostics.push(diag);
-            } else if sources.len() > 1 {
+            } else if sources.len() > 1 && !explicit_return_lifetime {
                 let diag = Diagnostic::error("missing lifetime specifier".to_string(), ret_span)
                     .with_code("E0106")
                     .with_note(
@@ -893,10 +921,10 @@ impl<'a> Checker<'a> {
                             .to_string(),
                     );
                 self.diagnostics.push(diag);
-            } else {
+            } else if sources.len() == 1 {
                 let source = sources[0];
                 ret_ref_source = Some(source);
-                if mutable {
+                if outer_mutable {
                     let from_mutable = if source == 0 && def.decl.self_kind.is_some() {
                         matches!(def.decl.self_kind, Some(SelfKind::RefMut))
                     } else {
@@ -1517,6 +1545,19 @@ impl<'a> Checker<'a> {
             // A trait object is already a concrete type, so no generic
             // arguments are inferred from its trait arguments in phase A.
             TypeExpr::Dyn(_) => true,
+            // A lifetime argument never participates in type identity.
+            TypeExpr::Lifetime(_) => true,
+            TypeExpr::Array { elem, .. } => {
+                let actual_inner = match &actual_resolved {
+                    ITy::Array(inner, _) => (**inner).clone(),
+                    ITy::Var(_) => self.infer.fresh_var(),
+                    _ => {
+                        self.report_pattern_mismatch(pattern, &actual_resolved, report_span);
+                        return false;
+                    }
+                };
+                self.infer_args_from_ty(elem, &actual_inner, env, report_span)
+            }
             TypeExpr::Slice { elem, .. } => {
                 let actual_inner = match &actual_resolved {
                     ITy::Slice(inner) => (**inner).clone(),

@@ -96,6 +96,9 @@ pub use collections::BTreeMap;
 pub use collections::VecDeque;
 pub use collections::BinaryHeap;
 
+// The conversion trait used by the `?` operator (v2.2).
+pub use core::From;
+
 // Error types.
 pub use io::Error;
 pub use io::ErrorKind;

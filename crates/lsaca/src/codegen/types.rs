@@ -106,6 +106,7 @@ impl TypeNames {
                 format!("Map_{}_{}", self.mangle(key), self.mangle(value))
             }
             Ty::Slice(elem) => format!("Slice_{}", self.mangle(elem)),
+            Ty::Array(elem, len) => format!("Array_{}_{}", self.mangle(elem), len),
             Ty::Str => String::from("Str"),
             Ty::Dyn(index) => format!("Dyn{}", index),
         }
@@ -183,6 +184,8 @@ pub enum TypeDef {
     Tuple(Vec<Ty>),
     Fn(Vec<Ty>, Ty),
     HashMap(Ty, Ty),
+    /// A by-value fixed-size array: the element type and the length.
+    Array(Ty, usize),
     /// A by-value fat slice struct, used for shared and mutable slices.
     Slice(Ty),
     /// The by-value fat string slice struct behind shared and mutable str refs.
@@ -359,6 +362,9 @@ impl TypeRegistry {
                 push_if_compound(&mut deps, ret);
             }
             Ty::Vec(_) => {}
+            // Every element is stored by value, so the element type must be
+            // complete before the array definition.
+            Ty::Array(elem, _) => push_if_compound(&mut deps, elem),
             Ty::Rc(elem) | Ty::Box(elem) => push_if_compound(&mut deps, elem),
             // The map table stores keys and values in byte buffers, but the
             // generated accessor helpers pass keys and values by value, so
@@ -378,6 +384,15 @@ impl TypeRegistry {
 }
 
 fn push_if_compound(deps: &mut Vec<Ty>, ty: &Ty) {
+    // A reference to an unsized pointee is a by-value fat view in C: LsStr for
+    // &str, LsSlice_T for &[T] and LsDyn_N for &dyn Trait. The reference itself
+    // has no generated C type, but the view struct does, so the aggregate that
+    // embeds the reference must be defined after the view. References to sized
+    // types stay plain pointers and need only the forward declaration.
+    let ty = match ty {
+        Ty::Ref { inner, .. } if inner.is_unsized() => inner,
+        _ => ty,
+    };
     // Rc<T>, Box<T> and HashMap<K, V> are pointers to their managed cells, so a
     // value that contains one only needs the forward declaration of the cell,
     // never its complete definition. Scalars need no definition either. Every
@@ -561,6 +576,7 @@ impl<'a> Collector<'a> {
                 self.visit_ty(&Ty::vec((**value).clone()));
             }
             Ty::Slice(elem) => self.visit_ty(elem),
+            Ty::Array(elem, _) => self.visit_ty(elem),
             // "str" and trait objects are unsized: they never name a type that
             // needs a C definition in this phase.
             Ty::Str | Ty::Dyn(_) => {}
@@ -702,8 +718,8 @@ impl<'a> Collector<'a> {
                     self.visit_expr(&arm.body);
                 }
             }
-            HExprKind::Loop { body } => self.visit_block(body),
-            HExprKind::While { cond, body } => {
+            HExprKind::Loop { body, .. } => self.visit_block(body),
+            HExprKind::While { cond, body, .. } => {
                 self.visit_expr(cond);
                 self.visit_block(body);
             }
@@ -719,7 +735,7 @@ impl<'a> Collector<'a> {
                 self.visit_expr(end);
                 self.visit_block(body);
             }
-            HExprKind::ForVec { pat, vec, body } => {
+            HExprKind::ForVec { pat, vec, body, .. } => {
                 self.visit_pat(pat);
                 self.visit_expr(vec);
                 self.visit_block(body);
@@ -736,11 +752,12 @@ impl<'a> Collector<'a> {
                     self.visit_expr(value);
                 }
             }
-            HExprKind::Tuple(elems) | HExprKind::VecLit { elems } => {
+            HExprKind::Tuple(elems) | HExprKind::VecLit { elems } | HExprKind::Array { elems } => {
                 for elem in elems {
                     self.visit_expr(elem);
                 }
             }
+            HExprKind::ArrayRepeat { value, .. } => self.visit_expr(value),
             HExprKind::VecRepeat { value, count } => {
                 self.visit_expr(value);
                 self.visit_expr(count);
@@ -771,7 +788,7 @@ impl<'a> Collector<'a> {
                     self.visit_expr(arg);
                 }
             }
-            HExprKind::Break | HExprKind::Continue => {}
+            HExprKind::Break { .. } | HExprKind::Continue { .. } => {}
             HExprKind::Return(value) => {
                 if let Some(value) = value {
                     self.visit_expr(value);
@@ -823,6 +840,7 @@ impl TypeRegistry {
             // generated definition. This arm only keeps the match exhaustive.
             Ty::Ref { .. } => TypeDef::Scalar,
             Ty::Slice(elem) => TypeDef::Slice((**elem).clone()),
+            Ty::Array(elem, len) => TypeDef::Array((**elem).clone(), *len),
             Ty::Str => TypeDef::Str,
             Ty::Dyn(index) => TypeDef::Dyn(*index),
         };
@@ -1029,6 +1047,11 @@ impl TypeNames {
                     )
                 }
             }
+            // The element storage is zero-initialised. Every zeroed element
+            // representation is safe to release (managed kinds are NULL
+            // pointers, discriminants are zero and vectors are empty), and an
+            // array value is always overwritten before an element is read.
+            Ty::Array(..) => format!("(({}){{0}})", self.ctype(ty)),
             Ty::Slice(_) | Ty::Str | Ty::Dyn(_) => crate::codegen::util::internal_error(
                 "cannot materialise an unsized value; slices, str and trait objects are only stored behind references",
             ),

@@ -77,6 +77,9 @@ pub(crate) struct Frame {
 pub(crate) struct LoopCtx {
     pub break_label: String,
     pub continue_label: String,
+    /// Source label of the loop, without the apostrophe, when it has one.
+    /// Only a labelled jump consults it.
+    pub label: Option<String>,
     pub body_frame: usize,
     pub used_break: bool,
     pub used_continue: bool,
@@ -459,6 +462,11 @@ impl<'a> Gen<'a> {
             | Ty::Slice(_)
             | Ty::Str
             | Ty::Dyn(_) => true,
+            // A zeroed array releases its zero elements; an empty array has no
+            // element storage to walk.
+            Ty::Array(elem, len) => {
+                *len == 0 || self.zero_release_inert_guarded(elem, structs, enums)
+            }
             // Tag 0 means None: the release helper never reads the payload.
             Ty::Option(_) => true,
             // Tag 0 means Ok: only the Ok payload is released.
@@ -920,28 +928,62 @@ impl<'a> Gen<'a> {
             HExprKind::Match { scrutinee, arms } => {
                 self.gen_match(scrutinee, arms, &expr.ty, target)
             }
-            HExprKind::Loop { body } => self.gen_loop(body, &expr.ty, target),
-            HExprKind::While { cond, body } => self.gen_while(cond, body, &expr.ty, target),
+            HExprKind::Loop { label, body } => {
+                self.gen_loop(label.as_deref(), body, &expr.ty, target)
+            }
+            HExprKind::While { label, cond, body } => {
+                self.gen_while(label.as_deref(), cond, body, &expr.ty, target)
+            }
             HExprKind::ForRange {
+                label,
                 pat,
                 start,
                 end,
                 inclusive,
                 body,
-            } => self.gen_for_range(pat, start, end, *inclusive, body, &expr.ty, target),
-            HExprKind::ForVec { pat, vec, body } => {
-                self.gen_for_vec(pat, vec, body, &expr.ty, target)
-            }
+            } => self.gen_for_range(
+                label.as_deref(),
+                pat,
+                start,
+                end,
+                *inclusive,
+                body,
+                &expr.ty,
+                target,
+            ),
+            HExprKind::ForVec {
+                label,
+                pat,
+                vec,
+                body,
+            } => self.gen_for_vec(label.as_deref(), pat, vec, body, &expr.ty, target),
             HExprKind::ForIter {
+                label,
                 iter,
                 next_fn,
                 pat,
                 body,
             } => {
-                if super::fusion::try_gen_fused_for(self, iter, pat, body, &expr.ty, target) {
+                if super::fusion::try_gen_fused_for(
+                    self,
+                    label.as_deref(),
+                    iter,
+                    pat,
+                    body,
+                    &expr.ty,
+                    target,
+                ) {
                     return;
                 }
-                self.gen_for_iter(iter, *next_fn, pat, body, &expr.ty, target)
+                self.gen_for_iter(
+                    label.as_deref(),
+                    iter,
+                    *next_fn,
+                    pat,
+                    body,
+                    &expr.ty,
+                    target,
+                )
             }
             HExprKind::StructLit { struct_id, fields } => {
                 self.gen_struct_lit(*struct_id, fields, &expr.ty, target)
@@ -950,6 +992,10 @@ impl<'a> Gen<'a> {
             HExprKind::VecLit { elems } => self.gen_vec_lit(elems, &expr.ty, target, expr.span),
             HExprKind::VecRepeat { value, count } => {
                 self.gen_vec_repeat(value, count, &expr.ty, target, expr.span)
+            }
+            HExprKind::Array { elems } => self.gen_array(elems, &expr.ty, target),
+            HExprKind::ArrayRepeat { value, len } => {
+                self.gen_array_repeat(value, *len, &expr.ty, target)
             }
             HExprKind::EnumLit {
                 enum_id,
@@ -965,8 +1011,8 @@ impl<'a> Gen<'a> {
             HExprKind::ResultErr(inner) => self.gen_result_variant(false, inner, &expr.ty, target),
             HExprKind::Format { parts } => self.gen_format(parts, target, expr.span),
             HExprKind::Macro(macro_call) => self.gen_macro(macro_call, target, expr.span),
-            HExprKind::Break => self.gen_break(),
-            HExprKind::Continue => self.gen_continue(),
+            HExprKind::Break { label } => self.gen_break(label.as_deref()),
+            HExprKind::Continue { label } => self.gen_continue(label.as_deref()),
             HExprKind::Return(value) => self.gen_return(value.as_deref(), target),
             HExprKind::Ref {
                 mutable: _,

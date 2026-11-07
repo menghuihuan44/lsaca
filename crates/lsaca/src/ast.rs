@@ -196,9 +196,58 @@ impl CrateGraph {
 pub struct GenericParam {
     pub name: String,
     pub name_span: Span,
+    /// Whether this is a type parameter (`T`) or a lifetime parameter (`'a`).
+    pub kind: GenericParamKind,
     /// Trait bounds, the callable bound `Fn(A, B) -> C`, or the builtin `Drop`
-    /// bound. Stored as written; the type checker resolves them.
+    /// bound. Stored as written; the type checker resolves them. Lifetime
+    /// parameters always have an empty list.
     pub bounds: Vec<TypeExpr>,
+}
+
+/// What a generic parameter declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericParamKind {
+    /// A type parameter such as `T`.
+    Type,
+    /// A lifetime parameter such as `'a`.
+    Lifetime,
+}
+
+impl GenericParamKind {
+    pub fn is_lifetime(self) -> bool {
+        matches!(self, GenericParamKind::Lifetime)
+    }
+}
+
+/// A lifetime as written in source: `'a`, `'static` or a label such as
+/// `'outer` in front of a loop. The stored name never includes the apostrophe.
+#[derive(Debug, Clone)]
+pub struct Lifetime {
+    pub name: String,
+    pub span: Span,
+}
+
+impl Lifetime {
+    pub fn describe(&self) -> String {
+        let mut text = String::from("'");
+        text.push_str(&self.name);
+        text
+    }
+}
+
+/// A loop label: the `'outer` in `'outer: loop { ... }`.
+#[derive(Debug, Clone)]
+pub struct Label {
+    pub name: String,
+    pub name_span: Span,
+}
+
+impl Label {
+    pub fn describe(&self) -> String {
+        let mut text = String::from("'");
+        text.push_str(&self.name);
+        text
+    }
 }
 
 /// Function or method declaration.
@@ -521,13 +570,16 @@ pub enum ExprKind {
     Match(MatchExpr),
     Block(Block),
     Loop {
+        label: Option<Label>,
         body: Block,
     },
     While {
+        label: Option<Label>,
         cond: Box<Expr>,
         body: Block,
     },
     For {
+        label: Option<Label>,
         pat: Pattern,
         iter: Box<Expr>,
         body: Block,
@@ -549,11 +601,25 @@ pub enum ExprKind {
     Tuple(Vec<Expr>),
     /// vec![a, b, c] or vec![value; count]
     Vec(VecLit),
+    /// A fixed-size array literal: [a, b, c].
+    Array {
+        elems: Vec<Expr>,
+    },
+    /// A fixed-size array repeat: [value; count].
+    ArrayRepeat {
+        value: Box<Expr>,
+        len: Box<Expr>,
+    },
     /// A macro invocation other than vec!: println!, print!, format!, panic!,
     /// assert!, assert_eq!, eprintln!, eprint!.
     Macro(MacroCall),
-    Break(Option<Box<Expr>>),
-    Continue,
+    Break {
+        label: Option<Label>,
+        value: Option<Box<Expr>>,
+    },
+    Continue {
+        label: Option<Label>,
+    },
     Return(Option<Box<Expr>>),
     /// A borrow expression: `&expr` or `&mut expr`. The operand must be a
     /// place expression; the type checker verifies mutability for `&mut`.
@@ -880,12 +946,26 @@ pub enum TypeExpr {
         ret: Box<TypeExpr>,
         span: Span,
     },
-    /// A reference type: &T or &mut T
+    /// A reference type: &T, &mut T, &'a T or &'a mut T.
     Ref {
         mutable: bool,
+        /// The lifetime written after the ampersand, when there is one.
+        lifetime: Option<Lifetime>,
         inner: Box<TypeExpr>,
         span: Span,
     },
+    /// A fixed-size array type: [T; N].
+    Array {
+        elem: Box<TypeExpr>,
+        /// The length expression. The type checker const-evaluates it; accepted
+        /// forms are integer literals and paths to integer constants.
+        len: Box<Expr>,
+        span: Span,
+    },
+    /// A lifetime argument inside a generic argument list: the `'a` in
+    /// `Parser<'a>`. Only valid as a generic argument; everywhere else the type
+    /// checker rejects it.
+    Lifetime(Lifetime),
     /// A dynamically dispatched trait object type: `dyn Trait` or `dyn Trait<Args>`.
     /// The inner [TraitRef] carries the trait name, its arguments and the span.
     Dyn(TraitRef),
@@ -900,6 +980,8 @@ impl TypeExpr {
             TypeExpr::Tuple { span, .. } => *span,
             TypeExpr::Fn { span, .. } => *span,
             TypeExpr::Ref { span, .. } => *span,
+            TypeExpr::Array { span, .. } => *span,
+            TypeExpr::Lifetime(lifetime) => lifetime.span,
             TypeExpr::Dyn(trait_ref) => trait_ref.span,
             TypeExpr::Slice { span, .. } => *span,
         }
@@ -942,11 +1024,20 @@ impl TypeExpr {
                     .join(", ");
                 format!("fn({}) -> {}", params, ret.describe())
             }
-            TypeExpr::Ref { mutable, inner, .. } => {
+            TypeExpr::Ref {
+                mutable,
+                lifetime,
+                inner,
+                ..
+            } => {
+                let lifetime = lifetime
+                    .as_ref()
+                    .map(|lifetime| format!("{} ", lifetime.describe()))
+                    .unwrap_or_default();
                 if *mutable {
-                    format!("&mut {}", inner.describe())
+                    format!("&{}mut {}", lifetime, inner.describe())
                 } else {
-                    format!("&{}", inner.describe())
+                    format!("&{}{}", lifetime, inner.describe())
                 }
             }
             TypeExpr::Dyn(trait_ref) => {
@@ -963,7 +1054,25 @@ impl TypeExpr {
                 }
             }
             TypeExpr::Slice { elem, .. } => format!("[{}]", elem.describe()),
+            TypeExpr::Array { elem, len, .. } => {
+                format!("[{}; {}]", elem.describe(), array_len_text(len))
+            }
+            TypeExpr::Lifetime(lifetime) => lifetime.describe(),
         }
+    }
+}
+
+/// Text for the length expression of an array type, used in diagnostics.
+/// Falls back to an ellipsis for expressions the parser accepts but the type
+/// checker is expected to reject.
+pub fn array_len_text(len: &Expr) -> String {
+    match &len.kind {
+        ExprKind::Lit(Lit::Int { raw, suffix, .. }) => match suffix {
+            Some(suffix) => format!("{}{}", raw, suffix),
+            None => raw.clone(),
+        },
+        ExprKind::Path(path) => path.display_name(),
+        _ => String::from("..."),
     }
 }
 
@@ -1057,6 +1166,12 @@ impl GenericParam {
         for bound in &mut self.bounds {
             bound.for_each_span_mut(visit);
         }
+    }
+}
+
+impl Label {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
     }
 }
 
@@ -1311,12 +1426,28 @@ impl Expr {
             ExprKind::If(if_expr) => if_expr.for_each_span_mut(visit),
             ExprKind::Match(match_expr) => match_expr.for_each_span_mut(visit),
             ExprKind::Block(block) => block.for_each_span_mut(visit),
-            ExprKind::Loop { body } => body.for_each_span_mut(visit),
-            ExprKind::While { cond, body } => {
+            ExprKind::Loop { label, body } => {
+                if let Some(label) = label {
+                    label.for_each_span_mut(visit);
+                }
+                body.for_each_span_mut(visit);
+            }
+            ExprKind::While { label, cond, body } => {
+                if let Some(label) = label {
+                    label.for_each_span_mut(visit);
+                }
                 cond.for_each_span_mut(visit);
                 body.for_each_span_mut(visit);
             }
-            ExprKind::For { pat, iter, body } => {
+            ExprKind::For {
+                label,
+                pat,
+                iter,
+                body,
+            } => {
+                if let Some(label) = label {
+                    label.for_each_span_mut(visit);
+                }
                 pat.for_each_span_mut(visit);
                 iter.for_each_span_mut(visit);
                 body.for_each_span_mut(visit);
@@ -1348,13 +1479,29 @@ impl Expr {
                     count.for_each_span_mut(visit);
                 }
             },
-            ExprKind::Macro(call) => call.for_each_span_mut(visit),
-            ExprKind::Break(expr) => {
-                if let Some(expr) = expr {
-                    expr.for_each_span_mut(visit);
+            ExprKind::Array { elems } => {
+                for elem in elems {
+                    elem.for_each_span_mut(visit);
                 }
             }
-            ExprKind::Continue => {}
+            ExprKind::ArrayRepeat { value, len } => {
+                value.for_each_span_mut(visit);
+                len.for_each_span_mut(visit);
+            }
+            ExprKind::Macro(call) => call.for_each_span_mut(visit),
+            ExprKind::Break { label, value } => {
+                if let Some(label) = label {
+                    label.for_each_span_mut(visit);
+                }
+                if let Some(value) = value {
+                    value.for_each_span_mut(visit);
+                }
+            }
+            ExprKind::Continue { label } => {
+                if let Some(label) = label {
+                    label.for_each_span_mut(visit);
+                }
+            }
             ExprKind::Return(expr) => {
                 if let Some(expr) = expr {
                     expr.for_each_span_mut(visit);
@@ -1532,10 +1679,24 @@ impl TypeExpr {
                 }
                 ret.for_each_span_mut(visit);
             }
-            TypeExpr::Ref { inner, span, .. } => {
+            TypeExpr::Ref {
+                lifetime,
+                inner,
+                span,
+                ..
+            } => {
                 visit(span);
+                if let Some(lifetime) = lifetime {
+                    visit(&mut lifetime.span);
+                }
                 inner.for_each_span_mut(visit);
             }
+            TypeExpr::Array { elem, len, span } => {
+                visit(span);
+                elem.for_each_span_mut(visit);
+                len.for_each_span_mut(visit);
+            }
+            TypeExpr::Lifetime(lifetime) => visit(&mut lifetime.span),
             TypeExpr::Dyn(trait_ref) => trait_ref.for_each_span_mut(visit),
             TypeExpr::Slice { elem, span } => {
                 visit(span);

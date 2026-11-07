@@ -239,6 +239,9 @@ pub enum Ty {
     /// A slice type `[T]`. Unsized: a slice value can only live behind a
     /// reference, and its C representation is a fat pointer struct.
     Slice(Box<Ty>),
+    /// A fixed-size array type `[T; N]`. Sized, stored inline by value; the
+    /// length is part of the type, so `[T; 3]` and `[T; 4]` are distinct.
+    Array(Box<Ty>, usize),
     /// The unsized builtin UTF-8 string slice type str. Only usable behind a
     /// reference: &str and &mut str.
     Str,
@@ -351,6 +354,12 @@ impl Ty {
         Ty::Slice(Box::new(elem))
     }
 
+    /// The fixed-size array type `[T; N]` built from an element type and a
+    /// length.
+    pub fn array(elem: Ty, len: usize) -> Ty {
+        Ty::Array(Box::new(elem), len)
+    }
+
     /// The unsized UTF-8 slice type str.
     pub fn str_() -> Ty {
         Ty::Str
@@ -449,6 +458,18 @@ impl Ty {
         matches!(self, Ty::Slice(_))
     }
 
+    pub fn is_array(&self) -> bool {
+        matches!(self, Ty::Array(_, _))
+    }
+
+    /// The element type of an array or slice type.
+    pub fn sequence_element(&self) -> Option<&Ty> {
+        match self {
+            Ty::Array(elem, _) | Ty::Slice(elem) => Some(elem),
+            _ => None,
+        }
+    }
+
     pub fn is_str(&self) -> bool {
         matches!(self, Ty::Str)
     }
@@ -494,6 +515,7 @@ impl Ty {
             Ty::Option(inner) => inner.is_bitwise_copy(),
             Ty::Result(ok, err) => ok.is_bitwise_copy() && err.is_bitwise_copy(),
             Ty::Tuple(elems) => elems.iter().all(Ty::is_bitwise_copy),
+            Ty::Array(elem, len) => *len == 0 || elem.is_bitwise_copy(),
             Ty::Struct(_) | Ty::Enum(_) => false,
         }
     }
@@ -571,6 +593,7 @@ impl fmt::Display for Ty {
                 write!(f, ") -> {}", ret)
             }
             Ty::Slice(elem) => write!(f, "[{}]", elem),
+            Ty::Array(elem, len) => write!(f, "[{}; {}]", elem, len),
             Ty::Str => write!(f, "str"),
             Ty::Dyn(id) => write!(f, "dyn#{}", id),
             Ty::Struct(id) => write!(f, "struct#{}", id),

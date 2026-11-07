@@ -28,7 +28,9 @@ impl Checker<'_> {
     fn slice_element_ty(&mut self, base: &TExpr) -> Option<ITy> {
         let ty = self.infer.resolve(&base.ty);
         match &ty {
-            ITy::Vec(elem) | ITy::Slice(elem) => Some(ITy::slice((**elem).clone())),
+            ITy::Vec(elem) | ITy::Slice(elem) | ITy::Array(elem, _) => {
+                Some(ITy::slice((**elem).clone()))
+            }
             ITy::String | ITy::Str => Some(ITy::Str),
             _ => None,
         }
@@ -174,6 +176,7 @@ impl Checker<'_> {
         let actual_inner = self.infer.resolve(&actual_inner);
         let inner_ty = match (&wanted_inner, &actual_inner) {
             (ITy::Slice(wanted_elem), ITy::Vec(actual_elem))
+            | (ITy::Slice(wanted_elem), ITy::Array(actual_elem, _))
             | (ITy::Slice(wanted_elem), ITy::Slice(actual_elem)) => {
                 if !self.unify_quiet(wanted_elem, actual_elem) {
                     return None;

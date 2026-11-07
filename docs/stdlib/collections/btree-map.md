@@ -1,6 +1,6 @@
 # btree_map: BTreeMap<K, V>
 
-**Status in 2.1.0.** Implemented in `stdlib/src/collections.ls`.
+**Status in 2.2.0.** Implemented in `stdlib/src/collections.ls`.
 
 `BTreeMap<K, V>` is the ordered map: it stores keys and values in two parallel
 `Vec`s sorted by key and finds entries by scanning the key vector in order.
@@ -31,7 +31,7 @@ to use when the output must be sorted.
 * `insert`, `get`, `contains_key` and `remove` scan the sorted key vector with
   linear comparisons, so they cost linear time in the worst case.
 
-## Limits in 2.1.0
+## Limits in 2.2.0
 
 There is no `for` loop over a `BTreeMap` yet: read the entries with `keys()`
 and `values()`. `get_with(key, f)` exists only on [`HashMap`](hash-map.md); it

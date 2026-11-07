@@ -8,6 +8,12 @@
 // Since 2.1.0 lengths, capacities, indices and counts are usize at the public
 // surface (Rust alignment). The frozen intrinsic ABI keeps i64 for length-like
 // results and indices; the wrappers convert at the intrinsic boundary.
+//
+// v2.2 Phase C: get_mut/first_mut/last_mut (and [T]::get_mut) return mutable
+// references into the vector's storage (Option<&mut T>); they have no lifetime
+// parameters, so they work under the Phase C lifetime rules. Vec::iter_mut is
+// deferred to a later version: a borrowing iterator needs a lifetime-
+// parameterized adapter struct, which v2.2 does not support in stdlib code.
 
 pub struct Vec<T> {
     internal: (),
@@ -29,6 +35,12 @@ pub extern fn __vec_last<T>(v: &Vec<T>) -> Option<T>;
 pub extern fn __vec_get<T>(v: &Vec<T>, index: i64) -> Option<T>;
 pub extern fn __vec_extend<T>(v: &mut Vec<T>, other: Vec<T>);
 pub extern fn __vec_reverse<T>(v: &mut Vec<T>);
+
+// v2.2 Phase C borrowed-view intrinsic: returns a mutable reference to the
+// element at `index`, or None when the index is out of bounds. The reference
+// points into the vector's storage, so the receiver borrow stays live while the
+// result is used. first_mut/last_mut are built on top of this intrinsic.
+pub extern fn __vec_get_mut<T>(v: &mut Vec<T>, index: i64) -> Option<&mut T>;
 
 impl<T> Vec<T> {
     pub fn new() -> Vec<T> {
@@ -77,6 +89,26 @@ impl<T> Vec<T> {
 
     pub fn get(&self, index: usize) -> Option<T> {
         return __vec_get(self, index as i64);
+    }
+
+    /// Returns a mutable reference to the element at `index`, or None when the
+    /// index is out of bounds (v2.2 borrowed accessors).
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        return __vec_get_mut(self, index as i64);
+    }
+
+    /// Returns a mutable reference to the first element, or None when empty.
+    pub fn first_mut(&mut self) -> Option<&mut T> {
+        return __vec_get_mut(self, 0);
+    }
+
+    /// Returns a mutable reference to the last element, or None when empty.
+    pub fn last_mut(&mut self) -> Option<&mut T> {
+        let length: usize = __vec_len::<T>(self) as usize;
+        if length == 0 {
+            return None;
+        }
+        return __vec_get_mut(self, (length - 1) as i64);
     }
 
     pub fn extend(&mut self, other: Vec<T>) {
@@ -173,6 +205,9 @@ impl<T> Vec<T> {
 // slice expressions handled in codegen).
 pub extern fn __slice_len<Z>(s: &[Z]) -> i64;
 pub extern fn __slice_get<Z>(s: &[Z], index: i64) -> Option<Z>;
+// v2.2 Phase C borrowed-view intrinsic for slices (same contract as
+// __vec_get_mut): the result points into the slice's storage.
+pub extern fn __slice_get_mut<Z>(s: &mut [Z], index: i64) -> Option<&mut Z>;
 pub extern fn __slice_slice<Z>(s: &[Z], start: i64, end: i64) -> &[Z];
 pub extern fn __vec_as_slice<Z>(v: &Vec<Z>) -> &[Z];
 pub extern fn __vec_as_mut_slice<Z>(v: &mut Vec<Z>) -> &mut [Z];
@@ -188,5 +223,25 @@ impl<T> [T] {
 
     pub fn get(&self, index: usize) -> Option<T> {
         return __slice_get(self, index as i64);
+    }
+
+    /// Returns a mutable reference to the element at `index`, or None when the
+    /// index is out of bounds (v2.2 borrowed accessors).
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        return __slice_get_mut(self, index as i64);
+    }
+
+    /// Returns a mutable reference to the first element, or None when empty.
+    pub fn first_mut(&mut self) -> Option<&mut T> {
+        return __slice_get_mut(self, 0);
+    }
+
+    /// Returns a mutable reference to the last element, or None when empty.
+    pub fn last_mut(&mut self) -> Option<&mut T> {
+        let length: usize = __slice_len::<T>(self) as usize;
+        if length == 0 {
+            return None;
+        }
+        return __slice_get_mut(self, (length - 1) as i64);
     }
 }

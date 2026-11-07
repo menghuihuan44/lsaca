@@ -4,7 +4,7 @@ Version 1.5.0 adds the `Iterator<T>` trait and a lazy adapter pipeline over it.
 Iterators are ordinary values: an adapter returns a generic struct that stores
 its input and the closures it needs, and nothing runs until a terminal operation
 asks for the next item. The trait and the adapter functions themselves are
-written in lsaca — in 2.1.0 they live in the `std` crate (`std::iter`,
+written in lsaca — in 2.2.0 they live in the `std` crate (`std::iter`,
 `stdlib/src/iter.ls`), whose root re-exports the prelude names — but a program
 only uses the public surface described here. Version 2.1 adds the `zip`,
 `chain`, `filter_map`, `take_while`, `skip_while` and `step_by` adapters plus the
@@ -51,7 +51,7 @@ None
 
 Unlike Rust's `into_iter`, `.iter()` **consumes the vector**: the iterator owns
 the elements from then on, so `values` cannot be used again. That is a
-documented deviation from Rust (`.iter()` still consumes the vector in 2.1.0), but
+documented deviation from Rust (`.iter()` still consumes the vector in 2.2.0), but
 it means `.iter()` works for any element type, including move-only types that
 are neither `Copy` nor cloneable.
 
@@ -391,7 +391,8 @@ The 2.1 iterator pipeline is still deliberately small. It has no:
 
 * `size_hint` or double-ended iteration;
 * `rev` and `flat_map` adapters;
-* `iter_mut` or borrowing iteration over a `Vec` (`.iter()` consumes it);
+* mutable borrowing iteration (`Vec::iter_mut`, `VecIterMut`), deferred to a
+  later version (`.iter()` consumes the vector);
 * `into_iter` (the method is spelled `.iter()`);
 * for-loop iteration over a `HashMap` (use `keys()`/`values()`, see
   [HashMap](20-hashmap.md));
@@ -404,7 +405,7 @@ Version 2.1 adds `zip`, `chain`, `filter_map`, `take_while`, `skip_while` and
 `reduce`, `product`, `inspect` and `for_each` terminal operations (see
 [iter](../stdlib/iter.md) for the signatures).
 
-## Known limitations in 2.1.0
+## Known limitations in 2.2.0
 
 * `.iter()` still consumes the `Vec`; a borrowed vector is not iterated by
   `.iter()` (borrowing iteration goes through slice references instead).

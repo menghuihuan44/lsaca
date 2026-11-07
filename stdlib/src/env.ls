@@ -6,6 +6,16 @@
 // values; a missing variable is reported as VarError::NotPresent, never as a
 // panic.
 
+/// Building a `VarError` from a plain message, so `?` can convert a text
+/// error into a `VarError` inside functions that return `Result<_, VarError>`.
+impl From<String> for VarError {
+    fn from(value: String) -> VarError {
+        return VarError::NotUnicode(value);
+    }
+}
+
+use crate::core::From;
+
 pub extern fn __env_var(name: &str) -> Option<String>;
 pub extern fn __env_vars() -> Vec<String>;
 

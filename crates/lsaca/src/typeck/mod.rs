@@ -2646,7 +2646,54 @@ fn main() {
     }
 
     #[test]
-    fn rejects_references_stored_in_struct_fields() {
+    fn checks_recursive_types_in_linear_time() {
+        // Regression guard: type_contains_ref_at used to walk recursive
+        // struct types without a cycle guard, so a Node with two
+        // Option<Box<Node>> children took exponential time (the 30 line
+        // refs_box_rc fixture needed over 100 seconds).
+        use std::time::{Duration, Instant};
+        let started = Instant::now();
+        expect_ok(
+            r#"struct Node {
+    value: i64,
+    left: Option<Box<Node>>,
+    right: Option<Box<Node>>,
+}
+
+fn leaf(value: i64) -> Node {
+    Node {
+        value: value,
+        left: None,
+        right: None,
+    }
+}
+
+fn sum(tree: &Option<Box<Node>>) -> i64 {
+    match tree {
+        Some(boxed) => {
+            let current: &Node = boxed;
+            current.value + sum(&current.left) + sum(&current.right)
+        }
+        None => 0,
+    }
+}
+
+fn main() {
+    let tree = leaf(1);
+    println!("{}", sum(&Some(Box::new(tree))));
+}"#,
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "type checking recursive types took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn requires_a_lifetime_on_reference_struct_fields() {
+        // Since v2.2 a struct field may hold one shared reference, but the
+        // lifetime must be spelled out: the field would otherwise dangle.
         let diagnostics = analyze(
             r#"struct Holder {
     value: &i64,
@@ -2659,14 +2706,26 @@ fn main() {
 }"#,
         );
         assert!(
-            has_code(&diagnostics, "E0498"),
+            has_code(&diagnostics, "E0106"),
             "{:?}",
             messages(&diagnostics)
         );
-        assert!(has_message(
-            &diagnostics,
-            "references cannot be stored in this type"
-        ));
+        assert!(has_message(&diagnostics, "missing lifetime specifier"));
+    }
+
+    #[test]
+    fn allows_shared_reference_struct_fields_with_lifetime() {
+        expect_ok(
+            r#"struct Holder<'a> {
+    value: &'a i64,
+}
+
+fn main() {
+    let number = 1;
+    let holder = Holder { value: &number };
+    println!("{}", holder.value);
+}"#,
+        );
     }
 
     #[test]
@@ -2686,34 +2745,28 @@ fn main() {
     }
 
     #[test]
-    fn rejects_references_stored_in_optional_values() {
-        let diagnostics = analyze(
+    fn allows_references_stored_in_optional_values() {
+        // Option payloads are value positions: Option<&T> is the return type
+        // of the borrowed collection accessors, so it must stay legal.
+        expect_ok(
             r#"fn main() {
     let number = 1;
     let wrapped: Option<&i64> = Some(&number);
     println!("{}", *wrapped.unwrap());
 }"#,
         );
-        assert!(
-            has_code(&diagnostics, "E0498"),
-            "{:?}",
-            messages(&diagnostics)
-        );
     }
 
     #[test]
-    fn rejects_references_stored_in_tuples() {
-        let diagnostics = analyze(
+    fn allows_references_stored_in_tuples() {
+        // Tuples are value positions too; the borrow checker keeps the loan
+        // alive for as long as the tuple (or one of its fields) is used.
+        expect_ok(
             r#"fn main() {
     let number = 1;
     let pair: (&i64, i64) = (&number, 2);
     println!("{}", *pair.0);
 }"#,
-        );
-        assert!(
-            has_code(&diagnostics, "E0498"),
-            "{:?}",
-            messages(&diagnostics)
         );
     }
 
@@ -3698,18 +3751,17 @@ fn main() {
     }
 
     #[test]
-    fn rejects_storing_mutable_heap_references_in_aggregates() {
-        let diagnostics = expect_errors(
+    fn allows_mutable_references_in_tuples() {
+        // v2.2 allows shared references in struct/enum fields and both shared
+        // and mutable references in tuples, Option and Result payloads. Only
+        // mutable struct/enum *fields* are still rejected (see
+        // validate_field_type).
+        expect_ok(
             r#"fn main() {
     let mut text = String::from("hi");
     let pair: (&mut String, i64) = (&mut text, 1);
     println!("{}", pair.1);
 }"#,
-        );
-        assert!(
-            has_code(&diagnostics, "E0498"),
-            "{:?}",
-            messages(&diagnostics)
         );
     }
 
@@ -5438,10 +5490,11 @@ fn main() {
     // -----------------------------------------------------------------
 
     #[test]
-    fn rejects_references_inside_inferred_constructor_payloads() {
-        // Some/Box::new/Rc::new/Ok used to validate their payload type before
-        // unifying it with the argument, so an inferred reference payload was
-        // accepted and dangled once the owner moved (borrower audit F1).
+    fn rejects_references_inside_owning_constructor_payloads() {
+        // Since v2.2 the value positions Option and Result accept borrowing
+        // payloads, while the owning heap pointers Box and Rc still reject
+        // them: an inferred reference payload would dangle once its owner is
+        // released (borrower audit F1).
         let diagnostics = expect_errors(
             r#"fn main() {
     let text = String::from("hello");
@@ -5458,8 +5511,8 @@ fn main() {
             .filter(|message| message.contains("references cannot be stored in this type"))
             .count();
         assert!(
-            detected >= 4,
-            "expected one diagnostic per constructor, got {:?}",
+            detected >= 2,
+            "expected a Box and an Rc diagnostic, got {:?}",
             messages(&diagnostics)
         );
         assert!(
@@ -5471,6 +5524,8 @@ fn main() {
 
     #[test]
     fn rejects_references_escaping_blocks_through_option_payloads() {
+        // Option payloads may borrow since v2.2, so the borrow checker (not
+        // the storage guard) reports the escape as a lifetime error.
         let diagnostics = expect_errors(
             r#"fn main() {
     let escaped = {
@@ -5481,14 +5536,11 @@ fn main() {
 }"#,
         );
         assert!(
-            has_code(&diagnostics, "E0498"),
+            has_code(&diagnostics, "E0597"),
             "{:?}",
             messages(&diagnostics)
         );
-        assert!(has_message(
-            &diagnostics,
-            "references cannot be stored in this type"
-        ));
+        assert!(has_message(&diagnostics, "value does not live long enough"));
     }
 
     #[test]
@@ -5551,14 +5603,15 @@ fn main() {
     }
 
     #[test]
-    fn rejects_reference_result_and_map_payloads() {
+    fn rejects_reference_map_value_payloads() {
+        // Result payloads are value positions and accept borrows; HashMap
+        // values are owned storage and still reject them.
         let diagnostics = expect_errors(
             r#"fn main() {
     let text = String::from("hi");
-    let ok = Ok(&text);
-    let mut map = HashMap::new();
+    let mut map: HashMap<i64, &String> = HashMap::new();
     map.insert(1, &text);
-    println!("{} {}", ok.is_ok(), map.len());
+    println!("{}", map.len());
 }"#,
         );
         let detected = messages(&diagnostics)
@@ -5566,8 +5619,8 @@ fn main() {
             .filter(|message| message.contains("references cannot be stored in this type"))
             .count();
         assert!(
-            detected >= 2,
-            "expected a diagnostic for Ok and for HashMap::insert, got {:?}",
+            detected >= 1,
+            "expected a diagnostic for HashMap::insert, got {:?}",
             messages(&diagnostics)
         );
         assert!(

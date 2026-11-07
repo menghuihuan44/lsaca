@@ -1,0 +1,45 @@
+markdown: convert a Markdown subset to HTML
+input lines: 25
+output bytes: 941
+blocks: headings=2 paragraphs=3 lists=1 items=3 quotes=1 code=1
+<h1>Markdown demo</h1>
+<p>markdown.ls converts a small Markdown subset to HTML. It handles <strong>bold</strong> text, <em>italic</em> text, <code>inline code</code> and links such as <a href="https://example.com/lsaca?lang=lsaca&amp;tab=docs">the lsaca repository</a>.</p>
+<p>Escapes keep markup literal: *not italic*, `not code`, # no heading.</p>
+<h2>Lists, quotes and code</h2>
+<ul>
+<li>first item</li>
+<li>second item with <strong>bold</strong> and <em>emphasis</em></li>
+<li>third item with <code>x = 1</code> and a <a href="https://example.com/list">link</a></li>
+</ul>
+<blockquote>
+<p>quoted line one quoted line two with <strong>bold</strong> and <code>code</code> and a <a href="https://example.com/quote">link</a></p>
+</blockquote>
+<pre><code>fn main() {
+    println!(&quot;hello from a fenced block &lt;tag&gt; &amp; more&quot;);
+}</code></pre>
+<p>Trailing paragraph with unicode: café, naïve, and 5 &lt; 6 &amp; 7 &gt; 6.</p>
+
+file: data/sample.md
+file input lines: 31
+file output bytes: 1046
+blocks: headings=3 paragraphs=4 lists=1 items=3 quotes=1 code=1
+<h1>Sample document</h1>
+<p>This file is read through the optional file argument. Inline styles: <strong>bold</strong>, <em>italic</em>, <code>code</code>, and a <a href="https://example.com/sample?x=1&amp;y=2">link</a>. Backslash escapes: *kept literal*, `kept literal`, # kept literal.</p>
+<h2>Paragraphs and lists</h2>
+<p>The next paragraph is split over three source lines and must be joined with single spaces; the paragraph should also preserve unicode text such as café, naïve and 日本語.</p>
+<ul>
+<li>alpha item</li>
+<li>beta item with <strong>bold words</strong></li>
+<li>gamma item with a <a href="https://example.com/gamma">link</a></li>
+</ul>
+<blockquote>
+<p>A block quote that spans two lines, with <em>emphasis</em> and <code>inline code</code>.</p>
+</blockquote>
+<pre><code>fn main() {
+    let total = 1 + 2;
+    println!(&quot;total = {} &lt; 4 &amp;&amp; 4 &gt; 3&quot;, total);
+}</code></pre>
+<p>#hashtag is not a heading; 5 &lt; 6 &amp; 7 &gt; 6 must be escaped.</p>
+<h3>Third level heading</h3>
+<p>A final paragraph.</p>
+

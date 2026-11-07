@@ -515,7 +515,10 @@ def selection_text(stats: dict) -> str:
 
 def select_sources(only: Sequence[str]) -> tuple[list, dict]:
     fixtures = sorted(FIXTURES_DIR.glob("*.ls"), key=lambda path: path.name)
-    examples = sorted(EXAMPLES_DIR.glob("*.ls"), key=lambda path: path.name)
+    examples = sorted(
+        list(EXAMPLES_DIR.glob("*.ls")) + list((EXAMPLES_DIR / "programs").glob("*.ls")),
+        key=lambda path: path.name,
+    )
     modules = sorted(
         (path for path in MODULES_DIR.glob("*/" + MODULE_MAIN) if path.is_file()),
         key=lambda path: path.parent.name,

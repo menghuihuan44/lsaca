@@ -1,11 +1,12 @@
 # Standard library
 
 Version 2.0 moved the standard library out of the compiler into a normal lsaca
-crate named `std`, and version 2.1.0 expands its surface and aligns it with
-Rust (see the [standard library reference](../stdlib/README.md)). The crate
+crate named `std`, version 2.1.0 expanded its surface and aligned it with
+Rust, and version 2.2.0 adds the `From` trait, `Error::source` and borrowed
+lookups (see the [standard library reference](../stdlib/README.md)). The crate
 root re-exports the prelude with `pub use`, so unqualified names are in scope in
 every module of every crate without an import, whether or not the program uses
-`mod` or a package; the modules can also be named with `std::…` paths. In
+`mod` or a package; the modules can also be named with `std::…` paths. Since
 version 2.1.0 a qualified path resolves for functions, constructors and
 associated items (`std::fs::read_to_string`,
 `std::collections::HashMap::new()`, `std::io::ErrorKind::NotFound`), and
@@ -19,7 +20,7 @@ Builtin generic types are `Vec<T>`, `HashMap<K, V>`, `Option<T>`,
 non-generic. The prelude also provides the generic functions behind the
 iterator adapters (see [Iterators](19-iterators.md)); those are ordinary public
 items of the `std` crate. This page describes the language-level library
-behaviour of version 2.1.0; the API of each module is documented in the
+behaviour of version 2.2.0; the API of each module is documented in the
 [standard library reference](../stdlib/README.md).
 
 The 2.1.0 changes you meet on every page are: a bare integer literal defaults
@@ -33,6 +34,16 @@ is a static slice that allocates nothing; concatenation is `String + &str`;
 and the file and metadata APIs return integer-sized values. The 1.5–2.0
 sections below still describe the unchanged core.
 
+The 2.2.0 changes you meet here are: `std::core` provides the `From` trait, so
+`?` converts an error with `impl From<Found> for Expected` when one exists (see
+[From and ?](30-from-try.md)); `std::error::Error` gains a default `source`
+method; and borrowed access arrives — `HashMap::get`/`get_mut` take `&K` and
+return references, and `Vec` and slices gain `get_mut`, `first_mut` and
+`last_mut`. Mutable borrowing iterators (`Vec::iter_mut`, `VecIterMut`) are
+deferred. Arrays, loop labels and reference fields are language features rather
+than library surface; they are documented in [Arrays](27-arrays.md), [Loop
+labels](28-loop-labels.md) and [Lifetimes](29-lifetimes.md).
+
 The page is organised by builtin: formatting first, because every example in the
 documentation uses it, then `String`, `Vec`, iterators, `HashMap`, `Option`
 (including its combinators), `Result` (including its combinators and the `?`
@@ -42,7 +53,7 @@ rules. Version 2.0 also adds the unsized slice types and `dyn` trait objects:
 str](26-slices-and-str.md), and `dyn Trait` in [Trait
 objects](25-trait-objects.md).
 
-## The std crate in 2.1
+## The std crate in 2.2
 
 The library source lives in `stdlib/src/` as one crate of ordinary lsaca code.
 It is embedded into the compiler at build time and parsed with a reserved
@@ -51,30 +62,30 @@ It is embedded into the compiler at build time and parsed with a reserved
 language as user code; only the `extern fn` intrinsics declared in it are
 implemented by code generation.
 
-| Module | Page | Status in 2.1.0 |
+| Module | Page | Status in 2.2.0 |
 | --- | --- | --- |
-| `std::core` (`Option`, `Result`, `Iterator`) | [core](../stdlib/core.md) | migrated; 2.1.0 adds the new `Option`/`Result` combinators and iterator methods |
+| `std::core` (`Option`, `Result`, `Iterator`) | [core](../stdlib/core.md) | migrated; 2.1.0 adds the new `Option`/`Result` combinators and iterator methods; 2.2.0 adds the `From` trait |
 | `std::string` | [string](../stdlib/string.md) | migrated; `&str` parameters, the typed `parse` surface and the `String` forwarders for the `str` methods |
 | `std::char` | [char](../stdlib/char.md) | ASCII classification methods; 2.1.0 adds `is_ascii`, the `to_ascii_*` conversions and `to_digit`; Unicode classification is not implemented |
-| `std::vec` | [vec](../stdlib/vec.md) | migrated; `sort`, `as_slice` and `as_mut_slice` implemented; 2.1.0 adds `truncate`, `swap` and `contains` |
-| `std::iter` | [iter](../stdlib/iter.md) | migrated; 2.1.0 adds `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by`, `position`, `last`, `nth`, `reduce`, `product`, `inspect` and `for_each`; `rev` and `flat_map` remain planned |
+| `std::vec` | [vec](../stdlib/vec.md) | migrated; `sort`, `as_slice` and `as_mut_slice` implemented; 2.1.0 adds `truncate`, `swap` and `contains`; 2.2.0 adds the borrowed accessors `get_mut`, `first_mut` and `last_mut` |
+| `std::iter` | [iter](../stdlib/iter.md) | migrated; 2.1.0 adds `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by`, `position`, `last`, `nth`, `reduce`, `product`, `inspect` and `for_each`; `rev` and `flat_map` remain planned; mutable borrowing iterators (`iter_mut`, `VecIterMut`) are deferred |
 | `std::fmt` | [fmt](../stdlib/fmt.md) | compiler-implemented |
 | `std::math` | [math](../stdlib/math.md) | migrated; `abs`/`min`/`max` remain compiler builtins; 2.1.0 adds the `f64` constants |
-| `std::collections` | [collections](../stdlib/collections/README.md) | `HashMap` migrated; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented; 2.1.0 follows the `usize` and `&str` rules |
+| `std::collections` | [collections](../stdlib/collections/README.md) | `HashMap` migrated; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented; 2.1.0 follows the `usize` and `&str` rules; 2.2.0 makes `HashMap::get`/`get_mut` borrow the key and return a reference |
 | `std::io` | [io](../stdlib/io.md) | error types, `File` and stream handles implemented; 2.1.0 adds `io::Result`, `Error::new`/`other` and the integer-shaped read/write/seek results; the stream traits are not implemented |
 | `std::fs` | [fs](../stdlib/fs.md) | path, directory and metadata API implemented; 2.1.0 returns `u64` sizes and `SystemTime` modification times |
 | `std::net` | [net](../stdlib/net.md) | implemented (plain TCP); 2.1.0 adds `Shutdown` |
 | `std::time` | [time](../stdlib/time.md) | implemented; 2.1.0 adds `Duration`, `Instant`, `SystemTime`, `unix_epoch()` and `sleep` |
 | `std::env` | [env](../stdlib/env.md) | implemented; 2.1.0 changes `var` to `Result<String, VarError>` |
 | `std::process` | [process](../stdlib/process.md) | `args` implemented; `exit` remains the compiler builtin, now taking `i32` |
-| `std::error` | [error](../stdlib/error.md) | the `Error` trait implemented; 2.1.0 adds the `io::Error` and parse-error implementations |
+| `std::error` | [error](../stdlib/error.md) | the `Error` trait implemented with a default `source` method (2.2.0); 2.1.0 adds the `io::Error` and parse-error implementations |
 
 "Migrated from 1.7" means the surface described in this chapter is unchanged but
 the implementation now lives in the `std` crate. "Implemented" names what
-version 2.1.0 provides; each module page lists it separately from the API that
-is not implemented in 2.1.0. Those remaining APIs are fixed by the 2.1 design
+version 2.2.0 provides; each module page lists it separately from the API that
+is not implemented in 2.2.0. Those remaining APIs are fixed by the 2.2 design
 and planned for a later release; the pages document the intended surface, not
-runnable behaviour. The whole library is versioned with the compiler (2.1.0) and
+runnable behaviour. The whole library is versioned with the compiler (2.2.0) and
 cannot be replaced by a user package: the package name `std` is reserved.
 
 ## Formatting and printing
@@ -550,7 +561,7 @@ ababab
 Parsing returns a typed `Result`. `parse_i64` returns
 `Result<i64, ParseIntError>` and `parse_f64` returns
 `Result<f64, ParseFloatError>`; the generic form `parse::<T>()` takes its target
-type from the turbofish and accepts `i64` and `f64` in 2.1.0 (other numeric
+type from the turbofish and accepts `i64` and `f64` in 2.2.0 (other numeric
 target types are rejected with `E0107`). The error values implement
 `error::Error`, whose `message()` method returns the diagnostic text:
 
@@ -625,6 +636,8 @@ so the reservation is only observable as avoided reallocations.
 | `clear()` | removes all elements |
 | `first()` / `last()` | first/last element as `Option<T>` |
 | `get(i)` | element at `i` as `Option<T>`, or `None` for an out-of-range index |
+| `get_mut(i)` | mutable borrow of the element at `i` as `Option<&mut T>` (added in 2.2.0) |
+| `first_mut()` / `last_mut()` | mutable borrow of the first/last element as `Option<&mut T>` (added in 2.2.0) |
 | `extend(other)` | appends all elements of another vector |
 | `truncate(n)` | keeps only the first `n` elements, dropping the rest (added in 2.1.0) |
 | `swap(i, j)` | exchanges the elements at two indices (added in 2.1.0) |
@@ -638,6 +651,11 @@ so the reservation is only observable as avoided reallocations.
 `get` is the non-panicking accessor: it returns `None` instead of panicking.
 Indexing returns a **copy** of the element, so mutating the result does not
 change the vector; assign through the index to modify it.
+
+`get_mut`, `first_mut` and `last_mut` return `Option<&mut T>`. A `match` or
+`if let` can use the call directly as its scrutinee; the mutable borrow lasts for
+the whole match, and assigning through the bound reference modifies the element
+in place. The same three accessors exist on the slice type `[T]`.
 
 ```ls
 fn main() {
@@ -729,8 +747,8 @@ consume the iterator and produce a value.
 | `filter_map(f)` | applies `f: Fn(T) -> Option<U>` and yields the `Some` values (added in 2.1.0) |
 | `take_while(p)` / `skip_while(p)` | yields while `p: Fn(&T) -> bool` is true / drops while it is true (added in 2.1.0) |
 | `step_by(n)` | yields every `n`-th value, starting with the first; `n` is a `usize` (added in 2.1.0) |
-| `rev()` | yields the values in reverse; the adapter must be double-ended — planned, not in 2.1.0 |
-| `flat_map(f)` | applies `f: Fn(T) -> I` and yields the values of every `I` in order — planned, not in 2.1.0 |
+| `rev()` | yields the values in reverse; the adapter must be double-ended — planned, not in 2.2.0 |
+| `flat_map(f)` | applies `f: Fn(T) -> I` and yields the values of every `I` in order — planned, not in 2.2.0 |
 | `collect()` | collects into a `Vec<T>`; the target type must be known |
 | `fold(init, f)` | folds with `f: Fn(U, T) -> U` |
 | `count()` / `sum()` | number of values (`usize`) / sum of numbers (`i32`, `i64`, `usize` or `f64`) |
@@ -743,12 +761,14 @@ consume the iterator and produce a value.
 | `reduce(f)` | `Option<T>`: like `fold` without an initial value |
 | `inspect(f)` / `for_each(f)` | trace each value (`f: Fn(&T)`) / consume each value (`f: Fn(T)`) |
 
-Version 2.1.0 provides the 2.0 adapter set (`map`, `filter`, `take`, `skip`,
-`enumerate`) plus `zip`, `chain`, `filter_map`, `take_while`, `skip_while` and
-`step_by`, and the terminals `collect`, `fold`, `count`, `sum`, `product`,
-`any`, `all`, `find`, `position`, `last`, `nth`, `reduce`, `inspect` and
+Version 2.2.0 provides the full adapter set: the 2.0 adapters (`map`, `filter`, `take`, `skip`,
+`enumerate`), the adapters added in 2.1.0 (`zip`, `chain`, `filter_map`,
+`take_while`, `skip_while` and `step_by`), and the terminals `collect`,
+`fold`, `count`, `sum`, `product`, `any`, `all`,
+`find`, `position`, `last`, `nth`, `reduce`, `inspect` and
 `for_each`. `rev` and `flat_map` are fixed by the design but are not
-implemented in 2.1.0 and are planned for a later release (see
+implemented in 2.2.0 and are planned for a later release; mutable borrowing
+iterators (`Vec::iter_mut`, `VecIterMut`) are deferred as well (see
 [iter](../stdlib/iter.md)).
 
 `sum` and `product` dispatch on the iterator item type: `i32`, `i64`, `usize`
@@ -777,8 +797,11 @@ Full details, user-defined iterators and the exact rules are on
 A `HashMap` is a builtin map from keys to values added in 1.5. Keys are limited
 to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and `char` (character keys
 since 1.6.0, the pointer-sized integer keys since 2.0.0). The list is exhaustive:
-`i32` and the narrower integer types are not key types in 2.1.0, so a map with
-an `i32` key is rejected with `E0277` — use `i64`. Values may be any value type. A map is move-only and owns its keys and values;
+`i32` and the narrower integer types are not key types in 2.2.0, so a map with
+an `i32` key is rejected with `E0277` — use `i64`. Values may be any value type.
+Since 2.2.0 `get` and `get_mut` borrow the key and return a reference to the
+living value, so no clone is needed; the other lookups still take the key by
+value. A map is move-only and owns its keys and values;
 `.clone()` produces an independent copy when the key and value types are
 cloneable. Since 1.6.0 the implementation is a Swiss-Table-style open-addressed
 table with a deterministic, non-cryptographic 64-bit hash. The printed order is
@@ -791,7 +814,8 @@ fn main() {
     counts.insert(String::from("a"), 1);
     counts.insert(String::from("b"), 2);
     counts.insert(String::from("a"), 3);
-    println!("{:?}", counts.get(String::from("a")));
+    let key = String::from("a");
+    println!("{:?}", counts.get(&key));
     println!("{} {}", counts.len(), counts.contains_key(String::from("b")));
 }
 ```
@@ -806,15 +830,18 @@ Some(3)
 | --- | --- |
 | `HashMap::new()` | creates an empty map; type arguments come from context or the turbofish |
 | `insert(key, value)` | moves both in, returns the previous value |
-| `get(key)` | returns `Option<V>` (the stored value is cloned) |
-| `get_with(key, f)` | applies `f: Fn(&V) -> U` to the stored value, returns `Option<U>` |
+| `get(&key)` | returns `Option<&V>`, a borrowed view of the stored value (2.2.0) |
+| `get_mut(&key)` | returns `Option<&mut V>`, a mutable borrowed view; the map binding must be `mut` (2.2.0) |
+| `get_with(key, f)` | copies the key, applies `f: Fn(&V) -> U` to the stored value, returns `Option<U>` |
 | `contains_key(key)` | true when the key is present |
 | `remove(key)` | removes the entry, returns `Option<V>` |
 | `len()` / `is_empty()` | number of entries / emptiness |
 | `clear()` | removes every entry |
 | `keys()` / `values()` | clones the keys/values into a `Vec` |
 
-Full details, ownership rules and limitations are on [HashMap](20-hashmap.md).
+`get` and `get_mut` borrow the key, so pass `&key`; `insert`, `contains_key`,
+`remove` and `get_with` take the key by value. Full details, ownership rules
+and limitations are on [HashMap](20-hashmap.md).
 
 ## Option
 
@@ -986,7 +1013,7 @@ Err("boom")
 ```
 
 `Result::map` leaves an `Err` untouched and `Result::map_err` leaves an `Ok`
-untouched. `Result` has no `map_or` method in 2.1.0; match on the result, or use
+untouched. `Result` has no `map_or` method in 2.2.0; match on the result, or use
 `map`/`map_err`/`and_then`, e.g. `result.map(|v| v + 1).unwrap_or(0)`.
 Error values are not modified by `map`, so the error type of `good.map(double)`
 stays `String`.
@@ -1200,7 +1227,7 @@ error[E0308]: the ? operator cannot convert error types: expected String, found 
    |
  3 |     let value = other?;
    |                 ^^^^^^
-   = note: the ? operator requires the error types to match exactly; use map_err or an explicit match to convert
+   = note: the ? operator requires the error types to match, or an impl From<Found> for Expected; implement From or use map_err
 
 lsaca: example-31.ls: could not compile example-31.ls due to previous error(s)
 ```
@@ -1386,7 +1413,7 @@ These are the legacy prelude helpers; they are items of the `std` crate root and
 stay in scope for every program. The richer per-module APIs — `std::io`,
 `std::fs`, `std::net`, `std::time`, `std::env` and `std::process` — are
 documented in the [standard library reference](../stdlib/README.md), which marks
-each item as implemented in 2.1.0 or planned. In 2.1.0 the `fs` functions and the
+each item as implemented in 2.2.0 or planned. In 2.2.0 the `fs` functions and the
 `read_file`/`write_file` helpers take `&str` paths and contents, `io` has
 `io::Result`, `io::Error::new`/`other` and integer-sized `read`/`write`/`seek`,
 `process::exit` is implemented, and `time`, `env` and `net` gain the new types
@@ -1584,7 +1611,7 @@ macros work on all of them; comparing function values is `E0369`.
 `assert_ne!` also accepts an optional message: `assert_ne!(left, right,
 "format", args…)` panics with the formatted message instead of the default
 `left`/`right` report. The message form of `assert_ne!` is the only one in
-2.1.0: `assert_eq!` and `assert!` take exactly the operands shown above.
+2.2.0: `assert_eq!` and `assert!` take exactly the operands shown above.
 
 The argument of `assert!` must be `bool`; `assert!(n)` for an integer `n` is a
 type error (`E0308`). Write the comparison explicitly: `assert!(n > 0)`.

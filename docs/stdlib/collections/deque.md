@@ -1,6 +1,6 @@
 # deque: VecDeque<T>
 
-**Status in 2.1.0.** Implemented in `stdlib/src/collections.ls`.
+**Status in 2.2.0.** Implemented in `stdlib/src/collections.ls`.
 
 `VecDeque<T>` is a double-ended queue: a growable `Vec<T>` with values ordered
 from front to back, so callers can add and remove at both ends. It is the
@@ -36,7 +36,7 @@ implementation is a plain `Vec`; the front operations shift the stored elements.
 * `VecDeque` has no `sort` of its own; collect into a `Vec` first and use
   `Vec::sort`.
 
-## Limitations in 2.1.0
+## Limitations in 2.2.0
 
 There is no `for` loop over a `VecDeque` yet: read the values with `elements()`.
 There is no `with_capacity`, no `front`/`back` inspection (use `get(0)` and

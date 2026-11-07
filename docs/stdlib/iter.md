@@ -1,6 +1,6 @@
 # iter: iterators and adapters
 
-**Status in 2.1.0.** Implemented. `Iterator<T>`, the adapters and the terminal
+**Status in 2.2.0.** Implemented. `Iterator<T>`, the adapters and the terminal
 operations live in `stdlib/src/iter.ls` (`std::iter`) and are re-exported
 through the prelude, so they need no import. Version 2.1.0 adds `zip`, `chain`,
 `filter_map`, `take_while`, `skip_while`, `step_by` and `inspect`, and the

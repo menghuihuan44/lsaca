@@ -1,6 +1,6 @@
 # btree_set: BTreeSet<T>
 
-**Status in 2.1.0.** Implemented in `stdlib/src/collections.ls`.
+**Status in 2.2.0.** Implemented in `stdlib/src/collections.ls`.
 
 `BTreeSet<T>` is the ordered set: it stores its elements in a sorted `Vec<T>`
 and finds them by scanning the vector in order. Reading the set is in ascending
@@ -37,7 +37,7 @@ not a tree; the name is kept for familiarity.)
   search is not used yet.
 * Lengths are `usize` since 2.1.0.
 
-## Limitations in 2.1.0
+## Limitations in 2.2.0
 
 There is no `for` loop over a `BTreeSet` yet: read the values with `elements()`.
 Set algebra (`union`, `intersection`, `difference`, `subset`) exists only on

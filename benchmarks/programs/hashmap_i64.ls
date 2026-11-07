@@ -19,7 +19,7 @@ fn main() {
     let mut hits = 0;
     i = 0;
     while i < n {
-        let value = values.get(key_at(i)).unwrap();
+        let value = *values.get(&key_at(i)).unwrap();
         hits += 1;
         fold = mix(fold, value);
         i += 1;
@@ -28,7 +28,7 @@ fn main() {
     while i < n {
         let absent = 2147483648 + i;
         if values.contains_key(absent) {
-            fold = mix(fold, values.get(absent).unwrap());
+            fold = mix(fold, *values.get(&absent).unwrap());
         } else {
             fold = mix(fold, absent % 97);
         }

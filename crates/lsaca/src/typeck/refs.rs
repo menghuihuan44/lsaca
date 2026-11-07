@@ -135,19 +135,95 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether a type stores a reference anywhere outside of a function
-    /// signature. Used to reject references in aggregates.
-    pub fn type_contains_ref(&self, ty: &ITy) -> bool {
+    /// signature. Used to reject references in aggregates: a struct or enum
+    /// that has a borrowing field counts as borrowing too, so containers of
+    /// borrowing values and closures capturing them stay rejected.
+    ///
+    /// Recursive types are ordinary in this language (a tree node holding
+    /// Option<Box<Node>> fields), so the walk keeps the nominal types on the
+    /// current path: revisiting one cannot discover a reference that the first
+    /// visit did not already see. Without that guard a two-field recursive node
+    /// makes the walk exponential in the depth limit, which used to cost
+    /// minutes of type checking for a 30-line program.
+    pub fn type_contains_ref(&mut self, ty: &ITy) -> bool {
+        let mut path = Vec::new();
+        self.type_contains_ref_at(ty, 0, &mut path)
+    }
+
+    fn type_contains_ref_at(
+        &mut self,
+        ty: &ITy,
+        depth: usize,
+        path: &mut Vec<(u8, usize)>,
+    ) -> bool {
+        if depth > 64 {
+            return false;
+        }
         match self.infer.resolve(ty) {
             ITy::Ref { .. } => true,
             ITy::Vec(inner) | ITy::Rc(inner) | ITy::Box(inner) | ITy::Option(inner) => {
-                self.type_contains_ref(&inner)
+                self.type_contains_ref_at(&inner, depth + 1, path)
             }
-            ITy::Result(ok, err) => self.type_contains_ref(&ok) || self.type_contains_ref(&err),
+            ITy::Result(ok, err) => {
+                self.type_contains_ref_at(&ok, depth + 1, path)
+                    || self.type_contains_ref_at(&err, depth + 1, path)
+            }
             ITy::HashMap(key, value) => {
-                self.type_contains_ref(&key) || self.type_contains_ref(&value)
+                self.type_contains_ref_at(&key, depth + 1, path)
+                    || self.type_contains_ref_at(&value, depth + 1, path)
             }
-            ITy::Tuple(elems) => elems.iter().any(|elem| self.type_contains_ref(elem)),
+            ITy::Tuple(elems) => elems
+                .iter()
+                .any(|elem| self.type_contains_ref_at(elem, depth + 1, path)),
+            ITy::Struct(struct_id) => {
+                let key = (0u8, struct_id);
+                if path.contains(&key) {
+                    return false;
+                }
+                path.push(key);
+                self.ensure_struct_fields(struct_id);
+                let fields = self.struct_fields(struct_id);
+                let found = fields
+                    .iter()
+                    .any(|(_, _, field_ty)| self.type_contains_ref_at(field_ty, depth + 1, path));
+                path.pop();
+                found
+            }
+            ITy::Enum(enum_id) => {
+                let key = (1u8, enum_id);
+                if path.contains(&key) {
+                    return false;
+                }
+                path.push(key);
+                self.ensure_enum_variants(enum_id);
+                let variant_count = self.variant_count(enum_id);
+                let mut found = false;
+                for variant in 0..variant_count {
+                    let fields = self.variant_fields(enum_id, variant);
+                    if fields
+                        .iter()
+                        .any(|field_ty| self.type_contains_ref_at(field_ty, depth + 1, path))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                path.pop();
+                found
+            }
             _ => false,
+        }
+    }
+
+    /// Whether this type is or deep-stores a borrow. Unlike
+    /// [`Self::type_contains_ref`] the top-level fat pointer types `str`,
+    /// `[T]` and `dyn Trait` are values of their own (they are only borrowed
+    /// through a reference), so they do not count as borrows here. This is the
+    /// predicate used when the elided lifetime of a return type is computed.
+    pub fn type_borrows(&mut self, ty: &ITy) -> bool {
+        match self.infer.resolve(ty) {
+            ITy::Slice(_) | ITy::Str | ITy::Dyn(_) => false,
+            _ => self.type_contains_ref(ty),
         }
     }
 
@@ -251,6 +327,12 @@ impl<'a> Checker<'a> {
             return false;
         }
         if self.type_contains_ref(&resolved) {
+            if std::env::var_os("LSACA_TRACE_STORAGE").is_some() {
+                eprintln!(
+                    "STORAGE-LEAK {:?}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
             let described = self.describe_resolved(&resolved);
             self.error_code(
                 format!(
@@ -263,6 +345,44 @@ impl<'a> Checker<'a> {
             return false;
         }
         true
+    }
+
+    /// Validate a struct or enum field. A field may hold exactly one shared
+    /// reference whose pointee is itself borrow-free. Mutable reference fields
+    /// are not supported yet, and collections of borrowing values remain
+    /// rejected (they would weaken the lifetime-erasing storage invariant).
+    pub fn validate_field_type(&mut self, ty: &ITy, span: Span) -> bool {
+        let resolved = self.infer.resolve(ty);
+        match &resolved {
+            ITy::Ref {
+                mutable: false,
+                inner,
+            } => {
+                if self.type_contains_ref(&inner.clone()) {
+                    let described = self.describe_resolved(&resolved);
+                    self.error_code(
+                        format!(
+                            "a reference field cannot point at a value that itself borrows (found {})",
+                            described
+                        ),
+                        span,
+                        "E0498",
+                    );
+                    return false;
+                }
+                true
+            }
+            ITy::Ref { mutable: true, .. } => {
+                self.error_code(
+                    "mutable references cannot be stored in a struct or enum field yet; take &T or store an owned value"
+                        .to_string(),
+                    span,
+                    "E0498",
+                );
+                false
+            }
+            _ => self.validate_storage_type(&resolved, span),
+        }
     }
 
     /// Validate a type that is allowed to be a reference: references may only
@@ -315,7 +435,11 @@ impl<'a> Checker<'a> {
                 }
                 valid
             }
-            ITy::Vec(inner) | ITy::Option(inner) => self.validate_storage_type(&inner, span),
+            ITy::Vec(inner) => self.validate_storage_type(&inner, span),
+            // Option and Result payloads are value positions: a borrowing
+            // payload such as Option<Token<'a>> is legal in parameters and
+            // return types.
+            ITy::Option(inner) => self.validate_value_type(&inner, span),
             ITy::Rc(inner) | ITy::Box(inner) => {
                 // Box and Rc are the owning pointers that may point at an
                 // unsized value, such as Box<dyn Trait>.
@@ -326,7 +450,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ITy::Result(ok, err) => {
-                self.validate_storage_type(&ok, span) && self.validate_storage_type(&err, span)
+                self.validate_value_type(&ok, span) && self.validate_value_type(&err, span)
             }
             ITy::HashMap(key, value) => {
                 self.validate_storage_type(&key, span) && self.validate_storage_type(&value, span)
@@ -334,7 +458,7 @@ impl<'a> Checker<'a> {
             ITy::Tuple(elems) => {
                 let mut valid = true;
                 for elem in elems.iter() {
-                    if !self.validate_storage_type(elem, span) {
+                    if !self.validate_value_type(elem, span) {
                         valid = false;
                     }
                 }
@@ -466,7 +590,11 @@ impl<'a> Checker<'a> {
         if inner_ty.is_never() {
             return self.never_expr(span);
         }
-        if !self.is_place_expr(&inner_expr) {
+        // A temporary may be borrowed directly in a call argument, where the
+        // borrow only lives until the end of the call; every other position
+        // still requires a place (E0745).
+        let is_temporary = !self.is_place_expr(&inner_expr);
+        if is_temporary && self.temp_borrow_depth == 0 {
             self.error_code(
                 "cannot borrow a temporary value, bind it to a local first".to_string(),
                 span,
@@ -474,19 +602,19 @@ impl<'a> Checker<'a> {
             );
             return self.never_expr(span);
         }
-        if mutable {
+        if mutable && !is_temporary {
             let _ = self.require_mutable_place(&inner_expr, span, "borrow this value as mutable");
-            if !inner_ty.is_unsized() && !self.is_mutable_reference_target(&inner_ty) {
-                let described = self.describe_resolved(&inner_ty);
-                self.error_code(
-                    format!(
-                        "mutable references to {} are not supported; take &{} or restructure the code",
-                        described, described
-                    ),
-                    span,
-                    "E0498",
-                );
-            }
+        }
+        if mutable && !inner_ty.is_unsized() && !self.is_mutable_reference_target(&inner_ty) {
+            let described = self.describe_resolved(&inner_ty);
+            self.error_code(
+                format!(
+                    "mutable references to {} are not supported; take &{} or restructure the code",
+                    described, described
+                ),
+                span,
+                "E0498",
+            );
         }
         let ty = ITy::Ref {
             mutable,
@@ -655,7 +783,9 @@ impl<'a> Checker<'a> {
     /// Check that a returned reference borrows from the elided lifetime source
     /// (design R6). Unknown provenance is left to the borrow checker.
     pub fn check_returned_reference(&mut self, value: &TExpr, source: Option<usize>, span: Span) {
-        if !matches!(self.infer.resolve(&value.ty), ITy::Ref { .. }) {
+        let value_ty = self.infer.resolve(&value.ty);
+        let bare_ref = matches!(value_ty, ITy::Ref { .. });
+        if !self.type_borrows(&value_ty) {
             return;
         }
         match self.reference_source(value) {
@@ -669,27 +799,33 @@ impl<'a> Checker<'a> {
                         .and_then(|info| info.decl.params.get(expected))
                         .map(|param| param.name.clone())
                         .unwrap_or_else(|| format!("p{}", expected));
-                    let diag = Diagnostic::error(
+                    let message = if bare_ref {
                         "returns a reference to a value that is not the elided lifetime source"
-                            .to_string(),
-                        span,
-                    )
-                    .with_code("E0515")
-                    .with_note(format!(
-                        "the return type borrows from parameter '{}', but this reference borrows from another input",
-                        param_name
-                    ));
+                            .to_string()
+                    } else {
+                        "returns a value that borrows from a parameter that is not the elided lifetime source"
+                            .to_string()
+                    };
+                    let diag = Diagnostic::error(message, span)
+                        .with_code("E0515")
+                        .with_note(format!(
+                            "the return type borrows from parameter '{}', but this value borrows from another input",
+                            param_name
+                        ));
                     self.diagnostics.push(diag);
                 }
             }
             Provenance::Local => {
-                let diag =
-                    Diagnostic::error("returns a reference to a local value".to_string(), span)
-                        .with_code("E0515")
-                        .with_note(
-                            "the returned reference must borrow from a function parameter"
-                                .to_string(),
-                        );
+                let message = if bare_ref {
+                    "returns a reference to a local value".to_string()
+                } else {
+                    "returns a value that borrows from a local variable".to_string()
+                };
+                let diag = Diagnostic::error(message, span)
+                    .with_code("E0515")
+                    .with_note(
+                        "the returned value must borrow from a function parameter".to_string(),
+                    );
                 self.diagnostics.push(diag);
             }
             Provenance::Unknown => {}

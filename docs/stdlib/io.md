@@ -1,12 +1,12 @@
 # io: input/output
 
-**Status in 2.1.0.** Implemented. The error types, the file and standard-stream
+**Status in 2.2.0.** Implemented. The error types, the file and standard-stream
 handles, the text helpers and the handle-level primitives are implemented in
 `stdlib/src/io.ls`. The `Read`, `Write` and `BufRead` traits, `BufReader` and the
-`io::Result<T>` alias are not implemented in 2.1.0 and are planned for a later
+`io::Result<T>` alias are not implemented in 2.2.0 and are planned for a later
 release.
 
-Paths and text arguments are read-only `&str` slices, as everywhere in the 2.1.0
+Paths and text arguments are read-only `&str` slices, as everywhere in the 2.2.0
 library: pass a literal directly, or `&owned` for a `String` variable. The legacy
 text helpers `read_file` and `write_file` still report failures as a plain
 `String`, exactly as their 1.7 versions did; the `fs` text wrappers built on them
@@ -106,7 +106,7 @@ buffering layer: every `read` and `write` is one operating-system call.
 ## Planned for a later release
 
 The `Read`, `Write` and `BufRead` traits, `BufReader` and the `io::Result<T>`
-alias are not implemented in 2.1.0 and are planned for a later release. There is
+alias are not implemented in 2.2.0 and are planned for a later release. There is
 no async I/O, no memory-mapped file support and no socket type in `io` (TCP
 lives in [net](net.md)).
 

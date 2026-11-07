@@ -445,6 +445,34 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Accept a lifetime token such as 'a' or 'static'.
+    /// Lifetime tokens appear in generic parameter/argument lists, on &
+    /// references, and as loop labels; everywhere else they are rejected later.
+    fn expect_lifetime(&mut self, what: &str) -> Option<Lifetime> {
+        match self.kind() {
+            TokenKind::Lifetime(name) => {
+                let name = name.clone();
+                let span = self.span();
+                self.bump();
+                Some(Lifetime { name, span })
+            }
+            _ => {
+                let found = self.peek_kind().describe();
+                let span = self.span();
+                self.error(format!("expected {}, found {}", what, found), span);
+                None
+            }
+        }
+    }
+
+    /// Turn a lifetime into the loop label with the same name.
+    fn lifetime_label(lifetime: Lifetime) -> Label {
+        Label {
+            name: lifetime.name,
+            name_span: lifetime.span,
+        }
+    }
+
     /// Accepts a plain identifier, `Self`, or a module-path keyword (`crate`,
     /// `self`, `super`) as the first segment of a type path.
     fn expect_type_name_ident(&mut self) -> (String, Span) {
@@ -551,6 +579,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::KwWhile
                 | TokenKind::KwFor
                 | TokenKind::LBrace
+                | TokenKind::Lifetime(_)
         )
     }
 
@@ -1591,12 +1620,25 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse the parameter list of a trait method. The first parameter must be
-    /// a receiver; a missing receiver is reported once per method.
-    fn parse_trait_params(&mut self, method_span: Span) -> (Vec<Param>, Option<SelfKind>) {
+    /// Whether the tokens ahead start a `&self` or `&mut self` receiver.
+    fn receiver_reference_ahead(&self) -> bool {
+        if !self.at(TokenKind::Amp) {
+            return false;
+        }
+        if matches!(self.peek_kind_at(1), Some(TokenKind::KwSelf)) {
+            return true;
+        }
+        matches!(self.peek_kind_at(1), Some(TokenKind::KwMut))
+            && matches!(self.peek_kind_at(2), Some(TokenKind::KwSelf))
+    }
+
+    /// Parse the parameter list of a trait method. A first parameter of
+    /// `self`, `&self` or `&mut self` is the receiver; any other first
+    /// parameter makes the method an associated function, which is also
+    /// allowed (for example `From::from`).
+    fn parse_trait_params(&mut self, _method_span: Span) -> (Vec<Param>, Option<SelfKind>) {
         let mut params = Vec::new();
         let mut self_kind = None;
-        let mut reported_missing_receiver = false;
         if self
             .expect(TokenKind::LParen, "'(' after trait method name")
             .is_none()
@@ -1616,45 +1658,36 @@ impl<'a> Parser<'a> {
                 let mut_token = self.bump();
                 self.error("'self' cannot be declared 'mut'", mut_token.span);
             }
-            if first {
-                if self.at(TokenKind::KwSelf) {
-                    let token = self.bump();
-                    self_kind = Some(SelfKind::Value);
-                    params.push(Param {
-                        name: "self".to_string(),
-                        name_span: token.span,
-                        mutable: false,
-                        ty: self_type(token.span),
-                    });
-                } else if self.at(TokenKind::Amp) {
-                    let amp = self.bump();
-                    let mutable = self.eat(TokenKind::KwMut).is_some();
-                    self.expect(TokenKind::KwSelf, "'self' after '&' in receiver");
-                    self_kind = Some(if mutable {
-                        SelfKind::RefMut
-                    } else {
-                        SelfKind::Ref
-                    });
-                    params.push(Param {
-                        name: "self".to_string(),
-                        name_span: amp.span,
-                        mutable: false,
-                        ty: TypeExpr::Ref {
-                            mutable,
-                            inner: Box::new(self_type(amp.span)),
-                            span: amp.span,
-                        },
-                    });
+            if first && self.at(TokenKind::KwSelf) {
+                let token = self.bump();
+                self_kind = Some(SelfKind::Value);
+                params.push(Param {
+                    name: "self".to_string(),
+                    name_span: token.span,
+                    mutable: false,
+                    ty: self_type(token.span),
+                });
+                first = false;
+            } else if first && self.receiver_reference_ahead() {
+                let amp = self.bump();
+                let mutable = self.eat(TokenKind::KwMut).is_some();
+                self.expect(TokenKind::KwSelf, "'self' after '&' in receiver");
+                self_kind = Some(if mutable {
+                    SelfKind::RefMut
                 } else {
-                    let span = self.span();
-                    self.error_coded(
-                        E_SYNTAX,
-                        "trait methods must take a self receiver; add '&self', '&mut self', or 'self' as the first parameter",
-                        span,
-                    );
-                    reported_missing_receiver = true;
-                    params.push(self.parse_param());
-                }
+                    SelfKind::Ref
+                });
+                params.push(Param {
+                    name: "self".to_string(),
+                    name_span: amp.span,
+                    mutable: false,
+                    ty: TypeExpr::Ref {
+                        mutable,
+                        lifetime: None,
+                        inner: Box::new(self_type(amp.span)),
+                        span: amp.span,
+                    },
+                });
                 first = false;
             } else {
                 params.push(self.parse_param());
@@ -1666,13 +1699,6 @@ impl<'a> Parser<'a> {
             break;
         }
         self.expect(TokenKind::RParen, "')' after trait method parameters");
-        if self_kind.is_none() && !reported_missing_receiver {
-            self.error_coded(
-                E_SYNTAX,
-                "trait methods must take a self receiver; add '&self', '&mut self', or 'self' as the first parameter",
-                method_span,
-            );
-        }
         (params, self_kind)
     }
 
@@ -1752,27 +1778,44 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_inner(&mut self) -> TypeExpr {
-        // Reference types: &T and &mut T. The lexer scans a written '&&' as a
-        // single AmpAmp token; it is two nested shared references, &(&T).
+        // A lifetime stands in for a type only inside generic argument lists
+        // (`Parser<'a>`); typeck rejects it everywhere else.
+        if let TokenKind::Lifetime(name) = self.kind() {
+            let name = name.clone();
+            let span = self.span();
+            self.bump();
+            return TypeExpr::Lifetime(Lifetime { name, span });
+        }
+        // Reference types: &T, &mut T, &'a T and &'a mut T. The lexer scans a
+        // written '&&' as a single AmpAmp token; it is two nested shared
+        // references, &(&T).
         if self.at(TokenKind::AmpAmp) {
             let amp = self.bump();
             let mutable = self.eat(TokenKind::KwMut).is_some();
             let inner = TypeExpr::Ref {
                 mutable,
+                lifetime: None,
                 inner: Box::new(self.parse_type()),
                 span: amp.span,
             };
             return TypeExpr::Ref {
                 mutable: false,
+                lifetime: None,
                 inner: Box::new(inner),
                 span: amp.span,
             };
         }
         if self.at(TokenKind::Amp) {
             let amp = self.bump();
+            let lifetime = if matches!(self.kind(), TokenKind::Lifetime(_)) {
+                self.expect_lifetime("lifetime after '&'")
+            } else {
+                None
+            };
             let mutable = self.eat(TokenKind::KwMut).is_some();
             return TypeExpr::Ref {
                 mutable,
+                lifetime,
                 inner: Box::new(self.parse_type()),
                 span: amp.span,
             };
@@ -1799,26 +1842,21 @@ impl<'a> Parser<'a> {
                 span,
             });
         }
-        // A slice type: `[T]`. Arrays are not part of the language, so a
-        // written `[T; N]` is reported as a syntax restriction.
+        // Array and slice types: `[T; N]` and `[T]`. The length must be an
+        // integer literal or a path to an integer constant; typeck validates it.
         if self.at(TokenKind::LBracket) {
             let lb = self.bump();
             let elem = self.parse_type();
             if self.at(TokenKind::Semi) {
-                let span = self.span();
-                self.error_coded(
-                    E_SYNTAX,
-                    "array types are not supported; use Vec<T> for an owned array or [T] for a slice",
-                    span,
-                );
                 self.bump();
-                let _ = self.parse_expr();
+                let len = Box::new(self.parse_expr());
                 let rb = self
-                    .expect(TokenKind::RBracket, "']' after array type")
+                    .expect(TokenKind::RBracket, "']' after array length")
                     .map(|token| token.span)
                     .unwrap_or_else(|| self.prev_span());
-                return TypeExpr::Slice {
+                return TypeExpr::Array {
                     elem: Box::new(elem),
+                    len,
                     span: lb.span.join(rb),
                 };
             }
@@ -1999,9 +2037,28 @@ impl<'a> Parser<'a> {
                 break;
             }
             let before = self.pos;
-            let (name, name_span) = self.expect_ident("generic parameter name");
+            let (name, name_span, kind) = match self.kind() {
+                TokenKind::Lifetime(name) => {
+                    let name = name.clone();
+                    let span = self.span();
+                    self.bump();
+                    (name, span, GenericParamKind::Lifetime)
+                }
+                _ => {
+                    let (name, name_span) = self.expect_ident("generic parameter name");
+                    (name, name_span, GenericParamKind::Type)
+                }
+            };
             let mut bounds = Vec::new();
             if self.eat(TokenKind::Colon).is_some() {
+                if kind.is_lifetime() {
+                    let span = self.prev_span();
+                    self.error_coded(
+                        E_SYNTAX,
+                        "lifetime parameters cannot have bounds; remove the ':' and the bounds",
+                        span,
+                    );
+                }
                 loop {
                     let bound_start = self.pos;
                     bounds.push(self.parse_type());
@@ -2015,10 +2072,14 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
+                if kind.is_lifetime() {
+                    bounds.clear();
+                }
             }
             params.push(GenericParam {
                 name,
                 name_span,
+                kind,
                 bounds,
             });
             self.ensure_progress(before);
@@ -2764,6 +2825,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::KwWhile
                 | TokenKind::KwFor
                 | TokenKind::LBrace
+                | TokenKind::Lifetime(_)
         );
         let mut expr = self.parse_primary();
         loop {
@@ -3000,15 +3062,7 @@ impl<'a> Parser<'a> {
                 Expr::new(ExprKind::Lit(Lit::Bool(false)), start)
             }
             TokenKind::LParen => self.parse_paren_expr(),
-            TokenKind::LBracket => {
-                let span = self.span();
-                self.error(
-                    "array literals are not supported; use vec! for vectors",
-                    span,
-                );
-                self.skip_balanced(TokenKind::LBracket, TokenKind::RBracket);
-                Expr::new(ExprKind::Tuple(Vec::new()), span)
-            }
+            TokenKind::LBracket => self.parse_array_expr(),
             TokenKind::LBrace => {
                 let block = self.parse_block();
                 let span = block.span;
@@ -3016,27 +3070,45 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwIf => self.parse_if_expr(),
             TokenKind::KwMatch => self.parse_match_expr(),
-            TokenKind::KwLoop => self.parse_loop_expr(),
-            TokenKind::KwWhile => self.parse_while_expr(),
-            TokenKind::KwFor => self.parse_for_expr(),
+            TokenKind::KwLoop => self.parse_loop_expr(None),
+            TokenKind::KwWhile => self.parse_while_expr(None),
+            TokenKind::KwFor => self.parse_for_expr(None),
             TokenKind::KwMove | TokenKind::Pipe | TokenKind::PipePipe => self.parse_closure_expr(),
             TokenKind::KwBreak => {
                 let token = self.bump();
+                let label = if matches!(self.kind(), TokenKind::Lifetime(_)) {
+                    self.expect_lifetime("loop label after 'break'")
+                        .map(Self::lifetime_label)
+                } else {
+                    None
+                };
                 let value = if self.starts_expression() {
                     Some(Box::new(self.parse_expr()))
                 } else {
                     None
                 };
-                let span = match &value {
-                    Some(value) => token.span.join(value.span),
-                    None => token.span,
+                let end = match (&value, &label) {
+                    (Some(value), _) => value.span,
+                    (None, Some(label)) => label.name_span,
+                    (None, None) => token.span,
                 };
-                Expr::new(ExprKind::Break(value), span)
+                Expr::new(ExprKind::Break { label, value }, token.span.join(end))
             }
             TokenKind::KwContinue => {
                 let token = self.bump();
-                Expr::new(ExprKind::Continue, token.span)
+                let label = if matches!(self.kind(), TokenKind::Lifetime(_)) {
+                    self.expect_lifetime("loop label after 'continue'")
+                        .map(Self::lifetime_label)
+                } else {
+                    None
+                };
+                let span = match &label {
+                    Some(label) => token.span.join(label.name_span),
+                    None => token.span,
+                };
+                Expr::new(ExprKind::Continue { label }, span)
             }
+            TokenKind::Lifetime(_) => self.parse_labeled_loop_expr(),
             TokenKind::KwReturn => {
                 let token = self.bump();
                 let value = if self.starts_expression() {
@@ -3093,22 +3165,82 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn skip_balanced(&mut self, open: TokenKind, close: TokenKind) {
-        if self.eat(open.clone()).is_none() {
-            return;
+    /// Parse a labeled loop: `'outer: loop { .. }`, `'outer: while .. { .. }`
+    /// or `'outer: for .. in .. { .. }`. A label is only legal in front of a
+    /// loop expression; any other use is rejected with E0001.
+    fn parse_labeled_loop_expr(&mut self) -> Expr {
+        let lifetime = match self.expect_lifetime("loop label") {
+            Some(lifetime) => lifetime,
+            None => return self.error_expr(),
+        };
+        if self.eat(TokenKind::Colon).is_none() {
+            let span = lifetime.span;
+            self.error_coded(E_SYNTAX, "expected ':' after a loop label", span);
+            return self.error_expr();
         }
-        let mut depth: usize = 1;
-        while depth > 0 && !self.at_eof() {
-            if self.at(open.clone()) {
-                depth += 1;
-                self.bump();
-            } else if self.at(close.clone()) {
-                depth -= 1;
-                self.bump();
-            } else {
-                self.bump();
+        let label = Some(Self::lifetime_label(lifetime));
+        match self.peek_kind() {
+            TokenKind::KwLoop => self.parse_loop_expr(label),
+            TokenKind::KwWhile => self.parse_while_expr(label),
+            TokenKind::KwFor => self.parse_for_expr(label),
+            _ => {
+                let found = self.peek_kind().describe();
+                let span = self.span();
+                self.error_coded(
+                    E_SYNTAX,
+                    format!(
+                        "a loop label can only precede 'loop', 'while' or 'for', found {}",
+                        found
+                    ),
+                    span,
+                );
+                self.error_expr()
             }
         }
+    }
+
+    /// Parse an array literal: `[a, b, c]`, `[value; len]` or `[]`.
+    fn parse_array_expr(&mut self) -> Expr {
+        let lb = self.bump();
+        let saved = self.allow_struct_literal;
+        self.allow_struct_literal = true;
+        let expr = if self.at(TokenKind::RBracket) {
+            let rb = self.bump();
+            Expr::new(ExprKind::Array { elems: Vec::new() }, lb.span.join(rb.span))
+        } else {
+            let first = self.parse_expr();
+            if self.eat(TokenKind::Semi).is_some() {
+                let len = Box::new(self.parse_expr());
+                let rb = self
+                    .expect(TokenKind::RBracket, "']' after array repeat length")
+                    .map(|token| token.span)
+                    .unwrap_or_else(|| self.prev_span());
+                Expr::new(
+                    ExprKind::ArrayRepeat {
+                        value: Box::new(first),
+                        len,
+                    },
+                    lb.span.join(rb),
+                )
+            } else {
+                let mut elems = vec![first];
+                while self.eat(TokenKind::Comma).is_some() {
+                    if self.at(TokenKind::RBracket) || self.at_eof() {
+                        break;
+                    }
+                    let before = self.pos;
+                    elems.push(self.parse_expr());
+                    self.ensure_progress(before);
+                }
+                let rb = self
+                    .expect(TokenKind::RBracket, "']' after array elements")
+                    .map(|token| token.span)
+                    .unwrap_or_else(|| self.prev_span());
+                Expr::new(ExprKind::Array { elems }, lb.span.join(rb))
+            }
+        };
+        self.allow_struct_literal = saved;
+        expr
     }
 
     fn parse_paren_expr(&mut self) -> Expr {
@@ -3294,29 +3426,30 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn parse_loop_expr(&mut self) -> Expr {
+    fn parse_loop_expr(&mut self, label: Option<Label>) -> Expr {
         let loop_token = self.expect(TokenKind::KwLoop, "loop");
         let start = loop_token
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
         let body = self.parse_block();
         let span = start.join(body.span);
-        Expr::new(ExprKind::Loop { body }, span)
+        Expr::new(ExprKind::Loop { label, body }, span)
     }
 
-    fn parse_while_expr(&mut self) -> Expr {
+    fn parse_while_expr(&mut self, label: Option<Label>) -> Expr {
         let while_token = self.expect(TokenKind::KwWhile, "while");
         let start = while_token
             .map(|token| token.span)
             .unwrap_or_else(|| self.span());
         if self.at(TokenKind::KwLet) {
-            return self.parse_while_let_expr(start);
+            return self.parse_while_let_expr(start, label);
         }
         let cond = self.parse_expr_no_struct();
         let body = self.parse_block();
         let span = start.join(body.span);
         Expr::new(
             ExprKind::While {
+                label,
                 cond: Box::new(cond),
                 body,
             },
@@ -3324,7 +3457,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn parse_while_let_expr(&mut self, start: Span) -> Expr {
+    fn parse_while_let_expr(&mut self, start: Span, label: Option<Label>) -> Expr {
         self.bump();
         let pattern = self.parse_pattern();
         let pattern_span = pattern.span;
@@ -3344,7 +3477,13 @@ impl<'a> Parser<'a> {
             kind: PatternKind::Wild,
             span: wildcard_span,
         };
-        let break_expr = Expr::new(ExprKind::Break(None), wildcard_span);
+        let break_expr = Expr::new(
+            ExprKind::Break {
+                label: None,
+                value: None,
+            },
+            wildcard_span,
+        );
         let else_arm = MatchArm {
             pat: wildcard,
             guard: None,
@@ -3363,10 +3502,16 @@ impl<'a> Parser<'a> {
             span: body_span,
         };
         let span = start.join(body_span);
-        Expr::new(ExprKind::Loop { body: loop_block }, span)
+        Expr::new(
+            ExprKind::Loop {
+                label,
+                body: loop_block,
+            },
+            span,
+        )
     }
 
-    fn parse_for_expr(&mut self) -> Expr {
+    fn parse_for_expr(&mut self, label: Option<Label>) -> Expr {
         let for_token = self.expect(TokenKind::KwFor, "for");
         let start = for_token
             .map(|token| token.span)
@@ -3388,6 +3533,7 @@ impl<'a> Parser<'a> {
             let span = start.join(body.span);
             return Expr::new(
                 ExprKind::For {
+                    label,
                     pat: pattern,
                     iter: Box::new(lhs),
                     body,
@@ -3410,6 +3556,7 @@ impl<'a> Parser<'a> {
         let span = start.join(body.span);
         Expr::new(
             ExprKind::For {
+                label,
                 pat: pattern,
                 iter: Box::new(iter),
                 body,
@@ -3772,7 +3919,8 @@ impl<'a> AstNode<'a> {
                 Stmt::Empty(_) => {}
             },
             AstNode::Expr(expr) => match &expr.kind {
-                ExprKind::Lit(_) | ExprKind::Continue => {}
+                ExprKind::Lit(_) => {}
+                ExprKind::Continue { .. } => {}
                 ExprKind::Path(path) => push_path_generics(stack, path, depth),
                 ExprKind::Unary { expr, .. } => stack.push((AstNode::Expr(expr), depth)),
                 ExprKind::Binary { lhs, rhs, .. } => {
@@ -3846,12 +3994,14 @@ impl<'a> AstNode<'a> {
                     }
                 }
                 ExprKind::Block(block) => stack.push((AstNode::Block(block), depth)),
-                ExprKind::Loop { body } => stack.push((AstNode::Block(body), depth)),
-                ExprKind::While { cond, body } => {
+                ExprKind::Loop { body, .. } => stack.push((AstNode::Block(body), depth)),
+                ExprKind::While { cond, body, .. } => {
                     stack.push((AstNode::Expr(cond), depth));
                     stack.push((AstNode::Block(body), depth));
                 }
-                ExprKind::For { pat, iter, body } => {
+                ExprKind::For {
+                    pat, iter, body, ..
+                } => {
                     stack.push((AstNode::Pattern(pat), depth));
                     stack.push((AstNode::Expr(iter), depth));
                     stack.push((AstNode::Block(body), depth));
@@ -3883,6 +4033,15 @@ impl<'a> AstNode<'a> {
                         stack.push((AstNode::Expr(elem), depth));
                     }
                 }
+                ExprKind::Array { elems } => {
+                    for elem in elems {
+                        stack.push((AstNode::Expr(elem), depth));
+                    }
+                }
+                ExprKind::ArrayRepeat { value, len } => {
+                    stack.push((AstNode::Expr(value), depth));
+                    stack.push((AstNode::Expr(len), depth));
+                }
                 ExprKind::Vec(vec_lit) => match vec_lit {
                     VecLit::List(elems) => {
                         for elem in elems {
@@ -3899,7 +4058,7 @@ impl<'a> AstNode<'a> {
                         stack.push((AstNode::Expr(arg), depth));
                     }
                 }
-                ExprKind::Break(value) | ExprKind::Return(value) => {
+                ExprKind::Break { value, .. } | ExprKind::Return(value) => {
                     if let Some(value) = value {
                         stack.push((AstNode::Expr(value), depth));
                     }
@@ -3957,6 +4116,11 @@ impl<'a> AstNode<'a> {
                     }
                 }
                 TypeExpr::Slice { elem, .. } => stack.push((AstNode::Type(elem), depth)),
+                TypeExpr::Array { elem, len, .. } => {
+                    stack.push((AstNode::Type(elem), depth));
+                    stack.push((AstNode::Expr(len), depth));
+                }
+                TypeExpr::Lifetime(_) => {}
             },
         }
     }
@@ -4822,20 +4986,36 @@ pub trait Shape<T> {
     }
 
     #[test]
-    fn rejects_trait_method_without_receiver() {
-        let source = "trait Shape { fn area(width: i64) -> i64; }";
+    fn allows_trait_associated_functions() {
+        let source = "trait From2 { fn from(value: i64) -> bool; }";
         let (program, diagnostics) = parse_source(source);
         assert!(
-            messages(&diagnostics)
-                .iter()
-                .any(|message| message.contains("must take a self receiver")),
-            "expected a missing receiver diagnostic, got {:?}",
+            !diagnostics.has_errors(),
+            "associated functions should be allowed, got {:?}",
             messages(&diagnostics)
         );
+        let trait_decl = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Trait(decl) => Some(decl),
+                _ => None,
+            })
+            .expect("expected a trait declaration");
+        let method = &trait_decl.methods[0];
+        assert!(method.self_kind.is_none());
+        assert_eq!(method.params.len(), 1);
+        assert_eq!(method.params[0].name, "value");
+    }
+
+    #[test]
+    fn reference_leading_parameter_is_not_a_receiver() {
+        let source = "trait First { fn first(items: &Vec<i64>) -> Option<i64>; }";
+        let (program, diagnostics) = parse_source(source);
         assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == Some("E0001"))
+            !diagnostics.has_errors(),
+            "a reference-typed parameter should not be a receiver, got {:?}",
+            messages(&diagnostics)
         );
         let trait_decl = program
             .items
@@ -4846,6 +5026,7 @@ pub trait Shape<T> {
             })
             .expect("expected a trait declaration");
         assert!(trait_decl.methods[0].self_kind.is_none());
+        assert_eq!(trait_decl.methods[0].params[0].name, "items");
     }
 
     #[test]
@@ -4898,7 +5079,6 @@ pub trait Shape<T> {
         let sources = [
             "trait A: B { fn run(&self); }",
             "trait Shape { fn convert<T>(&self, value: T); }",
-            "trait Shape { fn area(width: i64) -> i64; }",
             "type Pair<T> = Vec<T>;",
         ];
         for source in sources {
@@ -6832,7 +7012,7 @@ fn main() {
     fn desugars_while_let() {
         let program = parse_ok("fn main() { while let Some(x) = iter.next() { print(x); } }");
         match &main_tail(&program).kind {
-            ExprKind::Loop { body } => match body.tail.as_deref().map(|expr| &expr.kind) {
+            ExprKind::Loop { body, .. } => match body.tail.as_deref().map(|expr| &expr.kind) {
                 Some(ExprKind::Match(match_expr)) => {
                     assert_eq!(match_expr.arms.len(), 2);
                     match &match_expr.arms[0].pat.kind {
@@ -6841,7 +7021,7 @@ fn main() {
                     }
                     assert!(matches!(&match_expr.arms[1].pat.kind, PatternKind::Wild));
                     match &match_expr.arms[1].body.kind {
-                        ExprKind::Break(value) => assert!(value.is_none()),
+                        ExprKind::Break { value, .. } => assert!(value.is_none()),
                         other => panic!("expected a break, got {:?}", other),
                     }
                 }
@@ -7201,17 +7381,17 @@ impl Counter {
         let program = parse_ok(source);
         let helper = fn_named(&program, "helper");
         match fn_body(helper).tail.as_deref().map(|expr| &expr.kind) {
-            Some(ExprKind::Loop { body }) => {
+            Some(ExprKind::Loop { body, .. }) => {
                 assert_eq!(body.stmts.len(), 2);
                 match &stmt_expr(&body.stmts[0]).kind {
-                    ExprKind::Break(value) => {
+                    ExprKind::Break { value, .. } => {
                         assert_eq!(as_int(value.as_deref().expect("break value")), 1)
                     }
                     other => panic!("expected a break, got {:?}", other),
                 }
                 assert!(matches!(
                     &stmt_expr(&body.stmts[1]).kind,
-                    ExprKind::Continue
+                    ExprKind::Continue { .. }
                 ));
             }
             other => panic!("expected a loop tail, got {:?}", other),
@@ -7886,15 +8066,197 @@ fn view(items: &[i64], boxed: Box<[i64]>) -> [i64] {
     }
 
     #[test]
-    fn rejects_array_types() {
-        let source = "fn main() { let digits: [i64; 3] = x; }\nstruct Blob { data: [u8; 4] }\n";
-        let (program, diagnostics) = parse_source(source);
+    fn parses_array_types_and_literals() {
+        let source = r#"fn f() -> [i64; 4] {
+    let digits: [i64; 3] = x;
+    let empty: [i64; 0] = [];
+    let ones = [1, 1, 1];
+    let zeros = [0; 4];
+    let trailing = [1, 2,];
+    let matrix = [N; 2];
+    let nested = [[1, 2], [3, 4]];
+    zeros
+}
+struct Blob { data: [u8; 4] }
+const N: usize = 2;
+"#;
+        let program = parse_ok(source);
+        let decl = fn_named(&program, "f");
+        match decl.ret.as_ref() {
+            Some(TypeExpr::Array { elem, len, .. }) => {
+                assert!(matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "i64"));
+                assert_eq!(as_int(len), 4);
+            }
+            other => panic!("expected an array return type, got {:?}", other),
+        }
+        let body = fn_body(decl);
+        assert_eq!(body.stmts.len(), 7);
+        match &body.stmts[0] {
+            Stmt::Let(statement) => match statement.ty.as_ref() {
+                Some(TypeExpr::Array { elem, len, .. }) => {
+                    assert!(matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "i64"));
+                    assert_eq!(as_int(len), 3);
+                }
+                other => panic!("expected an array type, got {:?}", other),
+            },
+            other => panic!("expected a let statement, got {:?}", other),
+        }
+        match &let_init(&body.stmts[1]).kind {
+            ExprKind::Array { elems } => assert!(elems.is_empty()),
+            other => panic!("expected an empty array literal, got {:?}", other),
+        }
+        match &let_init(&body.stmts[2]).kind {
+            ExprKind::Array { elems } => {
+                assert_eq!(elems.len(), 3);
+                assert_eq!(as_int(&elems[0]), 1);
+            }
+            other => panic!("expected an array literal, got {:?}", other),
+        }
+        match &let_init(&body.stmts[3]).kind {
+            ExprKind::ArrayRepeat { value, len } => {
+                assert_eq!(as_int(value), 0);
+                assert_eq!(as_int(len), 4);
+            }
+            other => panic!("expected an array repeat, got {:?}", other),
+        }
+        match &let_init(&body.stmts[4]).kind {
+            ExprKind::Array { elems } => assert_eq!(elems.len(), 2),
+            other => panic!(
+                "expected an array literal with a trailing comma, got {:?}",
+                other
+            ),
+        }
+        match &let_init(&body.stmts[5]).kind {
+            ExprKind::ArrayRepeat { value, len } => {
+                assert!(matches!(&value.kind, ExprKind::Path(_)));
+                assert_eq!(as_int(len), 2);
+            }
+            other => panic!("expected a const-length array repeat, got {:?}", other),
+        }
+        match &let_init(&body.stmts[6]).kind {
+            ExprKind::Array { elems } => {
+                assert_eq!(elems.len(), 2);
+                assert!(matches!(&elems[0].kind, ExprKind::Array { .. }));
+            }
+            other => panic!("expected a nested array literal, got {:?}", other),
+        }
+        let blob = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(decl) if decl.name == "Blob" => Some(decl),
+                _ => None,
+            })
+            .expect("Blob struct");
+        match &blob.kind {
+            StructKind::Named(fields) => match &fields[0].ty {
+                TypeExpr::Array { elem, len, .. } => {
+                    assert!(matches!(elem.as_ref(), TypeExpr::Path { name, .. } if name == "u8"));
+                    assert_eq!(as_int(len), 4);
+                }
+                other => panic!("expected an array field type, got {:?}", other),
+            },
+            other => panic!("expected a named struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_lifetime_parameters_and_references() {
+        let source = r#"struct Holder<'a> { value: &'a i64, mutable_value: &'a mut i64 }
+fn first<'a>(items: &'a [i64]) -> &'a i64 { items[0] }
+fn shared(items: &[i64]) -> &i64 { items[0] }
+fn make<'a>(x: &'a i64) -> Parser<'a> { x }
+"#;
+        let program = parse_ok(source);
+        let holder = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(decl) if decl.name == "Holder" => Some(decl),
+                _ => None,
+            })
+            .expect("Holder struct");
+        assert_eq!(holder.generics.len(), 1);
+        let lifetime_param = &holder.generics[0];
+        assert_eq!(lifetime_param.name, "a");
+        assert_eq!(lifetime_param.kind, GenericParamKind::Lifetime);
+        assert!(lifetime_param.bounds.is_empty());
+        match &holder.kind {
+            StructKind::Named(fields) => {
+                match &fields[0].ty {
+                    TypeExpr::Ref {
+                        mutable,
+                        lifetime,
+                        inner,
+                        ..
+                    } => {
+                        assert!(!*mutable);
+                        let lifetime = lifetime.as_ref().expect("field lifetime");
+                        assert_eq!(lifetime.name, "a");
+                        assert!(
+                            matches!(inner.as_ref(), TypeExpr::Path { name, .. } if name == "i64")
+                        );
+                    }
+                    other => panic!("expected a reference field, got {:?}", other),
+                }
+                match &fields[1].ty {
+                    TypeExpr::Ref {
+                        mutable, lifetime, ..
+                    } => {
+                        assert!(*mutable);
+                        assert_eq!(lifetime.as_ref().expect("field lifetime").name, "a");
+                    }
+                    other => panic!("expected a mutable reference field, got {:?}", other),
+                }
+            }
+            other => panic!("expected a named struct, got {:?}", other),
+        }
+        let first = fn_named(&program, "first");
+        assert_eq!(first.generics[0].kind, GenericParamKind::Lifetime);
+        assert_eq!(first.generics[0].name, "a");
+        match &first.params[0].ty {
+            TypeExpr::Ref {
+                lifetime, inner, ..
+            } => {
+                assert_eq!(lifetime.as_ref().expect("param lifetime").name, "a");
+                assert!(matches!(inner.as_ref(), TypeExpr::Slice { .. }));
+            }
+            other => panic!("expected a reference parameter, got {:?}", other),
+        }
+        match first.ret.as_ref() {
+            Some(TypeExpr::Ref { lifetime, .. }) => {
+                assert_eq!(lifetime.as_ref().expect("return lifetime").name, "a")
+            }
+            other => panic!("expected a reference return type, got {:?}", other),
+        }
+        // Elided reference lifetimes stay None.
+        let shared = fn_named(&program, "shared");
+        match &shared.params[0].ty {
+            TypeExpr::Ref { lifetime, .. } => assert!(lifetime.is_none()),
+            other => panic!("expected a reference parameter, got {:?}", other),
+        }
+        // A lifetime used as a generic argument is TypeExpr::Lifetime.
+        let make = fn_named(&program, "make");
+        match make.ret.as_ref() {
+            Some(TypeExpr::Path { generics, .. }) => {
+                assert_eq!(generics.len(), 1);
+                assert!(
+                    matches!(&generics[0], TypeExpr::Lifetime(lifetime) if lifetime.name == "a")
+                );
+            }
+            other => panic!("expected a path return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_lifetime_parameter_bounds() {
+        let (program, diagnostics) = parse_source("fn f<'a: Drop>(x: &'a i64) -> i64 { 0 }");
         let errors = messages(&diagnostics);
         assert!(
             errors
                 .iter()
-                .any(|message| message.contains("array types are not supported")),
-            "expected an array type diagnostic, got {:?}",
+                .any(|message| message.contains("lifetime parameters cannot have bounds")),
+            "expected a lifetime-bound diagnostic, got {:?}",
             errors
         );
         assert!(
@@ -7902,11 +8264,214 @@ fn view(items: &[i64], boxed: Box<[i64]>) -> [i64] {
                 .iter()
                 .any(|diagnostic| diagnostic.code == Some("E0001"))
         );
-        // Recovery: the item after the rejected array type still parses.
-        assert!(program.items.iter().any(|item| matches!(
-            item,
-            Item::Struct(decl) if decl.name == "Blob"
-        )));
+        let decl = fn_named(&program, "f");
+        assert_eq!(decl.generics.len(), 1);
+        assert!(decl.generics[0].bounds.is_empty());
+    }
+
+    #[test]
+    fn parses_loop_labels() {
+        let source = r#"fn f() {
+    'outer: loop {
+        break 'outer;
+    }
+    'a: while cond {
+        continue 'a;
+    }
+    'b: for x in xs {
+        break 'b 1;
+    };
+}
+"#;
+        let program = parse_ok(source);
+        let body = fn_body(fn_named(&program, "f"));
+        assert_eq!(body.stmts.len(), 3);
+        match &body.stmts[0] {
+            Stmt::Expr(expr) => match &expr.kind {
+                ExprKind::Loop { label, body } => {
+                    let label = label.as_ref().expect("loop label");
+                    assert_eq!(label.name, "outer");
+                    match body.stmts.first() {
+                        Some(Stmt::Expr(inner)) => match &inner.kind {
+                            ExprKind::Break { label, value } => {
+                                assert_eq!(label.as_ref().expect("break label").name, "outer");
+                                assert!(value.is_none());
+                            }
+                            other => panic!("expected a break, got {:?}", other),
+                        },
+                        other => panic!("expected a break statement, got {:?}", other),
+                    }
+                }
+                other => panic!("expected a labeled loop, got {:?}", other),
+            },
+            other => panic!("expected a loop statement, got {:?}", other),
+        }
+        match &body.stmts[1] {
+            Stmt::Expr(expr) => match &expr.kind {
+                ExprKind::While { label, body, .. } => {
+                    assert_eq!(label.as_ref().expect("while label").name, "a");
+                    match body.stmts.first() {
+                        Some(Stmt::Expr(inner)) => match &inner.kind {
+                            ExprKind::Continue { label } => {
+                                assert_eq!(label.as_ref().expect("continue label").name, "a");
+                            }
+                            other => panic!("expected a continue, got {:?}", other),
+                        },
+                        other => panic!("expected a continue statement, got {:?}", other),
+                    }
+                }
+                other => panic!("expected a labeled while, got {:?}", other),
+            },
+            other => panic!("expected a while statement, got {:?}", other),
+        }
+        match &body.stmts[2] {
+            Stmt::Expr(expr) => match &expr.kind {
+                ExprKind::For { label, body, .. } => {
+                    assert_eq!(label.as_ref().expect("for label").name, "b");
+                    match body.stmts.first() {
+                        Some(Stmt::Expr(inner)) => match &inner.kind {
+                            ExprKind::Break { label, value } => {
+                                assert_eq!(label.as_ref().expect("break label").name, "b");
+                                assert_eq!(as_int(value.as_deref().expect("break value")), 1);
+                            }
+                            other => panic!("expected a labeled break, got {:?}", other),
+                        },
+                        other => panic!("expected a break statement, got {:?}", other),
+                    }
+                }
+                other => panic!("expected a labeled for, got {:?}", other),
+            },
+            other => panic!("expected a for statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_labels_outside_loops() {
+        let (program, diagnostics) = parse_source("fn f() { 'x: 1; }\nfn g() { 'y loop { } }\n");
+        let errors = messages(&diagnostics);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("a loop label can only precede")),
+            "expected a label-position diagnostic, got {:?}",
+            errors
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("expected ':' after a loop label")),
+            "expected a missing-colon diagnostic, got {:?}",
+            errors
+        );
+        assert!(
+            program
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Fn(decl) if decl.name == "f"))
+        );
+        assert!(
+            program
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Fn(decl) if decl.name == "g"))
+        );
+    }
+
+    #[test]
+    fn parses_index_and_slice_after_array_literal() {
+        let source = r#"fn f() {
+    let first = [1, 2, 3][0];
+    let slice = &[3, 4][0..1];
+    let repeat = [0; 2][1];
+}
+"#;
+        let program = parse_ok(source);
+        let body = fn_body(fn_named(&program, "f"));
+        assert_eq!(body.stmts.len(), 3);
+        match &let_init(&body.stmts[0]).kind {
+            ExprKind::Index { base, index } => {
+                assert!(matches!(&base.kind, ExprKind::Array { elems } if elems.len() == 3));
+                assert_eq!(as_int(index), 0);
+            }
+            other => panic!("expected an index expression, got {:?}", other),
+        }
+        match &let_init(&body.stmts[1]).kind {
+            ExprKind::Ref { expr, .. } => match &expr.kind {
+                ExprKind::Slice {
+                    base,
+                    start,
+                    end,
+                    inclusive,
+                } => {
+                    assert!(matches!(&base.kind, ExprKind::Array { elems } if elems.len() == 2));
+                    assert!(!*inclusive);
+                    assert!(start.is_some() && end.is_some());
+                }
+                other => panic!("expected a slice expression, got {:?}", other),
+            },
+            other => panic!("expected a reference, got {:?}", other),
+        }
+        match &let_init(&body.stmts[2]).kind {
+            ExprKind::Index { base, .. } => {
+                assert!(matches!(&base.kind, ExprKind::ArrayRepeat { .. }))
+            }
+            other => panic!("expected an index expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_mixed_lifetime_and_type_parameters() {
+        let source = r#"struct Pair<'a, T> { first: &'a T, second: T }
+fn make<'a, T>(value: &'a T) -> Pair<'a, T> { Pair { first: value, second: *value } }
+"#;
+        let program = parse_ok(source);
+        let pair = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(decl) if decl.name == "Pair" => Some(decl),
+                _ => None,
+            })
+            .expect("Pair struct");
+        assert_eq!(pair.generics.len(), 2);
+        assert_eq!(pair.generics[0].name, "a");
+        assert_eq!(pair.generics[0].kind, GenericParamKind::Lifetime);
+        assert_eq!(pair.generics[1].name, "T");
+        assert_eq!(pair.generics[1].kind, GenericParamKind::Type);
+        assert!(pair.generics[1].bounds.is_empty());
+        let make = fn_named(&program, "make");
+        assert_eq!(make.generics.len(), 2);
+        assert_eq!(make.generics[0].kind, GenericParamKind::Lifetime);
+        assert_eq!(make.generics[1].kind, GenericParamKind::Type);
+        match make.ret.as_ref() {
+            Some(TypeExpr::Path { name, generics, .. }) => {
+                assert_eq!(name, "Pair");
+                assert_eq!(generics.len(), 2);
+                assert!(
+                    matches!(&generics[0], TypeExpr::Lifetime(lifetime) if lifetime.name == "a")
+                );
+                assert!(matches!(&generics[1], TypeExpr::Path { name, .. } if name == "T"));
+            }
+            other => panic!("expected a path return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn labeled_loop_statement_ends_before_tuple() {
+        let program = parse_ok("fn f() { 'outer: loop { break 'outer; } (1, 2) }");
+        let body = fn_body(fn_named(&program, "f"));
+        assert_eq!(body.stmts.len(), 1);
+        assert!(matches!(
+            &body.stmts[0],
+            Stmt::Expr(expr) if matches!(expr.kind, ExprKind::Loop { .. })
+        ));
+        match body.tail.as_deref() {
+            Some(tail) => match &tail.kind {
+                ExprKind::Tuple(elems) => assert_eq!(elems.len(), 2),
+                other => panic!("expected a tuple tail, got {:?}", other),
+            },
+            other => panic!("expected a tuple tail, got {:?}", other),
+        }
     }
 
     #[test]

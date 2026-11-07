@@ -18,7 +18,7 @@ fn main() {
     let mut hits = 0;
     i = 0;
     while i < tokens {
-        let value = counts.get(key_at(i)).unwrap();
+        let value = *counts.get(&key_at(i)).unwrap();
         hits += 1;
         fold = mix(fold, value);
         i += 1;
@@ -27,7 +27,7 @@ fn main() {
     while i < tokens {
         let absent = key_at(tokens + i);
         if counts.contains_key(absent) {
-            fold = mix(fold, counts.get(absent).unwrap());
+            fold = mix(fold, *counts.get(&absent).unwrap());
         } else {
             let chars = absent.chars();
             let mut index = 0;

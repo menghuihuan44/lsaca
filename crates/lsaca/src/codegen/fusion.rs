@@ -46,14 +46,29 @@ struct FusedPipeline {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 enum FusedConsumer {
-    ForBody { pat: HPat, body: HBlock },
-    Fold { init: HExpr, closure: HClosure },
+    ForBody {
+        /// Source label of the loop, when it has one; a labelled break or
+        /// continue must find this loop on the generated loop stack.
+        label: Option<String>,
+        pat: HPat,
+        body: HBlock,
+    },
+    Fold {
+        init: HExpr,
+        closure: HClosure,
+    },
     Count,
     SumI64,
     SumF64,
-    Any { closure: HClosure },
-    All { closure: HClosure },
-    Find { closure: HClosure },
+    Any {
+        closure: HClosure,
+    },
+    All {
+        closure: HClosure,
+    },
+    Find {
+        closure: HClosure,
+    },
     CollectVec,
 }
 
@@ -82,6 +97,7 @@ enum FusedRuntime {
 /// caller must not generate the generic iterator lowering.
 pub(crate) fn try_gen_fused_for(
     generator: &mut Gen,
+    label: Option<&str>,
     iter: &HExpr,
     pat: &HPat,
     body: &HBlock,
@@ -98,6 +114,7 @@ pub(crate) fn try_gen_fused_for(
         return false;
     }
     let consumer = FusedConsumer::ForBody {
+        label: label.map(str::to_string),
         pat: pat.clone(),
         body: body.clone(),
     };
@@ -487,8 +504,8 @@ fn fused_expression_safe(generator: &Gen, expr: &HExpr, parameters: &[String]) -
         | HExprKind::FnRef { .. }
         | HExprKind::Closure { .. }
         | HExprKind::Call { .. }
-        | HExprKind::Break
-        | HExprKind::Continue
+        | HExprKind::Break { .. }
+        | HExprKind::Continue { .. }
         | HExprKind::Return(_)
         | HExprKind::Loop { .. }
         | HExprKind::While { .. }
@@ -562,9 +579,10 @@ fn fused_expression_safe(generator: &Gen, expr: &HExpr, parameters: &[String]) -
         HExprKind::StructLit { fields, .. } => fields
             .iter()
             .all(|(_, value)| fused_expression_safe(generator, value, parameters)),
-        HExprKind::Tuple(elems) | HExprKind::VecLit { elems } => elems
+        HExprKind::Tuple(elems) | HExprKind::VecLit { elems } | HExprKind::Array { elems } => elems
             .iter()
             .all(|element| fused_expression_safe(generator, element, parameters)),
+        HExprKind::ArrayRepeat { value, .. } => fused_expression_safe(generator, value, parameters),
         HExprKind::EnumLit { args, .. } => args
             .iter()
             .all(|argument| fused_expression_safe(generator, argument, parameters)),
@@ -652,6 +670,10 @@ fn emit_fused_pipeline(
     generator.loops.push(LoopCtx {
         break_label: break_label.clone(),
         continue_label: continue_label.clone(),
+        label: match consumer {
+            FusedConsumer::ForBody { label, .. } => label.clone(),
+            _ => None,
+        },
         body_frame: generator.frames.len(),
         used_break: false,
         used_continue: false,
@@ -932,7 +954,7 @@ fn emit_fused_leaf(
 ) {
     match runtime {
         FusedRuntime::None => {
-            if let FusedConsumer::ForBody { pat, body } = consumer {
+            if let FusedConsumer::ForBody { pat, body, .. } = consumer {
                 generator.gen_loop_body(
                     body,
                     Some((pat, current.as_str(), false)),

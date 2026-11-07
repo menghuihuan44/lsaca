@@ -416,6 +416,38 @@ fn cases() -> Vec<Case> {
             stderr_contains: &[],
         },
         Case {
+            name: "arrays",
+            source: include_str!("programs/arrays.ls"),
+            args: &[],
+            stdout: "5 30\n[0, 0, 0, 0]\n150\n[10, 20, 30]\n0 true\ntrue\ntrue\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "labels",
+            source: include_str!("programs/labels.ls"),
+            args: &[],
+            stdout: "6\n3\n16\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "lifetimes_refs",
+            source: include_str!("programs/lifetimes_refs.ls"),
+            args: &[],
+            stdout: "hello, lifetimes\n16\ntrue\n<hello, lifetimes>\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "from_try",
+            source: include_str!("programs/from_try.ls"),
+            args: &[],
+            stdout: "ok 42\nerr cannot parse: invalid digit found in string\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
             name: "iterator_adapters",
             source: include_str!("programs/iterator_adapters.ls"),
             args: &[],
@@ -1349,6 +1381,111 @@ fn compiled_programs() {
     }
 }
 
+/// The example programs under examples/programs are full sized, realistic
+/// programs (JSON parser, Markdown to HTML converter, Lisp interpreter). Each
+/// one embeds a deterministic script or reads a checked in data file, so its
+/// output is compared byte for byte against a golden file written here.
+#[test]
+fn real_programs_match_expected_output() {
+    if let Err(error) = driver::find_c_compiler() {
+        eprintln!("skipping real program tests: {}", error);
+        return;
+    }
+    let programs = [
+        (
+            "json",
+            &[] as &[&str],
+            include_str!("real_programs/expected/json.out"),
+        ),
+        (
+            "markdown",
+            &[],
+            include_str!("real_programs/expected/markdown.out"),
+        ),
+        (
+            "json",
+            &["data/sample.json"] as &[&str],
+            include_str!("real_programs/expected/json_file.out"),
+        ),
+        (
+            "markdown",
+            &["data/sample.md"] as &[&str],
+            include_str!("real_programs/expected/markdown_file.out"),
+        ),
+        (
+            "lisp",
+            &[] as &[&str],
+            include_str!("real_programs/expected/lisp.out"),
+        ),
+        (
+            "lisp",
+            &["data/sample.lisp"] as &[&str],
+            include_str!("real_programs/expected/lisp_file.out"),
+        ),
+    ];
+    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/programs");
+    let mut failures: Vec<String> = Vec::new();
+    for (name, args, expected) in programs {
+        let path = directory.join(format!("{}.ls", name));
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                failures.push(format!("could not read {}: {}", path.display(), error));
+                continue;
+            }
+        };
+        let frontend = Frontend::new(path.display().to_string(), source);
+        let build_name = format!("real_{}", name);
+        let executable = match build_loaded(&frontend, &build_name, false) {
+            Ok(executable) => executable,
+            Err(message) => {
+                failures.push(message);
+                continue;
+            }
+        };
+        let output = match Command::new(&executable)
+            .args(args)
+            .current_dir(&directory)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) => {
+                failures.push(format!("could not run {}: {}", name, error));
+                continue;
+            }
+        };
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        let label = if args.is_empty() {
+            name.to_string()
+        } else {
+            format!("{} {:?}", name, args)
+        };
+        if stdout != expected {
+            failures.push(format!(
+                "{}: stdout does not match {}\n--- expected ---\n{:?}\n--- actual ---\n{:?}",
+                label,
+                path.display(),
+                expected,
+                stdout
+            ));
+        }
+        if output.status.code() != Some(0) {
+            failures.push(format!(
+                "{}: expected exit code 0, got {:?}",
+                label,
+                output.status.code()
+            ));
+        }
+        if !stderr.is_empty() {
+            failures.push(format!("{}: unexpected stderr:\n{}", label, stderr));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("real program failures:\n\n{}", failures.join("\n\n"));
+    }
+}
+
 #[test]
 fn release_builds_wrap_overflow() {
     if let Err(error) = driver::find_c_compiler() {
@@ -1634,6 +1771,47 @@ fn frontend_rejects_invalid_programs() {
         ("bad_index_type", include_str!("programs/bad_index_type.ls")),
         ("bad_str_arg", include_str!("programs/bad_str_arg.ls")),
         ("bad_mut_param", include_str!("programs/bad_mut_param.ls")),
+        (
+            "bad_array_length_non_const",
+            include_str!("programs/bad_array_length_non_const.ls"),
+        ),
+        (
+            "bad_array_length_range",
+            include_str!("programs/bad_array_length_range.ls"),
+        ),
+        (
+            "bad_array_element_move",
+            include_str!("programs/bad_array_element_move.ls"),
+        ),
+        ("bad_array_move", include_str!("programs/bad_array_move.ls")),
+        (
+            "bad_label_unknown",
+            include_str!("programs/bad_label_unknown.ls"),
+        ),
+        (
+            "bad_break_value",
+            include_str!("programs/bad_break_value.ls"),
+        ),
+        (
+            "bad_lifetime_bound",
+            include_str!("programs/bad_lifetime_bound.ls"),
+        ),
+        (
+            "bad_empty_array_type",
+            include_str!("programs/bad_empty_array_type.ls"),
+        ),
+        (
+            "bad_array_repeat_noncopy",
+            include_str!("programs/bad_array_repeat_noncopy.ls"),
+        ),
+        (
+            "bad_from_missing",
+            include_str!("programs/bad_from_missing.ls"),
+        ),
+        (
+            "bad_lifetime_missing",
+            include_str!("programs/bad_lifetime_missing.ls"),
+        ),
     ];
     let mut problems: Vec<String> = Vec::new();
     for (name, source) in programs {
@@ -2243,10 +2421,7 @@ fn v15_feature_errors_are_reported() {
         (
             "bad_slice_storage",
             include_str!("programs/bad_slice_storage.ls"),
-            &[
-                "error[E0498]",
-                "references cannot be stored in this type (found &[i64])",
-            ],
+            &["error[E0498]", "references cannot be stored"],
         ),
         (
             "bad_str_concat_views",

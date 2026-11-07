@@ -445,6 +445,21 @@ impl<'a> Gen<'a> {
                 self.w.line("};");
                 self.w.blank();
             }
+            TypeDef::Array(elem, len) => {
+                // A fixed-size array stores its elements inline in one C
+                // array member, so the value has a single flat layout. A
+                // zero-length array still needs one element of storage (C has
+                // no zero-length arrays); it is never indexed.
+                let c_name = self.registry.tag(ty);
+                let element = self.registry.ctype(&elem);
+                let storage = len.max(1);
+                self.w.line(format!("struct {} {{", c_name));
+                self.w.indent();
+                self.w.line(format!("{} data[{}];", element, storage));
+                self.w.dedent();
+                self.w.line("};");
+                self.w.blank();
+            }
             TypeDef::Slice(elem) => {
                 // A slice is a by-value fat pointer: borrowed data and a
                 // length. It is never owned, so it is not managed.

@@ -32,5 +32,5 @@ fn main() {
     let mut flags: HashMap<bool, u64> = HashMap::new();
     flags.insert(true, 1 as u64);
     flags.insert(false, 2 as u64);
-    println!("{} {}", flags.get(true).unwrap(), flags.get(false).unwrap());
+    println!("{} {}", flags.get(&true).unwrap(), flags.get(&false).unwrap());
 }

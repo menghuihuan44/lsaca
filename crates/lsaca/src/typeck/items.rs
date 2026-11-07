@@ -21,6 +21,105 @@ use crate::diag::{Diagnostic, Diagnostics};
 use crate::span::Span;
 use crate::types::{SelfKind, Ty};
 
+/// Largest array length accepted in a type or a repeat literal.
+pub const MAX_ARRAY_LEN: usize = 1_048_576;
+
+/// Keep only type parameters. v2.2 erases lifetimes completely, so generic
+/// environments, instance names and arity checks count type parameters only.
+pub fn only_type_generics(generics: &[crate::ast::GenericParam]) -> Vec<crate::ast::GenericParam> {
+    generics
+        .iter()
+        .filter(|param| !param.kind.is_lifetime())
+        .cloned()
+        .collect()
+}
+
+/// Drop lifetime arguments from an explicit type-argument list. Lifetime
+/// arguments are elided (erased) and never take part in arity checks.
+pub fn only_type_args(args: &[crate::ast::TypeExpr]) -> Vec<crate::ast::TypeExpr> {
+    args.iter()
+        .filter(|arg| !matches!(arg, crate::ast::TypeExpr::Lifetime(_)))
+        .cloned()
+        .collect()
+}
+
+/// Names of the lifetime parameters declared by an item or function.
+pub fn declared_lifetimes(generics: &[crate::ast::GenericParam]) -> Vec<String> {
+    generics
+        .iter()
+        .filter(|param| param.kind.is_lifetime())
+        .map(|param| param.name.clone())
+        .collect()
+}
+
+/// Whether a type expression mentions an explicitly named lifetime. v2.2
+/// erases lifetimes from the type model, so the elision rules (E0106) consult
+/// the written form instead: an explicit lifetime names its source and needs no
+/// elision.
+pub fn has_explicit_lifetime(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Ref {
+            lifetime, inner, ..
+        } => {
+            matches!(lifetime, Some(lifetime) if lifetime.name != "_" && lifetime.name != "static")
+                || has_explicit_lifetime(inner)
+        }
+        TypeExpr::Path { generics, .. } => generics.iter().any(has_explicit_lifetime),
+        TypeExpr::Tuple { elems, .. } => elems.iter().any(has_explicit_lifetime),
+        TypeExpr::Fn { params, ret, .. } => {
+            params.iter().any(has_explicit_lifetime) || has_explicit_lifetime(ret)
+        }
+        TypeExpr::Array { elem, .. } => has_explicit_lifetime(elem),
+        TypeExpr::Dyn(trait_ref) => trait_ref.args.iter().any(has_explicit_lifetime),
+        TypeExpr::Slice { elem, .. } => has_explicit_lifetime(elem),
+        TypeExpr::Lifetime(_) => false,
+    }
+}
+
+/// True when the type names a declared type parameter and nothing else,
+/// for example the `T` in `fn unwrap<T>(self) -> T`.
+///
+/// Such a return type is not a reference *in the signature*: it only becomes
+/// one when the parameter is instantiated with a reference type. Lifetime
+/// elision rules do not apply to it, so instantiating `Option<T>::unwrap` with
+/// `&mut i64` must not look like a `&mut` return borrowing from an owned
+/// `Option` input.
+pub fn type_is_bare_generic_param(ty: &TypeExpr, generics: &[ast::GenericParam]) -> bool {
+    match ty {
+        TypeExpr::Path {
+            name,
+            generics: args,
+            ..
+        } => {
+            args.is_empty()
+                && generics
+                    .iter()
+                    .any(|param| !param.kind.is_lifetime() && param.name == *name)
+        }
+        _ => false,
+    }
+}
+
+/// Whether the written type mentions a reference anywhere. Lifetime elision
+/// (E0106/E0596) only applies when the signature literally contains a
+/// reference; a container such as `HashMap<K, V>` becomes borrowed only after
+/// its parameters are instantiated with reference arguments, and that is a
+/// storage problem reported elsewhere.
+pub fn type_expr_has_ref(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Ref { .. } => true,
+        TypeExpr::Path { generics, .. } => generics.iter().any(type_expr_has_ref),
+        TypeExpr::Tuple { elems, .. } => elems.iter().any(type_expr_has_ref),
+        TypeExpr::Fn { params, ret, .. } => {
+            params.iter().any(type_expr_has_ref) || type_expr_has_ref(ret)
+        }
+        TypeExpr::Array { elem, .. } => type_expr_has_ref(elem),
+        TypeExpr::Dyn(trait_ref) => trait_ref.args.iter().any(type_expr_has_ref),
+        TypeExpr::Slice { elem, .. } => type_expr_has_ref(elem),
+        TypeExpr::Lifetime(_) => false,
+    }
+}
+
 /// Identifies a struct or enum by its dense index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TypeKey {
@@ -257,7 +356,7 @@ fn scan_block<'a>(block: &'a Block, out: &mut Vec<&'a Item>) {
 
 fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
     match &expr.kind {
-        ExprKind::Lit(_) | ExprKind::Path(_) | ExprKind::Continue => {}
+        ExprKind::Lit(_) | ExprKind::Path(_) | ExprKind::Continue { .. } => {}
         ExprKind::Unary { expr, .. }
         | ExprKind::Cast { expr, .. }
         | ExprKind::TupleField { base: expr, .. }
@@ -317,8 +416,8 @@ fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
             }
         }
         ExprKind::Block(block) => scan_block(block, out),
-        ExprKind::Loop { body } => scan_block(body, out),
-        ExprKind::While { cond, body } => {
+        ExprKind::Loop { body, .. } => scan_block(body, out),
+        ExprKind::While { cond, body, .. } => {
             scan_expr(cond, out);
             scan_block(body, out);
         }
@@ -357,7 +456,16 @@ fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
                 scan_expr(arg, out);
             }
         }
-        ExprKind::Break(value) => {
+        ExprKind::Array { elems } => {
+            for elem in elems {
+                scan_expr(elem, out);
+            }
+        }
+        ExprKind::ArrayRepeat { value, len } => {
+            scan_expr(value, out);
+            scan_expr(len, out);
+        }
+        ExprKind::Break { value, .. } => {
             if let Some(value) = value {
                 scan_expr(value, out);
             }
@@ -568,14 +676,22 @@ impl<'a> Checker<'a> {
             );
             return;
         }
+        let field_types: Vec<(TypeExpr, Span)> = decl
+            .kind
+            .fields()
+            .into_iter()
+            .map(|field| (field.ty, field.name_span))
+            .collect();
+        self.check_decl_field_lifetimes(&decl.generics, &field_types);
         let prefix = self.module_prefix(module);
         let base = format!("{}{}", prefix, sanitize_c_ident(&decl.name));
-        if !decl.generics.is_empty() {
-            self.validate_generic_params(&decl.generics);
+        let type_generics = only_type_generics(&decl.generics);
+        if !type_generics.is_empty() {
+            self.validate_generic_params(&type_generics);
             let def_id = self.generic_structs.len();
             self.generic_structs.push(GStructDef {
                 name: decl.name.clone(),
-                generics: decl.generics.clone(),
+                generics: type_generics,
                 decl: decl.clone(),
                 instances: HashMap::new(),
                 module,
@@ -619,14 +735,25 @@ impl<'a> Checker<'a> {
             self.report_duplicate_type(&decl.name, decl.name_span, previous);
             return;
         }
+        let enum_field_types: Vec<(TypeExpr, Span)> = decl
+            .variants
+            .iter()
+            .flat_map(|variant| variant.fields.iter().cloned())
+            .map(|ty| {
+                let span = ty.span();
+                (ty, span)
+            })
+            .collect();
+        self.check_decl_field_lifetimes(&decl.generics, &enum_field_types);
         let prefix = self.module_prefix(module);
         let base = format!("{}{}", prefix, sanitize_c_ident(&decl.name));
-        if !decl.generics.is_empty() {
-            self.validate_generic_params(&decl.generics);
+        let type_generics = only_type_generics(&decl.generics);
+        if !type_generics.is_empty() {
+            self.validate_generic_params(&type_generics);
             let def_id = self.generic_enums.len();
             self.generic_enums.push(GEnumDef {
                 name: decl.name.clone(),
-                generics: decl.generics.clone(),
+                generics: type_generics,
                 decl: decl.clone(),
                 instances: HashMap::new(),
                 module,
@@ -656,6 +783,123 @@ impl<'a> Checker<'a> {
         // One drop-hook slot per enum, filled in by register_drop_impl.
         self.drop_enums.push(None);
         self.insert_type_binding(module, &decl.name, DefRef::Enum(id), decl.name_span, vis);
+    }
+
+    /// Validate the lifetimes written on struct or enum fields (v2.2).
+    ///
+    /// A reference field must carry a named lifetime declared by the item
+    /// (E0106 when missing, E0261 when undeclared). Declared but unused lifetime
+    /// parameters are reported with E0392 for user code; the standard library is
+    /// exempt so that forward-looking declarations do not surface as internal
+    /// errors.
+    fn check_decl_field_lifetimes(
+        &mut self,
+        generics: &[ast::GenericParam],
+        field_types: &[(TypeExpr, Span)],
+    ) {
+        let declared = declared_lifetimes(generics);
+        let mut used: Vec<String> = Vec::new();
+        for (ty, _span) in field_types {
+            self.check_field_lifetime_ty(ty, &declared, &mut used);
+        }
+        if self.collecting_origin.is_prelude() {
+            return;
+        }
+        for param in generics.iter().filter(|param| param.kind.is_lifetime()) {
+            if !used.contains(&param.name) {
+                self.error_code(
+                    format!("lifetime parameter '{}' is never used", param.name),
+                    param.name_span,
+                    "E0392",
+                );
+            }
+        }
+    }
+
+    fn check_field_lifetime_ty(
+        &mut self,
+        ty: &TypeExpr,
+        declared: &[String],
+        used: &mut Vec<String>,
+    ) {
+        match ty {
+            TypeExpr::Ref {
+                mutable,
+                lifetime,
+                inner,
+                span,
+            } => {
+                let _ = mutable;
+                match lifetime {
+                    None => {
+                        self.error_code_note(
+                            "missing lifetime specifier".to_string(),
+                            *span,
+                            "E0106",
+                            "this reference field needs a named lifetime parameter; declare it on the type and write it on the field, for example struct Item<'a> { field: &'a T }"
+                                .to_string(),
+                        );
+                    }
+                    Some(lifetime) if lifetime.name == "static" => {
+                        self.error_code_note(
+                            "the 'static lifetime is not supported yet".to_string(),
+                            lifetime.span,
+                            "E0498",
+                            "use a named lifetime parameter declared by the type".to_string(),
+                        );
+                    }
+                    Some(lifetime) if lifetime.name == "_" => {
+                        self.error_code(
+                            "missing lifetime specifier: write a named lifetime parameter"
+                                .to_string(),
+                            lifetime.span,
+                            "E0106",
+                        );
+                    }
+                    Some(lifetime) => {
+                        if !declared.contains(&lifetime.name) {
+                            self.error_code(
+                                format!("use of undeclared lifetime name '{}'", lifetime.name),
+                                lifetime.span,
+                                "E0261",
+                            );
+                        } else if !used.contains(&lifetime.name) {
+                            used.push(lifetime.name.clone());
+                        }
+                    }
+                }
+                self.check_field_lifetime_ty(inner, declared, used);
+            }
+            TypeExpr::Tuple { elems, .. } => {
+                for elem in elems {
+                    self.check_field_lifetime_ty(elem, declared, used);
+                }
+            }
+            TypeExpr::Fn { params, ret, .. } => {
+                for param in params {
+                    self.check_field_lifetime_ty(param, declared, used);
+                }
+                self.check_field_lifetime_ty(ret, declared, used);
+            }
+            TypeExpr::Array { elem, .. } | TypeExpr::Slice { elem, .. } => {
+                self.check_field_lifetime_ty(elem, declared, used);
+            }
+            TypeExpr::Path { generics, .. } => {
+                for arg in generics {
+                    self.check_field_lifetime_ty(arg, declared, used);
+                }
+            }
+            TypeExpr::Dyn(trait_ref) => {
+                for arg in &trait_ref.args {
+                    self.check_field_lifetime_ty(arg, declared, used);
+                }
+            }
+            TypeExpr::Lifetime(lifetime) => {
+                // A lifetime in field position is only valid as a generic
+                // argument; resolve_ty reports a misplaced one elsewhere.
+                let _ = lifetime;
+            }
+        }
     }
 
     /// Validate the shape of a generic parameter list (duplicate names E0403).
@@ -747,14 +991,16 @@ impl<'a> Checker<'a> {
         }
         let prefix = self.module_prefix(module);
         let base = format!("{}lsaca_fn_{}", prefix, sanitize_c_ident(&decl.name));
-        if !decl.generics.is_empty() {
-            self.validate_generic_params(&decl.generics);
+        // Lifetimes are erased; only type parameters make a function generic.
+        let type_generics = only_type_generics(&decl.generics);
+        if !type_generics.is_empty() {
+            self.validate_generic_params(&type_generics);
             let def_id = self.generic_fns.len();
             self.generic_fns.push(GFnDef {
                 name: decl.name.clone(),
                 name_span: decl.name_span,
                 span: decl.span,
-                generics: decl.generics.clone(),
+                generics: type_generics,
                 decl: decl.clone(),
                 owner: GenericOwner::Free,
                 instances: HashMap::new(),
@@ -811,12 +1057,15 @@ impl<'a> Checker<'a> {
     }
 
     fn register_impl(&mut self, block: &ImplBlock) {
-        self.validate_impl_generics(&block.generics);
+        // v2.2 erases lifetimes: an impl block over lifetime parameters only
+        // is a plain impl for its (non-generic) target type.
+        let impl_generics = only_type_generics(&block.generics);
+        self.validate_impl_generics(&impl_generics);
         self.reject_generic_methods(block);
         if let Some(trait_ref) = &block.trait_name {
             match trait_ref.name.as_str() {
                 "Drop" => {
-                    if block.generics.is_empty() {
+                    if impl_generics.is_empty() {
                         if let Some(owner) = self.resolve_impl_target(block) {
                             self.register_drop_impl(block, owner, trait_ref);
                         }
@@ -836,7 +1085,7 @@ impl<'a> Checker<'a> {
             }
             return;
         }
-        if !block.generics.is_empty()
+        if !impl_generics.is_empty()
             || self.impl_target_builtin_kind(block).is_some()
             || self.impl_target_unsized_builtin_kind(block)
         {
@@ -910,6 +1159,7 @@ impl<'a> Checker<'a> {
             self.report_invalid_impl_target(block);
             return;
         }
+        let impl_generics = only_type_generics(&block.generics);
         let impl_id = self.impls.len();
         let mut methods = Vec::new();
         let prefix = self.module_prefix(self.current_module);
@@ -917,7 +1167,7 @@ impl<'a> Checker<'a> {
             self.check_method_name_reserved(&block.ty_name, func);
             let gfn_id = self.register_generic_method(
                 impl_id,
-                &block.generics,
+                &impl_generics,
                 func,
                 GenericOwner::InherentImpl(impl_id),
                 format!(
@@ -936,7 +1186,7 @@ impl<'a> Checker<'a> {
         self.impls.push(ImplInfo {
             id: impl_id,
             module: self.current_module,
-            generics: block.generics.clone(),
+            generics: impl_generics,
             self_ty: block.ty.clone(),
             trait_ref: None,
             methods,
@@ -1009,11 +1259,12 @@ impl<'a> Checker<'a> {
         if !valid {
             return;
         }
+        let impl_generics = only_type_generics(&block.generics);
         let impl_id = self.impls.len();
         let prefix = self.module_prefix(self.current_module);
         let gfn_id = self.register_generic_method(
             impl_id,
-            &block.generics,
+            &impl_generics,
             method,
             GenericOwner::TraitImpl(impl_id),
             format!("{}lsaca_fn_Drop_{}", prefix, sanitize_c_ident(&type_name)),
@@ -1022,7 +1273,7 @@ impl<'a> Checker<'a> {
         self.impls.push(ImplInfo {
             id: impl_id,
             module: self.current_module,
-            generics: block.generics.clone(),
+            generics: impl_generics,
             self_ty: block.ty.clone(),
             trait_ref: Some(trait_ref.clone()),
             methods: vec![ImplMethod {
@@ -1320,7 +1571,22 @@ impl<'a> Checker<'a> {
                 name,
                 name_span,
                 generics,
-            } => self.resolve_type_path(name, *name_span, generics, self_key),
+            } => {
+                // Lifetimes are erased and may be elided: `View<'_>`, `View<'a>`
+                // and `View` name the same type, so only type arguments reach
+                // the arity checks and the instantiation logic.
+                let filtered;
+                let generics = if generics
+                    .iter()
+                    .any(|arg| matches!(arg, TypeExpr::Lifetime(_)))
+                {
+                    filtered = only_type_args(generics);
+                    &filtered[..]
+                } else {
+                    generics
+                };
+                self.resolve_type_path(name, *name_span, generics, self_key)
+            }
             TypeExpr::Tuple { elems, .. } => {
                 let mut resolved = Vec::with_capacity(elems.len());
                 for elem in elems {
@@ -1348,6 +1614,22 @@ impl<'a> Checker<'a> {
                 let resolved = self.resolve_ty(elem, self_key)?;
                 Some(ITy::slice(resolved))
             }
+            TypeExpr::Array { elem, len, span: _ } => {
+                let resolved = self.resolve_ty(elem, self_key)?;
+                let len = self.array_len_value(len, "the array length")?;
+                Some(ITy::array(resolved, len))
+            }
+            TypeExpr::Lifetime(lifetime) => {
+                self.error_code(
+                    format!(
+                        "lifetime '{}' is only allowed as a generic argument",
+                        lifetime.name
+                    ),
+                    lifetime.span,
+                    "E0106",
+                );
+                None
+            }
         }
     }
 
@@ -1364,23 +1646,24 @@ impl<'a> Checker<'a> {
             );
             return None;
         };
+        let trait_args = only_type_args(&trait_ref.args);
         let expected = self.traits[trait_id].generics.len();
-        if trait_ref.args.len() != expected {
+        if trait_args.len() != expected {
             self.error_code(
                 format!(
                     "trait {} takes {} type argument{} but {} were supplied",
                     trait_ref.name,
                     expected,
                     if expected == 1 { "" } else { "s" },
-                    trait_ref.args.len()
+                    trait_args.len()
                 ),
                 trait_ref.span,
                 "E0107",
             );
             return None;
         }
-        let mut args = Vec::with_capacity(trait_ref.args.len());
-        for arg in &trait_ref.args {
+        let mut args = Vec::with_capacity(trait_args.len());
+        for arg in &trait_args {
             args.push(self.resolve_ty(arg, None)?);
         }
         let object = self.register_trait_object(trait_id, args, trait_ref.span);
@@ -1831,7 +2114,7 @@ impl<'a> Checker<'a> {
                 Some(ty) => ty,
                 None => self.infer.fresh_var(),
             };
-            self.validate_storage_type(&ty, field.name_span);
+            self.validate_field_type(&ty, field.name_span);
             fields.push(StructField {
                 name: field.name.clone(),
                 name_span: field.name_span,
@@ -1877,7 +2160,7 @@ impl<'a> Checker<'a> {
                 let field_span = field.span();
                 match self.resolve_ty(field, None) {
                     Some(ty) => {
-                        self.validate_storage_type(&ty, field_span);
+                        self.validate_field_type(&ty, field_span);
                         fields.push(ty);
                     }
                     None => {
@@ -2027,7 +2310,28 @@ impl<'a> Checker<'a> {
         }
         let mut ret_ref_source: Option<usize> = None;
         let ret_resolved = self.infer.resolve(&ret);
-        if let ITy::Ref { mutable, .. } = ret_resolved {
+        // A return type borrows not only when it is a bare reference: an
+        // aggregate with a reference field borrows too, so the elided lifetime
+        // must be derived for it as well.
+        let outer_mutable = matches!(&ret_resolved, ITy::Ref { mutable: true, .. });
+        // An explicitly named lifetime on the return type names its source and
+        // needs no elision rule (v2.2).
+        let explicit_return_lifetime = decl
+            .ret
+            .as_ref()
+            .map(has_explicit_lifetime)
+            .unwrap_or(false);
+        // A bare type parameter in return position is not a reference in the
+        // written signature: with `T = &mut i64` the instantiated type borrows,
+        // yet the value is simply moved out of an owned parameter. Elision rules
+        // must not treat that as returning a reference from a shared source.
+        let generic_param_return = decl
+            .ret
+            .as_ref()
+            .map(|ty| type_is_bare_generic_param(ty, &decl.generics))
+            .unwrap_or(false);
+        let return_names_reference = decl.ret.as_ref().map(type_expr_has_ref).unwrap_or(false);
+        if return_names_reference && !generic_param_return && self.type_borrows(&ret_resolved) {
             let mut sources: Vec<usize> = Vec::new();
             // Only `&self`/`&mut self` receivers borrow from a reference. A
             // by-value `self` owns the receiver, so returning a reference
@@ -2037,7 +2341,8 @@ impl<'a> Checker<'a> {
                 sources.push(0);
             } else {
                 for (index, param_ty) in params.iter().enumerate() {
-                    if matches!(self.infer.resolve(param_ty), ITy::Ref { .. }) {
+                    let param_ty = param_ty.clone();
+                    if self.type_borrows(&param_ty) {
                         sources.push(index);
                     }
                 }
@@ -2055,7 +2360,7 @@ impl<'a> Checker<'a> {
                             .to_string(),
                     );
                 self.diagnostics.push(diag);
-            } else if sources.len() > 1 {
+            } else if sources.len() > 1 && !explicit_return_lifetime {
                 let diag = Diagnostic::error("missing lifetime specifier".to_string(), ret_span)
                     .with_code("E0106")
                     .with_note(
@@ -2063,10 +2368,10 @@ impl<'a> Checker<'a> {
                             .to_string(),
                     );
                 self.diagnostics.push(diag);
-            } else {
+            } else if sources.len() == 1 {
                 let source = sources[0];
                 ret_ref_source = Some(source);
-                if mutable {
+                if outer_mutable {
                     let from_mutable = if source == 0 && decl.self_kind.is_some() {
                         matches!(decl.self_kind, Some(SelfKind::RefMut))
                     } else {

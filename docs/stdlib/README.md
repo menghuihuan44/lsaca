@@ -1,8 +1,8 @@
 # Standard library reference
 
-Version 2.1.0 moves the standard library out of the compiler: it is a normal
-lsaca crate named `std`, stored in the repository under `stdlib/src/` and embedded
-in the compiler at build time. Programs see it as the prelude (unqualified names)
+The standard library is a normal lsaca crate named `std`, stored in the repository
+under `stdlib/src/` and embedded in the compiler at build time; the move out of
+the compiler happened in 2.0.0. Programs see it as the prelude (unqualified names)
 and can also name its modules explicitly with `std::…` paths.
 
 This page is the index of the library reference. The language-level chapter
@@ -12,23 +12,23 @@ the builtin features that are part of the language surface (formatting macros, t
 
 ## Module map
 
-| Module | Page | Status in 2.1.0 |
+| Module | Page | Status in 2.2.0 |
 | --- | --- | --- |
-| `std::core` (Option, Result, Iterator) | [core](core.md) | API migrated from 1.7, additively extended |
+| `std::core` (Option, Result, Iterator) | [core](core.md) | API migrated from 1.7, additively extended; 2.2.0 adds the `From` trait (re-exported by the crate root) |
 | `std::string` (String) | [string](string.md) | API migrated from 1.7; `from_str`, `as_str`, `as_mut_str` and the `str` methods implemented; `&str` parameters in 2.1.0 |
 | `std::char` (character classification) | [char](char.md) | ASCII classification methods implemented and extended in 2.1.0; Unicode classification not implemented |
-| `std::vec` (Vec) | [vec](vec.md) | API migrated from 1.7; `sort`, `as_slice` and `as_mut_slice` implemented; `usize` positions in 2.1.0 |
+| `std::vec` (Vec) | [vec](vec.md) | API migrated from 1.7; `sort`, `as_slice` and `as_mut_slice` implemented; `usize` positions in 2.1.0; `get_mut`, `first_mut` and `last_mut` added in 2.2.0 |
 | `std::iter` (iterators and adapters) | [iter](iter.md) | API migrated from 1.7; `zip`, `chain`, `filter_map`, `take_while`, `skip_while` and `step_by` added in 2.1.0 |
 | `std::fmt` (formatting) | [fmt](fmt.md) | compiler-implemented; module is a reference layer |
 | `std::math` (math functions) | [math](math.md) | free functions migrated from 1.7; the 16 `f64` constants added in 2.1.0 |
-| `std::collections` | [collections](collections/README.md) | HashMap migrated; HashSet, BTreeSet, BTreeMap, VecDeque and BinaryHeap implemented; `usize` lengths in 2.1.0 |
+| `std::collections` | [collections](collections/README.md) | HashMap migrated (borrowed `get`/`get_mut` in 2.2.0); HashSet, BTreeSet, BTreeMap, VecDeque and BinaryHeap implemented; `usize` lengths in 2.1.0 |
 | `std::io` and `std::io::file` | [io](io.md) | error types, file and stream handles and text helpers implemented; the stream traits, `BufReader` and the `io::Result` alias are not implemented |
 | `std::fs` | [fs](fs.md) | path, directory and metadata API implemented; `FileType` and `SystemTime` metadata added in 2.1.0 |
 | `std::net` | [net](net.md) | implemented (plain TCP, no TLS); `Shutdown` added in 2.1.0 |
 | `std::time` | [time](time.md) | implemented; `Duration`, `Instant`, `SystemTime` and `sleep(Duration)` added in 2.1.0 |
 | `std::env` | [env](env.md) | implemented; `var` returns `Result<String, VarError>` in 2.1.0 |
 | `std::process` | [process](process.md) | `args` and `exit(i32)` implemented |
-| `std::error` | [error](error.md) | the minimal `Error` trait is implemented; `io::Error`, `ParseIntError` and `ParseFloatError` implement it |
+| `std::error` | [error](error.md) | the minimal `Error` trait is implemented, with a default `source` method in 2.2.0; `io::Error`, `ParseIntError` and `ParseFloatError` implement it |
 
 The collections module has its own index: [collections](collections/README.md),
 with one page per container — [HashMap](collections/hash-map.md),
@@ -39,7 +39,7 @@ with one page per container — [HashMap](collections/hash-map.md),
 "API migrated from 1.7" means the surface is described in the language chapter;
 the implementation has moved into the `std` crate on top of compiler intrinsics,
 so programs do not need to change. "Implemented" means the code exists in
-`stdlib/src/` and has been exercised against the 2.1.0 compiler. Modules that are
+`stdlib/src/` and has been exercised against the 2.2.0 compiler. Modules that are
 only partly implemented describe the implemented subset first and mark the rest
 *planned*: the API fixed by the design but not implemented yet.
 
@@ -78,21 +78,21 @@ only partly implemented describe the implemented subset first and mark the rest
 
 ## Packaging and paths
 
-The library is versioned with the compiler (2.1.0). There is no separate library
+The library is versioned with the compiler (2.2.0). There is no separate library
 package to download and no version resolution for it. Paths into the library use
 the crate name `std`, which cannot be shadowed by a user package.
 
 ## Reading this reference
 
 Each page starts with a **status line** and then lists the API. Entries marked
-*planned* are not implemented in 2.1.0; they are planned for a later release.
+*planned* are not implemented in 2.2.0; they are planned for a later release.
 Entries without a marker are either part of the migrated 1.7 surface or are
 implemented in the `std` crate. Partly implemented modules say so in the status
 line and name the missing parts. Examples in this subtree are written for the
-2.1.0 semantics (default `i32`, `usize` lengths, `&str` text parameters). Every
+2.2.0 semantics (default `i32`, `usize` lengths, `&str` text parameters). Every
 runnable (```ls) example here is part of the compiled example test plan, like the
 language chapters: `scripts/docs_verify.py` writes each one to disk, executes it
-with the 2.1.0 compiler and compares its output with the stated result. Prose-only
+with the 2.2.0 compiler and compares its output with the stated result. Prose-only
 API listings are not examples and make no verified-output claim.
 
 ## What next

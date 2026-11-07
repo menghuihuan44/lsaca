@@ -215,7 +215,7 @@ Output:
 8 13
 ```
 
-One limitation remains in 2.1.0: function values do **not** support `==`, so
+One limitation remains in 2.2.0: function values do **not** support `==`, so
 comparing two of them is an error (`E0369`):
 
 ```ls,compile-fail
@@ -459,8 +459,8 @@ Output:
 2
 ```
 
-A function may also **return** a reference. Because lsaca has no lifetime
-syntax, the returned reference's source is inferred by elision:
+A function may also **return** a reference. The returned reference's source is
+inferred by elision:
 
 * In a method, a returned reference is borrowed from the receiver (`&self` or
   `&mut self`).
@@ -468,6 +468,24 @@ syntax, the returned reference's source is inferred by elision:
   function has **exactly one** reference parameter; that parameter is the
   source. Zero or several reference parameters give `E0106` (missing lifetime
   specifier).
+
+A function may also spell the relationship explicitly, which is how a function
+returns an aggregate that borrows from its argument (see
+[Lifetimes](29-lifetimes.md)):
+
+```rust
+fn first<'a>(values: &'a [i64]) -> &'a i64 {
+    return &values[0];
+}
+
+fn make<'a>(values: &'a [i64]) -> View<'a> {
+    return View { data: values };
+}
+```
+
+The lifetime parameters are erased before code generation, so they cost nothing
+at run time and a function that only has lifetime parameters is not generic.
+Explicit lifetimes are optional in signatures that elision already settles.
 
 ```ls
 fn first(values: &[i64]) -> &i64 {
@@ -523,7 +541,11 @@ implicitly:
 * `&Box<T>` coerces to `&T`;
 * `&Vec<T>` coerces to `&[T]` and `&mut Vec<T>` to `&mut [T]`;
 * `&String` coerces to `&str` and `&mut String` to `&mut str`;
+* `&array` coerces to `&[T]` (but `&mut array` is not supported in 2.2.0);
 * a string literal is compiled as a static `&str` where a `&str` is expected.
+
+Reference types may be used as struct, enum, tuple and `Option` fields since
+2.2.0, with a lifetime parameter; see [Lifetimes](29-lifetimes.md).
 
 Methods with `&self`/`&mut self` receivers are covered in [Structs, enums and
 impl](10-structs-enums-and-impl.md#methods-and-associated-functions-with-impl);

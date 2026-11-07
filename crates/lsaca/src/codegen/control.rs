@@ -1146,7 +1146,7 @@ impl<'a> Gen<'a> {
 
     // ----- loops -----------------------------------------------------------
 
-    pub(crate) fn gen_loop(&mut self, body: &HBlock, ty: &Ty, target: &str) {
+    pub(crate) fn gen_loop(&mut self, label: Option<&str>, body: &HBlock, ty: &Ty, target: &str) {
         let break_label = self.fresh_label("loop_end");
         let continue_label = self.fresh_label("loop_next");
         // A loop completion value of unit type is never observed; storing it
@@ -1159,6 +1159,7 @@ impl<'a> Gen<'a> {
         self.loops.push(LoopCtx {
             break_label: break_label.clone(),
             continue_label: continue_label.clone(),
+            label: label.map(str::to_string),
             body_frame: self.frames.len(),
             used_break: false,
             used_continue: false,
@@ -1181,7 +1182,14 @@ impl<'a> Gen<'a> {
         self.fn_terminated = false;
     }
 
-    pub(crate) fn gen_while(&mut self, cond: &HExpr, body: &HBlock, ty: &Ty, target: &str) {
+    pub(crate) fn gen_while(
+        &mut self,
+        label: Option<&str>,
+        cond: &HExpr,
+        body: &HBlock,
+        ty: &Ty,
+        target: &str,
+    ) {
         let break_label = self.fresh_label("while_end");
         let continue_label = self.fresh_label("while_next");
         // A loop completion value of unit type is never observed; storing it
@@ -1194,6 +1202,7 @@ impl<'a> Gen<'a> {
         self.loops.push(LoopCtx {
             break_label: break_label.clone(),
             continue_label: continue_label.clone(),
+            label: label.map(str::to_string),
             body_frame: self.frames.len(),
             used_break: false,
             used_continue: false,
@@ -1239,6 +1248,7 @@ impl<'a> Gen<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn gen_for_range(
         &mut self,
+        label: Option<&str>,
         pat: &HPat,
         start: &HExpr,
         end: &HExpr,
@@ -1264,6 +1274,7 @@ impl<'a> Gen<'a> {
         self.loops.push(LoopCtx {
             break_label: break_label.clone(),
             continue_label: continue_label.clone(),
+            label: label.map(str::to_string),
             body_frame: self.frames.len(),
             used_break: false,
             used_continue: false,
@@ -1303,6 +1314,7 @@ impl<'a> Gen<'a> {
 
     pub(crate) fn gen_for_vec(
         &mut self,
+        label: Option<&str>,
         pat: &HPat,
         vec: &HExpr,
         body: &HBlock,
@@ -1329,6 +1341,7 @@ impl<'a> Gen<'a> {
         self.loops.push(LoopCtx {
             break_label: break_label.clone(),
             continue_label: continue_label.clone(),
+            label: label.map(str::to_string),
             body_frame: self.frames.len(),
             used_break: false,
             used_continue: false,
@@ -1399,6 +1412,7 @@ impl<'a> Gen<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn gen_for_iter(
         &mut self,
+        label: Option<&str>,
         iter: &HExpr,
         next_fn: usize,
         pat: &HPat,
@@ -1437,6 +1451,7 @@ impl<'a> Gen<'a> {
         self.loops.push(LoopCtx {
             break_label: break_label.clone(),
             continue_label: continue_label.clone(),
+            label: label.map(str::to_string),
             body_frame: self.frames.len(),
             used_break: false,
             used_continue: false,
@@ -1554,47 +1569,71 @@ impl<'a> Gen<'a> {
 
     // ----- jump statements -------------------------------------------------
 
-    pub(crate) fn gen_break(&mut self) {
-        let context = match self.loops.last() {
-            Some(context) => (context.break_label.clone(), context.body_frame),
-            None => {
-                self.block_terminated = true;
-                return;
-            }
+    /// Resolve the loop targeted by a `break` or `continue`.
+    ///
+    /// Without a label the innermost loop is targeted. With a label the
+    /// nearest enclosing loop carrying that label is targeted; the loop label
+    /// is scoped like a local name, so an inner loop reusing an outer label
+    /// shadows it, which `rposition` reproduces. The type checker rejects
+    /// unknown labels (E0426), so a missing one is a compiler bug.
+    ///
+    /// Returns the index of the target on the loop stack together with the
+    /// break label, the continue label and the frame count recorded when the
+    /// loop was entered.
+    fn jump_target(&self, label: Option<&str>) -> Option<(usize, String, String, usize)> {
+        let index = match label {
+            Some(name) => self
+                .loops
+                .iter()
+                .rposition(|context| context.label.as_deref() == Some(name))
+                .unwrap_or_else(|| {
+                    util::internal_error(format!(
+                        "no loop is labelled `{}` (the type checker should have rejected this jump)",
+                        name
+                    ))
+                }),
+            None => self.loops.len().checked_sub(1)?,
         };
-        let (label, body_frame) = context;
-        if let Some(context) = self.loops.last_mut() {
-            context.used_break = true;
-        }
+        let context = &self.loops[index];
+        Some((
+            index,
+            context.break_label.clone(),
+            context.continue_label.clone(),
+            context.body_frame,
+        ))
+    }
+
+    pub(crate) fn gen_break(&mut self, label: Option<&str>) {
+        let Some((index, break_label, _continue_label, body_frame)) = self.jump_target(label)
+        else {
+            self.block_terminated = true;
+            return;
+        };
+        self.loops[index].used_break = true;
         let frame_count = self.frames.len();
         let mut index = frame_count;
         while index > body_frame {
             index -= 1;
             self.emit_frame_release(index);
         }
-        self.w.line(format!("goto {};", label));
+        self.w.line(format!("goto {};", break_label));
         self.block_terminated = true;
     }
 
-    pub(crate) fn gen_continue(&mut self) {
-        let context = match self.loops.last() {
-            Some(context) => (context.continue_label.clone(), context.body_frame),
-            None => {
-                self.block_terminated = true;
-                return;
-            }
+    pub(crate) fn gen_continue(&mut self, label: Option<&str>) {
+        let Some((index, _break_label, continue_label, body_frame)) = self.jump_target(label)
+        else {
+            self.block_terminated = true;
+            return;
         };
-        let (label, body_frame) = context;
-        if let Some(context) = self.loops.last_mut() {
-            context.used_continue = true;
-        }
+        self.loops[index].used_continue = true;
         let frame_count = self.frames.len();
         let mut index = frame_count;
         while index > body_frame + 1 {
             index -= 1;
             self.emit_frame_release(index);
         }
-        self.w.line(format!("goto {};", label));
+        self.w.line(format!("goto {};", continue_label));
         self.block_terminated = true;
     }
 

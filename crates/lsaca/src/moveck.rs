@@ -116,6 +116,8 @@ impl State {
 }
 
 struct LoopFrame {
+    /// Label of the loop, without the apostrophe, when the source wrote one.
+    label: Option<String>,
     breaks: Vec<State>,
     continues: Vec<State>,
 }
@@ -529,32 +531,36 @@ impl<'a> FnChecker<'a> {
                 else_expr,
             } => self.walk_if(cond, then_block, else_expr.as_deref(), ctx),
             HExprKind::Match { scrutinee, arms } => self.walk_match(scrutinee, arms, ctx),
-            HExprKind::Loop { body } => {
-                self.walk_loop(body);
-                true
-            }
-            HExprKind::While { cond, body } => {
-                self.walk_while(cond, body);
-                true
-            }
+            HExprKind::Loop { label, body } => self.walk_loop(label.as_deref(), body),
+            HExprKind::While { label, cond, body } => self.walk_while(label.as_deref(), cond, body),
             HExprKind::ForRange {
+                label,
                 pat,
                 start,
                 end,
                 body,
                 ..
             } => {
-                self.walk_for_range(pat, start, end, body);
+                self.walk_for_range(label.as_deref(), pat, start, end, body);
                 true
             }
-            HExprKind::ForVec { pat, vec, body } => {
-                self.walk_for_vec(pat, vec, body);
+            HExprKind::ForVec {
+                label,
+                pat,
+                vec,
+                body,
+            } => {
+                self.walk_for_vec(label.as_deref(), pat, vec, body);
                 true
             }
             HExprKind::ForIter {
-                iter, pat, body, ..
+                label,
+                iter,
+                pat,
+                body,
+                ..
             } => {
-                self.walk_for_iter(pat, iter, body);
+                self.walk_for_iter(label.as_deref(), pat, iter, body);
                 true
             }
             HExprKind::StructLit { fields, .. } => {
@@ -584,6 +590,21 @@ impl<'a> FnChecker<'a> {
                 self.walk_expr(count, Ctx::Borrow);
                 true
             }
+            HExprKind::Array { elems } => {
+                // Every element is moved into the new array value, so each one
+                // is consumed exactly like a vector literal element.
+                for element in elems {
+                    self.walk_expr(element, Ctx::Consume);
+                }
+                true
+            }
+            HExprKind::ArrayRepeat { value, .. } => {
+                // The operand is evaluated once and copied or moved into every
+                // slot; consuming it matches the borrow checker. The length is
+                // a constant and has no runtime expression to walk.
+                self.walk_expr(value, Ctx::Consume);
+                true
+            }
             HExprKind::EnumLit { args, .. } => {
                 for arg in args {
                     self.walk_expr(arg, Ctx::Consume);
@@ -608,12 +629,12 @@ impl<'a> FnChecker<'a> {
                 self.walk_args(&call.args, Ctx::Borrow);
                 true
             }
-            HExprKind::Break => {
-                self.record_loop_exit(true);
+            HExprKind::Break { label } => {
+                self.record_loop_exit(true, label.as_deref());
                 false
             }
-            HExprKind::Continue => {
-                self.record_loop_exit(false);
+            HExprKind::Continue { label } => {
+                self.record_loop_exit(false, label.as_deref());
                 false
             }
             HExprKind::Return(value) => {
@@ -652,7 +673,7 @@ impl<'a> FnChecker<'a> {
             HExprKind::Local { .. } => {
                 self.walk_expr(capture, ctx);
             }
-            HExprKind::Break => {}
+            HExprKind::Break { label: _ } => {}
             _ => {
                 self.walk_expr(capture, Ctx::Borrow);
             }
@@ -833,9 +854,26 @@ impl<'a> FnChecker<'a> {
         falls_any
     }
 
-    fn record_loop_exit(&mut self, is_break: bool) {
+    /// Record the state at a `break` or `continue`, attaching it to the loop
+    /// the statement targets. Unlabelled exits target the innermost loop; a
+    /// labelled exit targets the innermost enclosing loop with that label (the
+    /// type checker has already rejected unknown labels). Recording a labelled
+    /// exit only on its target loop is what keeps every loop the exit escapes
+    /// from treating the exit as a normal fall-through, so code after such a
+    /// loop is correctly seen as unreachable.
+    fn record_loop_exit(&mut self, is_break: bool, label: Option<&str>) {
+        let target = match label {
+            Some(name) => self
+                .loops
+                .iter()
+                .rposition(|frame| frame.label.as_deref() == Some(name)),
+            None => self.loops.len().checked_sub(1),
+        };
+        let Some(target) = target else {
+            return;
+        };
         let state = self.state.clone();
-        if let Some(frame) = self.loops.last_mut() {
+        if let Some(frame) = self.loops.get_mut(target) {
             if is_break {
                 frame.breaks.push(state);
             } else {
@@ -855,7 +893,18 @@ impl<'a> FnChecker<'a> {
     /// A while/for loop can also exit at the loop head (the condition fails or
     /// the iterator is exhausted), so the loop-head state is part of the state
     /// after the loop. A plain loop() only exits through a break.
-    fn analyze_loop<F>(&mut self, exits_at_head: bool, mut iteration: F) -> State
+    ///
+    /// The returned flag reports whether the loop can fall through to the code
+    /// after it. A while/for loop always can (the condition or iterator can end
+    /// it at the loop head), while a plain loop can only be left by a break that
+    /// targets it, so a plain loop with no such break never falls through and the
+    /// code after it is unreachable.
+    fn analyze_loop<F>(
+        &mut self,
+        label: Option<&str>,
+        exits_at_head: bool,
+        mut iteration: F,
+    ) -> (State, bool)
     where
         F: FnMut(&mut FnChecker<'a>) -> bool,
     {
@@ -864,6 +913,7 @@ impl<'a> FnChecker<'a> {
         let mut breaks: Vec<State> = Vec::new();
         for _ in 0..MAX_LOOP_ITERATIONS {
             self.loops.push(LoopFrame {
+                label: label.map(str::to_string),
                 breaks: Vec::new(),
                 continues: Vec::new(),
             });
@@ -909,55 +959,82 @@ impl<'a> FnChecker<'a> {
         for state in &breaks {
             post = post.join(state);
         }
-        post
+        let falls_through = exits_at_head || !breaks.is_empty();
+        (post, falls_through)
     }
 
-    fn walk_loop(&mut self, body: &HBlock) {
-        let post = self.analyze_loop(false, |checker| checker.walk_block(body, Ctx::Consume));
+    fn walk_loop(&mut self, label: Option<&str>, body: &HBlock) -> bool {
+        let (post, falls_through) = self.analyze_loop(label, false, |checker| {
+            checker.walk_block(body, Ctx::Consume)
+        });
         self.state = post;
+        falls_through
     }
 
-    fn walk_while(&mut self, cond: &HExpr, body: &HBlock) {
-        let post = self.analyze_loop(true, |checker| {
+    fn walk_while(&mut self, label: Option<&str>, cond: &HExpr, body: &HBlock) -> bool {
+        let (post, falls_through) = self.analyze_loop(label, true, |checker| {
             checker.walk_expr(cond, Ctx::Borrow);
             checker.walk_block(body, Ctx::Consume)
         });
         self.state = post;
+        falls_through
     }
 
-    fn walk_for_range(&mut self, pat: &HPat, start: &HExpr, end: &HExpr, body: &HBlock) {
+    fn walk_for_range(
+        &mut self,
+        label: Option<&str>,
+        pat: &HPat,
+        start: &HExpr,
+        end: &HExpr,
+        body: &HBlock,
+    ) -> bool {
         self.walk_expr(start, Ctx::Borrow);
         self.walk_expr(end, Ctx::Borrow);
-        let post = self.analyze_loop(true, |checker| {
+        let (post, falls_through) = self.analyze_loop(label, true, |checker| {
             checker.bind_pat(pat);
             checker.walk_block(body, Ctx::Consume)
         });
         self.state = post;
+        falls_through
     }
 
-    fn walk_for_vec(&mut self, pat: &HPat, vec: &HExpr, body: &HBlock) {
+    fn walk_for_vec(
+        &mut self,
+        label: Option<&str>,
+        pat: &HPat,
+        vec: &HExpr,
+        body: &HBlock,
+    ) -> bool {
         // A for loop over a vector moves the collection into the loop; each
         // iteration transfers one element into the pattern binding.
         self.walk_expr(vec, Ctx::Consume);
-        let post = self.analyze_loop(true, |checker| {
+        let (post, falls_through) = self.analyze_loop(label, true, |checker| {
             checker.bind_pat(pat);
             checker.walk_block(body, Ctx::Consume)
         });
         self.state = post;
+        falls_through
     }
 
-    fn walk_for_iter(&mut self, pat: &HPat, iter: &HExpr, body: &HBlock) {
+    fn walk_for_iter(
+        &mut self,
+        label: Option<&str>,
+        pat: &HPat,
+        iter: &HExpr,
+        body: &HBlock,
+    ) -> bool {
         // A for loop over an iterator consumes the iterator value: the hidden
         // loop owns it and polls next_fn until it yields None. The pattern is
         // rebound on every iteration, so moving a binding inside the body is
         // fine, while moving an enclosing local is reported on the next
         // iteration by the loop-head fixed point.
         self.walk_expr(iter, Ctx::Consume);
-        let post = self.analyze_loop(true, |checker| {
+        let (post, falls_through) = self.analyze_loop(label, true, |checker| {
             checker.bind_pat(pat);
             checker.walk_block(body, Ctx::Consume)
         });
         self.state = post;
+        falls_through
     }
 }
 
@@ -2310,6 +2387,238 @@ fn main() {
             }"#,
         );
     }
+
+    // -- v2.2 arrays and labelled loops ----------------------------------
+    //
+    // Fixed size arrays are Copy when their element type is Copy, so copying
+    // an integer array keeps the source usable. Arrays of owned values behave
+    // like every other owned aggregate: they move and their elements are
+    // places that cannot be moved out of. Labelled break and continue only
+    // feed the loop they name, which decides whether the loop can run another
+    // iteration after a move.
+
+    #[test]
+    fn accepts_copy_arrays() {
+        expect_accepted(
+            r#"fn main() {
+                let numbers: [i64; 3] = [1, 2, 3];
+                let first = numbers;
+                let second = numbers;
+                println!("{} {} {}", first[0], second[1], numbers[2]);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn accepts_cloning_an_array_element() {
+        expect_accepted(
+            r#"fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let first: String = words[0].clone();
+                println!("{} {:?}", first, words);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn accepts_copy_array_passed_by_value() {
+        expect_accepted(
+            r#"fn take(values: [i64; 2]) -> i64 { values[0] }
+            fn main() {
+                let numbers: [i64; 2] = [7, 8];
+                let first: i64 = take(numbers);
+                println!("{} {}", first, numbers[0]);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn accepts_empty_string_array_as_copy() {
+        expect_accepted(
+            r#"fn main() {
+                let words: [String; 0] = [];
+                let first = words;
+                let second = words;
+                println!("{} {}", first.len(), second.len());
+            }"#,
+        );
+    }
+
+    #[test]
+    fn accepts_copy_array_repeat_values() {
+        expect_accepted(
+            r#"fn main() {
+                let zeros: [i64; 3] = [0; 3];
+                let copy = zeros;
+                println!("{:?} {:?}", zeros, copy);
+            }"#,
+        );
+    }
+
+    #[test]
+    fn accepts_breaking_out_of_a_labelled_loop_before_another_iteration() {
+        expect_accepted(
+            r#"fn main() {
+                let text: String = String::from("x");
+                'outer: for i in 0..2 {
+                    for j in 0..2 {
+                        let moved: String = text;
+                        break 'outer;
+                    }
+                }
+            }"#,
+        );
+    }
+
+    #[test]
+    fn accepts_fresh_binding_in_each_labelled_iteration() {
+        expect_accepted(
+            r#"fn main() {
+                'outer: for i in 0..3 {
+                    let local: String = String::from("x");
+                    let moved: String = local;
+                    if i == 1 { continue 'outer; }
+                    println!("{}", moved);
+                }
+            }"#,
+        );
+    }
+
+    #[test]
+    fn accepts_move_inside_a_labelled_loop_that_breaks_itself() {
+        expect_accepted(
+            r#"fn main() {
+                let mut count: i64 = 0;
+                'timer: loop {
+                    let text: String = String::from("x");
+                    let moved: String = text;
+                    count = count + 1;
+                    if count >= 3 { break 'timer; }
+                    println!("{}", moved);
+                }
+            }"#,
+        );
+    }
+
+    #[test]
+    fn accepts_while_let_that_reassigns_the_scrutinee() {
+        expect_accepted(
+            r#"fn main() {
+                let mut next: Option<String> = Some(String::from("a"));
+                'scan: while let Some(value) = next {
+                    next = None;
+                    continue 'scan;
+                }
+            }"#,
+        );
+    }
+
+    #[test]
+    fn rejects_use_of_a_moved_string_array() {
+        expect_rejected(
+            r#"fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let moved = words;
+                println!("{:?}", words);
+            }"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn rejects_second_move_of_a_string_array() {
+        expect_rejected(
+            r#"fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let first = words;
+                let second = words;
+                println!("{:?} {:?}", first, second);
+            }"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn rejects_moving_an_array_element() {
+        expect_rejected(
+            r#"fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let first: String = words[0];
+                println!("{}", first);
+            }"#,
+            "E0507",
+        );
+    }
+
+    #[test]
+    fn rejects_use_of_a_string_array_after_passing_it_by_value() {
+        expect_rejected(
+            r#"fn take(values: [String; 2]) -> usize { values.len() }
+            fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let count: usize = take(words);
+                println!("{} {:?}", count, words);
+            }"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn rejects_use_of_an_array_after_moving_it_into_a_struct_field() {
+        expect_rejected(
+            r#"struct Holder { values: [String; 2] }
+            fn main() {
+                let words: [String; 2] = [String::from("a"), String::from("b")];
+                let holder: Holder = Holder { values: words };
+                println!("{:?}", words);
+            }"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn rejects_use_after_move_on_a_later_labelled_iteration() {
+        expect_rejected(
+            r#"fn main() {
+                let text: String = String::from("x");
+                'outer: for i in 0..2 {
+                    if i == 1 {
+                        break 'outer;
+                    }
+                    let moved: String = text;
+                }
+            }"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn rejects_moving_in_a_labelled_loop_before_continuing() {
+        expect_rejected(
+            r#"fn main() {
+                let text: String = String::from("x");
+                'outer: for i in 0..2 {
+                    let moved: String = text;
+                    continue 'outer;
+                }
+                println!("{}", text);
+            }"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn rejects_while_let_continuing_after_the_scrutinee_is_consumed() {
+        expect_rejected(
+            r#"fn main() {
+                let next: Option<String> = Some(String::from("a"));
+                'scan: while let Some(value) = next {
+                    continue 'scan;
+                }
+            }"#,
+            "E0382",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2522,6 +2831,7 @@ mod hir_tests {
         HExpr::new(
             Ty::unit(),
             HExprKind::ForIter {
+                label: None,
                 iter: Box::new(iter),
                 next_fn: 0,
                 pat: pat_bind(item_name, item_ty),
@@ -3258,6 +3568,7 @@ mod hir_tests {
         let loop_expr = HExpr::new(
             Ty::unit(),
             HExprKind::Loop {
+                label: None,
                 body: block(vec![expr_stmt(match_expr)]),
             },
             sp(),
@@ -3597,6 +3908,229 @@ mod hir_tests {
             let_stmt("view", slice_of(local("numbers", int_vector_type()))),
         ]);
         let diagnostics = dyn_run(body);
+        expect_code(&diagnostics, "E0382");
+    }
+
+    // -- v2.2 arrays ------------------------------------------------
+
+    fn array_lit(elem_ty: Ty, len: usize, elems: Vec<HExpr>) -> HExpr {
+        HExpr::new(Ty::array(elem_ty, len), HExprKind::Array { elems }, sp())
+    }
+
+    fn index_of(base: HExpr, index: HExpr, ty: Ty) -> HExpr {
+        HExpr::new(
+            ty,
+            HExprKind::Index {
+                base: Box::new(base),
+                index: Box::new(index),
+            },
+            sp(),
+        )
+    }
+
+    fn loop_expr(label: Option<&str>, body: HBlock) -> HExpr {
+        HExpr::new(
+            Ty::unit(),
+            HExprKind::Loop {
+                label: label.map(str::to_string),
+                body,
+            },
+            sp(),
+        )
+    }
+
+    fn break_expr(label: Option<&str>) -> HExpr {
+        HExpr::new(
+            Ty::unit(),
+            HExprKind::Break {
+                label: label.map(str::to_string),
+            },
+            sp(),
+        )
+    }
+
+    fn continue_expr(label: Option<&str>) -> HExpr {
+        HExpr::new(
+            Ty::unit(),
+            HExprKind::Continue {
+                label: label.map(str::to_string),
+            },
+            sp(),
+        )
+    }
+
+    #[test]
+    fn copy_array_remains_usable_after_a_copy() {
+        let int_array = Ty::array(Ty::i64(), 2);
+        let body = block(vec![
+            let_stmt(
+                "numbers",
+                array_lit(Ty::i64(), 2, vec![int_lit(1), int_lit(2)]),
+            ),
+            let_stmt("first", local("numbers", int_array.clone())),
+            let_stmt("second", local("numbers", int_array)),
+        ]);
+        accept(body, Vec::new());
+    }
+
+    #[test]
+    fn owned_array_moves_and_use_after_move_reports_e0382() {
+        let string_array = Ty::array(Ty::String, 2);
+        let body = block(vec![
+            let_stmt(
+                "words",
+                array_lit(Ty::String, 2, vec![str_lit("a"), str_lit("b")]),
+            ),
+            let_stmt("moved", local("words", string_array.clone())),
+            let_stmt("again", local("words", string_array)),
+        ]);
+        let diagnostics = run(body, Vec::new());
+        expect_code(&diagnostics, "E0382");
+    }
+
+    #[test]
+    fn array_repeat_consumes_the_repeated_value() {
+        let word = str_lit("hi");
+        let words = HExpr::new(
+            Ty::array(Ty::String, 2),
+            HExprKind::ArrayRepeat {
+                value: Box::new(local("word", Ty::String)),
+                len: 2,
+            },
+            sp(),
+        );
+        let body = block(vec![
+            let_stmt("word", word),
+            let_stmt("words", words),
+            expr_stmt(local("word", Ty::String)),
+        ]);
+        let diagnostics = run(body, Vec::new());
+        expect_code(&diagnostics, "E0382");
+    }
+
+    #[test]
+    fn moving_an_array_element_reports_e0507() {
+        let string_array = Ty::array(Ty::String, 2);
+        let element = index_of(local("words", string_array.clone()), int_lit(0), Ty::String);
+        let body = block(vec![
+            let_stmt(
+                "words",
+                array_lit(Ty::String, 2, vec![str_lit("a"), str_lit("b")]),
+            ),
+            let_stmt("first", element),
+        ]);
+        let diagnostics = run(body, Vec::new());
+        expect_code(&diagnostics, "E0507");
+    }
+
+    #[test]
+    fn zero_length_owned_array_is_copy() {
+        let string_array = Ty::array(Ty::String, 0);
+        let body = block(vec![
+            let_stmt("words", array_lit(Ty::String, 0, Vec::new())),
+            let_stmt("first", local("words", string_array.clone())),
+            let_stmt("second", local("words", string_array)),
+        ]);
+        accept(body, Vec::new());
+    }
+
+    #[test]
+    fn struct_with_a_reference_field_is_copy() {
+        let view_type = Ty::Struct(0);
+        let reference_type = Ty::ref_to(Ty::String);
+        let structs = vec![HStruct {
+            name: "View".to_string(),
+            c_name: "View".to_string(),
+            fields: vec![HField {
+                name: "text".to_string(),
+                ty: reference_type.clone(),
+            }],
+            span: sp(),
+        }];
+        let view = HExpr::new(
+            view_type.clone(),
+            HExprKind::StructLit {
+                struct_id: 0,
+                fields: vec![(
+                    0,
+                    HExpr::new(
+                        reference_type,
+                        HExprKind::Ref {
+                            mutable: false,
+                            expr: Box::new(local("text", Ty::String)),
+                        },
+                        sp(),
+                    ),
+                )],
+            },
+            sp(),
+        );
+        let body = block(vec![
+            let_stmt("text", str_lit("x")),
+            let_stmt("view", view),
+            let_stmt("first", local("view", view_type.clone())),
+            let_stmt("second", local("view", view_type)),
+        ]);
+        accept(body, structs);
+    }
+
+    #[test]
+    fn labelled_break_exits_the_outer_loop_so_a_later_use_reports_e0382() {
+        let inner = loop_expr(
+            None,
+            block(vec![
+                let_stmt("moved", local("text", Ty::String)),
+                expr_stmt(break_expr(Some("outer"))),
+            ]),
+        );
+        let outer = loop_expr(Some("outer"), block(vec![expr_stmt(inner)]));
+        let body = block(vec![
+            let_stmt("text", str_lit("x")),
+            expr_stmt(outer),
+            expr_stmt(local("text", Ty::String)),
+        ]);
+        let diagnostics = run(body, Vec::new());
+        expect_code(&diagnostics, "E0382");
+    }
+
+    #[test]
+    fn labelled_break_stops_the_outer_loop_from_iterating_again() {
+        let inner = loop_expr(
+            None,
+            block(vec![
+                let_stmt("moved", local("text", Ty::String)),
+                expr_stmt(break_expr(Some("outer"))),
+            ]),
+        );
+        let outer = loop_expr(Some("outer"), block(vec![expr_stmt(inner)]));
+        let body = block(vec![let_stmt("text", str_lit("x")), expr_stmt(outer)]);
+        accept(body, Vec::new());
+    }
+
+    #[test]
+    fn use_after_a_loop_that_never_exits_is_not_analyzed() {
+        let timer = loop_expr(
+            Some("timer"),
+            block(vec![expr_stmt(continue_expr(Some("timer")))]),
+        );
+        let body = block(vec![
+            let_stmt("text", str_lit("x")),
+            let_stmt("moved", local("text", Ty::String)),
+            expr_stmt(timer),
+            expr_stmt(local("text", Ty::String)),
+        ]);
+        accept(body, Vec::new());
+    }
+
+    #[test]
+    fn array_of_a_drop_type_moves_instead_of_copying() {
+        let string_array = Ty::array(Ty::String, 1);
+        let body = block(vec![
+            let_stmt("words", array_lit(Ty::String, 1, vec![str_lit("a")])),
+            expr_stmt(local("words", string_array.clone())),
+            expr_stmt(local("words", string_array)),
+        ]);
+        let diagnostics = run(body, Vec::new());
         expect_code(&diagnostics, "E0382");
     }
 }

@@ -11,8 +11,8 @@ fn main() {
     let mut i = 0;
     while i < tokens {
         let word = format!("w{}", i % distinct);
-        let next = match counts.get(word) {
-            Some(count) => count + 1,
+        let next = match counts.get(&word) {
+            Some(count) => *count + 1,
             None => 1,
         };
         counts.insert(word, next);
@@ -22,7 +22,7 @@ fn main() {
     let mut max_count = 0;
     let keys = counts.keys();
     for key in keys {
-        let count = counts.get(key).unwrap();
+        let count = *counts.get(&key).unwrap();
         checksum += count * count;
         if count > max_count {
             max_count = count;

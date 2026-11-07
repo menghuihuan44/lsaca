@@ -1,0 +1,11 @@
+; sample.lisp - file-mode script for examples/programs/lisp.ls and lisp.c
+(define fact (lambda (n) (if (<= n 1) 1 (* n (fact (- n 1))))))
+(print (fact 5))
+(define squares (lambda (items) (if (null? items) (list) (cons (* (car items) (car items)) (squares (cdr items))))))
+(print (squares (list 2 3 4)))
+(define add (lambda (a) (lambda (b) (+ a b))))
+(define add10 (add 10))
+(print (add10 32))
+(let ((x 3) (y 4)) (print (* x y)))
+(print "file mode ok")
+(print (length "café") (number? 42) (symbol? 'ok))

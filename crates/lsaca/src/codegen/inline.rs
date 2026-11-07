@@ -176,8 +176,8 @@ fn scan_expr(expr: &HExpr, escaped: &mut HashSet<usize>) {
         | HExprKind::Local { .. }
         | HExprKind::Capture { .. }
         | HExprKind::ConstRef { .. }
-        | HExprKind::Break
-        | HExprKind::Continue
+        | HExprKind::Break { .. }
+        | HExprKind::Continue { .. }
         | HExprKind::OptionNone => {}
         HExprKind::FnRef { fn_id } => {
             escaped.insert(*fn_id);
@@ -245,8 +245,8 @@ fn scan_expr(expr: &HExpr, escaped: &mut HashSet<usize>) {
                 scan_arm(arm, escaped);
             }
         }
-        HExprKind::Loop { body } => scan_block(body, escaped),
-        HExprKind::While { cond, body } => {
+        HExprKind::Loop { body, .. } => scan_block(body, escaped),
+        HExprKind::While { cond, body, .. } => {
             scan_expr(cond, escaped);
             scan_block(body, escaped);
         }
@@ -276,7 +276,7 @@ fn scan_expr(expr: &HExpr, escaped: &mut HashSet<usize>) {
                 scan_expr(field, escaped);
             }
         }
-        HExprKind::Tuple(elems) | HExprKind::VecLit { elems } => {
+        HExprKind::Tuple(elems) | HExprKind::VecLit { elems } | HExprKind::Array { elems } => {
             for elem in elems {
                 scan_expr(elem, escaped);
             }
@@ -285,6 +285,7 @@ fn scan_expr(expr: &HExpr, escaped: &mut HashSet<usize>) {
             scan_expr(value, escaped);
             scan_expr(count, escaped);
         }
+        HExprKind::ArrayRepeat { value, .. } => scan_expr(value, escaped),
         HExprKind::EnumLit { args, .. } => {
             for arg in args {
                 scan_expr(arg, escaped);

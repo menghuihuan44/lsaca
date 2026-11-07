@@ -1,9 +1,10 @@
 # core: Option, Result and Iterator
 
-**Status in 2.1.0.** `Option`, `Result` and `Iterator` live in `stdlib/src/core.ls`
+**Status in 2.2.0.** `Option`, `Result` and `Iterator` live in `stdlib/src/core.ls`
 (`std::core`) and are re-exported unqualified, so existing programs keep working.
 The 2.1.0 additions are the `Option::or` and `Option::xor` combinators and the
-`usize` counts in the iterator surface; the rest of the surface is unchanged.
+`usize` counts in the iterator surface; 2.2.0 adds the `From` trait used by the
+`?` operator, defined here and re-exported by the crate root.
 
 ## Option<T>
 
@@ -62,6 +63,34 @@ compatible `Result`; it is a language feature documented in the
 `error::Error`; they are the error types of the typed `parse` methods (see
 [string](string.md)).
 
+## The From trait
+
+The library defines the conversion trait behind the `?` operator:
+
+```rust
+pub trait From<T> {
+    fn from(value: T) -> Self;
+}
+```
+
+It lives in `stdlib/src/core.ls` and the crate root re-exports it, so `From`,
+`SomeType::from(value)` and `impl From<...> for ...` work without an import.
+A user error type converts with
+
+```rust
+impl From<ParseIntError> for AppError {
+    fn from(error: ParseIntError) -> AppError {
+        return AppError { message: error.message() };
+    }
+}
+```
+
+`?` calls `From::from` only when the `Err` type of the expression differs from
+the `Err` type of the enclosing function; the full mechanism is in
+[Error conversions with `?`](../language/30-from-try.md). There is no blanket
+`impl<T> From<T> for T`, no `Into`, no `Try` and no `From<&str>` conversions:
+only the pairs the library or the user writes exist.
+
 ## Iterator<T>
 
 `Iterator<T>` is the trait every iterator implements:
@@ -82,7 +111,7 @@ live in [iter](iter.md).
 * The remaining Rust `Option`/`Result` combinators (`or_else`, `unwrap_or_else`,
   `map_or_else`, `ok_or_else`, `unwrap_or_default`, `is_some_and`, `is_none_or`,
   `and`, `map_or`/`or`/`or_else`/`is_ok_and`/`is_err_and`/`inspect`/`inspect_err`
-  on `Result`) are not part of 2.1.0.
+  on `Result`) are not part of 2.2.0.
 * No `core`-level error trait: `std::error::Error` is defined in the error
   module and used by `io` and `fs`.
 

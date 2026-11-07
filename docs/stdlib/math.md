@@ -1,6 +1,6 @@
 # math: math functions and constants
 
-**Status in 2.1.0.** The math free functions live in `stdlib/src/math.ls` and are
+**Status in 2.2.0.** The math free functions live in `stdlib/src/math.ls` and are
 re-exported from the crate root, so the unqualified names keep working and the
 qualified path `std::math::sqrt` names the same function. The eleven float
 functions (`sqrt`, `floor`, `ceil`, `round`, `sin`, `cos`, `tan`, `ln`,

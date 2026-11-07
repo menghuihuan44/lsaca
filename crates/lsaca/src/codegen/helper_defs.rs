@@ -175,6 +175,30 @@ fn emit_copy(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty
             w.line("}");
             w.line("return out;");
         }
+        Ty::Array(elem, len) => {
+            // Arrays keep their elements inline. Copying walks the element
+            // type's ownership rules: Copy elements are copied by value and
+            // managed elements go through their copy helper.
+            w.line(format!("{} out = ({}){{0}};", c_ty, c_ty));
+            if *len > 0 {
+                if program.is_copy(elem) {
+                    w.line("out = v;");
+                } else {
+                    w.line("size_t i;");
+                    w.line(format!("for (i = 0; i < (size_t){}; i += 1) {{", len));
+                    w.indent();
+                    w.line(format!(
+                        "out.data[i] = {};",
+                        ops::copy_expr(names, elem, "v.data[i]")
+                    ));
+                    w.dedent();
+                    w.line("}");
+                }
+            } else {
+                w.line("(void)v;");
+            }
+            w.line("return out;");
+        }
         Ty::Tuple(elems) => {
             w.line(format!("{} out;", c_ty));
             for (index, elem) in elems.iter().enumerate() {
@@ -380,6 +404,21 @@ fn emit_release(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: 
             );
             w.dedent();
             w.line("}");
+        }
+        Ty::Array(elem, len) => {
+            // Releasing an array releases every managed element in place; the
+            // element storage itself is inline and needs no free.
+            if *len > 0 && !program.is_copy(elem) {
+                w.line("size_t i;");
+                w.line(format!("for (i = 0; i < (size_t){}; i += 1) {{", len));
+                w.indent();
+                if let Some(stmt) = ops::release_stmt(names, elem, "v.data[i]") {
+                    w.line(stmt);
+                }
+                w.dedent();
+                w.line("}");
+            }
+            w.line("(void)v;");
         }
         Ty::Tuple(elems) => {
             for (index, elem) in elems.iter().enumerate() {
@@ -587,6 +626,29 @@ fn debug_field_reads_value(names: &TypeNames, ty: &Ty, value: &str) -> bool {
 
 fn emit_debug_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty) {
     match ty {
+        Ty::Array(elem, len) => {
+            // Fixed arrays render like slices: [a, b, c]. A zero-length array
+            // has no operand to read and renders as [].
+            let reads_value = *len > 0 && debug_field_reads_value(names, elem, "v.data[i]");
+            if !reads_value {
+                w.line("(void)v;");
+            }
+            push_cstr(w, "[");
+            if *len > 0 {
+                w.line("size_t i;");
+                w.line(format!("for (i = 0; i < (size_t){}; i += 1) {{", len));
+                w.indent();
+                w.line("if (i > 0) {");
+                w.indent();
+                w.line("acc = ls_format_push_cstr(acc, \", \");");
+                w.dedent();
+                w.line("}");
+                emit_debug_append(w, names, elem, "v.data[i]");
+                w.dedent();
+                w.line("}");
+            }
+            push_cstr(w, "]");
+        }
         Ty::Vec(elem) => {
             w.line("size_t i;");
             push_cstr(w, "[");
@@ -832,6 +894,26 @@ fn emit_eq_check(w: &mut CWriter, names: &TypeNames, ty: &Ty, a: &str, b: &str) 
 
 fn emit_eq_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty) {
     match ty {
+        Ty::Array(elem, len) => {
+            // The length is part of the array type, so only the elements are
+            // compared. Unit-like elements compare equal without reading the
+            // operands.
+            let reads_operands =
+                *len > 0 && ops::eq_expr(names, elem, "a.data[i]", "b.data[i]") != "true";
+            if !reads_operands {
+                w.line("(void)a;");
+                w.line("(void)b;");
+            }
+            if *len > 0 {
+                w.line("size_t i;");
+                w.line(format!("for (i = 0; i < (size_t){}; i += 1) {{", len));
+                w.indent();
+                emit_eq_check(w, names, elem, "a.data[i]", "b.data[i]");
+                w.dedent();
+                w.line("}");
+            }
+            w.line("return true;");
+        }
         Ty::Vec(elem) => {
             w.line("size_t i;");
             w.line("if (a.len != b.len) {");
@@ -1099,6 +1181,17 @@ fn emit_trace(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &T
     w.indent();
     w.line("(void)value;");
     match ty {
+        Ty::Array(elem, len) => {
+            // Elements are stored inline, so each slot is traced in place.
+            if traceable(elem) && *len > 0 {
+                w.line("size_t i;");
+                w.line(format!("for (i = 0; i < (size_t){}; i += 1) {{", len));
+                w.indent();
+                emit_trace_slot(w, names, elem, "value->data[i]");
+                w.dedent();
+                w.line("}");
+            }
+        }
         Ty::Vec(elem) => {
             if traceable(elem) {
                 w.line("size_t i;");

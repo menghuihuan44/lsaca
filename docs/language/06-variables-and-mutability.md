@@ -4,7 +4,7 @@ Bindings are introduced with `let`. By default a binding is immutable; `let mut`
 makes the binding mutable. This page covers bindings, shadowing, assignment,
 compound assignment, destructuring and constants.
 
-The rules on this page describe lsaca 2.1.0. Since 2.1.0 an unsuffixed integer
+The rules on this page describe lsaca 2.2.0. Since 2.1.0 an unsuffixed integer
 literal has type `i32` by default (floats default to `f64`), lengths and indices
 are `usize`, and a function parameter may be declared `mut`; the sections below
 call out the places where this matters.
@@ -400,7 +400,7 @@ Destructuring a value copies it into the new bindings: `Copy` parts are
 copied, and move-only parts (`String`, `Vec`, `Rc`, `Box`) are deep-copied — for
 `Rc` and `Box` the new binding points to the same cell or heap value and the
 reference count is retained. This is not Rust's move semantics: the source value
-stays fully usable after the pattern, and no partial move happens. Version 2.1.0
+stays fully usable after the pattern, and no partial move happens. Version 2.2.0
 has no partial moves; destructuring always copies the whole value, so a `String`
 field is cloned out rather than moved. Moving a field out of a value *without*
 destructuring it is still rejected (`E0507`), and `match` still moves the

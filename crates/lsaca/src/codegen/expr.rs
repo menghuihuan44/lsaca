@@ -31,19 +31,27 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Lvalue of a vector element, with a runtime bounds check.
+    /// Lvalue of an element, with a runtime bounds check.
+    ///
+    /// Vectors, slices, strings and arrays all store their elements behind the
+    /// same data member. A fixed array carries its length in the type, so the
+    /// check compares against that constant instead of a stored length.
     pub(crate) fn index_lvalue(&mut self, base: &HExpr, index: &HExpr, span: Span) -> String {
-        let base_lv = self.auto_deref_base(base);
+        let (base_lv, base_ty) = self.auto_deref_place(base);
         let index_value = self.gen_owned(index);
         let loc = self.loc(span);
+        let length = match &base_ty {
+            Ty::Array(_, len) => format!("{}", len),
+            _ => format!("({}).len", base_lv),
+        };
         self.w.line(format!(
-            "if ((uint64_t)({}) >= (uint64_t)({}).len) {{",
-            index_value, base_lv
+            "if ((uint64_t)({}) >= (uint64_t)({})) {{",
+            index_value, length
         ));
         self.w.indent();
         self.w.line(format!(
-            "ls_panic_bounds({}, (int64_t)({}).len, (int64_t)({}));",
-            loc, base_lv, index_value
+            "ls_panic_bounds({}, (int64_t)({}), (int64_t)({}));",
+            loc, length, index_value
         ));
         self.w.dedent();
         self.w.line("}");
@@ -54,6 +62,13 @@ impl<'a> Gen<'a> {
     /// dereferenced and `Rc`/`Box` handles are unwrapped to their payload
     /// cell. Any other value is returned unchanged.
     pub(crate) fn auto_deref_base(&mut self, base: &HExpr) -> String {
+        self.auto_deref_place(base).0
+    }
+
+    /// Like auto_deref_base, but also returns the place type after auto-deref,
+    /// for callers that need to know whether they end up at a vector, a slice
+    /// or a fixed array.
+    pub(crate) fn auto_deref_place(&mut self, base: &HExpr) -> (String, Ty) {
         let mut lvalue = if base.is_place() {
             self.gen_place(base)
         } else {
@@ -78,7 +93,7 @@ impl<'a> Gen<'a> {
                 _ => break,
             }
         }
-        lvalue
+        (lvalue, ty)
     }
 
     // ----- unary and binary operators --------------------------------------
@@ -768,6 +783,56 @@ impl<'a> Gen<'a> {
             .line(format!("{}.data[{}] = {};", target, index, copied));
         self.w.dedent();
         self.w.line("}");
+    }
+
+    /// A fixed array literal.
+    ///
+    /// The elements are stored inline in the generated struct, so each one is
+    /// moved into its own slot: no allocation and no extra copy.
+    pub(crate) fn gen_array(&mut self, elems: &[HExpr], ty: &Ty, target: &str) {
+        let len = match ty {
+            Ty::Array(_, len) => *len,
+            _ => elems.len(),
+        };
+        if elems.len() != len {
+            util::internal_error("an array literal does not match the length of its type");
+        }
+        for (index, element) in elems.iter().enumerate() {
+            let slot = format!("{}.data[{}]", target, index);
+            self.gen_move_into(element, &slot);
+        }
+    }
+
+    /// A repeated array literal: the single value is evaluated once and copied
+    /// into every element slot.
+    pub(crate) fn gen_array_repeat(&mut self, value: &HExpr, len: usize, ty: &Ty, target: &str) {
+        if len == 0 {
+            return;
+        }
+        let element_ty = match ty {
+            Ty::Array(elem, _) => (**elem).clone(),
+            _ => value.ty.clone(),
+        };
+        let item = self.gen_owned(value);
+        let copied = ops::copy_expr(self.names, &element_ty, &item);
+        if len <= 8 {
+            for index in 0..len {
+                self.w
+                    .line(format!("{}.data[{}] = {};", target, index, copied));
+            }
+        } else {
+            // Large repeats stay compact: copy element by element in a loop.
+            let index = self.fresh("i");
+            self.w.line(format!(
+                "for (size_t {} = 0; {} < (size_t){}; {} += 1) {{",
+                index, index, len, index
+            ));
+            self.w.indent();
+            self.w
+                .line(format!("{}.data[{}] = {};", target, index, copied));
+            self.w.dedent();
+            self.w.line("}");
+        }
     }
 
     pub(crate) fn gen_enum_lit(

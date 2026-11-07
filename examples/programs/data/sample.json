@@ -1,0 +1,8 @@
+{
+  "name": "lsaca",
+  "version": 2.2,
+  "tags": ["examples", "json", "data"],
+  "meta": {"empty": [], "nothing": {}, "unicode": "café"},
+  "active": true,
+  "final": null
+}

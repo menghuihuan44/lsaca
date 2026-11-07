@@ -71,12 +71,12 @@ impl<'a> Gen<'a> {
                 let fused = if receiver.ty.is_string()
                     && matches!(&receiver.kind, HExprKind::Local { .. })
                 {
-                    match args.first().map(|argument| &argument.kind) {
-                        Some(HExprKind::Format { parts }) => {
+                    match args.first().and_then(inline_format_argument) {
+                        Some(parts) => {
                             self.gen_format_append(receiver, parts);
                             true
                         }
-                        _ => false,
+                        None => false,
                     }
                 } else {
                     false
@@ -1734,6 +1734,161 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Emit one of the borrowed collection accessors added in v2.2.
+    ///
+    /// The standard library migrated HashMap::get/get_mut, Vec::get_mut,
+    /// Vec::first_mut/last_mut and slice get_mut to intrinsics that return an
+    /// Option of a borrow into the collection. Unlike the owned __map_get and
+    /// __vec_get emitters they never copy the element and never panic: a missing
+    /// key or an out-of-bounds index produces None.
+    ///
+    /// Returns false when the name is not one of the accessors, so the caller
+    /// can fall back to the remaining intrinsic tables.
+    pub(crate) fn try_gen_borrowed_accessor(
+        &mut self,
+        name: &str,
+        args: &[HExpr],
+        ty: &Ty,
+        target: &str,
+    ) -> bool {
+        let name = name.strip_prefix("__").unwrap_or(name);
+        match name {
+            "map_get_ref" | "map_get_mut" => {
+                self.gen_map_borrowed_accessor(args, ty, target);
+                true
+            }
+            "vec_get_mut" => {
+                self.gen_vec_borrowed_mut(args, ty, target);
+                true
+            }
+            "slice_get_mut" => {
+                self.gen_slice_borrowed_mut(args, ty, target);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// HashMap::get/get_mut: point the Option payload at the value blob stored
+    /// in the map table.
+    ///
+    /// The helper returns a borrowed view into the table, so the payload is the
+    /// address of the stored blob itself: a const V-pointer for the shared
+    /// variant and a plain V-pointer for the mutable one. The intrinsic consumes
+    /// the lookup key (the standard library clones it before the call), hence
+    /// the key is moved into a temporary and released once the lookup finished.
+    fn gen_map_borrowed_accessor(&mut self, args: &[HExpr], ty: &Ty, target: &str) {
+        let (Some(table), Some(key)) = (args.first(), args.get(1)) else {
+            util::internal_error("borrowed map accessor expects a table and a key");
+        };
+        let map_ty = self.receiver_value_ty(table);
+        let Ty::HashMap(_, value) = &map_ty else {
+            util::internal_error(format!(
+                "borrowed map accessor on a receiver of type {:?}",
+                map_ty
+            ));
+        };
+        let value_ty = (**value).clone();
+        let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+        let place = self.map_place(table);
+        let key_ty = key.ty.clone();
+        let key_value = self.gen_owned_move(key);
+        let value_ctype = self.ctype(&value_ty);
+        let slot = self.new_plain_of(&format!("{}*", value_ctype), "borrowed_slot");
+        let zero = self.zero_expr(ty);
+        self.line(format!("{} = {};", target, zero));
+        self.line(format!(
+            "if (lsaca_map_get_ptr_{}({}, {}, &{})) {{",
+            suffix, place, key_value, slot
+        ));
+        self.w.indent();
+        self.store_borrowed_some(ty, target, &slot);
+        self.w.dedent();
+        self.line("}");
+        // The table only borrowed the key during the lookup, so the moved key
+        // is released here and must not be released again by the frame cleanup.
+        self.emit_release(&key_ty, &key_value);
+        self.mark_moved(&key_value);
+    }
+
+    /// Vec::get_mut (and the first_mut/last_mut wrappers): address of the
+    /// element storage, or None when the index is out of bounds.
+    ///
+    /// The receiver is a mutable reference to the by-value vector struct, whose
+    /// len/data members are read through the reference. The frozen Vec<String>
+    /// layout shares the same member names, so one emission covers both.
+    fn gen_vec_borrowed_mut(&mut self, args: &[HExpr], ty: &Ty, target: &str) {
+        let (Some(vector), Some(index)) = (args.first(), args.get(1)) else {
+            util::internal_error("vec get_mut intrinsic expects a vector and an index");
+        };
+        let place = self.place_through_reference(vector);
+        let position = self.new_plain_of("int64_t", "vec_index");
+        let index_value = self.gen_owned(index);
+        self.line(format!("{} = (int64_t)({});", position, index_value));
+        let zero = self.zero_expr(ty);
+        self.line(format!("{} = {};", target, zero));
+        self.line(format!(
+            "if ({} >= 0 && (uint64_t)({}) < (uint64_t)(({}).len)) {{",
+            position, position, place
+        ));
+        self.w.indent();
+        let payload = format!("&(({place}).data[(size_t)({position})])");
+        self.store_borrowed_some(ty, target, &payload);
+        self.w.dedent();
+        self.line("}");
+    }
+
+    /// slice get_mut: address of the element behind the slice fat view, or None
+    /// when the index is out of bounds.
+    fn gen_slice_borrowed_mut(&mut self, args: &[HExpr], ty: &Ty, target: &str) {
+        let (Some(slice), Some(index)) = (args.first(), args.get(1)) else {
+            util::internal_error("slice get_mut intrinsic expects a slice and an index");
+        };
+        let fat = self.new_plain(&slice.ty, "borrowed_slice");
+        let value = self.gen_borrowed(slice);
+        self.line(format!("{} = {};", fat, value));
+        let position = self.new_plain_of("int64_t", "slice_index");
+        let index_value = self.gen_owned(index);
+        self.line(format!("{} = (int64_t)({});", position, index_value));
+        let zero = self.zero_expr(ty);
+        self.line(format!("{} = {};", target, zero));
+        self.line(format!(
+            "if ({} >= 0 && (uint64_t)({}) < (uint64_t)(({}).len)) {{",
+            position, position, fat
+        ));
+        self.w.indent();
+        let payload = format!("&(({fat}).data[(size_t)({position})])");
+        self.store_borrowed_some(ty, target, &payload);
+        self.w.dedent();
+        self.line("}");
+    }
+
+    /// Store a borrowed pointer into the payload of an Option value.
+    ///
+    /// The payload type comes from the declared result type, so the shared
+    /// variant produces a const element pointer and the mutable variant a plain
+    /// element pointer; the cast keeps -Wpedantic -Werror quiet for the const
+    /// layer of a shared borrow.
+    fn store_borrowed_some(&mut self, option_ty: &Ty, target: &str, pointer: &str) {
+        if !matches!(option_ty, Ty::Option(_)) {
+            util::internal_error(format!(
+                "borrowed accessor expected an Option result, found {:?}",
+                option_ty
+            ));
+        }
+        let payload_ty = option_payload(option_ty);
+        let payload_ctype = self.ctype(&payload_ty);
+        self.line(format!("{}.{} = 1;", target, types::TAG_FIELD));
+        self.line(format!(
+            "{}.{}.{} = ({})({});",
+            target,
+            types::UNION_FIELD,
+            types::OPTION_SOME_MEMBER,
+            payload_ctype,
+            pointer
+        ));
+    }
+
     /// Append the pieces of a `format!` expression directly to the string
     /// held by `receiver`, avoiding the intermediate accumulator string and
     /// the extra copy that `push_str` would perform.
@@ -2185,6 +2340,28 @@ impl<'a> Gen<'a> {
         self.w.dedent();
         self.line("}");
         self.assign_unit(target);
+    }
+}
+
+/// Peel the borrow and slice-coercion wrappers of a push_str argument down to
+/// an inline format call.
+///
+/// The language allows borrowing a temporary for the duration of a statement,
+/// so text.push_str(&format!(...)) now reaches codegen as a reference to the
+/// formatted value (wrapped in the implicit String to str slice coercion).
+/// Those wrapper nodes only view the produced text, so the append can be fused
+/// and the intermediate string never has to exist.
+fn inline_format_argument(argument: &HExpr) -> Option<&[HFormatPart]> {
+    match &argument.kind {
+        HExprKind::Format { parts } => Some(parts),
+        HExprKind::Ref { expr, .. } | HExprKind::Deref { expr } => inline_format_argument(expr),
+        HExprKind::Slice {
+            base,
+            start: None,
+            end: None,
+            ..
+        } => inline_format_argument(base),
+        _ => None,
     }
 }
 

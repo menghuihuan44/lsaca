@@ -7,11 +7,12 @@ A reference is a **non-owning view of a value that already exists somewhere else
 the underlying value alive and tracks every allocation exactly as before.
 
 References are the second way to avoid copying data (the first is `Rc<T>`, the shared
-*mutable* cell). They are deliberately small: there are **no lifetimes you can write**,
-no reference-typed fields, no references inside closures, and no raw pointers. The
-compiler infers how long each borrow lives — the borrow ends at the last point where the
-reference is used — and rejects code that would let two conflicting accesses happen at
-the same time.
+*mutable* cell). They are deliberately small: lifetime annotations appear only on reference fields
+(since 2.2.0 a struct, enum, tuple or `Option` may hold one), references cannot be
+stored in other aggregates or captured by closures, and there are no raw pointers.
+The compiler infers how long each borrow lives — the borrow ends at the last point
+where the reference is used — and rejects code that would let two conflicting
+accesses happen at the same time. See [Lifetimes](29-lifetimes.md).
 
 This page covers:
 
@@ -27,10 +28,12 @@ This page covers:
 If you have written Rust, the syntax will look familiar, but the checker underneath is
 not Rust's borrow checker. A reference is still a non-owning, checked pointer: it does
 not keep its referent alive on its own, and the compiler only accepts a borrow when an
-owner provably outlives its last use. There are no lifetime annotations — a borrow ends at
-the last point where the reference is used — and the checker is conservative inside a
-single expression (two mutable borrows there are rejected even when Rust would accept
-them; see [Known limitations](#known-limitations-in-version-210)). Since 1.4 the ownership
+owner provably outlives its last use. Most lifetimes are inferred: a borrow ends at the last point where the reference is
+used, and the checker is conservative inside a single expression (two mutable borrows
+there are rejected even when Rust would accept them; see
+[Known limitations](#known-limitations-in-version-220)). Since 2.2.0 an explicit
+`'a` is needed only on reference fields and on functions whose elided signature
+cannot say which input is borrowed. Since 1.4 the ownership
 and move checks (E0382, E0507, E0505) run alongside the reference checks, so moving a
 value while a borrow of it is live is rejected too.
 
@@ -67,9 +70,12 @@ Output:
 10 10 2 3 1
 ```
 
-There is no lifetime syntax in lsaca: you cannot write `&'a T`, and `&` never takes a
-label. The compiler computes lifetimes itself, using the elision rules described in
-[References and functions](#references-and-functions).
+Lifetime syntax is limited: `&'a T` is written only for a reference field (a
+struct, enum, tuple or `Option` declares the parameter) and in function signatures
+that share a lifetime explicitly between parameters and a return. Ordinary
+references use elision, described in
+[References and functions](#references-and-functions). See
+[Lifetimes](29-lifetimes.md).
 
 A reference is a value in its own right: it can be copied, reassigned, stored in a
 local, passed to a function and returned from one. Copying a reference never copies or
@@ -735,7 +741,9 @@ borrowed value is being written; both forms are equivalent.
 ### Returning references and elision
 
 A function may return a reference only when the compiler can tell which input it
-borrows from. Since lsaca has no lifetime annotations, it uses two elision rules:
+borrows from. Elision decides most signatures; when the rules are not enough, an
+explicit lifetime can name the relation (`fn first<'a>(values: &'a [i64]) -> &'a i64`,
+see [Lifetimes](29-lifetimes.md)). The two elision rules are:
 
 1. **Method receiver rule.** A method with a `&self` or `&mut self` receiver can return
    a reference derived from `self`; the receiver decides the lifetime even if the method
@@ -816,7 +824,7 @@ error[E0515]: returns a reference to a local value
    |
  3 |     &value
    |     ^^^^^^
-   = note: the returned reference must borrow from a function parameter
+   = note: the returned value must borrow from a function parameter
 
 lsaca: example-30.ls: could not compile example-30.ls due to previous error(s)
 ```
@@ -862,7 +870,7 @@ error[E0515]: returns a reference to a local value
    |
  3 |     &local
    |     ^^^^^^
-   = note: the returned reference must borrow from a function parameter
+   = note: the returned value must borrow from a function parameter
 
 lsaca: example-32.ls: could not compile example-32.ls due to previous error(s)
 ```
@@ -1217,14 +1225,16 @@ References are restricted to the places where their lifetime is obvious. They ma
 - elements of expressions and arguments;
 - reborrowed through other references;
 - mutable references to owned heap values: `&mut String`, `&mut Vec<T>`,
-  `&mut Rc<T>` and `&mut Box<T>` (new in version 1.4).
+  `&mut Rc<T>` and `&mut Box<T>` (new in version 1.4);
+- reference fields of a struct, enum, tuple or `Option` that declares the lifetime
+  parameter (since 2.2.0).
 
 They may **not** be:
 
 | Use | Result |
 | --- | --- |
-| stored in a struct or enum field | error E0498 |
-| stored in a tuple, `Vec<T>`, `Option<T>`, `Result<T, E>` or `Box<T>` | error E0498 |
+| stored in a struct, enum, tuple or `Option` field without a declared lifetime | error E0106 (a named lifetime parameter makes the field legal since 2.2.0) |
+| stored in a `Vec<T>`, `HashMap`, `Result<T, E>`, `Box<T>` or array | error E0498 |
 | captured by a closure | error E0498 |
 | returned from a function that cannot name its source | error E0106 |
 | used as the `for` iterator | error E0277 |
@@ -1232,7 +1242,8 @@ They may **not** be:
 Since 1.5.0 references can be compared with `==`; the comparison reads the
 pointed-to values, so `a == b` is the same as `*a == *b`.
 
-Some examples of the storage and capture errors:
+The first example stores a reference in a field without a lifetime parameter; the
+second captures one in a closure:
 
 ```ls,compile-fail
 struct Holder { value: &i64 }
@@ -1245,17 +1256,12 @@ fn main() {
 
 Error:
 ```text
-error[E0498]: references cannot be stored in this type (found &i64)
-  --> example-44.ls:1:17
+error[E0106]: missing lifetime specifier
+  --> example-44.ls:1:24
    |
  1 | struct Holder { value: &i64 }
-   |                 ^^^^^
-
-error[E0498]: references cannot be stored in this type (found &i64)
-  --> example-44.ls:4:34
-   |
- 4 |     let holder = Holder { value: &n };
-   |                                  ^^
+   |                        ^
+   = note: this reference field needs a named lifetime parameter; declare it on the type and write it on the field, for example struct Item<'a> { field: &'a T }
 
 lsaca: example-44.ls: could not compile example-44.ls due to previous error(s)
 ```
@@ -1284,7 +1290,7 @@ error[E0498]: references cannot be captured by closures
 lsaca: example-45.ls: could not compile example-45.ls due to previous error(s)
 ```
 
-Mutable references to owned heap types are supported in version 2.1.0: a
+Mutable references to owned heap types are supported in version 2.2.0: a
 `&mut String`, `&mut Vec<T>`, `&mut Rc<T>` or `&mut Box<T>` can be a parameter, a
 local binding or a return value, and the callee mutates the payload in place:
 
@@ -1466,16 +1472,17 @@ t28 = (*(t27));
 ((*(t19))).f_count = t20;
 ```
 
-This is why references cannot escape into aggregates: a raw pointer has no lifetime
-information, so the compiler only permits references where it can prove the referent
-stays alive.
+This is also why reference storage is limited: a raw pointer carries no lifetime
+information, so a reference field must name its lifetime parameter and every other
+reference is permitted only where the compiler can prove the referent stays alive.
 
 ## Diagnostics
 
 | Code | Message (abbreviated) | Typical cause |
 | --- | --- | --- |
-| E0106 | `missing lifetime specifier` | a function returns a reference but has zero or two or more reference parameters |
-| E0498 | `references cannot be stored in this type (found &T)` | `&T` inside a struct, enum, tuple, `Vec`, `Option`, `Result` or `Box` |
+| E0106 | `missing lifetime specifier` | a function returns a reference but has zero or two or more reference parameters, or a reference field has no declared lifetime |
+| E0261 | `use of undeclared lifetime name` | a type path names a lifetime the type does not declare |
+| E0498 | `references cannot be stored in this type (found &T)` | `&T` inside `Vec`, `HashMap`, `Result`, `Box`, an array or a closure; a `'static` reference field |
 | E0498 | `references cannot be captured by closures` | a closure body uses a captured reference |
 | E0499 | `cannot borrow X as mutable more than once at a time` | two overlapping mutable borrows, including two mutable borrows inside one expression |
 | E0502 | `cannot borrow X as immutable because it is also borrowed as mutable` | shared borrow while a mutable borrow is alive |
@@ -1493,16 +1500,19 @@ stays alive.
 Errors without a code (parser level): `reference patterns are not supported; match a
 reference scrutinee directly, bindings become references`.
 
-## Known limitations in version 2.1.0
+## Known limitations in version 2.2.0
 
 Version 1.3.0 introduced references, 1.4.0 added ownership and moves on top of
 them, and 1.5.0 added `==` between references. The current restrictions are:
 
-1. **No lifetime syntax.** Only the two elision rules (receiver, single reference
-   parameter) are available; there are no explicit `'a` annotations, labels or `'static`.
-2. **References cannot be stored.** Struct fields, enum payloads, tuples, `Vec`,
-   `Option`, `Result`, `Box` and closures cannot hold references. Keep the reference in
-   a local for the duration of the computation instead.
+1. **Lifetime syntax is limited to reference fields.** A struct, enum, tuple or
+   `Option` may declare `<'a>` and hold `&'a T`/`&'a mut T`; function signatures use
+   the two elision rules or an explicit shared lifetime, and there are no lifetime
+   bounds, outlives relations or `'static` fields (see [Lifetimes](29-lifetimes.md)).
+2. **References cannot be stored in other aggregates.** `Vec`, `HashMap`, `Result`,
+   `Box`, arrays and closures cannot hold references (`E0498`). Keep the reference in
+   a local, or in the supported reference-field aggregates, for the duration of the
+   computation.
 3. **Mutable references to user aggregates with heap fields are rejected.** `&mut` works
    for Copy values and for `String`, `Vec<T>`, `Rc<T>` and `Box<T>`, but not for a user
    struct or enum that contains a `String`, `Vec`, `Rc`, `Box` or Drop field (E0498).
@@ -1536,16 +1546,18 @@ them, and 1.5.0 added `==` between references. The current restrictions are:
   use, which makes sequential and loop-local borrows legal.
 - Functions can take and return references, using the receiver rule and the
   single-reference-parameter rule to infer lifetimes; the returned reference must point
-  into an input.
+  into an input. An explicit `'a` can name that input when elision cannot.
 - Matching a reference binds references to the referent (match ergonomics) — for shared
   and mutable references alike, so `&mut` bindings can be assigned through — and matching
   `self` inside a method follows the same rule.
 - References never retain or release ORC allocations and cannot create cycles; ORC
   remains the only owner.
-- References cannot be stored in aggregates or captured by closures; they can be
+- References cannot be stored in `Vec`, `HashMap`, `Result`, `Box`, arrays or
+  closures, and cannot be captured by closures; since 2.2.0 a struct, enum, tuple or
+  `Option` field may hold one when the type names a lifetime parameter. They can be
   compared with `==` since 1.5.0 (the comparison reads the pointed-to values).
   Mutable references to `String`, `Vec`, `Rc` and `Box` *are* allowed as
-  parameters, locals and return values in version 2.1.0.
+  parameters, locals and return values in version 2.2.0.
 
 ## What next
 
@@ -1558,7 +1570,7 @@ them, and 1.5.0 added `==` between references. The current restrictions are:
   ergonomics.
 - [Standard library](15-standard-library.md) — the owned containers references point
   into.
-- [Roadmap](16-roadmap.md) — what is still planned (reference fields, lifetimes,
-  generics, traits and iterators).
+- [Roadmap](16-roadmap.md) — what is still planned (references in other aggregates,
+  full lifetime relations, generics, traits and iterators).
 - [Benchmarks](21-benchmarks.md) — measured performance of the reference and ORC
   runtime.

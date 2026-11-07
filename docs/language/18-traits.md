@@ -6,6 +6,9 @@ type can implement; traits are used as bounds on generic parameters (see
 *trait objects*: since 2.0 a trait can also be used as a type behind `dyn`, and
 method calls through such a value dispatch at runtime (see [Trait
 objects](25-trait-objects.md) and [Default method bodies](#default-method-bodies)).
+Version 2.2.0 adds two library traits that connect to `?`: `From<T>` in
+`std::core`, which converts error values, and `std::error::Error` with a default
+`source` method (see [From and ?](30-from-try.md)).
 
 ## Declaring a trait
 
@@ -338,6 +341,63 @@ As with any generic item, the body of `first_item` is checked per instantiation
 (here `Pair<i64>`): reading `self.first` out of a borrowed value is fine when
 `T` is Copy and would be rejected for `Pair<String>`.
 
+## The From trait
+
+`std::core` declares a conversion trait since 2.2.0:
+
+```rust
+pub trait From<T> {
+    fn from(value: T) -> Self;
+}
+```
+
+Implement it for a user type when a value of the parameter type should convert
+into it; the canonical use is converting a narrow error type into the broader
+one that a function returns. The trait and method names are fixed, and a type
+may implement `From` for several source types:
+
+```rust
+use std::error::Error;
+
+enum AppError {
+    BadNumber,
+}
+
+impl From<ParseIntError> for AppError {
+    fn from(value: ParseIntError) -> AppError {
+        return AppError::BadNumber;
+    }
+}
+```
+
+`?` on a `Result` whose error type does not match the function's return type
+looks for exactly this impl and lowers the mismatch to
+`ExpectedError::from(found)`. Without a matching impl the expression is `E0308`
+and the diagnostic adds a note about `From`. There is no blanket
+`impl<T> From<T> for T`, no `Into`, no `Try` and no `From<&str>`; see
+[From and ?](30-from-try.md).
+
+## The Error trait
+
+`std::error::Error` is a trait with one required method and one default method:
+
+```rust
+pub trait Error {
+    fn message(&self) -> String;
+
+    fn source(&self) -> Option<Box<dyn Error>> {
+        return None;
+    }
+}
+```
+
+`impl Error for T` requires `fn message(&self) -> String` and may override
+`source` to point at an underlying error. The trait is **not in the prelude**,
+because its name would collide with `io::Error`: a file that names it must
+write `use std::error::Error;` explicitly. `io::Error`, `ParseIntError` and
+`ParseFloatError` from the standard library implement it. There is no `chain`,
+no `downcast` and no blanket implementation.
+
 ## The Drop trait
 
 `Drop` remains special. It is the only trait with a builtin implementation
@@ -477,6 +537,7 @@ Person` exists. See [Trait objects](25-trait-objects.md) for the full rules.
   is valid only behind `Box`, `Rc`, `&` or `&mut`.
 * `Copy`, `Clone` and `Drop` are not ordinary implementable traits: `Copy` and
   `Clone` are derived automatically, and `Drop` has its own special impl form.
+* No blanket `impl<T> From<T> for T` and no `Into` or `Try` traits (2.2.0).
 
 See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 
@@ -496,6 +557,10 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 * A bare trait is not a type (`E0412`). Since 2.0 an object-safe trait can be a
   trait object behind `dyn` and `Box`/`Rc`/`&`/`&mut`, with dynamic dispatch;
   `==` and `<` on trait objects are `E0369`.
+* Since 2.2.0 the library declares `From<T>` (`fn from(value: T) -> Self`),
+  which `?` consults for error conversion, and `std::error::Error` with a
+  default `source` method; naming `Error` needs `use std::error::Error;`
+  because it is not in the prelude.
 
 ## What next
 
@@ -503,4 +568,5 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 * Trait objects and dynamic dispatch: [Trait objects](25-trait-objects.md).
 * The standard library's `Iterator<T>` trait: [Iterators](19-iterators.md).
 * Special `Drop` rules: [Ownership and moves](11-ownership-and-moves.md#the-drop-trait).
+* Error conversion and the `?` operator: [From and ?](30-from-try.md).
 * Deviations and limitations: [Roadmap and deviations from Rust](16-roadmap.md).

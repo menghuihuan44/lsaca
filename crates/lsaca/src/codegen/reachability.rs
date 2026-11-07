@@ -240,8 +240,8 @@ fn scan_expr(expr: &HExpr, marks: &mut Marks) {
         | HExprKind::Local { .. }
         | HExprKind::Capture { .. }
         | HExprKind::ConstRef { .. }
-        | HExprKind::Break
-        | HExprKind::Continue
+        | HExprKind::Break { .. }
+        | HExprKind::Continue { .. }
         | HExprKind::OptionNone => {}
         HExprKind::FnRef { fn_id } => {
             marks.fns.insert(*fn_id);
@@ -324,8 +324,8 @@ fn scan_expr(expr: &HExpr, marks: &mut Marks) {
                 scan_arm(arm, marks);
             }
         }
-        HExprKind::Loop { body } => scan_block(body, marks),
-        HExprKind::While { cond, body } => {
+        HExprKind::Loop { body, .. } => scan_block(body, marks),
+        HExprKind::While { cond, body, .. } => {
             scan_expr(cond, marks);
             scan_block(body, marks);
         }
@@ -355,7 +355,7 @@ fn scan_expr(expr: &HExpr, marks: &mut Marks) {
                 scan_expr(field, marks);
             }
         }
-        HExprKind::Tuple(elems) | HExprKind::VecLit { elems } => {
+        HExprKind::Tuple(elems) | HExprKind::VecLit { elems } | HExprKind::Array { elems } => {
             for elem in elems {
                 scan_expr(elem, marks);
             }
@@ -364,6 +364,7 @@ fn scan_expr(expr: &HExpr, marks: &mut Marks) {
             scan_expr(value, marks);
             scan_expr(count, marks);
         }
+        HExprKind::ArrayRepeat { value, .. } => scan_expr(value, marks),
         HExprKind::EnumLit { args, .. } => {
             for arg in args {
                 scan_expr(arg, marks);

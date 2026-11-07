@@ -13,6 +13,7 @@
 // counts and positions are `usize` (sizes stay `u64`), and `Error`
 // implements the `error::Error` trait in addition to its inherent methods.
 
+use crate::core::From;
 use crate::error::Error as ErrorTrait;
 
 // Intrinsic declarations for the runtime error record.
@@ -98,6 +99,14 @@ impl ErrorKind {
 /// Values are obtained from `Error::last()` after a failed operation, or built
 /// directly with `Error::new` / `Error::other`; the standard library never
 /// panics on an operating system failure.
+/// Building an `Error` from a plain message, so `?` can convert a text error
+/// into an `io::Error` inside functions that return `Result<_, io::Error>`.
+impl From<String> for Error {
+    fn from(message: String) -> Error {
+        return Error::other(message);
+    }
+}
+
 pub struct Error {
     kind: ErrorKind,
     message: String,

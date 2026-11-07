@@ -1568,7 +1568,7 @@ fn unterminated_constructs_are_reported_cleanly() {
         let cases: &[(&str, &str, &str)] = &[
             ("unterminated-string", "\"abc", "E0004"),
             ("unterminated-comment", "fn main() { /*", "E0006"),
-            ("unterminated-char", "'a", "E0004"),
+            ("unterminated-char", "fn main() { let c = '", "E0004"),
         ];
         for (name, source, expected) in cases {
             let diagnostics = source_diagnostics("unterminated.ls", source);
@@ -1946,19 +1946,17 @@ fn main() {
 }
 
 #[test]
-fn rejects_slice_stored_in_struct() {
-    expect_v21_rejected(
+fn accepts_slice_view_stored_in_a_struct() {
+    expect_v21_accepted(
         "v21-slice-struct",
         r#"
-struct Holder {
-    values: &[i64],
+struct Holder<'a> {
+    values: &'a [i64],
 }
 
 fn main() {
 }
 "#,
-        "E0498",
-        None,
     );
 }
 
@@ -2424,4 +2422,393 @@ fn rejects_env_var_as_string() {
         "E0308",
         None,
     );
+}
+
+// ---------------------------------------------------------------------------
+// v2.2 semantic hardening: fixed size arrays and loop labels
+// The 2.2 release adds the array type [T; N] with Rust copy and move rules and
+// labels on loops. Both are parsed and typed in parallel with this suite, so
+// the cases below pin the diagnostics that are part of the frozen contract:
+// array lengths must be const evaluated (E0435/E0080), labels must resolve to
+// an enclosing loop (E0426), elements of an owned array are places (E0507) and
+// owned arrays move (E0382). Acceptance cases pin the new surface syntax so a
+// regression in the parser or the move checker is caught here as well.
+// ---------------------------------------------------------------------------
+
+fn expect_v22_rejected(
+    case_name: &'static str,
+    source: &'static str,
+    expected: &'static str,
+    fragment: Option<&'static str>,
+) {
+    expect_v21_rejected(case_name, source, expected, fragment);
+}
+
+fn expect_v22_accepted(case_name: &'static str, source: &'static str) {
+    expect_v21_accepted(case_name, source);
+}
+
+#[test]
+fn rejects_array_length_that_is_not_const() {
+    expect_v22_rejected(
+        "v22-nonconst-array-length",
+        "fn main() {\n    let n: usize = 3;\n    let values: [i64; n] = [1, 2, 3];\n    println!(\"{}\", values[0]);\n}\n",
+        "E0435",
+        Some("integer literal or an integer constant"),
+    );
+}
+
+#[test]
+fn rejects_negative_array_length() {
+    expect_v22_rejected(
+        "v22-negative-array-length",
+        "fn main() {\n    let values: [i64; -1] = [];\n    println!(\"{}\", values[0]);\n}\n",
+        "E0080",
+        Some("array length must be between 0 and 1048576"),
+    );
+}
+
+#[test]
+fn rejects_array_length_above_the_cap() {
+    expect_v22_rejected(
+        "v22-array-length-cap",
+        "fn main() {\n    let values: [i64; 2000000] = [];\n    println!(\"{}\", values[0]);\n}\n",
+        "E0080",
+        Some("1048576"),
+    );
+}
+
+#[test]
+fn rejects_unknown_loop_label() {
+    expect_v22_rejected(
+        "v22-unknown-label",
+        "fn main() {\n    'outer: loop {\n        break 'missing;\n    }\n}\n",
+        "E0426",
+        Some("use of undeclared label 'missing'"),
+    );
+}
+
+#[test]
+fn rejects_unknown_continue_label() {
+    expect_v22_rejected(
+        "v22-unknown-continue-label",
+        "fn main() {\n    for i in 0..2 {\n        continue 'missing;\n    }\n}\n",
+        "E0426",
+        Some("use of undeclared label"),
+    );
+}
+
+#[test]
+fn rejects_loop_label_before_a_statement() {
+    expect_v22_rejected(
+        "v22-label-before-statement",
+        "fn main() {\n    'outer: let x = 1;\n    println!(\"{}\", x);\n}\n",
+        "E0001",
+        Some("loop label can only precede"),
+    );
+}
+
+#[test]
+fn rejects_break_with_a_value() {
+    expect_v22_rejected(
+        "v22-break-value",
+        "fn main() {\n    loop {\n        break 1;\n    }\n}\n",
+        "E0308",
+        Some("break with a value is not supported"),
+    );
+}
+
+#[test]
+fn rejects_lifetime_parameter_bounds() {
+    expect_v22_rejected(
+        "v22-lifetime-bounds",
+        "struct View<'a: 'static> { text: &'a str }\n\nfn main() {\n}\n",
+        "E0001",
+        Some("lifetime parameters cannot have bounds"),
+    );
+}
+
+#[test]
+fn rejects_empty_array_without_type() {
+    expect_v22_rejected(
+        "v22-empty-array-no-type",
+        "fn main() {\n    let values = [];\n    println!(\"{}\", 1);\n}\n",
+        "E0282",
+        Some("cannot infer the element type of an empty array"),
+    );
+}
+
+#[test]
+fn rejects_non_usize_array_index() {
+    expect_v22_rejected(
+        "v22-array-index-type",
+        "fn main() {\n    let values: [i64; 3] = [1, 2, 3];\n    let index: i32 = 0;\n    println!(\"{}\", values[index]);\n}\n",
+        "E0308",
+        None,
+    );
+}
+
+#[test]
+fn rejects_moving_an_array_element() {
+    expect_v22_rejected(
+        "v22-array-element-move",
+        "fn main() {\n    let words: [String; 2] = [String::from(\"a\"), String::from(\"b\")];\n    let first: String = words[0];\n    println!(\"{}\", first);\n}\n",
+        "E0507",
+        Some("indexed element"),
+    );
+}
+
+#[test]
+fn rejects_use_of_a_moved_array() {
+    expect_v22_rejected(
+        "v22-array-use-after-move",
+        "fn main() {\n    let words: [String; 2] = [String::from(\"a\"), String::from(\"b\")];\n    let moved = words;\n    println!(\"{:?}\", words);\n}\n",
+        "E0382",
+        Some("use of moved value: words"),
+    );
+}
+
+#[test]
+fn rejects_use_of_an_array_after_passing_it_by_value() {
+    expect_v22_rejected(
+        "v22-array-passed-by-value",
+        "fn take(values: [String; 2]) -> usize { values.len() }\n\nfn main() {\n    let words: [String; 2] = [String::from(\"a\"), String::from(\"b\")];\n    let count: usize = take(words);\n    println!(\"{} {:?}\", count, words);\n}\n",
+        "E0382",
+        Some("use of moved value: words"),
+    );
+}
+
+#[test]
+fn rejects_reference_stored_in_vector() {
+    expect_v22_rejected(
+        "v22-vector-of-references",
+        "fn main() {\n    let value: i64 = 1;\n    let references: Vec<&i64> = Vec::new();\n    println!(\"{} {}\", value, references.len());\n}\n",
+        "E0498",
+        Some("references cannot be stored in this type"),
+    );
+}
+
+#[test]
+fn accepts_arrays_and_length_sugar() {
+    expect_v22_accepted(
+        "v22-arrays-accepted",
+        "fn main() {\n    let numbers: [i64; 3] = [1, 2, 3];\n    let empty: [i64; 0] = [];\n    println!(\"{} {} {}\", numbers.len(), numbers.is_empty(), empty.is_empty());\n}\n",
+    );
+}
+
+#[test]
+fn accepts_array_repeat_of_copy_values() {
+    expect_v22_accepted(
+        "v22-array-repeat",
+        "fn main() {\n    let zeros: [i64; 4] = [0; 4];\n    let copy = zeros;\n    println!(\"{:?} {:?}\", zeros, copy);\n}\n",
+    );
+}
+
+#[test]
+fn accepts_empty_owned_array_as_copy() {
+    expect_v22_accepted(
+        "v22-empty-owned-array",
+        "fn main() {\n    let words: [String; 0] = [];\n    let first = words;\n    let second = words;\n    println!(\"{} {}\", first.len(), second.len());\n}\n",
+    );
+}
+
+#[test]
+fn accepts_array_of_arrays() {
+    expect_v22_accepted(
+        "v22-array-of-arrays",
+        "fn main() {\n    let matrix: [[i64; 2]; 2] = [[1, 2], [3, 4]];\n    println!(\"{}\", matrix[1][0]);\n}\n",
+    );
+}
+
+#[test]
+fn rejects_array_repeat_of_a_non_copy_value() {
+    expect_v22_rejected(
+        "v22-array-repeat-noncopy",
+        "fn main() {\n    let word = String::from(\"x\");\n    let pair: [String; 2] = [word; 2];\n    println!(\"{:?}\", pair);\n}\n",
+        "E0507",
+        Some("cannot move out of a value of type String in an array repeat expression"),
+    );
+}
+
+#[test]
+fn accepts_array_repeat_with_a_single_owned_element() {
+    expect_v22_accepted(
+        "v22-array-repeat-move",
+        "fn main() {\n    let word = String::from(\"x\");\n    let single: [String; 1] = [word; 1];\n    println!(\"{:?}\", single);\n}\n",
+    );
+}
+
+#[test]
+fn accepts_empty_array_repeat_of_a_non_copy_value() {
+    expect_v22_accepted(
+        "v22-array-repeat-empty",
+        "fn main() {\n    let empty: [String; 0] = [String::from(\"x\"); 0];\n    println!(\"{}\", empty.len());\n}\n",
+    );
+}
+
+#[test]
+fn accepts_slice_of_an_array() {
+    expect_v22_accepted(
+        "v22-array-slice",
+        "fn main() {\n    let numbers: [i64; 4] = [4, 5, 6, 7];\n    let part: &[i64] = &numbers[1..3];\n    println!(\"{:?}\", part);\n}\n",
+    );
+}
+
+#[test]
+fn accepts_labelled_break_and_continue() {
+    expect_v22_accepted(
+        "v22-labels-accepted",
+        "fn main() {\n    'outer: for i in 0..3 {\n        let mut inner: i64 = 0;\n        'inner: while inner < 2 {\n            inner = inner + 1;\n            if i == 1 { continue 'outer; }\n            if inner == 2 { break 'inner; }\n        }\n        if i == 2 { break 'outer; }\n    }\n    let mut count: i64 = 0;\n    'timer: loop {\n        count = count + 1;\n        if count >= 2 { break 'timer; }\n    }\n    println!(\"{}\", count);\n}\n",
+    );
+}
+
+#[test]
+fn accepts_reference_fields_in_a_struct() {
+    expect_v22_accepted(
+        "v22-reference-fields",
+        "struct Pair<'a> { left: &'a i64, right: &'a i64 }\n\nfn main() {\n    let left: i64 = 1;\n    let right: i64 = 2;\n    let pair: Pair = Pair { left: &left, right: &right };\n    println!(\"{} {}\", pair.left, pair.right);\n}\n",
+    );
+}
+
+#[test]
+fn rejects_reference_field_without_a_lifetime() {
+    expect_v22_rejected(
+        "v22-missing-lifetime",
+        "struct Holder {\n    values: &[i64],\n}\n\nfn main() {\n}\n",
+        "E0106",
+        Some("missing lifetime specifier"),
+    );
+}
+
+#[test]
+fn accepts_reference_field_with_a_named_lifetime() {
+    expect_v22_accepted(
+        "v22-named-lifetime",
+        "struct View<'a> {\n    text: &'a str,\n}\n\nfn main() {\n    let view: View = View { text: \"hello\" };\n    println!(\"{}\", view.text);\n}\n",
+    );
+}
+
+#[test]
+fn rejects_try_without_a_from_conversion() {
+    expect_v22_rejected(
+        "v22-try-no-from",
+        "use std::error::Error;\n\nstruct AppError {\n    message: String,\n}\n\nimpl Error for AppError {\n    fn message(&self) -> String {\n        return self.message.clone();\n    }\n}\n\nfn parse(text: &str) -> Result<i64, AppError> {\n    let value: i64 = text.parse_i64()?;\n    return Ok(value);\n}\n\nfn main() {\n    let parsed: Result<i64, AppError> = parse(\"42\");\n    println!(\"{:?}\", parsed.is_ok());\n}\n",
+        "E0308",
+        Some("cannot convert error types"),
+    );
+}
+
+const V22_MALFORMED_SNIPPETS: &[&str] = &[
+    "fn main() { let values: [i64; 3] = [1, 2",
+    "fn main() { let values = [];",
+    "fn main() { let values = [1,;",
+    "fn main() { let values = [1;",
+    "fn main() { let values: [i64; ] = [];",
+    "fn main() { let values: [; 3] = [];",
+    "fn main() { let values: [i64 3] = [];",
+    "fn main() { 'outer: }",
+    "fn main() { 'outer: 'inner: loop { } }",
+    "fn main() { loop 'outer { } }",
+    "fn main() { break '; }",
+    "fn main() { continue '; }",
+    "fn main() { break 'outer }",
+    "fn main() { 'a fn inner() { } }",
+    "struct Parser<'a { text: &'a str }",
+    "struct Parser<'a,> { text: &'a str }",
+    "struct Parser<'a: > { text: &'a str }",
+    "fn take(view: &'a str) -> 'a i64 { 0 }",
+    "fn main() { let value: [&str; 2] = [&'a, &'b]; }",
+    "fn main() { let value = 'static; }",
+];
+
+#[test]
+fn malformed_v22_snippets_do_not_panic() {
+    case("v22-snippets", || {
+        for snippet in V22_MALFORMED_SNIPPETS {
+            let diagnostics = source_diagnostics("v22_snippet.ls", snippet);
+            let text = messages(&diagnostics);
+            if !text.is_empty() {
+                assert_clean_failure("v2.2 malformed snippet", &text);
+            }
+        }
+    });
+}
+
+const V22_STORM_TOKENS: &[&str] = &[
+    "struct",
+    "Parser",
+    "View",
+    "fn",
+    "main",
+    "loop",
+    "while",
+    "for",
+    "in",
+    "break",
+    "continue",
+    "if",
+    "else",
+    "'outer",
+    "'inner",
+    "'timer",
+    "'a",
+    "'static",
+    "'",
+    "0..3",
+    "i64",
+    "usize",
+    "String",
+    "[",
+    "]",
+    "[i64",
+    ";",
+    "3]",
+    "[0",
+    "4]",
+    "&",
+    "&mut",
+    "&[",
+    "(",
+    ")",
+    "{",
+    "}",
+    ",",
+    ".",
+    "=",
+    "==",
+    "->",
+    "=>",
+    ":",
+    "::",
+    "<",
+    ">",
+    "\"text\"",
+    "'c'",
+    "1",
+    "0",
+    "+",
+    "?",
+    "struct Parser<'a>",
+    "text: &'a str",
+    "let",
+];
+
+#[test]
+fn random_v22_token_storms_do_not_panic() {
+    case("storm-v22", || {
+        let mut state = 0xDEAD_BEEF_CAFE_F00D_u64;
+        for _ in 0..120 {
+            let mut source = String::new();
+            for index in 0..160 {
+                if index > 0 {
+                    source.push(' ');
+                }
+                let pick = (next_random(&mut state) as usize) % V22_STORM_TOKENS.len();
+                source.push_str(V22_STORM_TOKENS[pick]);
+            }
+            let diagnostics = source_diagnostics("v22_storm.ls", &source);
+            let text = messages(&diagnostics);
+            assert_clean_failure("v2.2 token storm", &text);
+        }
+    });
 }

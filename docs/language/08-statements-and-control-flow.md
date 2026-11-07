@@ -271,7 +271,9 @@ done -2
 
 `loop` repeats its block forever. Leave it with `break` (optionally from inside a
 nested `if`). `continue` skips to the next iteration. A loop has type `()`:
-`break` cannot carry a value in 2.1.0.
+`break` cannot carry a value in 2.2.0. Since 2.2.0 a loop may also be labelled,
+which lets `break` and `continue` name an outer loop; see
+[Loop labels](28-loop-labels.md).
 
 ```ls
 fn main() {
@@ -424,7 +426,7 @@ Output:
 1: b
 ```
 
-The `mut` on a loop variable is accepted in 2.1.0; the assignment does not affect
+The `mut` on a loop variable is accepted in 2.2.0; the assignment does not affect
 the sequence of values:
 
 ```ls
@@ -494,8 +496,27 @@ lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
 
 `break` and `continue` are valid only inside `loop`, `while` or `for`. `break`
 leaves the innermost loop, `continue` starts the next iteration of the innermost
-loop. There are no labels in 2.1.0, so to leave nested loops use a flag or a
-function with `return`.
+loop.
+
+Since 2.2.0 a loop may be labelled with a lifetime token and a colon —
+`'outer: loop`, `'outer: while cond`, `'outer: for value in values`, and
+`'outer: while let Some(value) = …` — and `break 'outer` or `continue 'outer`
+then names that loop instead of the innermost one:
+
+```rust
+'outer: for row in 0..4 {
+    for column in 0..4 {
+        if row * column > 4 {
+            break 'outer;
+        }
+    }
+}
+```
+
+The label name may shadow an outer label of the same name (the innermost wins),
+a label before a non-loop item is a syntax error, and a label that no enclosing
+loop declares is `E0426`. `break` still cannot carry a value, labelled or not.
+The full rules, including `while let`, are on [Loop labels](28-loop-labels.md).
 
 Outside a loop, `continue` (and `break`) is a compile error:
 

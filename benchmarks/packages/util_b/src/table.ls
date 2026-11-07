@@ -20,9 +20,8 @@ impl Counter {
     }
 
     pub fn touch(&mut self, word: String) {
-        let existing = self.counts.get(word);
-        let next = match existing {
-            Some(count) => count + 1,
+        let next = match self.counts.get(&word) {
+            Some(count) => *count + 1,
             None => 1,
         };
         if next == 1 {
@@ -32,11 +31,9 @@ impl Counter {
     }
 
     pub fn entry_count(&self, word: &String) -> i64 {
-        let key = word.clone();
-        let existing = self.counts.get(key);
-        match existing {
+        match self.counts.get(word) {
             Some(count) => {
-                return count;
+                return *count;
             }
             None => {
                 return 0;

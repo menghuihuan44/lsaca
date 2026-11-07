@@ -1,0 +1,21 @@
+markdown: convert a Markdown subset to HTML
+input lines: 25
+output bytes: 941
+blocks: headings=2 paragraphs=3 lists=1 items=3 quotes=1 code=1
+<h1>Markdown demo</h1>
+<p>markdown.ls converts a small Markdown subset to HTML. It handles <strong>bold</strong> text, <em>italic</em> text, <code>inline code</code> and links such as <a href="https://example.com/lsaca?lang=lsaca&amp;tab=docs">the lsaca repository</a>.</p>
+<p>Escapes keep markup literal: *not italic*, `not code`, # no heading.</p>
+<h2>Lists, quotes and code</h2>
+<ul>
+<li>first item</li>
+<li>second item with <strong>bold</strong> and <em>emphasis</em></li>
+<li>third item with <code>x = 1</code> and a <a href="https://example.com/list">link</a></li>
+</ul>
+<blockquote>
+<p>quoted line one quoted line two with <strong>bold</strong> and <code>code</code> and a <a href="https://example.com/quote">link</a></p>
+</blockquote>
+<pre><code>fn main() {
+    println!(&quot;hello from a fenced block &lt;tag&gt; &amp; more&quot;);
+}</code></pre>
+<p>Trailing paragraph with unicode: café, naïve, and 5 &lt; 6 &amp; 7 &gt; 6.</p>
+

@@ -454,25 +454,27 @@ measured on the reference machine; those tables are generated from
 benchmarks/results/latest.md, and the page explains how to reproduce them. The recorded
 run used the `official` build mode (the normal `lsaca build -r` path, not the fallback);
 its JSON also contains every individual run, the compiler SHA-256 prefix and the
-repository commit, so a saved result is self-describing. The published 2.0.0 run was
-recorded on 2026-11-03T00:20:17+08:00 with lsaca 2.0.0 (compiler SHA-256 prefix
-2a60c5ac7c9fd34c, repository commit b151d1a); latest.json and latest.md hold that run,
-and a frozen copy is kept in benchmarks/results/archive/v2.0/. Two frozen references
-are used for the before/after comparison: the published 1.7.0 run in
+repository commit, so a saved result is self-describing. The published 2.2.0 run was
+recorded on 2026-11-07T17:21:34+08:00 with lsaca 2.2.0 (compiler SHA-256 prefix
+1c74d15ecf9a1b49, repository commit 97280dd); latest.json and latest.md hold that run,
+and a frozen copy is kept in benchmarks/results/archive/v2.2/. Frozen references are
+kept for before/after comparisons: the published 2.1.0 run in
+benchmarks/results/archive/v2.1/ (recorded 2026-11-06T18:46:10+08:00, compiler SHA-256
+prefix 90fca3bbe4e3ec5e, commit 151a9c2), the published 2.0.0 run in
+benchmarks/results/archive/v2.0/ (recorded 2026-11-03T00:20:17+08:00, compiler SHA-256
+prefix 2a60c5ac7c9fd34c, commit b151d1a), the published 1.7.0 run in
 benchmarks/results/archive/v1.7/ (recorded 2026-11-01T13:25:52+08:00, compiler SHA-256
-prefix 37554c98f102841f, commit fd3657e) and the Phase D pre-performance baseline in
+prefix 37554c98f102841f, commit fd3657e), and the Phase D pre-performance baseline in
 benchmarks/results/archive/v2.0-pre-perf/ (taken earlier in the 2.0 cycle on a busier
-host, so it is a directional reference only). Neither archive is overwritten when a new
-run replaces latest.json/latest.md. python scripts/bench_report.py combines the current
-result with both references and writes benchmarks/results/v2-report-sections.md;
-benchmarks/results/v2.0-report.md is the rendered report that
-docs/language/21-benchmarks.md was refreshed from, v2-report-preview.md is a dry run of
-the script, and v2-docs-page-template.md records the layout of the sections the page
-needs. The top-level `warnings` list
-records anything that affects interpretation, for example a single sample that had to be
-re-measured because of unrelated background load on the machine. If you rerun the suite,
-do not compare fallback numbers with the numbers on the docs page - the two measure
-different build pipelines.
+host, so it is a directional reference only). No archive is overwritten when a new run
+replaces latest.json/latest.md. benchmarks/results/v2.2-report.md is the rendered report
+for the 2.2.0 run; benchmarks/results/v2.1-report.md and v2.0-report.md are the rendered
+reports for those runs, v2-report-preview.md is a dry run of scripts/bench_report.py, and
+v2-docs-page-template.md records the layout of the sections the page needs. The top-level
+`warnings` list records anything that affects interpretation, for example a single sample
+that had to be re-measured because of unrelated background load on the machine. If you
+rerun the suite, do not compare fallback numbers with the numbers on the docs page - the
+two measure different build pipelines.
 
 All 2.0 additions to latest.json are additive, so schema_version stays 1: settings gains
 scales and scale_runs, each executed program gains a scales object, runtime records gain

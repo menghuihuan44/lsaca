@@ -224,6 +224,7 @@ impl Program {
             Ty::Option(inner) => self.is_copy(inner),
             Ty::Result(ok, err) => self.is_copy(ok) && self.is_copy(err),
             Ty::Tuple(elems) => elems.iter().all(|elem| self.is_copy(elem)),
+            Ty::Array(elem, len) => *len == 0 || self.is_copy(elem),
             Ty::Struct(id) => self.copy_structs.get(*id).copied().unwrap_or(false),
             Ty::Enum(id) => self.copy_enums.get(*id).copied().unwrap_or(false),
         }
@@ -305,6 +306,7 @@ impl Program {
             Ty::Tuple(elems) => elems
                 .iter()
                 .any(|elem| self.has_drop_glue_guarded(elem, structs, enums)),
+            Ty::Array(elem, len) => *len > 0 && self.has_drop_glue_guarded(elem, structs, enums),
             Ty::Unit
             | Ty::Bool
             | Ty::Char
@@ -603,13 +605,17 @@ pub enum HExprKind {
         arms: Vec<HArm>,
     },
     Loop {
+        /// Loop label without the apostrophe, when the source wrote one.
+        label: Option<String>,
         body: HBlock,
     },
     While {
+        label: Option<String>,
         cond: Box<HExpr>,
         body: HBlock,
     },
     ForRange {
+        label: Option<String>,
         pat: HPat,
         start: Box<HExpr>,
         end: Box<HExpr>,
@@ -617,6 +623,7 @@ pub enum HExprKind {
         body: HBlock,
     },
     ForVec {
+        label: Option<String>,
         pat: HPat,
         vec: Box<HExpr>,
         body: HBlock,
@@ -625,6 +632,7 @@ pub enum HExprKind {
     /// The iterator value is evaluated once, moved into a local, and polled
     /// through next_fn; it is released exactly once when the loop exits.
     ForIter {
+        label: Option<String>,
         iter: Box<HExpr>,
         /// FnId of the instantiated Iterator::next method.
         next_fn: usize,
@@ -644,6 +652,17 @@ pub enum HExprKind {
         value: Box<HExpr>,
         count: Box<HExpr>,
     },
+    /// A fixed-size array literal. Every element has the array element type;
+    /// the length is the number of elements.
+    Array {
+        elems: Vec<HExpr>,
+    },
+    /// A fixed-size array repeat `[value; count]`. The count is const-evaluated
+    /// by the type checker and stored here.
+    ArrayRepeat {
+        value: Box<HExpr>,
+        len: usize,
+    },
     /// A user-defined enum variant value: Shape::Circle(1.0), Color::Red.
     /// Unit variants have an empty args vector.
     EnumLit {
@@ -661,8 +680,15 @@ pub enum HExprKind {
     },
     /// A statement-like macro (print, println, panic, assert, ...).
     Macro(HMacroCall),
-    Break,
-    Continue,
+    /// Break out of the innermost loop, or of the loop named by label.
+    Break {
+        label: Option<String>,
+    },
+    /// Skip to the next iteration of the innermost loop, or of the loop named
+    /// by label.
+    Continue {
+        label: Option<String>,
+    },
     Return(Option<Box<HExpr>>),
     /// A borrow expression: `&place` or `&mut place`. References do not own
     /// their referent and never change a reference count.
@@ -1063,6 +1089,11 @@ pub struct HFormatPart {
 }
 
 #[derive(Debug, Clone)]
+// The argument expression is stored inline so code generation, borrow checking
+// and move checking can match it without an extra allocation per format
+// argument; the resulting size difference against the literal variant is small
+// in absolute terms and bounded by the HIR expression itself.
+#[allow(clippy::large_enum_variant)]
 pub enum HFormatPartKind {
     Literal(String),
     /// An argument formatted with the given specification.
