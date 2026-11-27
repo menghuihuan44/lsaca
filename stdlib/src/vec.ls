@@ -9,11 +9,12 @@
 // surface (Rust alignment). The frozen intrinsic ABI keeps i64 for length-like
 // results and indices; the wrappers convert at the intrinsic boundary.
 //
-// v2.2 Phase C: get_mut/first_mut/last_mut (and [T]::get_mut) return mutable
-// references into the vector's storage (Option<&mut T>); they have no lifetime
-// parameters, so they work under the Phase C lifetime rules. Vec::iter_mut is
-// deferred to a later version: a borrowing iterator needs a lifetime-
-// parameterized adapter struct, which v2.2 does not support in stdlib code.
+// v2.2 Phase C added get_mut/first_mut/last_mut (and [T]::get_mut), which
+// return mutable references into the vector's storage (Option<&mut T>).
+// Since 2.3 borrowing iterators are ordinary lifetime-parameterized stdlib
+// structs in std::iter: Vec::iter yields &T, Vec::iter_mut yields &mut T, and
+// Vec::into_iter is the consuming iterator. A `for` loop can also iterate
+// `&v`, `&mut v`, `&[T]` and `&mut [T]` directly.
 
 pub struct Vec<T> {
     internal: (),

@@ -59,7 +59,7 @@ impl Counter {
         let mut best = 0;
         let keys = self.counts.keys();
         for key in keys {
-            let count = *self.counts.get(&key).unwrap();
+            let count = *self.counts.get(key).unwrap();
             if count > best {
                 best = count;
             }
@@ -72,7 +72,7 @@ impl Counter {
         let mut chosen = String::from("");
         let keys = self.counts.keys();
         for key in keys {
-            let count = *self.counts.get(&key).unwrap();
+            let count = *self.counts.get(key).unwrap();
             if count > best {
                 best = count;
                 chosen = format!("{}", key);
@@ -85,7 +85,7 @@ impl Counter {
         let mut count = 0;
         let keys = self.counts.keys();
         for key in keys {
-            let value = *self.counts.get(&key).unwrap();
+            let value = *self.counts.get(key).unwrap();
             if value > limit {
                 count += 1;
             }
@@ -97,7 +97,7 @@ impl Counter {
         let mut total = 0;
         let keys = self.counts.keys();
         for key in keys {
-            let count = *self.counts.get(&key).unwrap();
+            let count = *self.counts.get(key).unwrap();
             total += count * count;
         }
         total
@@ -116,7 +116,7 @@ impl Counter {
         let mut total = 0;
         let keys = self.counts.keys();
         for key in keys {
-            let count = *self.counts.get(&key).unwrap();
+            let count = *self.counts.get(key).unwrap();
             total += count * 31 + key.len() as i64;
         }
         total % MODULUS
@@ -184,7 +184,7 @@ pub fn lookup_total(table: &HashMap<String, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = *table.get(&key).unwrap();
+        let value = *table.get(key).unwrap();
         total += value;
     }
     total
@@ -194,7 +194,7 @@ pub fn lookup_squares(table: &HashMap<String, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = *table.get(&key).unwrap();
+        let value = *table.get(key).unwrap();
         total += value * value;
     }
     total
@@ -204,7 +204,7 @@ pub fn lookup_checksum(table: &HashMap<String, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = *table.get(&key).unwrap();
+        let value = *table.get(key).unwrap();
         total += value * 31 + key.len() as i64;
     }
     total % MODULUS
@@ -214,8 +214,8 @@ pub fn int_table_checksum(table: &HashMap<i64, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = *table.get(&key).unwrap();
-        total += key * 31 + value;
+        let value = *table.get(key).unwrap();
+        total += *key * 31 + value;
     }
     total % MODULUS
 }
@@ -224,7 +224,7 @@ pub fn int_table_total(table: &HashMap<i64, i64>) -> i64 {
     let mut total = 0;
     let keys = table.keys();
     for key in keys {
-        let value = *table.get(&key).unwrap();
+        let value = *table.get(key).unwrap();
         total += value;
     }
     total

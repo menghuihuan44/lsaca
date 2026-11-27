@@ -9,6 +9,12 @@
 # published suite (scripts/bench.py) is run on a single idle host instead, so
 # results from different runners are never compared in one table.
 #
+# scripts/bench_guard.py enforces the incremental speed limits against the
+# most recently released baseline (2.3.0): no runtime median regression above
+# 10% and no cold compile median regression above 20%.  Because the baseline
+# was recorded on a different host, auto mode compares lsaca/C median ratios so
+# runner speed cancels out.
+#
 # Trigger it manually from the Actions tab ("Run workflow") or wait for the
 # weekly schedule; it is not part of ci.yml because benchmarks are slower and
 # can be noisy on shared runners.
@@ -95,7 +101,24 @@ jobs:
           --json target/bench-matrix/results.json
           --md target/bench-matrix/results.md
 
+      # The self-test proves the guard's comparison logic without touching the
+      # repository; the comparison then enforces the committed v2.3 limits.
+      # Auto mode uses absolute medians only when the host platform matches the
+      # baseline and otherwise compares lsaca/C ratios.
+      - name: Enforce the incremental speed guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/bench_guard.py --self-test
+          python scripts/bench_guard.py \
+            --results target/bench-matrix/results.json \
+            --baseline benchmarks/results/archive/v2.3/latest.json \
+            --runtime-tolerance 10 --compile-tolerance 20 \
+            --json target/bench-matrix/speed-guard.json \
+            --md target/bench-matrix/speed-guard.md
+
       - name: Upload the per-platform benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-matrix-${{ matrix.os }}

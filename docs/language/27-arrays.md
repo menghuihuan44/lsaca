@@ -239,8 +239,9 @@ Output:
 An array is not iterable by value. `for element in array` is rejected with
 `error[E0277]: cannot iterate over an array by value; arrays are not iterable in this language version`
 and a note suggesting the index route. Arrays do not have an `.iter()` method
-either; iterate over the indices with `0..array.len()`, or pass `&array` as
-`&[T]` and iterate over that slice from inside a function that takes `&[T]`:
+either; iterate over the indices with `0..array.len()`, or pass `&array` to a
+function that takes `&[T]` and iterate over that slice (since 2.3.0 a `for`
+loop accepts `&[T]` directly):
 
 ```ls
 fn total(values: &[i64]) -> i64 {
@@ -271,14 +272,14 @@ does not allocate. In the generated C project an array type is a struct wrapper
 around a C array of the element type, so an array by value and an array field
 behave like any other aggregate.
 
-## Known limitations in 2.2.0
+## Known limitations in 2.3.0
 
 * Arrays are not iterable by value, have no `.iter()` or `.iter_mut()` method,
   and there is no array pattern syntax: `let [a, b] = [1, 2];` and patterns
   such as `[1, 2, 3]` are parse errors.
 * References cannot be array elements: `[&i64; 2]` is rejected with
   `error[E0498]: references cannot be stored in this type (found &i64)`.
-  References can be stored in struct, enum, tuple and `Option` fields (see
+  References can be stored in struct, enum or tuple struct fields (see
   [Lifetimes](29-lifetimes.md)), but not inside arrays.
 * The length must be an integer literal or an integer `const`; there are no
   const generics and no general constant expressions in type positions.

@@ -38,6 +38,13 @@ NUM_RE = re.compile(r"^\d+(\.\d+)?$")
 RATIO_RE = re.compile(r"^\d+\.\d+x$")
 CHECKSUM_RE = re.compile(r"checksum=([0-9][0-9,]*)")
 
+
+def first_group(pattern, text):
+    match = re.search(pattern, text or "")
+    if match is None:
+        return None
+    return match.group(1) if match.groups() else match.group(0)
+
 LANG_KEY = {
     "lsaca": "lsaca",
     "C (gcc -O2)": "c",
@@ -194,10 +201,23 @@ class Checker:
             self.equal(page_row, latest_row, label + " row for " + (page_row[0] if page_row else "?"))
 
 
+def path_option(argv, name, default):
+    for index, value in enumerate(argv):
+        if value == name and index + 1 < len(argv):
+            return Path(argv[index + 1])
+        if value.startswith(name + "="):
+            return Path(value.split("=", 1)[1])
+    return default
+
+
 def main():
-    page_text = PAGE.read_text(encoding="utf-8")
-    latest_text = LATEST_MD.read_text(encoding="utf-8")
-    data = json.loads(LATEST_JSON.read_text(encoding="utf-8"))
+    argv = sys.argv[1:]
+    page_path = path_option(argv, "--page", PAGE)
+    latest_md = path_option(argv, "--md", LATEST_MD)
+    latest_json = path_option(argv, "--results", LATEST_JSON)
+    page_text = page_path.read_text(encoding="utf-8")
+    latest_text = latest_md.read_text(encoding="utf-8")
+    data = json.loads(latest_json.read_text(encoding="utf-8"))
 
     checker = Checker()
     page_tables = parse_tables(page_text)
@@ -343,6 +363,21 @@ def main():
             offset = " +" + offset
         mtime_display = date_part + " " + rest + offset
 
+    gcc_version = first_group(r"\d+\.\d+\.\d+", toolchains.get("gcc", ""))
+    rustc_version = first_group(r"rustc\s+(\d+\.\d+\.\d+)", toolchains.get("rustc", ""))
+    python_version = first_group(r"\d+\.\d+\.\d+", toolchains.get("python", ""))
+    node_version = first_group(r"v\d+\.\d+\.\d+", toolchains.get("node", ""))
+    for toolchain_name, toolchain_version in (
+        ("gcc", gcc_version),
+        ("rustc", rustc_version),
+        ("Python", python_version),
+        ("Node.js", node_version),
+    ):
+        if toolchain_version is None:
+            checker.failures.append(
+                "latest.json toolchains: cannot parse the " + toolchain_name + " version"
+            )
+
     page_env_table = find_heading_table(page_tables, "Environment")
     env = {}
     if page_env_table is None:
@@ -357,10 +392,22 @@ def main():
         checker.check(toolchains["repository_commit"] in lsaca_row, "environment: lsaca row must contain commit " + toolchains["repository_commit"])
         checker.check(toolchains["lsaca_compiler_sha256"][:16] in lsaca_row, "environment: lsaca row must contain sha256 prefix")
         checker.check(mtime_display in lsaca_row, "environment: lsaca row must contain compiler mtime " + mtime_display)
-        checker.check("15.2.0" in env.get("C compiler", ""), "environment: C compiler row must contain gcc 15.2.0")
-        checker.check("1.99.0" in env.get("Rust compiler", ""), "environment: Rust compiler row must contain rustc 1.99.0")
-        checker.check("3.14.4" in env.get("Python", ""), "environment: Python row must contain 3.14.4")
-        checker.check("v24.14.1" in env.get("Node.js", ""), "environment: Node.js row must contain v24.14.1")
+        checker.check(
+            gcc_version is None or gcc_version in env.get("C compiler", ""),
+            "environment: C compiler row must contain gcc " + str(gcc_version),
+        )
+        checker.check(
+            rustc_version is None or rustc_version in env.get("Rust compiler", ""),
+            "environment: Rust compiler row must contain rustc " + str(rustc_version),
+        )
+        checker.check(
+            python_version is None or python_version in env.get("Python", ""),
+            "environment: Python row must contain " + str(python_version),
+        )
+        checker.check(
+            node_version is None or node_version in env.get("Node.js", ""),
+            "environment: Node.js row must contain " + str(node_version),
+        )
         harness_row = env.get("Harness", "")
         checker.check(str(len(programs)) + " programs (" + str(len(runtime_programs)) + " executed)" in harness_row,
                       "environment: Harness row program counts")
@@ -385,10 +432,22 @@ def main():
             generated_line = line
     checker.check(generated_at in generated_line, "latest.md: Generated line must contain " + generated_at)
     checker.check(version in latest_env.get("lsaca", ""), "latest.md: lsaca environment line version " + version)
-    checker.check("15.2.0" in latest_env.get("gcc", ""), "latest.md: gcc environment line")
-    checker.check("1.99.0" in latest_env.get("rustc", ""), "latest.md: rustc environment line")
-    checker.check("3.14.4" in latest_env.get("Python", ""), "latest.md: Python environment line")
-    checker.check("v24.14.1" in latest_env.get("Node.js", ""), "latest.md: Node.js environment line")
+    checker.check(
+        gcc_version is None or gcc_version in latest_env.get("gcc", ""),
+        "latest.md: gcc environment line must contain " + str(gcc_version),
+    )
+    checker.check(
+        rustc_version is None or rustc_version in latest_env.get("rustc", ""),
+        "latest.md: rustc environment line must contain " + str(rustc_version),
+    )
+    checker.check(
+        python_version is None or python_version in latest_env.get("Python", ""),
+        "latest.md: Python environment line must contain " + str(python_version),
+    )
+    checker.check(
+        node_version is None or node_version in latest_env.get("Node.js", ""),
+        "latest.md: Node.js environment line must contain " + str(node_version),
+    )
     checker.check(latest_env.get("lsaca build mode", "") == "official", "latest.md: build mode must be official")
 
     # Workload checksum table on the page vs latest.md vs latest.json.

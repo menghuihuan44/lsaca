@@ -18,15 +18,15 @@ impl Iterator<i64> for Countdown {
 }
 
 fn main() {
-    // .iter() consumes the Vec and the chain is lazy: nothing runs until the
+    // .into_iter() consumes the Vec and the chain is lazy: nothing runs until the
     // for loop pulls values out.
     let numbers: Vec<i64> = vec![1, 2, 3, 4, 5, 6];
-    let total = numbers.iter().filter(|x| *x % 2 == 0).sum();
+    let total = numbers.into_iter().filter(|x| *x % 2 == 0).sum();
     println!("sum of evens: {}", total);
 
     // .collect() needs a known target type; here it comes from the annotation.
     let words: Vec<String> = vec![String::from("alpha"), String::from("beta")];
-    let lengths: Vec<usize> = words.iter().map(|word| word.len()).collect();
+    let lengths: Vec<usize> = words.into_iter().map(|word| word.len()).collect();
     println!("lengths: {:?}", lengths);
 
     // Any type implementing Iterator can be used in a for loop.
@@ -38,6 +38,6 @@ fn main() {
     println!("countdown sum: {}", count);
 
     // fold threads an accumulator through the items.
-    let joined = vec![String::from("a"), String::from("b")].iter().fold(String::from(""), |acc, item| acc + item.as_str());
+    let joined = vec![String::from("a"), String::from("b")].into_iter().fold(String::from(""), |acc, item| acc + item.as_str());
     println!("joined: {}", joined);
 }

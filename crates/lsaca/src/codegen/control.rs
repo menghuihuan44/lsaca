@@ -45,12 +45,16 @@ impl<'a> Gen<'a> {
                         if init.is_place() && self.program.drop_hook(&init.ty).is_some() {
                             let place = self.gen_place(init);
                             self.bind_let_pattern(pat, init, &place);
-                        } else if self.let_pattern_consumes_owned_value(pat, init) {
-                            // A destructuring pattern that binds a Drop-hook
-                            // payload owns the initialiser: move it into a
-                            // temporary, steal the payload fields and mark the
-                            // temporary moved. Copying would run the Drop hook
-                            // for the binding and for the temporary.
+                        } else if self.let_pattern_consumes_owned_value(pat, init)
+                            || self.let_pattern_partially_moves(pat, init)
+                        {
+                            // Both paths take ownership of the initialiser:
+                            // either it holds a Drop-hook payload or the pattern
+                            // binds an owning (non-Copy) value (a partial move).
+                            // Move it into a temporary, steal the selected
+                            // fields and mark the temporary moved. Copying would
+                            // either run the Drop hook twice or leave a second
+                            // refcounted owner behind.
                             let value = self.gen_owned_move(init);
                             self.bind_pattern_consume(pat, &value);
                             self.mark_moved(&value);
@@ -415,6 +419,49 @@ impl<'a> Gen<'a> {
         }
         self.program.drop_hook(&init.ty).is_none() && self.pattern_moves_drop_payload(pat)
     }
+    /// Whether `pat` binds at least one owning value by value.
+    ///
+    /// Owning values are the non-Copy types: a pattern that binds one of them
+    /// takes ownership of the initialiser instead of deep-copying it. Copy
+    /// bindings inside the same pattern stay copies.
+    fn pattern_binds_owned(&self, pat: &HPat) -> bool {
+        match &pat.kind {
+            HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => false,
+            HPatKind::Bind { .. } => !self.is_trivial_copy(&pat.ty),
+            HPatKind::Tuple(parts) | HPatKind::Or(parts) => {
+                parts.iter().any(|part| self.pattern_binds_owned(part))
+            }
+            HPatKind::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, part)| self.pattern_binds_owned(part)),
+            HPatKind::Enum { args, .. } => args.iter().any(|part| self.pattern_binds_owned(part)),
+            HPatKind::OptionSome(inner)
+            | HPatKind::ResultOk(inner)
+            | HPatKind::ResultErr(inner) => self.pattern_binds_owned(inner),
+        }
+    }
+
+    /// Whether `let <pat> = <init>` performs a partial move.
+    ///
+    /// A destructuring pattern that binds at least one owning value takes the
+    /// initialiser by value: the bound fields are stolen and the source binding
+    /// becomes moved (E0382 if it is used again). Patterns that only bind Copy
+    /// values keep the copy semantics, as do initialisers that are aggregate
+    /// places other than a local variable (moving out of a field or index is
+    /// E0507) and reference initialisers (they only bind references).
+    fn let_pattern_partially_moves(&self, pat: &HPat, init: &HExpr) -> bool {
+        if matches!(&init.ty, Ty::Ref { .. }) {
+            return false;
+        }
+        if init.is_place() && !matches!(&init.kind, HExprKind::Local { .. }) {
+            return false;
+        }
+        if self.program.drop_hook(&init.ty).is_some() {
+            return false;
+        }
+        self.pattern_binds_owned(pat)
+    }
+
     /// Move the value selected by a wildcard or ignored field into a released
     /// temporary, clearing the source slot.
     ///

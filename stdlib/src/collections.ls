@@ -28,6 +28,15 @@ impl<K> HashSet<K> {
         return HashSet { map: HashMap::new(), order: Vec::new() };
     }
 
+    /// Builds a set from owned values, keeping the first occurrence of each.
+    pub fn from(values: Vec<K>) -> HashSet<K> {
+        let mut set: HashSet<K> = HashSet::new();
+        for value in values {
+            set.insert(value);
+        }
+        return set;
+    }
+
     /// Inserts a value and returns true when it was not present yet.
     pub fn insert(&mut self, key: K) -> bool {
         if self.map.contains_key(key.clone()) {

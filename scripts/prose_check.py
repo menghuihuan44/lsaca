@@ -136,8 +136,8 @@ SOURCES["hashmap_keys"] = r"""fn main() {
     let mut scores: HashMap<String, i64> = HashMap::new();
     scores.insert(String::from("a"), 1);
 
-    let keys = scores.keys();
-    let values = scores.values();
+    let keys: Vec<String> = scores.keys().map(|key| key.clone()).collect();
+    let values: Vec<i64> = scores.values().map(|value| *value).collect();
     println!("{:?}", keys);
     println!("{:?}", values);
 }
@@ -229,7 +229,7 @@ CASES = [
             ("docs/language/04-types.md", [
                 "Unicode scalar value",
             ]),
-            ("docs/language/16-roadmap.md", [
+            ("docs/language/deviations.md", [
                 "Characters are scalars; strings are UTF-8",
             ]),
         ],
@@ -408,7 +408,7 @@ CASES = [
         "kind": "check",
         "source": "hashmap_for_loop",
         "docs": [("docs/language/20-hashmap.md", [
-            "cannot be iterated with `for` in 2.2.0",
+            "Iterating by value is not supported",
         ])],
         "stderr_contains": ["cannot iterate over a value of type HashMap<i64, i64>"],
     },

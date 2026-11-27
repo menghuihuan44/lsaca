@@ -1666,6 +1666,12 @@ impl<'a> Checker<'a> {
         env: &mut HashMap<String, ITy>,
         report_span: Span,
     ) -> bool {
+        // Lifetimes are erased from the type model: a self-type such as
+        // `Impl<'a, T>` names the instance with its type arguments only, so
+        // lifetime arguments must not shift or extend the pattern argument
+        // list compared against the instantiated instance.
+        let pattern_args = super::items::only_type_args(pattern_args);
+        let pattern_args = &pattern_args[..];
         let instance = match actual {
             ITy::Struct(id) if is_struct => self
                 .structs

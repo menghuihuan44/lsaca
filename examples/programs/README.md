@@ -90,7 +90,7 @@ documents: 8
 summary: 4 accepted, 4 rejected
 ```
 
-With `examples/programs/data/sample.json` (1546 bytes):
+With `examples/programs/data/sample.json` (1528 bytes):
 
 ```console
 $ lsaca run examples/programs/json.ls -- examples/programs/data/sample.json | tail -n 8
@@ -207,15 +207,16 @@ Every mode below was run through both implementations and compared byte for byte
 
 | program | invocation | stdout bytes | SHA-256 |
 | --- | --- | ---: | --- |
-| json | no arguments | 1340 | `7489c158da84d90ddf3e163c93d9afd5` |
-| json | `data/sample.json` | 1546 | `977227c916349e4f8232f5d720fb5cdb` |
-| markdown | no arguments | 1084 | `16a902a6bc3ebdde1abaa29db2f135c1` |
-| markdown | `data/sample.md` | 2279 | `792ff27bdb1b19eaa4d16c4852046320` |
-| lisp | no arguments | 351 | `0cd802d14a61707147f8cd5d46ca4c64` |
-| lisp | `data/sample.lisp` | 464 | `730d5070bf812ff171474aaca7c5df98` |
+| json | no arguments | 1340 | `7489c158da84d90ddf3e163c93d9afd5fddf4e56bf62a10d3213bef0fcd48250` |
+| json | `data/sample.json` | 1528 | `1bfdb0243fe03a1a9b3eac3008c6f1d568b585b7daa10e78f2dd4edb950ce938` |
+| markdown | no arguments | 1084 | `16a902a6bc3ebdde1abaa29db2f135c148fd893264410bb39cf56c4f4437c9db` |
+| markdown | `data/sample.md` | 2261 | `228c63c5e255b612ffc0abab60c8f91e2481a60d4c88dce2ee4e23e06d8faf73` |
+| lisp | no arguments | 351 | `0cd802d14a61707147f8cd5d46ca4c64fcb10b2318a4d2571253ebee2084b20f` |
+| lisp | `data/sample.lisp` | 464 | `730d5070bf812ff171474aaca7c5df98d0612d4a5eb8e6d2094684a6a927e2cb` |
 
-The full SHA-256 values are recorded in the release notes; the first 32 hex digits are enough
-to compare a local run against these files.
+Hashes are SHA-256 of the CRLF-normalized stdout. The `Real example programs` CI job
+re-checks all six invocations against both implementations with
+`scripts/real_programs.py`.
 
 Notes:
 

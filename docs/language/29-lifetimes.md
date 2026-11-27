@@ -2,8 +2,9 @@
 
 Version 2.2 adds lightweight lifetimes for storing references in user-defined
 aggregate types. Before 2.2 a reference could only appear in a function
-signature; now a struct, enum, tuple struct or `Option` field may hold `&'a T`
-or `&'a mut T` as long as the type names the lifetime. This is not the full
+signature; now a struct, enum or tuple struct field may hold `&'a T` or `&'a mut T`
+as long as the type names the lifetime. `Option<&T>` and tuple-typed fields
+remain rejected with `E0498`. This is not the full
 Rust lifetime system: there are no lifetime bounds, outlives requirements,
 variance checks or general inference, and all lifetime information is erased
 after type checking. The feature exists so a view type can bundle data with a
@@ -106,7 +107,7 @@ lifetime parameters that appear only in a return type: two elided input
 references with one borrowed return still produce
 `error[E0106]: missing lifetime specifier`.
 
-`'static` is **not** a supported field lifetime in 2.2.0. Every reference
+`'static` is **not** a supported field lifetime in 2.3.0. Every reference
 field must name a lifetime parameter that the type declares; a field such as
 `text: &'static str` is rejected with
 `error[E0498]: the 'static lifetime is not supported yet` and the note *use a
@@ -120,8 +121,11 @@ well.
 References may be stored in these positions:
 
 * fields of user-defined structs, including tuple structs;
-* fields of user-defined enums, including variant payloads;
-* fields whose type is `Option<&'a T>` or `Option<&'a mut T>`.
+* fields of user-defined enums, including variant payloads.
+
+`Option<&'a T>`, `Option<&'a mut T>` and tuple-typed fields such as
+`(&'a T, &'a T)` are **not** accepted: they are rejected with
+`error[E0498]: references cannot be stored in this type`.
 
 References are still rejected everywhere else, with
 `error[E0498]: references cannot be stored in this type`: type arguments
@@ -142,11 +146,12 @@ lifetimes are not compared for equality or subtyping, there are no outlives
 bounds, and variance is not checked, so some programs Rust accepts are rejected
 and lifetime mistakes are not all caught at compile time.
 
-## Known limitations in 2.2.0
+## Known limitations in 2.3.0
 
-* Lifetime support is limited to reference fields in user structs, tuple
-  structs, enums and `Option`. References in `Vec`, `Result`, `HashMap`,
-  `Rc`, `Box`, arrays and closures remain rejected with `E0498`.
+* Lifetime support is limited to direct reference fields in user structs,
+  tuple structs and enums. `Option<&T>`, tuple-typed fields and references in
+  `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures are rejected
+  with `E0498`.
 * There are no lifetime bounds (`'a: 'b`), no outlives requirements, no
   higher-ranked lifetimes, no variance checks and no named-lifetime
   equivalence checks.
@@ -161,8 +166,9 @@ and lifetime mistakes are not all caught at compile time.
 
 ## Summary
 
-* A struct, enum, tuple struct or `Option` field may hold `&'a T` or
-  `&'a mut T`; the item must declare `<'a>` and the field must name it.
+* A struct, enum or tuple struct field may hold `&'a T` or `&'a mut T`; the
+  item must declare `<'a>` and the field must name it. `Option<&T>` and
+  tuple-typed fields are rejected with `E0498`.
 * `impl<'a> View<'a>` blocks and functions returning such aggregates use the
   same lifetime parameters.
 * Elision covers function and method signatures and struct paths; `'static` is

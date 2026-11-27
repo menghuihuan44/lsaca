@@ -151,5 +151,5 @@ impl From<ParseIntError> for AppError {
 * [The error module](../stdlib/error.md) covers the `Error` trait and its
   implementations.
 * [Traits](18-traits.md) covers the trait system that `From` uses.
-* [Roadmap](16-roadmap.md) lists the remaining Rust features that 2.2.0 does
-  not provide.
+* [Known limitations](limitations.md) lists the remaining Rust features that
+  the current release does not provide.

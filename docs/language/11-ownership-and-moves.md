@@ -199,7 +199,7 @@ The note points at the place where the value was moved and suggests `.clone()` w
 
 ### Moving out of a place (E0507)
 
-A move takes the whole value. You cannot move one field out of a value, one element out of a vector or the payload out of a dereference; those operations would leave the original place partially uninitialised, which 2.2.0 still rejects. Clone the field instead, or move the whole value. Destructuring a whole tuple or struct with a `let` pattern copies it rather than moving parts out (see [Variables](06-variables-and-mutability.md#destructuring-bindings)); `match` still moves the scrutinee.
+A move takes the whole value. You cannot move one field out of a value, one element out of a vector or the payload out of a dereference; those operations would leave the original place partially uninitialised, which still reports `E0507`. Clone the field instead, or move the whole value. A `let` pattern that destructures a tuple or struct moves the whole value when it binds an owning part (partial moves, since 2.3.0), so the source cannot be used afterwards; a pattern that binds only `Copy` values copies them and leaves the source usable (see [Variables](06-variables-and-mutability.md#destructuring-bindings)). `match` still moves the scrutinee.
 
 ```ls,compile-fail
 struct Config {
@@ -344,7 +344,7 @@ drop b
 done
 ```
 
-Iterating over a `Vec<i64>` also moves the vector, even though its elements are Copy. After the loop the original binding is gone; use a range or a fresh vector when the loop must not consume it. Version 1.4 has no `for` loop over a reference (`for x in &vec` is rejected).
+Iterating over a `Vec<i64>` also moves the vector, even though its elements are Copy. After the loop the original binding is gone; use a range or a fresh vector when the loop must not consume it. Since 2.3.0 `for x in &vec` borrows the vector instead and leaves it usable (see [Iterators](19-iterators.md#borrowing-loops-and-slices)).
 
 ### match, if let and while let
 
@@ -842,16 +842,16 @@ Mutable references to a user struct or enum are supported only when the type is 
 * User-defined generics and traits exist since 1.5.0, and `Copy`, `Clone` and `Drop` remain the only compiler-known traits; since 2.0 a trait value can be used behind a pointer as a trait object (`Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait`) with calls dispatched through a vtable (see [Trait objects](25-trait-objects.md)).
 * Since 1.5.0 user structs, enums, tuples, `Vec`, `Option`, `Result`, references and `HashMap` compare with `==`; function values do not (`E0369`).
 
-## Known limitations in version 2.2.0
+## Known limitations in version 2.3.0
 
 * `Copy` and `Clone` cannot be implemented (both are derived automatically); `Drop` keeps its special form, and user-defined traits can be implemented since 1.5.0.
-* Lifetime syntax covers reference fields only: since 2.2.0 a struct, enum, tuple or
-  `Option` field may hold `&'a T`/`&'a mut T` with a declared lifetime parameter, and
+* Lifetime syntax covers reference fields only: since 2.2.0 a struct, enum or tuple
+  struct field may hold a direct `&'a T`/`&'a mut T` with a declared lifetime parameter; `Option<&T>` and tuple-typed fields are rejected, and
   there are no lifetime bounds or relations; references cannot be stored in `Vec`,
   `HashMap`, `Result`, `Box`, arrays or closures (see [Lifetimes](29-lifetimes.md)).
 * A value with a Drop impl cannot be cloned, and a container whose elements have drop glue (for example `Vec<Guard>`) cannot be cloned either.
-* Moving out of a field, an indexed element or a dereference is rejected (E0507); clone the part or move the whole value. Destructuring a whole value with a `let` pattern copies it instead of moving non-`Copy` parts; `match` still moves the scrutinee (see [Variables](06-variables-and-mutability.md#destructuring-bindings)).
-* Partial moves are not supported: a value is either moved as a whole or not at all; a `let` pattern that destructures the whole value copies it.
+* Moving out of a field, an indexed element or a dereference is rejected (E0507); clone the part or move the whole value. A `let` pattern that binds an owning value moves the whole value (partial move), while a pattern that binds only `Copy` values copies them; `match` moves the scrutinee (see [Variables](06-variables-and-mutability.md#destructuring-bindings)).
+* Partial moves are all-or-nothing: binding one owning field moves the whole aggregate and the source binding cannot be read afterwards, even through an unbound `Copy` field. Rust keeps the unbound fields usable through the source.
 * Mutable references are supported for Copy values and for `String`, `Vec<T>`, `Rc<T>` and `Box<T>`; mutable references to a user struct or enum with heap fields are rejected (E0498).
 * `for` loops consume a vector and there is no iteration over `&Vec`.
 * Drop hooks do not run on panic or exit.
@@ -875,4 +875,4 @@ Mutable references to a user struct or enum are supported only when the type is 
 * See how values are represented at runtime: [Memory model](05-memory-model.md).
 * Learn about Rc, Box and the standard library: [Standard library](15-standard-library.md).
 * User-defined generics and traits: [Generics](17-generics.md) and [Traits](18-traits.md).
-* What is planned next: [Roadmap and deviations from Rust](16-roadmap.md).
+* What is planned next: [Roadmap](16-roadmap.md).

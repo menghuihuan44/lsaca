@@ -370,7 +370,38 @@ impl<'a> Checker<'a> {
             );
         }
         let iter_expr = self.check_expr(iter, None);
-        let iter_ty = self.infer.resolve(&iter_expr.ty);
+        let mut iter_expr = iter_expr;
+        let mut iter_ty = self.infer.resolve(&iter_expr.ty);
+        // Borrowed collections: `for x in &v`, `for x in &mut v`,
+        // `for x in slice` (a &[T]) and `for (k, v) in &map` materialize the
+        // matching prelude iterator before the by-value Vec branch consumes the
+        // collection. The borrowing adapters keep the collection alive.
+        if let ITy::Ref { mutable, inner } = iter_ty.clone() {
+            let pointee = self.infer.resolve(&inner);
+            let method = match (&pointee, mutable) {
+                (ITy::Vec(_) | ITy::Slice(_), true) => Some("iter_mut"),
+                (ITy::Vec(_) | ITy::Slice(_) | ITy::HashMap(_, _), false) => Some("iter"),
+                // HashMap has no mutable iterator; a &mut map still iterates
+                // through a shared reborrow of its keys and values.
+                (ITy::HashMap(_, _), true) => Some("iter"),
+                _ => None,
+            };
+            if let Some(method) = method
+                && let Some(borrowed) = self.check_iterator_sugar(
+                    &iter_expr,
+                    &pointee,
+                    method,
+                    iter.span,
+                    &[],
+                    &[],
+                    iter.span,
+                    None,
+                )
+            {
+                iter_expr = borrowed;
+                iter_ty = self.infer.resolve(&iter_expr.ty);
+            }
+        }
         if let ITy::Vec(elem) = &iter_ty {
             let elem_ty = (**elem).clone();
             self.push_scope();
@@ -444,7 +475,7 @@ impl<'a> Checker<'a> {
             }
             let described = self.describe_resolved(&iter_ty);
             let message = format!(
-                "cannot iterate over a value of type {}; for loops require a range, a Vec<T>, or a type that implements Iterator<T>",
+                "cannot iterate over a value of type {}; for loops require a range, a Vec<T>, a type that implements Iterator<T>, or a borrowed collection (&Vec<T>, &mut Vec<T>, &[T], &mut [T] or &HashMap<K, V>)",
                 described
             );
             if matches!(iter_ty, ITy::HashMap(_, _)) {
@@ -452,7 +483,7 @@ impl<'a> Checker<'a> {
                     message,
                     iter.span,
                     "E0277",
-                    "call keys() or values() to get a Vec and iterate over that",
+                    "iterate over a borrowed map: for (key, value) in &map",
                 );
             } else {
                 self.error_code(message, iter.span, "E0277");

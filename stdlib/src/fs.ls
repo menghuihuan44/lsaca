@@ -54,6 +54,10 @@ pub extern fn __io_canonicalize(path: &str) -> Option<String>;
 pub extern fn __io_current_dir() -> Option<String>;
 pub extern fn __io_set_current_dir(path: &str) -> i64;
 pub extern fn __io_temp_dir() -> String;
+pub extern fn __io_path_join(base: &str, segment: &str) -> String;
+pub extern fn __io_path_parent(path: &str) -> Option<String>;
+pub extern fn __io_path_file_name(path: &str) -> Option<String>;
+pub extern fn __io_path_extension(path: &str) -> Option<String>;
 
 /// The kind of a file system entry.
 pub enum FileType {
@@ -100,6 +104,192 @@ impl FileType {
                 return false;
             }
         }
+    }
+}
+
+/// A borrowed-style path value with lexical operations.
+///
+/// Path never touches the operating system; join, parent, file_name and
+/// extension work on the text alone. The checks exists, is_file and is_dir do
+/// query the operating system. Path strings use the platform path syntax;
+/// join always inserts a forward slash when it needs a separator.
+pub struct Path {
+    text: String,
+}
+
+impl Path {
+    /// Builds a path from text.
+    pub fn new(text: &str) -> Path {
+        return Path { text: String::from_str(text) };
+    }
+
+    /// Builds a path from an owned string.
+    pub fn from(text: String) -> Path {
+        return Path { text: text };
+    }
+
+    /// The path text.
+    pub fn as_str(&self) -> &str {
+        return self.text.as_str();
+    }
+
+    /// The path as text.
+    pub fn to_string(&self) -> String {
+        return self.text.clone();
+    }
+
+    /// The path as text, suitable for printing.
+    pub fn display(&self) -> String {
+        return self.text.clone();
+    }
+
+    /// Joins a path component. An absolute component replaces this path.
+    pub fn join(&self, segment: &str) -> PathBuf {
+        return PathBuf { text: __io_path_join(self.text.as_str(), segment) };
+    }
+
+    /// The parent path, or None at a root.
+    pub fn parent(&self) -> Option<PathBuf> {
+        match __io_path_parent(self.text.as_str()) {
+            Some(parent) => {
+                return Some(PathBuf { text: parent });
+            }
+            None => {
+                return None;
+            }
+        }
+    }
+
+    /// The last component of the path, or None at a root.
+    pub fn file_name(&self) -> Option<String> {
+        return __io_path_file_name(self.text.as_str());
+    }
+
+    /// The extension after the last dot of the file name, without the dot.
+    pub fn extension(&self) -> Option<String> {
+        return __io_path_extension(self.text.as_str());
+    }
+
+    /// Whether the path exists on the file system.
+    pub fn exists(&self) -> bool {
+        return exists(self.text.as_str());
+    }
+
+    /// Whether the path is an existing regular file.
+    pub fn is_file(&self) -> bool {
+        return is_file(self.text.as_str());
+    }
+
+    /// Whether the path is an existing directory.
+    pub fn is_dir(&self) -> bool {
+        return is_dir(self.text.as_str());
+    }
+}
+
+/// An owned, mutable path value.
+///
+/// PathBuf adds new, push and pop to the lexical operations of Path. Path and
+/// PathBuf are separate owned values: as_path clones the text rather than
+/// borrowing it, because standard library structs cannot store references.
+pub struct PathBuf {
+    text: String,
+}
+
+impl PathBuf {
+    /// Builds an empty path.
+    pub fn new() -> PathBuf {
+        return PathBuf { text: String::new() };
+    }
+
+    /// Builds a path from an owned string.
+    pub fn from(text: String) -> PathBuf {
+        return PathBuf { text: text };
+    }
+
+    /// Builds a path from text.
+    pub fn from_str(text: &str) -> PathBuf {
+        return PathBuf { text: String::from_str(text) };
+    }
+
+    /// The path text.
+    pub fn as_str(&self) -> &str {
+        return self.text.as_str();
+    }
+
+    /// A Path value with the same text.
+    pub fn as_path(&self) -> Path {
+        return Path { text: self.text.clone() };
+    }
+
+    /// The path as text.
+    pub fn to_string(&self) -> String {
+        return self.text.clone();
+    }
+
+    /// The path as text, suitable for printing.
+    pub fn display(&self) -> String {
+        return self.text.clone();
+    }
+
+    /// Appends a component. An absolute component replaces the path.
+    pub fn push(&mut self, segment: &str) {
+        let joined: String = __io_path_join(self.text.as_str(), segment);
+        self.text = joined;
+    }
+
+    /// Removes the last component, returning false at a root or empty path.
+    pub fn pop(&mut self) -> bool {
+        match __io_path_parent(self.text.as_str()) {
+            Some(parent) => {
+                self.text = parent;
+                return true;
+            }
+            None => {
+                return false;
+            }
+        }
+    }
+
+    /// Joins a path component. An absolute component replaces this path.
+    pub fn join(&self, segment: &str) -> PathBuf {
+        return PathBuf { text: __io_path_join(self.text.as_str(), segment) };
+    }
+
+    /// The parent path, or None at a root.
+    pub fn parent(&self) -> Option<PathBuf> {
+        match __io_path_parent(self.text.as_str()) {
+            Some(parent) => {
+                return Some(PathBuf { text: parent });
+            }
+            None => {
+                return None;
+            }
+        }
+    }
+
+    /// The last component of the path, or None at a root.
+    pub fn file_name(&self) -> Option<String> {
+        return __io_path_file_name(self.text.as_str());
+    }
+
+    /// The extension after the last dot of the file name, without the dot.
+    pub fn extension(&self) -> Option<String> {
+        return __io_path_extension(self.text.as_str());
+    }
+
+    /// Whether the path exists on the file system.
+    pub fn exists(&self) -> bool {
+        return exists(self.text.as_str());
+    }
+
+    /// Whether the path is an existing regular file.
+    pub fn is_file(&self) -> bool {
+        return is_file(self.text.as_str());
+    }
+
+    /// Whether the path is an existing directory.
+    pub fn is_dir(&self) -> bool {
+        return is_dir(self.text.as_str());
     }
 }
 
@@ -178,6 +368,78 @@ pub fn read_dir(path: &str) -> Result<Vec<String>, Error> {
             return Err(Error::last());
         }
     }
+}
+
+/// One entry returned while iterating a directory.
+pub struct DirEntry {
+    path: PathBuf,
+    name: String,
+    file_type: FileType,
+}
+
+impl DirEntry {
+    /// The full path of the entry, built from the directory path and name.
+    pub fn path(&self) -> PathBuf {
+        return self.path.clone();
+    }
+
+    /// The entry name without the directory prefix.
+    pub fn file_name(&self) -> String {
+        return self.name.clone();
+    }
+
+    /// The kind of the entry, as reported by metadata at iteration time.
+    pub fn file_type(&self) -> FileType {
+        return self.file_type;
+    }
+}
+
+/// A directory iterator over DirEntry values.
+///
+/// Entries are produced in sorted name order, matching read_dir, and the
+/// directory is read completely when the value is created.
+pub struct ReadDir {
+    entries: Vec<DirEntry>,
+    index: usize,
+}
+
+impl Iterator<DirEntry> for ReadDir {
+    fn next(&mut self) -> Option<DirEntry> {
+        if self.index >= self.entries.len() {
+            return None;
+        }
+        let entry: DirEntry = self.entries.get(self.index).unwrap().clone();
+        self.index = self.index + 1;
+        return Some(entry);
+    }
+}
+
+/// Reads the entries of a directory as DirEntry values.
+///
+/// Entry names are sorted, like read_dir. The file type of each entry is
+/// classified from metadata when the iterator is created; an entry that
+/// disappears during that check is reported as FileType::Other.
+pub fn read_dir_entries(path: &str) -> Result<ReadDir, Error> {
+    let names: Vec<String> = read_dir(path)?;
+    let mut entries: Vec<DirEntry> = Vec::new();
+    let mut index: usize = 0;
+    while index < names.len() {
+        let name: String = names.get(index).unwrap().clone();
+        let mut child: PathBuf = PathBuf::from_str(path);
+        child.push(name.as_str());
+        let info = __io_metadata(child.as_str());
+        let kind: i64 = if info.0 == 0 { info.3 } else { 2 };
+        let file_type: FileType = if kind == 0 {
+            FileType::File
+        } else if kind == 1 {
+            FileType::Dir
+        } else {
+            FileType::Other
+        };
+        entries.push(DirEntry { path: child, name: name, file_type: file_type });
+        index = index + 1;
+    }
+    return Ok(ReadDir { entries: entries, index: 0 });
 }
 
 /// Reads metadata for a path.

@@ -17,8 +17,11 @@
 #                and build one generated project through CMake + Ninja
 #   docs-examples run every runnable documentation example against the release
 #                compiler and compare stdout, exit code and panic messages
+#   real-programs compile and run the json/markdown/lisp example programs with
+#                both the compiler and their C references, against goldens
 #   site         validate the markdown documentation (internal links, external
-#                files, documented version claims, benchmark tables) and build
+#                files, documented version claims, benchmark tables, documentation
+#                drift, status traceability, language-page numbering) and build
 #                the static site
 #
 # The Pages deployment lives in pages.yml; the optional benchmark smoke run
@@ -528,6 +531,54 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  real-programs:
+    name: Real example programs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: real-programs
+      - name: Build the release CLI
+        run: cargo build --release -p lsaca-cli
+      # The three real programs (a JSON pretty-printer, a markdown renderer and
+      # a Lisp interpreter) exercise the compiler end to end.  Their stdout must
+      # match the committed goldens byte for byte, and the hand-written C
+      # references must produce the same goldens, so the compiler cannot
+      # silently diverge from the reference implementations.
+      - name: Run the real example programs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          python scripts/real_programs.py \
+            --bin ./target/release/lsaca \
+            --json target/real-programs.json 2>&1 | tee target/real-programs.log
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-real-programs
+          path: |
+            target/real-programs.log
+            target/real-programs.json
+            target/real-programs/**
+          if-no-files-found: ignore
+          retention-days: 7
+
   site:
     name: Documentation site
     runs-on: ubuntu-latest
@@ -559,6 +610,25 @@ jobs:
         run: python scripts/prose_check.py --bin ./target/release/lsaca 2>&1 | tee target/prose-check.log
       - name: Validate the published benchmark tables
         run: python scripts/check_bench21.py 2>&1 | tee target/check-bench21.log
+      # The drift check is the single source of truth for the workspace version:
+      # it validates the README/docs/CHANGELOG statements, rejects versioned
+      # claims that are already due, checks language-page numbering and proves
+      # every language and stdlib page is reachable from docs/README.md.
+      - name: Check documentation drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/docs_drift.py \
+            --json target/docs-drift.json 2>&1 | tee target/docs-drift.log
+      # STATUS.md is the completion matrix; this gate checks row states and
+      # targets and verifies the test/documentation evidence in
+      # docs/status-traceability.md.
+      - name: Check status traceability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_status.py \
+            --json target/check-status.json 2>&1 | tee target/check-status.log
       - name: Build the static site
         run: python scripts/docsite.py --output _site
       - name: Upload failure diagnostics
@@ -566,7 +636,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-site
-          path: target/*.log
+          path: |
+            target/*.log
+            target/check-status.json
           if-no-files-found: ignore
           retention-days: 7
       # Prove the generator actually produced a browsable tree before uploading.

@@ -472,6 +472,34 @@ impl Gen<'_> {
         }
     }
 
+    /// Read the data-and-vtable pair of a trait object receiver.
+    ///
+    /// The receiver may be reached through any number of references and an
+    /// owning Box/Rc cell; each reference is a plain pointer to its referent,
+    /// while a Box/Rc cell stores the fat value in its payload field.
+    fn dyn_object_fat(&mut self, object: &HExpr) -> String {
+        let mut fat = self.gen_borrowed(object);
+        let mut ty = object.ty.clone();
+        loop {
+            match ty {
+                Ty::Ref { inner, .. } if inner.is_dyn() => return fat,
+                Ty::Ref { inner, .. } => {
+                    fat = format!("(*({}))", fat);
+                    ty = *inner;
+                }
+                Ty::Box(inner) | Ty::Rc(inner) => {
+                    fat = format!("({})->payload", fat);
+                    ty = *inner;
+                }
+                Ty::Dyn(_) => return fat,
+                other => util::internal_error(format!(
+                    "dynamic call on a value whose type {} is not a trait object",
+                    other
+                )),
+            }
+        }
+    }
+
     /// Lower a virtual method call through a trait object.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn gen_dyn_call(
@@ -498,18 +526,7 @@ impl Gen<'_> {
                 object_spec.name, slot
             )),
         };
-        let fat = match &object.ty {
-            Ty::Ref { inner, .. } if inner.is_dyn() => self.gen_borrowed(object),
-            Ty::Box(inner) | Ty::Rc(inner) if inner.is_dyn() => {
-                let cell = self.gen_borrowed(object);
-                format!("({})->payload", cell)
-            }
-            Ty::Dyn(_) => self.gen_borrowed(object),
-            other => util::internal_error(format!(
-                "dynamic call on a value whose type {} is not a trait object",
-                other
-            )),
-        };
+        let fat = self.dyn_object_fat(object);
         let mut arguments: Vec<String> = Vec::new();
         let mut moved: Vec<String> = Vec::new();
         for (index, argument) in args.iter().enumerate() {

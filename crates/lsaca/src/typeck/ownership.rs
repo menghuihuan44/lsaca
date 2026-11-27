@@ -153,7 +153,10 @@ impl<'a> Checker<'a> {
                     .unwrap_or_default();
                 let copied = fields
                     .iter()
-                    .all(|field| self.is_copy_ty_inner(field, visiting));
+                    .all(|field| self.is_copy_ty_inner(field, visiting))
+                    && !fields.iter().any(|field| {
+                        matches!(self.infer.resolve(field), ITy::Ref { mutable: true, .. })
+                    });
                 visiting.remove(&key);
                 copied
             }
@@ -178,7 +181,10 @@ impl<'a> Checker<'a> {
                     .unwrap_or_default();
                 let copied = payloads
                     .iter()
-                    .all(|payload| self.is_copy_ty_inner(payload, visiting));
+                    .all(|payload| self.is_copy_ty_inner(payload, visiting))
+                    && !payloads.iter().any(|payload| {
+                        matches!(self.infer.resolve(payload), ITy::Ref { mutable: true, .. })
+                    });
                 visiting.remove(&key);
                 copied
             }

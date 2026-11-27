@@ -1,6 +1,7 @@
 # hash_set: HashSet<T>
 
-**Status in 2.2.0.** Implemented in `stdlib/src/collections.ls`.
+**Status in 2.3.0.** Implemented in `stdlib/src/collections.ls`. Version 2.3.0
+adds `HashSet::from(Vec<T>)`.
 
 `HashSet<T>` is an insertion-ordered set: it stores its keys in a
 `HashMap<T, ()>` for membership and additionally keeps a `Vec<T>` of the keys in
@@ -13,6 +14,7 @@ internal slot order.
 | Method | Signature | Meaning |
 | --- | --- | --- |
 | `new` | `() -> HashSet<T>` | an empty set |
+| `from` | `(Vec<T>) -> HashSet<T>` | builds a set from values; duplicates collapse, first insertion order is kept (2.3.0) |
 | `insert` | `(&mut self, T) -> bool` | adds a value; reports whether it was newly added |
 | `contains` | `(&self, T) -> bool` | whether the set holds a value; the argument is moved or copied |
 | `remove` | `(&mut self, T) -> bool` | removes a value; reports whether it was present |
@@ -30,7 +32,7 @@ internal slot order.
 
 * The element type is restricted to the `HashMap` key types: `i64`, `u64`,
   `isize`, `usize`, `bool`, `char` and `String`. The narrower integer types,
-  including the default `i32`, are not usable elements in 2.2.0.
+  including the default `i32`, are not usable elements.
 * Inserting a value that is already present leaves the set unchanged (duplicates
   collapse); the set owns one copy of each value.
 * The insertion order is part of the API: reading the set is always the same
@@ -39,11 +41,12 @@ internal slot order.
   number of values; the hash lookup itself is constant time on average.
 * Lengths are `usize` since 2.1.0.
 
-## Limitations in 2.2.0
+## Limitations in 2.3.0
 
-There is no `for` loop over a `HashSet` yet: read the values with `elements()`
-or `to_vec()` and iterate the resulting `Vec`. There is no `with_capacity`, no
-iterator type and no set equality operator.
+There is no `for` loop over a `HashSet` and no borrowing iterator yet: read the
+values with `elements()` or `to_vec()` (both clone) and iterate the resulting
+`Vec`, or iterate `&set` after exposing its order vector in a later release.
+There is no `with_capacity`, no iterator type and no set equality operator.
 
 ## See also
 

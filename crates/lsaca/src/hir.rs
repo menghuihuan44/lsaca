@@ -181,7 +181,11 @@ impl Program {
                     .iter()
                     .map(|field| field.ty.clone())
                     .collect::<Vec<_>>();
-                if fields.iter().all(|ty| self.is_copy(ty)) {
+                if fields.iter().all(|ty| self.is_copy(ty))
+                    && !fields
+                        .iter()
+                        .any(|ty| matches!(ty, Ty::Ref { mutable: true, .. }))
+                {
                     self.copy_structs[id] = true;
                     changed = true;
                 }
@@ -195,7 +199,11 @@ impl Program {
                     .iter()
                     .flat_map(|variant| variant.fields.iter().cloned())
                     .collect::<Vec<_>>();
-                if payloads.iter().all(|ty| self.is_copy(ty)) {
+                if payloads.iter().all(|ty| self.is_copy(ty))
+                    && !payloads
+                        .iter()
+                        .any(|ty| matches!(ty, Ty::Ref { mutable: true, .. }))
+                {
                     self.copy_enums[id] = true;
                     changed = true;
                 }
@@ -994,6 +1002,11 @@ pub enum HBuiltinFn {
     Ln,
     Log10,
     Exp,
+    CharIsAlphabetic,
+    CharIsNumeric,
+    CharIsWhitespace,
+    CharToUppercase,
+    CharToLowercase,
     ReadLine,
     Args,
     Exit,
@@ -1019,6 +1032,11 @@ impl HBuiltinFn {
             Ln => "ln",
             Log10 => "log10",
             Exp => "exp",
+            CharIsAlphabetic => "char_is_alphabetic",
+            CharIsNumeric => "char_is_numeric",
+            CharIsWhitespace => "char_is_whitespace",
+            CharToUppercase => "char_to_uppercase",
+            CharToLowercase => "char_to_lowercase",
             ReadLine => "read_line",
             Args => "args",
             Exit => "exit",

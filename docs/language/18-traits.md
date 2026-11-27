@@ -539,7 +539,7 @@ Person` exists. See [Trait objects](25-trait-objects.md) for the full rules.
   `Clone` are derived automatically, and `Drop` has its own special impl form.
 * No blanket `impl<T> From<T> for T` and no `Into` or `Try` traits (2.2.0).
 
-See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
+See [Known limitations](limitations.md) for the full list.
 
 ## Summary
 
@@ -569,4 +569,4 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 * The standard library's `Iterator<T>` trait: [Iterators](19-iterators.md).
 * Special `Drop` rules: [Ownership and moves](11-ownership-and-moves.md#the-drop-trait).
 * Error conversion and the `?` operator: [From and ?](30-from-try.md).
-* Deviations and limitations: [Roadmap and deviations from Rust](16-roadmap.md).
+* Deviations: [Deviations from Rust](deviations.md); limitations: [Known limitations](limitations.md).

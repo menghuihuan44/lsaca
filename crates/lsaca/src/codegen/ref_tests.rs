@@ -1750,6 +1750,9 @@ fn emits_hash_map_helpers_and_builtin_operations() {
         "void lsaca_map_clear_i64_String(",
         "LsVec_i64* lsaca_map_keys_i64_String(",
         "LsVec_String* lsaca_map_values_i64_String(",
+        "bool lsaca_map_iter_next_index_i64_String(",
+        "const void* lsaca_map_key_ptr_i64_String(",
+        "const void* lsaca_map_value_ptr_i64_String(",
         "void lsaca_map_debug_i64_String(const LsMap_i64_String* self, LsString** out);",
         "bool lsaca_map_eq_i64_String(const LsMap_i64_String* a, const LsMap_i64_String* b);",
     ] {

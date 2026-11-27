@@ -336,7 +336,7 @@ recursive function value, use a named `fn`.
 * `.clone()` on a closure or on an aggregate holding one shares the captured
   environment instead of copying it (see above).
 
-See [Roadmap](16-roadmap.md) for the full list.
+See [Known limitations](limitations.md) for the full list.
 
 ## What next
 

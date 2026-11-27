@@ -35,6 +35,150 @@ impl<T> Iterator<T> for __lsaca_VecIter<T> {
     fn next(&mut self) -> Option<T> { return self.items.pop(); }
 }
 
+
+// v2.3: borrowed iteration. .iter() walks a Vec by reference instead of
+// consuming it, so the vector stays usable after the loop. .iter_mut() yields
+// &mut T and hands out one element at a time without allocating. Both are
+// lazy; the index advances only in next(). VecIterMut stores a mutable
+// reference, which only the prelude may declare as a field, and it implements
+// Drop so the auto-Copy rule for reference-containing structs does not let two
+// cursors alias the same &mut Vec.
+
+pub struct __lsaca_VecIterRef<'a, T> { items: &'a Vec<T>, index: usize }
+
+pub fn __lsaca_vec_iter_ref<'a, T>(items: &'a Vec<T>) -> __lsaca_VecIterRef<'a, T> {
+    return __lsaca_VecIterRef { items: items, index: 0 };
+}
+
+impl<'a, T> Iterator<&'a T> for __lsaca_VecIterRef<'a, T> {
+    fn next(&mut self) -> Option<&'a T> {
+        if self.index >= self.items.len() { return None; }
+        let position = self.index;
+        self.index = position + 1;
+        return Some(&self.items[position]);
+    }
+}
+
+pub struct __lsaca_VecIterMut<'a, T> { items: &'a mut Vec<T>, index: usize }
+
+pub fn __lsaca_vec_iter_mut<'a, T>(items: &'a mut Vec<T>) -> __lsaca_VecIterMut<'a, T> {
+    return __lsaca_VecIterMut { items: items, index: 0 };
+}
+
+impl<'a, T> Drop for __lsaca_VecIterMut<'a, T> {
+    fn drop(&mut self) { }
+}
+
+impl<'a, T> Iterator<&'a mut T> for __lsaca_VecIterMut<'a, T> {
+    fn next(&mut self) -> Option<&'a mut T> {
+        if self.index >= self.items.len() { return None; }
+        let position = self.index;
+        self.index = position + 1;
+        return self.items.get_mut(position);
+    }
+}
+
+// v2.3: iteration over &[T] and &mut [T], including Vec::as_slice().
+
+pub struct __lsaca_SliceIter<'a, T> { items: &'a [T], index: usize }
+
+pub fn __lsaca_slice_iter<'a, T>(items: &'a [T]) -> __lsaca_SliceIter<'a, T> {
+    return __lsaca_SliceIter { items: items, index: 0 };
+}
+
+impl<'a, T> Iterator<&'a T> for __lsaca_SliceIter<'a, T> {
+    fn next(&mut self) -> Option<&'a T> {
+        if self.index >= self.items.len() { return None; }
+        let position = self.index;
+        self.index = position + 1;
+        return Some(&self.items[position]);
+    }
+}
+
+pub struct __lsaca_SliceIterMut<'a, T> { items: &'a mut [T], index: usize }
+
+pub fn __lsaca_slice_iter_mut<'a, T>(items: &'a mut [T]) -> __lsaca_SliceIterMut<'a, T> {
+    return __lsaca_SliceIterMut { items: items, index: 0 };
+}
+
+impl<'a, T> Drop for __lsaca_SliceIterMut<'a, T> {
+    fn drop(&mut self) { }
+}
+
+impl<'a, T> Iterator<&'a mut T> for __lsaca_SliceIterMut<'a, T> {
+    fn next(&mut self) -> Option<&'a mut T> {
+        if self.index >= self.items.len() { return None; }
+        let position = self.index;
+        self.index = position + 1;
+        return self.items.get_mut(position);
+    }
+}
+
+// v2.3: HashMap iteration. The structs are generic over M so this file (which
+// is also the embedded compiler-test prelude) does not need to name HashMap;
+// the standard library instantiates M with HashMap<K, V>. The intrinsics walk
+// the Swiss table in slot order and return the next occupied slot plus
+// references into its key/value arrays; iteration therefore borrows and never
+// clones.
+
+pub struct __lsaca_HashMapIter<'a, K, V, M> { map: &'a M, index: usize }
+
+extern fn __map_iter_next_index<M>(map: &M, start: usize) -> Option<usize>;
+extern fn __map_key_ref<M, K>(map: &M, index: usize) -> &K;
+extern fn __map_value_ref<M, V>(map: &M, index: usize) -> &V;
+
+pub fn __lsaca_hash_map_iter<'a, K, V, M>(map: &'a M) -> __lsaca_HashMapIter<'a, K, V, M> {
+    return __lsaca_HashMapIter { map: map, index: 0 };
+}
+
+impl<'a, K, V, M> Iterator<(&'a K, &'a V)> for __lsaca_HashMapIter<'a, K, V, M> {
+    fn next(&mut self) -> Option<(&'a K, &'a V)> {
+        match __map_iter_next_index::<M>(self.map, self.index) {
+            Some(index) => {
+                self.index = index + 1;
+                return Some((__map_key_ref::<M, K>(self.map, index), __map_value_ref::<M, V>(self.map, index)));
+            }
+            None => { return None; }
+        }
+    }
+}
+
+pub struct __lsaca_HashMapKeysIter<'a, K, M> { map: &'a M, index: usize }
+
+pub fn __lsaca_hash_map_keys<'a, K, M>(map: &'a M) -> __lsaca_HashMapKeysIter<'a, K, M> {
+    return __lsaca_HashMapKeysIter { map: map, index: 0 };
+}
+
+impl<'a, K, M> Iterator<&'a K> for __lsaca_HashMapKeysIter<'a, K, M> {
+    fn next(&mut self) -> Option<&'a K> {
+        match __map_iter_next_index::<M>(self.map, self.index) {
+            Some(index) => {
+                self.index = index + 1;
+                return Some(__map_key_ref::<M, K>(self.map, index));
+            }
+            None => { return None; }
+        }
+    }
+}
+
+pub struct __lsaca_HashMapValuesIter<'a, V, M> { map: &'a M, index: usize }
+
+pub fn __lsaca_hash_map_values<'a, V, M>(map: &'a M) -> __lsaca_HashMapValuesIter<'a, V, M> {
+    return __lsaca_HashMapValuesIter { map: map, index: 0 };
+}
+
+impl<'a, V, M> Iterator<&'a V> for __lsaca_HashMapValuesIter<'a, V, M> {
+    fn next(&mut self) -> Option<&'a V> {
+        match __map_iter_next_index::<M>(self.map, self.index) {
+            Some(index) => {
+                self.index = index + 1;
+                return Some(__map_value_ref::<M, V>(self.map, index));
+            }
+            None => { return None; }
+        }
+    }
+}
+
 // map(f): applies f to every item as it is pulled.
 
 pub struct __lsaca_MapIter<T, U, I, F> { inner: I, f: F }
@@ -292,6 +436,94 @@ impl<T, I: Iterator<T>, F: Fn(&T)> Iterator<T> for __lsaca_InspectIter<T, I, F> 
                 return Some(item);
             }
             None => { return None; }
+        }
+    }
+}
+
+// v2.3: rev() buffers the iterator's remaining items on the first pull, then
+// yields them back to front. Construction itself stays lazy and no size hint
+// is claimed: the underlying iterator only needs Iterator<T>, so rev() works on
+// every adapter, including flat_map below.
+
+pub struct __lsaca_RevIter<T, I> { inner: I, buffer: Vec<T>, ready: bool }
+
+pub fn __lsaca_it_rev<T, I: Iterator<T>>(iter: I) -> __lsaca_RevIter<T, I> {
+    return __lsaca_RevIter { inner: iter, buffer: Vec::new(), ready: false };
+}
+
+impl<T, I: Iterator<T>> Iterator<T> for __lsaca_RevIter<T, I> {
+    fn next(&mut self) -> Option<T> {
+        if !self.ready {
+            self.ready = true;
+            loop {
+                match self.inner.next() {
+                    Some(item) => { self.buffer.push(item); }
+                    None => { break; }
+                }
+            }
+        }
+        return self.buffer.pop();
+    }
+}
+
+// v2.3: flat_map(f) where f returns a Vec<U>. Each inner Vec is buffered and
+// drained in order before the next outer item is pulled, so laziness is per
+// outer item and iteration order is preserved.
+
+pub struct __lsaca_FlatMapVecIter<T, U, I, F> { inner: I, f: F, pending: Vec<U> }
+
+pub fn __lsaca_it_flat_map_vec<T, U, I: Iterator<T>, F: Fn(T) -> Vec<U>>(iter: I, f: F) -> __lsaca_FlatMapVecIter<T, U, I, F> {
+    return __lsaca_FlatMapVecIter { inner: iter, f: f, pending: Vec::new() };
+}
+
+impl<T, U, I: Iterator<T>, F: Fn(T) -> Vec<U>> Iterator<U> for __lsaca_FlatMapVecIter<T, U, I, F> {
+    fn next(&mut self) -> Option<U> {
+        loop {
+            if !self.pending.is_empty() {
+                return self.pending.pop();
+            }
+            match self.inner.next() {
+                Some(item) => {
+                    let mut produced: Vec<U> = (self.f)(item);
+                    produced.reverse();
+                    self.pending = produced;
+                }
+                None => { return None; }
+            }
+        }
+    }
+}
+
+// v2.3: flat_map(f) where f returns another iterator. The item type comes from
+// that iterator's Iterator<U> implementation. The produced inner iterator is
+// drained into a buffer as soon as the outer item is pulled, so iteration stays
+// lazy between outer items and order is preserved.
+
+pub struct __lsaca_FlatMapIter<T, U, R, I, F> { inner: I, f: F, pending: Vec<U> }
+
+pub fn __lsaca_it_flat_map<T, U, R: Iterator<U>, I: Iterator<T>, F: Fn(T) -> R>(iter: I, f: F) -> __lsaca_FlatMapIter<T, U, R, I, F> {
+    return __lsaca_FlatMapIter { inner: iter, f: f, pending: Vec::new() };
+}
+
+impl<T, U, R: Iterator<U>, I: Iterator<T>, F: Fn(T) -> R> Iterator<U> for __lsaca_FlatMapIter<T, U, R, I, F> {
+    fn next(&mut self) -> Option<U> {
+        loop {
+            if !self.pending.is_empty() {
+                return self.pending.pop();
+            }
+            match self.inner.next() {
+                Some(item) => {
+                    let mut produced: R = (self.f)(item);
+                    loop {
+                        match produced.next() {
+                            Some(value) => { self.pending.push(value); }
+                            None => { break; }
+                        }
+                    }
+                    self.pending.reverse();
+                }
+                None => { return None; }
+            }
         }
     }
 }

@@ -74,6 +74,29 @@ pub use iter::__lsaca_it_product_i64;
 pub use iter::__lsaca_it_product_usize;
 pub use iter::__lsaca_it_product_f64;
 
+
+// v2.3 borrowing iterators, slice iterators, HashMap iteration, rev, flat_map.
+pub use iter::__lsaca_VecIterRef;
+pub use iter::__lsaca_VecIterMut;
+pub use iter::__lsaca_SliceIter;
+pub use iter::__lsaca_SliceIterMut;
+pub use iter::__lsaca_HashMapIter;
+pub use iter::__lsaca_HashMapKeysIter;
+pub use iter::__lsaca_HashMapValuesIter;
+pub use iter::__lsaca_RevIter;
+pub use iter::__lsaca_FlatMapVecIter;
+pub use iter::__lsaca_FlatMapIter;
+pub use iter::__lsaca_vec_iter_ref;
+pub use iter::__lsaca_vec_iter_mut;
+pub use iter::__lsaca_slice_iter;
+pub use iter::__lsaca_slice_iter_mut;
+pub use iter::__lsaca_hash_map_iter;
+pub use iter::__lsaca_hash_map_keys;
+pub use iter::__lsaca_hash_map_values;
+pub use iter::__lsaca_it_rev;
+pub use iter::__lsaca_it_flat_map_vec;
+pub use iter::__lsaca_it_flat_map;
+
 // Text parsing helpers used by the generic `parse::<T>()` sugar and by the
 // numeric parse methods on String and str.
 pub use string::__lsaca_parse_i8;
@@ -151,6 +174,14 @@ pub use io::stdin;
 pub use io::stdout;
 pub use io::stderr;
 
+// Stream traits and buffered adapters (v2.3).
+pub use io::Read;
+pub use io::Write;
+pub use io::Seek;
+pub use io::BufRead;
+pub use io::BufReader;
+pub use io::BufWriter;
+
 // File system functions.
 pub use fs::read_to_string;
 pub use fs::write;
@@ -174,6 +205,13 @@ pub use fs::canonicalize;
 pub use fs::current_dir;
 pub use fs::set_current_dir;
 pub use fs::temp_dir;
+
+// Path values and directory iteration (v2.3).
+pub use fs::Path;
+pub use fs::PathBuf;
+pub use fs::DirEntry;
+pub use fs::ReadDir;
+pub use fs::read_dir_entries;
 
 // Networking.
 pub use net::TcpListener;

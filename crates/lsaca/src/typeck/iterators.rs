@@ -9,7 +9,10 @@
 //!
 //! Sugar is tried after inherent and trait methods (a user type that implements
 //! `Iterator<T>` and defines its own `count` keeps that method) and before the
-//! builtin method table. Every sugar method consumes its receiver by value.
+//! builtin method table. Adapter sugar consumes its receiver by value; the
+//! borrowing constructors (`.iter()`, `.iter_mut()`, `.keys()`, `.values()`)
+//! synthesize a `&`/`&mut` receiver instead, so the collection itself survives
+//! the loop.
 
 use super::check::Checker;
 use super::itype::{ITy, VarKind};
@@ -19,8 +22,14 @@ use crate::span::Span;
 use crate::types::{FloatTy, IntTy};
 
 /// The method names resolved by the iterator sugar.
-pub const SUGAR_METHODS: [&str; 26] = [
+pub const SUGAR_METHODS: [&str; 32] = [
     "iter",
+    "iter_mut",
+    "into_iter",
+    "keys",
+    "values",
+    "rev",
+    "flat_map",
     "map",
     "filter",
     "filter_map",
@@ -231,6 +240,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Wrap a checked receiver in an explicit `&` or `&mut` node for the
+    /// borrowing constructors. The receiver has already been dereferenced by
+    /// [Self::wrap_derefs], so this is a reborrow of the collection place.
+    fn borrow_receiver(expr: TExpr, mutable: bool) -> TExpr {
+        let span = expr.span;
+        let inner = expr.ty.clone();
+        TExpr::new(
+            ITy::Ref {
+                mutable,
+                inner: Box::new(inner),
+            },
+            TExprKind::Ref {
+                mutable,
+                expr: Box::new(expr),
+            },
+            span,
+        )
+    }
+
     /// Resolve a sugar method call. Returns `None` when the name is not sugar
     /// or the receiver cannot provide the required item type; the caller then
     /// continues with the builtin method table and eventually E0599.
@@ -264,20 +292,74 @@ impl<'a> Checker<'a> {
         let receiver_ty = self.infer.resolve(receiver_ty);
         let receiver_expr = self.wrap_derefs(receiver_expr.clone());
 
-        // .iter() consumes a Vec<T> and produces the VecIter adapter.
-        if method == "iter" {
-            let elem = match &receiver_ty {
-                ITy::Vec(elem) => (**elem).clone(),
-                _ => return None,
-            };
-            let def_id = self.prelude_fn("__lsaca_vec_iter")?;
+        // Borrowing constructors. Vec, slices and HashMap have dedicated
+        // prelude adapters that hold a reference to the collection, so the
+        // collection itself is not moved. .into_iter() keeps the historical
+        // consuming VecIter (and remains the source form the fused-loop
+        // codegen recognizes).
+        let borrowing = match (method, &receiver_ty) {
+            ("iter", ITy::Vec(elem)) => {
+                Some(("__lsaca_vec_iter_ref", vec![(**elem).clone()], true, false))
+            }
+            ("iter", ITy::Slice(elem)) => {
+                Some(("__lsaca_slice_iter", vec![(**elem).clone()], true, false))
+            }
+            ("iter", ITy::HashMap(key, value)) => Some((
+                "__lsaca_hash_map_iter",
+                vec![(**key).clone(), (**value).clone(), receiver_ty.clone()],
+                true,
+                false,
+            )),
+            ("iter_mut", ITy::Vec(elem)) => {
+                Some(("__lsaca_vec_iter_mut", vec![(**elem).clone()], true, true))
+            }
+            ("iter_mut", ITy::Slice(elem)) => {
+                Some(("__lsaca_slice_iter_mut", vec![(**elem).clone()], true, true))
+            }
+            ("keys", ITy::HashMap(key, _)) => Some((
+                "__lsaca_hash_map_keys",
+                vec![(**key).clone(), receiver_ty.clone()],
+                true,
+                false,
+            )),
+            ("values", ITy::HashMap(_, value)) => Some((
+                "__lsaca_hash_map_values",
+                vec![(**value).clone(), receiver_ty.clone()],
+                true,
+                false,
+            )),
+            ("into_iter", ITy::Vec(elem)) => {
+                Some(("__lsaca_vec_iter", vec![(**elem).clone()], false, false))
+            }
+            _ => None,
+        };
+        if let Some((name, generic_args, borrowed, mutable)) = borrowing {
+            if mutable
+                && !self.require_mutable_receiver(
+                    &receiver_expr,
+                    &receiver_expr.ty,
+                    method_span,
+                    "mutate through this receiver",
+                )
+            {
+                for arg in args {
+                    let _ = self.check_expr(arg, None);
+                }
+                return Some(self.never_expr(span));
+            }
             if self.sugar_args(&[], args, span).is_none() {
                 return Some(self.never_expr(span));
             }
+            let def_id = self.prelude_fn(name)?;
+            let receiver = if borrowed {
+                Self::borrow_receiver(receiver_expr, mutable)
+            } else {
+                receiver_expr
+            };
             return Some(self.instantiate_sugar_fn(
                 def_id,
-                vec![elem],
-                receiver_expr,
+                generic_args,
+                receiver,
                 Vec::new(),
                 span,
                 hint,
@@ -518,6 +600,15 @@ impl<'a> Checker<'a> {
                         return Some(self.never_expr(span));
                     }
                 };
+                if self.type_contains_ref(&elem) {
+                    self.error_code(
+                        "cannot collect borrowed values into a Vec; map them to owned values first, for example .map(|value| *value)"
+                            .to_string(),
+                        method_span,
+                        "E0498",
+                    );
+                    return Some(self.never_expr(span));
+                }
                 if self.infer.unify(&elem, &item).is_err() {
                     self.report_mismatch(&elem, &item, method_span);
                 }
@@ -569,6 +660,69 @@ impl<'a> Checker<'a> {
                     vec![item, receiver_ty, other_ty],
                     receiver_expr,
                     vec![other],
+                    span,
+                    hint,
+                ))
+            }
+            "rev" => {
+                let def_id = self.prelude_fn("__lsaca_it_rev")?;
+                if self.sugar_args(&[], args, span).is_none() {
+                    return Some(self.never_expr(span));
+                }
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty],
+                    receiver_expr,
+                    Vec::new(),
+                    span,
+                    hint,
+                ))
+            }
+            "flat_map" => {
+                // The prelude has two representations: closures returning a
+                // Vec<U> use the Vec-backed adapter, and closures returning an
+                // iterator use the generic adapter. Which one applies is only
+                // known after the closure body has been checked.
+                let vec_fn = self.prelude_fn("__lsaca_it_flat_map_vec")?;
+                let iter_fn = self.prelude_fn("__lsaca_it_flat_map")?;
+                let u = self.infer.fresh_var();
+                let produced = self.infer.fresh_var();
+                let closure_ty = ITy::function(vec![item.clone()], produced.clone());
+                let extra = self.sugar_args(std::slice::from_ref(&closure_ty), args, span)?;
+                let produced_ty = self.infer.resolve(&produced);
+                let (def_id, generic_args) = match &produced_ty {
+                    ITy::Vec(elem) => {
+                        let _ = self.infer.unify(elem, &u);
+                        (vec_fn, vec![item, u, receiver_ty, closure_ty])
+                    }
+                    _ => {
+                        let source_item = match self.iterator_item_type(&produced_ty, method_span) {
+                            Some(source_item) => source_item,
+                            None => {
+                                let described = self.describe_resolved(&produced_ty);
+                                self.error_code(
+                                    format!(
+                                        "the closure passed to .flat_map() must return a Vec<T> or an iterator, found {}",
+                                        described
+                                    ),
+                                    method_span,
+                                    "E0277",
+                                );
+                                return Some(self.never_expr(span));
+                            }
+                        };
+                        let _ = self.infer.unify(&source_item, &u);
+                        (
+                            iter_fn,
+                            vec![item, u, produced_ty.clone(), receiver_ty, closure_ty],
+                        )
+                    }
+                };
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    generic_args,
+                    receiver_expr,
+                    extra,
                     span,
                     hint,
                 ))

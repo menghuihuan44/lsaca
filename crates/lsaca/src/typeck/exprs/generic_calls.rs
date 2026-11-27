@@ -757,14 +757,7 @@ impl<'a> Checker<'a> {
                 return self.check_direct_call(fn_id, None, args, span, hint);
             }
             let owner_name = self.type_name(owner_key);
-            self.error_code(
-                format!(
-                    "method {}::{} cannot be called as an associated function",
-                    owner_name, item
-                ),
-                span,
-                "E0599",
-            );
+            self.reject_method_as_associated(&owner_name, item, span);
             return self.check_plain_args(args, span);
         }
         if let Some(fn_id) = self.dispatch_associated_fn(owner_ty, item, span) {

@@ -238,11 +238,21 @@ static bool vector_name_at(const LsVec_String* vector, size_t index,
     return equal;
 }
 
+static bool path_equals(const LsString* path, const char* expected) {
+    LsString* text = ls_str_cstr(expected);
+    bool equal = path != NULL && ls_str_eq(path, text);
+
+    ls_release(text);
+    return equal;
+}
+
 static char scratch[1024];
 static char file_a[1200];
 static char file_b[1200];
+static char file_c[1200];
 static char dir_a[1200];
 static char dir_b[1200];
+static char dir_c[1200];
 
 static void build_path(char* out, size_t capacity, const char* base,
                        const char* suffix) {
@@ -322,8 +332,10 @@ int main(int argc, char** argv) {
     build_path(scratch, sizeof scratch, base, "lsaca_io_tests");
     build_path(file_a, sizeof file_a, scratch, "file_a.bin");
     build_path(file_b, sizeof file_b, scratch, "file_b.bin");
+    build_path(file_c, sizeof file_c, scratch, "file_c.bin");
     build_path(dir_a, sizeof dir_a, scratch, "dir_a");
     build_path(dir_b, sizeof dir_b, scratch, "dir_b");
+    build_path(dir_c, sizeof dir_c, scratch, "dir_c");
 
     /* --- standard handles and invalid handles --------------------------- */
     CHECK_I64(ls_io_stdin(), 0);
@@ -355,6 +367,140 @@ int main(int argc, char** argv) {
     CHECK_I64(io_metadata(scratch, &size, &mtime, &kind), 0);
     CHECK_I64(kind, 1);
     CHECK(mtime > 0);
+
+    /* --- lexical path helpers ------------------------------------------- */
+    {
+        LsString* base_path = ls_str_cstr("assets");
+        LsString* segment = ls_str_cstr("icons/logo.png");
+        LsString* joined = ls_io_path_join(base_path, segment);
+        LsString* absolute = ls_str_cstr("/tmp/absolute");
+        LsString* replaced = ls_io_path_join(base_path, absolute);
+        LsString* empty = ls_str_cstr("");
+        LsString* kept = ls_io_path_join(base_path, empty);
+        LsString* empty_base = ls_str_cstr("");
+        LsString* segment_only = ls_io_path_join(empty_base, segment);
+        LsString* base_slash = ls_str_cstr("assets/");
+        LsString* icons = ls_str_cstr("icons");
+        LsString* slash_joined = ls_io_path_join(base_slash, icons);
+        LsString* parent = ls_io_path_parent(joined);
+        LsString* name = ls_io_path_file_name(joined);
+        LsString* extension = ls_io_path_extension(joined);
+        LsString* trailing = ls_str_cstr("assets/icons/");
+        LsString* trailing_name = ls_io_path_file_name(trailing);
+        LsString* trailing_parent = ls_io_path_parent(trailing);
+        LsString* bare_parent = ls_io_path_parent(base_path);
+        LsString* root = ls_str_cstr("/");
+
+        CHECK(path_equals(joined, "assets/icons/logo.png"));
+        CHECK(path_equals(replaced, "/tmp/absolute"));
+        CHECK(path_equals(kept, "assets"));
+        CHECK(path_equals(segment_only, "icons/logo.png"));
+        CHECK(path_equals(slash_joined, "assets/icons"));
+        CHECK(path_equals(parent, "assets/icons"));
+        CHECK(path_equals(name, "logo.png"));
+        CHECK(path_equals(extension, "png"));
+        CHECK(path_equals(trailing_name, "icons"));
+        CHECK(path_equals(trailing_parent, "assets"));
+        CHECK(path_equals(bare_parent, ""));
+        CHECK(ls_io_path_parent(root) == NULL);
+        CHECK(ls_io_path_file_name(root) == NULL);
+        CHECK(ls_io_path_extension(root) == NULL);
+        CHECK(ls_io_path_extension(base_path) == NULL);
+
+        ls_release(root);
+        ls_release(trailing_parent);
+        ls_release(bare_parent);
+        ls_release(trailing_name);
+        ls_release(trailing);
+        ls_release(extension);
+        ls_release(name);
+        ls_release(parent);
+        ls_release(icons);
+        ls_release(slash_joined);
+        ls_release(base_slash);
+        ls_release(segment_only);
+        ls_release(empty_base);
+        ls_release(kept);
+        ls_release(empty);
+        ls_release(replaced);
+        ls_release(absolute);
+        ls_release(joined);
+        ls_release(segment);
+        ls_release(base_path);
+    }
+
+    /* --- buffered round trip -------------------------------------------- */
+    {
+        static const char* chunks[3] = { "alpha", "-", "omega" };
+        char read_back[32];
+        size_t offset = 0;
+        size_t chunk_index;
+
+        handle = io_create(file_c);
+        CHECK(handle >= 0);
+        for (chunk_index = 0; chunk_index < 3; chunk_index += 1) {
+            int64_t length = (int64_t)strlen(chunks[chunk_index]);
+
+            CHECK_I64(ls_io_write(handle, chunks[chunk_index], length), length);
+        }
+        CHECK_I64(ls_io_flush(handle), 0);
+        CHECK_I64(ls_io_close(handle), 0);
+
+        handle = io_open(file_c);
+        CHECK(handle >= 0);
+        memset(read_back, 0, sizeof read_back);
+        while (offset < 11) {
+            int64_t count = ls_io_read(handle, read_back + offset, 1);
+
+            if (count != 1) {
+                break;
+            }
+            offset += 1;
+        }
+        CHECK_I64((int64_t)offset, 11);
+        CHECK(memcmp(read_back, "alpha-omega", 11) == 0);
+        CHECK_I64(ls_io_close(handle), 0);
+        CHECK_I64(io_remove_file(file_c), 0);
+    }
+
+    /* --- directory iteration -------------------------------------------- */
+    CHECK_I64(io_create_dir(dir_c), 0);
+    build_path(nested, sizeof nested, dir_c, "note.txt");
+    handle = io_create(nested);
+    CHECK(handle >= 0);
+    CHECK(io_write_text(handle, "hi", 2));
+    CHECK_I64(ls_io_close(handle), 0);
+    build_path(nested, sizeof nested, dir_c, "nested");
+    CHECK_I64(io_create_dir(nested), 0);
+    vector = io_read_dir(dir_c);
+    CHECK(vector != NULL);
+    if (vector != NULL) {
+        size_t entry_index;
+
+        CHECK_I64(vector->len, 2);
+        CHECK(vector_name_at(vector, 0, "nested"));
+        CHECK(vector_name_at(vector, 1, "note.txt"));
+        for (entry_index = 0; entry_index < vector->len; entry_index += 1) {
+            LsString* directory = ls_str_cstr(dir_c);
+            LsString* child =
+                ls_io_path_join(directory, vector->data[entry_index]);
+            int64_t child_kind = -1;
+
+            CHECK(child != NULL);
+            if (child != NULL) {
+                CHECK_I64(ls_io_metadata(child, &size, NULL, &child_kind), 0);
+                if (entry_index == 0) {
+                    CHECK_I64(child_kind, 1);
+                } else {
+                    CHECK_I64(child_kind, 0);
+                }
+                ls_release(child);
+            }
+            ls_release(directory);
+        }
+        ls_release(vector);
+    }
+    CHECK_I64(io_remove_dir_all(dir_c), 0);
 
     /* --- file round trip ------------------------------------------------ */
     handle = io_create(file_a);

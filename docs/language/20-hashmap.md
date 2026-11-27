@@ -17,10 +17,14 @@ builtin table) and the API described here is unchanged, so the same methods work
 through `use std::collections::HashMap` or through the prelude re-export. See
 the standard library reference for [HashMap](../stdlib/collections/hash-map.md).
 
-Version 2.2.0 makes the lookups borrowed: `get` takes the key by reference
+Version 2.2.0 made the lookups borrowed: `get` takes the key by reference
 (`map.get(&key)`) and returns `Option<&V>`, while `get_mut` returns
-`Option<&mut V>`; both avoid cloning the stored value. `contains_key`,
-`remove` and `get_with` still take the key by value.
+`Option<&mut V>`; both avoid cloning the stored value. Version 2.3.0 made
+iteration borrowed as well: `map.iter()` yields `(&K, &V)`, `map.keys()`
+yields `&K`, `map.values()` yields `&V`, and `for (key, value) in &map`
+iterates without cloning or consuming the map. Version 2.3.0 also added
+`HashMap::from`. The entry API is deliberately deferred; see
+[the entry RFC](../../rfcs/0002-hashmap-entry.md).
 
 Unlike `Vec`, the key type is restricted: it must be one of `i64`, `u64`,
 `isize`, `usize`, `bool`, `String` or `char`. The value type may be any valid
@@ -37,8 +41,8 @@ let the context choose it for unsuffixed literals: `counts.insert(1, 1)` on a
 
 ## Creating a map
 
-`HashMap::new()` is the only associated function. The type arguments come from
-the binding annotation, a parameter or return type, or the turbofish:
+`HashMap::new()` creates an empty map. The type arguments come from the binding
+annotation, a parameter or return type, or the turbofish:
 
 ```ls
 fn main() {
@@ -77,11 +81,58 @@ parameter type; for example a function declared as `fn empty() -> HashMap<i64,
 String>` can return `HashMap::new()` directly. If no context determines both
 type arguments, the compiler reports `E0282`.
 
+`HashMap::from` builds a map from a `Vec<(K, V)>` of owned pairs:
+
+```ls
+fn main() {
+    let ages: HashMap<String, i64> = HashMap::from(vec![
+        (String::from("ana"), 30),
+        (String::from("bo"), 25),
+        (String::from("ana"), 31),
+    ]);
+    println!(
+        "{} {:?}",
+        ages.len(),
+        ages.get(&String::from("ana"))
+    );
+}
+```
+
+Output:
+```text
+2 Some(31)
+```
+
+The pairs are inserted in vector order, so a repeated key keeps the **last**
+value; the earlier value is dropped exactly as an overwriting `insert` would
+drop it. A `Vec<(K, V)>` is the pair source because it is the one collection
+the language can build directly with `vec![`...`]` and iterate without cloning.
+There is no `FromIterator` trait and no implicit conversion: `HashMap::from`
+takes that vector by value. The turbofish `HashMap::<K, V>::from(...)` also
+works, and the binding can otherwise infer both type arguments from the
+pairs.
+
+`HashSet::from(Vec<K>)` is the matching set constructor; it keeps the first
+occurrence of each key and its `elements()` order is the set's insertion order:
+
+```ls
+fn main() {
+    let set: HashSet<i64> = HashSet::from(vec![4i64, 4i64, 2i64, 7i64]);
+    println!("{} {:?}", set.len(), set.elements());
+}
+```
+
+Output:
+```text
+3 [4, 2, 7]
+```
+
 ## Methods
 
 | Method | Signature (informal) | Ownership |
 | --- | --- | --- |
 | `HashMap::new()` | `→ HashMap<K, V>` | creates an empty map |
+| `HashMap::from(pairs)` | `Vec<(K, V)> → HashMap<K, V>` | moves every pair into the map; a repeated key keeps the last value |
 | `insert(key, value)` | `→ Option<V>` | moves both arguments into the map; returns the previous value for the key, if any |
 | `get(&key)` | `→ Option<&V>` | borrows the key argument; returns a shared reference to the stored value, no clone |
 | `get_mut(&key)` | `→ Option<&mut V>` | borrows the key argument; returns a mutable reference to the stored value; needs a mutable binding |
@@ -91,8 +142,9 @@ type arguments, the compiler reports `E0282`.
 | `len()` | `→ usize` | number of entries |
 | `is_empty()` | `→ bool` | true when the map has no entries |
 | `clear()` | `()` | removes every entry |
-| `keys()` | `→ Vec<K>` | clones every key into a vector |
-| `values()` | `→ Vec<V>` | clones every value into a vector |
+| `iter()` | `→ iterator of (&K, &V)` | borrows the map; does not clone or consume it |
+| `keys()` | `→ iterator of &K` | borrows the map; does not clone the keys |
+| `values()` | `→ iterator of &V` | borrows the map; does not clone the values |
 
 `insert`, `remove`, `get_mut` and `clear` mutate the map, so they need a mutable
 binding (`let mut map`); the other methods take `&self` and work on a shared
@@ -232,32 +284,61 @@ Some(1) 1
 false
 ```
 
-`keys()` and `values()` produce vectors of cloned keys or values. The order is
-the map's internal slot order: it is deterministic for a given sequence of
-operations, but it is **not** insertion order and it is not guaranteed across
-releases, so treat it as unspecified:
+## Iterating the map
+
+`iter()`, `keys()` and `values()` all borrow the map and yield references;
+none of them clones an entry and none consumes the map. A `for` loop borrows
+the map directly when the loop expression is `&map`: `for (key, value) in
+&map` is the loop form of `map.iter()`.
 
 ```ls
 fn main() {
     let mut scores: HashMap<String, i64> = HashMap::new();
     scores.insert(String::from("a"), 1);
+    scores.insert(String::from("bb"), 2);
 
-    let keys = scores.keys();
-    let values = scores.values();
-    println!("{:?}", keys);
-    println!("{:?}", values);
+    let mut total: i64 = 0;
+    for (key, value) in &scores {
+        total += (key.len() as i64) * *value;
+    }
+    println!("{} {}", total, scores.len());
 
-    scores.clear();
-    println!("{}", scores.is_empty());
+    let mut key_chars: i64 = 0;
+    for key in scores.keys() {
+        key_chars += key.len() as i64;
+    }
+    let mut value_total: i64 = 0;
+    for value in scores.values() {
+        value_total += *value;
+    }
+    println!("{} {}", key_chars, value_total);
+
+    let mut weighted: i64 = 0;
+    for (key, value) in scores.iter() {
+        weighted += (key.len() as i64) + *value * 2;
+    }
+    println!("{} {}", weighted, scores.is_empty());
 }
 ```
 
 Output:
 ```text
-["a"]
-[1]
-true
+5 2
+3 3
+9 false
 ```
+
+The loop bindings are references: `key` has type `&String` and `value` has type
+`&i64`. Method calls such as `key.len()` work through the reference; arithmetic
+needs `*value`. The map cannot be mutated while one of these borrows is alive:
+collect the changes into a local and apply them after the loop, or iterate
+`&mut map` when only shared access to keys is needed (a map has no mutable
+iteration over its values yet).
+
+The order is the map's internal slot order. It is deterministic for a given
+sequence of operations, but it is **not** insertion order and it is not
+guaranteed across releases, so the output shown above prints only
+order-independent sums.
 
 ## Equality and formatting
 
@@ -316,13 +397,13 @@ fn main() {
 Error:
 ```text
 error[E0277]: HashMap keys must be one of i64, u64, isize, usize, bool, char or String, found Vec<i64>
-  --> example-12.ls:2:18
+  --> example-14.ls:2:18
    |
  2 |     let mut map: HashMap<Vec<i64>, i64> = HashMap::new();
    |                  ^^^^^^^
    = note: only the listed key types are supported; use a struct field or a String key instead
 
-lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
 ```
 
 A `char` is a `Copy` scalar and a valid key type. Characters compare by
@@ -373,11 +454,20 @@ emitted by earlier releases must be regenerated with the 1.6.0 compiler.
 
 ### Slot order and iteration
 
-`keys()`, `values()` and the printed form of a map all walk the slots in
-ascending slot order. That order is deterministic for a given sequence of
-operations, but it is not insertion order and it is not a language guarantee:
-do not sort or compare programs by output order, and do not assume it stays the
-same across releases.
+`iter()`, `keys()`, `values()`, borrowed `for` loops and the printed form of
+a map all walk the slots in ascending slot order. That order is deterministic
+for a given sequence of operations, but it is not insertion order and it is not
+a language guarantee: do not sort or compare programs by output order, and do
+not assume it stays the same across releases. A borrowed iteration holds a
+shared borrow of the map for its whole lifetime; inserting or removing entries
+while an iterator is alive is rejected by the borrow checker.
+
+Borrowed map iteration is implemented by reading the table's occupied slots
+directly through compiler intrinsics; it does not materialize a key/value
+vector. `keys()` and `values()` therefore allocate nothing per element, and
+`iter()` yields references into the table's storage. Mutating the map can move
+entries (growth rehashes every slot), which is exactly why the borrow checker
+does not allow it during iteration.
 
 ### Performance expectations
 
@@ -389,12 +479,12 @@ documentation quotes - see [Benchmarks](21-benchmarks.md).
 
 ## Values that cannot be cloned
 
-`get` and `get_mut` borrow from the map, so they work for any value type,
-including a type that implements `Drop`. The methods that clone are `values()`
-and `keys()` — a `Drop` value cannot be cloned (`E0277`), so `values()` is not
-available for it:
+`get`, `get_mut`, `get_with`, `iter()`, `keys()` and `values()` borrow from
+the map, so they all work for any value type, including a type that implements
+`Drop`. Iterating `values()` now visits each stored value through a
+reference; no clone is required:
 
-```ls,compile-fail
+```ls
 struct Guard {
     name: String,
 }
@@ -408,38 +498,46 @@ impl Drop for Guard {
 fn main() {
     let mut guards: HashMap<i64, Guard> = HashMap::new();
     guards.insert(1, Guard { name: String::from("g") });
-    println!("{:?}", guards.values());
+    for guard in guards.values() {
+        println!("{}", guard.name);
+    }
 }
 ```
 
-Error:
+Output:
 
 ```text
-error[E0277]: HashMap::values cannot clone values of type Guard because it implements Drop; use get_with(...) instead
-   --> example-14.ls:14:29
-    |
- 14 |     println!("{:?}", guards.values());
-    |                             ^^^^^^
-    = note: get_with borrows the stored value, so it works for types with drop glue
-
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+g
+drop g
 ```
 
-`get`, `get_mut` and `get_with` inspect a value with drop glue without cloning it;
-`get_with` hands a reference to the stored value to a closure and returns the
-closure result.
+`iter()` yields the pair of references, and `get`/`get_mut`/`get_with` inspect
+one value without cloning it; `get_with` hands a reference to the stored value
+to a closure and returns the closure result.
 
-## No for-loop iteration
+## Entry API
 
-A `HashMap` cannot be iterated with `for` in 2.2.0: it does not implement
-`Iterator<T>`. Use `keys()` or `values()` and iterate the resulting vector:
+There is no `Entry` API in 2.3.0. The common operations are covered by
+`get`, `get_mut`, `get_with`, `contains_key`, `insert` and `remove`; an
+entry value would have to hold a mutable borrow of the map and a slot index
+that a later insertion could invalidate (the table rehashes on growth), and the
+representation does not expose stable slot addresses to lsaca code. The
+recommendation and the alternatives considered are recorded in
+[rfcs/0002-hashmap-entry.md](../../rfcs/0002-hashmap-entry.md); the API is
+deferred rather than implemented for 2.3.0.
+
+## Iterating by value is not supported
+
+A `HashMap` value does not implement `Iterator<T>`, and a map is never
+consumed by a `for` loop. Iterating the borrowed form is the supported
+operation:
 
 ```ls,compile-fail
 fn main() {
     let mut scores: HashMap<i64, i64> = HashMap::new();
     scores.insert(1, 2);
     for entry in scores {
-        println!("{}", entry);
+        println!("{:?}", entry);
     }
 }
 ```
@@ -447,60 +545,66 @@ fn main() {
 Error:
 
 ```text
-error[E0277]: cannot iterate over a value of type HashMap<i64, i64>; for loops require a range, a Vec<T>, or a type that implements Iterator<T>
-  --> example-15.ls:4:18
+error[E0277]: cannot iterate over a value of type HashMap<i64, i64>; for loops require a range, a Vec<T>, a type that implements Iterator<T>, or a borrowed collection (&Vec<T>, &mut Vec<T>, &[T], &mut [T] or &HashMap<K, V>)
+  --> example-17.ls:4:18
    |
  4 |     for entry in scores {
    |                  ^^^^^^
-   = note: call keys() or values() to get a Vec and iterate over that
+   = note: iterate over a borrowed map: for (key, value) in &map
 
-lsaca: example-15.ls: could not compile example-15.ls due to previous error(s)
+lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
 ```
 
-## Known limitations in 2.2.0
+## Known limitations in 2.3.0
 
 * Key types are limited to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and
   `char`; user structs, enums and other types cannot be keys.
-* There is no entry API, no `HashMap::from`, no `insert_or_update`, and no
-  iteration over the map; `keys()` and `values()` allocate a vector.
-* `values()` requires a cloneable value type; a `Drop` value can be read with
-  `get`, `get_mut` or `get_with`, but not with `values()` (keys are always
-  cloneable).
+* There is no entry API and no `insert_or_update`. `get_with` is the
+  non-cloning way to inspect a stored value; the entry RFC records the design
+  decision.
+* `iter()`, `keys()` and `values()` borrow the map; there is no mutable
+  iteration over the stored values and no way to remove entries while
+  iterating. A map cannot be mutated during a borrowed iteration.
 * `get` and `get_mut` borrow the map: `get_mut` needs a mutable binding, and the
   returned reference keeps the map borrowed until the last use of that
   reference (a `match` or `if let` scrutinee ends the borrow at the end of the
   statement).
 * The printed order of entries is the internal slot order, not insertion order
   (it is deterministic for a given sequence of operations, but it is not part
-  of the documented contract).
+  of the documented contract). `HashSet::from` keeps its own insertion order
+  in `elements()`; `HashMap` does not.
 * The hash is deterministic and non-cryptographic; do not expose a map directly
   to adversarial keys.
 * A map is move-only: passing it to a function by value moves it, and
   `let other = map;` moves it. Use `.clone()` for an independent copy or pass a
   reference.
 
-See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
+See [Known limitations](limitations.md) for the full list.
 
 ## Summary
 
 * `HashMap<K, V>` is a builtin generic map with key types `i64`, `u64`,
   `isize`, `usize`, `bool`, `String` and `char`; the value type may be any
   value type.
-* `HashMap::new()` creates a map; type arguments come from annotations,
-  parameters, return types or the turbofish.
+* `HashMap::new()` creates an empty map; `HashMap::from(Vec<(K, V)>)` builds
+  one from owned pairs, with the last value winning for a repeated key.
 * `insert` moves key and value and returns the previous value; `get(&key)`
   borrows the key and returns `Option<&V>`, `get_mut(&key)` returns
   `Option<&mut V>`; `get_with` inspects through a closure; `remove` moves the
-  value out; `contains_key`, `len`, `is_empty`, `clear`, `keys` and `values`
-  round out the API.
+  value out; `contains_key`, `len`, `is_empty` and `clear` round out the API.
+* `map.iter()` yields `(&K, &V)`, `map.keys()` yields `&K` and `map.values()`
+  yields `&V`; all three borrow the map and clone nothing. `for (key, value) in
+  &map` iterates the same pairs.
 * `insert`, `remove`, `get_mut` and `clear` need a mutable binding.
 * `==` compares contents, ignoring insertion order; `{}` and `{:?}` print the
   entries in slot order.
-* There is no `for`-loop iteration over a map in 2.2.0.
+* There is no entry API and no iteration over a `HashMap` value by value;
+  borrow the map to iterate it.
 
 ## What next
 
-* Iterating `keys()` and `values()` results: [Iterators](19-iterators.md).
+* Iterators and borrowed loops: [Iterators](19-iterators.md).
+* The entry API decision: [rfcs/0002-hashmap-entry.md](../../rfcs/0002-hashmap-entry.md).
 * The `std::collections` reference: [HashMap](../stdlib/collections/hash-map.md)
   and [collections](../stdlib/collections/README.md).
 * Generic types in general: [Generics](17-generics.md).

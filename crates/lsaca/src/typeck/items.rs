@@ -2091,6 +2091,13 @@ impl<'a> Checker<'a> {
         let previous_module = self.current_module;
         self.current_module = self.structs[id].module;
         self.structs[id].fields_resolved = true;
+        let previous_allow_ref_storage = self.allow_ref_storage;
+        if self.modules[self.structs[id].module].origin.is_prelude() {
+            // Iterator adapter structs declared by the standard library hold
+            // references in their upstream-iterator fields and buffers. User
+            // structs never take this path, so E0498 still applies to them.
+            self.allow_ref_storage = true;
+        }
         let decl_fields = self.structs[id].decl_fields.clone();
         let mut fields: Vec<StructField> = Vec::with_capacity(decl_fields.len());
         let mut seen: HashMap<String, Span> = HashMap::new();
@@ -2122,6 +2129,7 @@ impl<'a> Checker<'a> {
             });
         }
         self.structs[id].fields = fields;
+        self.allow_ref_storage = previous_allow_ref_storage;
         self.current_module = previous_module;
     }
 

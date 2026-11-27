@@ -9,18 +9,16 @@ fn main() {
     let missing = map.get_with(String::from("z"), |value| format!("never {}", value));
     println!("{:?}", missing);
 
-    let keys = map.keys();
-    println!("{}", keys.len());
+    println!("{}", map.keys().count());
     let mut key_chars = 0;
-    for key in keys {
+    for key in map.keys() {
         key_chars = key_chars + key.len();
     }
     println!("{}", key_chars);
 
-    let values = map.values();
     let mut total = 0;
-    for value in values {
-        total = total + value;
+    for value in map.values() {
+        total = total + *value;
     }
     println!("{}", total);
 

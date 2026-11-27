@@ -460,7 +460,7 @@ lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
 * Generic items are limited to structs, enums, free functions, inherent impls
   and trait impls.
 
-See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
+See [Known limitations](limitations.md) for the full list.
 
 ## Summary
 
@@ -485,4 +485,4 @@ See [Roadmap and deviations from Rust](16-roadmap.md) for the full list.
 * Iterators are built on generic structs: [Iterators](19-iterators.md).
 * The standard library: [Standard library](15-standard-library.md).
 * Dynamic dispatch with trait objects: [Trait objects](25-trait-objects.md).
-* Deviations and limitations: [Roadmap and deviations from Rust](16-roadmap.md).
+* Deviations: [Deviations from Rust](deviations.md); limitations: [Known limitations](limitations.md).

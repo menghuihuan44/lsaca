@@ -977,7 +977,7 @@ remain in 2.2.0 are:
   through `*binding`. There are no range or slice patterns at all, for strings
   or integers.
 
-The remaining restrictions are listed in [Roadmap](16-roadmap.md) together with
+The remaining restrictions are listed in [Known limitations](limitations.md) together with
 the other known limitations of the release.
 
 ## What next

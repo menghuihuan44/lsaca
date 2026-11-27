@@ -24,22 +24,23 @@ Rust-shaped surface (iterator adapters, string and character methods, `time`
 types, `env::VarError`, `net::Shutdown`, `math` constants, integer-sized file
 APIs). Version 2.2.0 adds arrays (`[T; N]`, including `[value; N]` repeat
 literals and `Copy` arrays), labelled loops (`'outer: loop` with `break 'outer`
-and `continue 'outer`), lightweight lifetimes that let structs, enums, tuples and
-`Option` store references (`struct View<'a> { data: &'a [T] }`), the `From`/`?`
+and `continue 'outer`), direct `&'a T`/`&'a mut T` fields in structs, tuple structs and enums
+(`struct View<'a> { data: &'a [T] }`; `Option<&T>` and tuple-typed fields are
+rejected with `E0498`), the `From`/`?`
 conversion path with the `Error` trait's `source` method, and the `lsaca fmt`
 source formatter. The
 [standard library reference](stdlib/README.md) documents the library module by
 module, and marks each module and API as implemented in 2.2.0 or planned for a
 later release.
 
-This documentation set is the reference for the language as of version 2.2.0.
+This documentation set is the reference for the language as of version 2.3.0.
 It is split into short pages, one per topic, so you can read it linearly
 from [Getting started](language/01-getting-started.md) or jump straight to the
 part you need. Every runnable example on these pages has been executed with the
 compiler of the release it documents and shows its real output, including the
 multi-file and package examples; all runnable examples, including those in the
-standard-library reference, are part of the 2.2.0 verification gate and are
-executed against the 2.2.0 compiler.
+standard-library reference, are part of the 2.3.0 verification gate and are
+executed against the 2.3.0 compiler.
 
 ## Why lsaca?
 
@@ -58,7 +59,7 @@ executed against the 2.2.0 compiler.
   tuple/unit structs and `mut` parameters, and completed the Rust-shaped
   standard library. `Copy` and `Clone` are derived for you, and 2.2.0 adds
   arrays, labelled loops and the small set of lifetime annotations needed to
-  store references in structs, enums, tuples and `Option`. Version 2.2.0 follows
+  store direct references in structs, tuple structs and enums. Version 2.3.0 follows
   Rust's defaults for integers (`i32`), lengths and indices (`usize`), borrowed
   text (`&str`) and array semantics more closely than any earlier release.
 * **Memory safety without a tracing garbage collector.** Values are managed by
@@ -118,8 +119,7 @@ executed against the 2.2.0 compiler.
   2.2.0 adds arrays, loop labels, reference fields with lightweight lifetime
   annotations, the `From` trait with `?`, `Error::source` and `lsaca fmt`. Known
   implementation limitations are listed in
-  [Roadmap and differences from Rust](language/16-roadmap.md) rather than
-  hidden.
+  [Known limitations](language/limitations.md) rather than hidden.
 
 A first taste:
 
@@ -189,7 +189,9 @@ reference material and the example programs.
 | [13 Pattern matching](language/13-pattern-matching.md) | All pattern forms including or-patterns and `match` guards, exhaustiveness, refutability, unreachable arms and moves in patterns. |
 | [14 Closures](language/14-closures.md) | Closure syntax and types, capture by value (copy or move), mutation, `move`, storing closures in aggregates, and using `Rc<T>` for shared state. |
 | [15 Standard library](language/15-standard-library.md) | Language-level library behaviour: formatting, UTF-8 `String`, `Vec`, `Option`/`Result`, `?`, error conversion with `From`, `Rc`, `Box`, iterators and `HashMap`; links to the per-module reference. |
-| [16 Roadmap and differences](language/16-roadmap.md) | How lsaca deliberately differs from Rust, verified limitations of 2.2.0 and what comes next. |
+| [16 Roadmap](language/16-roadmap.md) | The compatibility story and what comes next. |
+| [Deviations from Rust](language/deviations.md) | The deliberate, numbered design differences from Rust. |
+| [Known limitations](language/limitations.md) | Verified gaps and restrictions of the current release, with workarounds. |
 | [17 Generics](language/17-generics.md) | Generic structs, enums, functions and impls, lifetime parameters, bounds, turbofish syntax, monomorphization and its late-checking rules. |
 | [18 Traits](language/18-traits.md) | Trait declarations, default method bodies, implementing a trait for a struct or enum, static dispatch, coherence errors, `Fn`/`Drop` bounds and the `From` and `Error` traits. |
 | [19 Iterators](language/19-iterators.md) | The `Iterator<T>` trait, `.iter()`, the 2.1.0 adapters (`zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by`), the terminal operations (with `usize` counts and positions), `for` loops over iterators, the deferred status of mutable borrowing iteration and writing your own iterator. |
@@ -204,6 +206,7 @@ reference material and the example programs.
 | [28 Loop labels](language/28-loop-labels.md) | Labelled `loop`, `while`, `for` and `while let`: `break 'label` and `continue 'label`, nesting, shadowing and the label diagnostics. |
 | [29 Lifetimes](language/29-lifetimes.md) | Lightweight lifetime annotations for reference fields in structs, enums, tuples and `Option`, `impl<'a>` blocks, elision rules, `'static` and where references may not be stored. |
 | [30 From and ?](language/30-from-try.md) | The `From` trait, how `?` converts error types through `From`, and the `Error` trait with its `source` default method. |
+| [31 Error codes](language/31-error-codes.md) | The complete index of compiler diagnostic codes (`E0xxx`), what each one means and the compiler phase that raises it. |
 
 ### Standard library
 
@@ -213,27 +216,27 @@ The library is documented module by module in the
 language-level behaviour that is not a module (formatting macros, panics, exit
 codes).
 
-| Module | Page | Status in 2.2.0 |
+| Module | Page | Status in 2.3.0 |
 | --- | --- | --- |
-| `std::core` (Option, Result, Iterator) | [core](stdlib/core.md) | migrated from 1.7; the 2.1.0 Option/Result combinators implemented; the `From` trait lives in the library root |
+| `std::core` (Option, Result, Iterator) | [core](stdlib/core.md) | migrated from 1.7; the 2.1.0 Option/Result combinators implemented; 2.3.0 completes the `Option`/`Result` combinator surface; the `From` trait lives in the library root |
 | `std::string` | [string](stdlib/string.md) | `&str` text API, `String` forwarding, `parse` with typed errors and the new `str` methods implemented |
-| `std::char` | [char](stdlib/char.md) | ASCII classification methods implemented; Unicode classification planned |
-| `std::vec` | [vec](stdlib/vec.md) | migrated; `sort`, `truncate`/`swap`/`contains`, `as_slice` and `as_mut_slice` implemented; borrowed access with `get_mut`, `first_mut` and `last_mut` added in 2.2.0 |
-| `std::iter` | [iter](stdlib/iter.md) | `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by` and the new terminals implemented; mutable borrowing iterators (`iter_mut`/`VecIterMut`) are deferred to a later version; `rev`/`flat_map` planned |
+| `std::char` | [char](stdlib/char.md) | ASCII classification methods implemented; 2.3.0 adds Unicode 16.0.0 classification and case mapping |
+| `std::vec` | [vec](stdlib/vec.md) | migrated; `sort`, `truncate`/`swap`/`contains`, `as_slice` and `as_mut_slice` implemented; borrowed access with `get_mut`, `first_mut` and `last_mut` added in 2.2.0; 2.3.0 adds `iter`, `iter_mut` and `into_iter` |
+| `std::iter` | [iter](stdlib/iter.md) | `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by` and the new terminals implemented; 2.3.0 adds borrowed iteration, mutable borrowing iterators (`iter_mut`/`VecIterMut`), `into_iter`, `rev` and `flat_map` |
 | `std::fmt` | [fmt](stdlib/fmt.md) | compiler-implemented |
 | `std::math` | [math](stdlib/math.md) | migrated plus the 16 `f64` constants; `abs`/`min`/`max` remain compiler builtins |
 | `std::collections` | [collections](stdlib/collections/README.md) | `HashMap` migrated with borrowed `get`/`get_mut` lookups added in 2.2.0; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented |
-| `std::io` | [io](stdlib/io.md) | error types, `io::Result`, file and stream handles with integer `read`/`write`/`seek` implemented; the stream traits are planned |
-| `std::fs` | [fs](stdlib/fs.md) | `&str` path API, directory and metadata API, `FileType` and integer-sized metadata implemented |
+| `std::io` | [io](stdlib/io.md) | error types, file and stream handles with integer `read`/`write`/`seek` implemented; 2.3.0 adds the `Read`/`Write`/`Seek`/`BufRead` traits, `BufReader`, `BufWriter` and `File::read_to_string`; the `io::Result<T>` alias is not implemented |
+| `std::fs` | [fs](stdlib/fs.md) | `&str` path API, directory and metadata API, `FileType` and integer-sized metadata implemented; 2.3.0 adds `Path`, `PathBuf`, `read_dir_entries`, `DirEntry` and `ReadDir` |
 | `std::net` | [net](stdlib/net.md) | implemented (plain TCP, `Shutdown` added) |
 | `std::time` | [time](stdlib/time.md) | `Duration`, `Instant`, `SystemTime`, `unix_epoch()` and `sleep` added |
 | `std::env` | [env](stdlib/env.md) | implemented; `var` returns `Result<String, VarError>` |
 | `std::process` | [process](stdlib/process.md) | `args` and `exit` implemented |
 | `std::error` | [error](stdlib/error.md) | the `Error` trait implemented, with `Error::source` added in 2.2.0 and `io::Error` and the parse errors as implementors; the `From` conversions that `?` uses came with 2.2.0 |
 
-The status column records what version 2.2.0 provides; where a module is only
+The status column records what version 2.3.0 provides; where a module is only
 partly implemented, its page separates the implemented API from the API that is
-not implemented in 2.2.0 and planned for a later release. Entries marked *planned*
+not implemented in 2.3.0 and planned for a later release. Entries marked *planned*
 are documented from the design rather than from runnable behaviour.
 
 ### Reference
@@ -244,7 +247,8 @@ are documented from the design rather than from runnable behaviour.
 | [Getting started](language/01-getting-started.md) | The complete command-line interface, the build backends and exit codes. |
 | [Types](language/04-types.md) | The complete type system summary and the type table, including arrays and references. |
 | [Memory model](language/05-memory-model.md) | The ORC memory model, drop order and leak tracking. |
-| [Roadmap and differences from Rust](language/16-roadmap.md) | The exact list of deviations from Rust and the known limitations of 2.2.0. |
+| [Deviations from Rust](language/deviations.md) | The exact list of deliberate deviations from Rust. |
+| [Known limitations](language/limitations.md) | The verified limitations of the current release. |
 
 ### Guides and examples
 

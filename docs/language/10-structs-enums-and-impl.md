@@ -456,7 +456,7 @@ Output:
 ```
 
 Struct and enum fields may themselves be references since 2.2.0: a struct,
-enum, tuple struct or `Option` can hold a `&'a T` or `&'a mut T` field when the
+enum or tuple struct can hold a direct `&'a T` or `&'a mut T` field when the
 type declares a named lifetime parameter (see [Reference fields and lifetime
 parameters](#reference-fields-and-lifetime-parameters) below and
 [Lifetimes](29-lifetimes.md)). Storing a reference in a `Vec`, `Result`,

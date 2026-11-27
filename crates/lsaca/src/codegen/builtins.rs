@@ -1411,6 +1411,48 @@ impl<'a> Gen<'a> {
             HBuiltinFn::Ln => self.gen_unary_float_math("ln", args, ty, target),
             HBuiltinFn::Log10 => self.gen_unary_float_math("log10", args, ty, target),
             HBuiltinFn::Exp => self.gen_unary_float_math("exp", args, ty, target),
+            HBuiltinFn::CharIsAlphabetic => {
+                if let Some(arg) = args.first() {
+                    let value = self.gen_owned(arg);
+                    self.line(format!(
+                        "{} = ls_rt_unicode_is_alphabetic({});",
+                        target, value
+                    ));
+                }
+            }
+            HBuiltinFn::CharIsNumeric => {
+                if let Some(arg) = args.first() {
+                    let value = self.gen_owned(arg);
+                    self.line(format!("{} = ls_rt_unicode_is_numeric({});", target, value));
+                }
+            }
+            HBuiltinFn::CharIsWhitespace => {
+                if let Some(arg) = args.first() {
+                    let value = self.gen_owned(arg);
+                    self.line(format!(
+                        "{} = ls_rt_unicode_is_whitespace({});",
+                        target, value
+                    ));
+                }
+            }
+            HBuiltinFn::CharToUppercase => {
+                if let Some(arg) = args.first() {
+                    let value = self.gen_owned(arg);
+                    self.line(format!(
+                        "{} = ls_rt_unicode_upper_scalar({});",
+                        target, value
+                    ));
+                }
+            }
+            HBuiltinFn::CharToLowercase => {
+                if let Some(arg) = args.first() {
+                    let value = self.gen_owned(arg);
+                    self.line(format!(
+                        "{} = ls_rt_unicode_lower_scalar({});",
+                        target, value
+                    ));
+                }
+            }
             HBuiltinFn::Pow => {
                 if let (Some(base), Some(exponent)) = (args.first(), args.get(1)) {
                     let base_value = self.gen_owned(base);
@@ -1765,8 +1807,72 @@ impl<'a> Gen<'a> {
                 self.gen_slice_borrowed_mut(args, ty, target);
                 true
             }
+            "map_iter_next_index" => {
+                self.gen_map_iter_next_index(args, ty, target);
+                true
+            }
+            "map_key_ref" | "map_value_ref" => {
+                self.gen_map_slot_ref(name, args, ty, target);
+                true
+            }
             _ => false,
         }
+    }
+
+    /// Find the next occupied HashMap slot at or after a start index. The
+    /// runtime iterator walks the control bytes, so generated code never
+    /// hard-codes the Swiss-table layout.
+    fn gen_map_iter_next_index(&mut self, args: &[HExpr], ty: &Ty, target: &str) {
+        let (Some(table), Some(start)) = (args.first(), args.get(1)) else {
+            util::internal_error("map iteration expects a map and a start index");
+        };
+        let map_ty = self.receiver_value_ty(table);
+        if !matches!(map_ty, Ty::HashMap(_, _)) {
+            util::internal_error(format!("map iteration on a receiver of type {:?}", map_ty));
+        }
+        let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+        let place = self.map_place(table);
+        let start_value = self.gen_owned(start);
+        let found = self.new_plain_of("size_t", "map_slot_index");
+        let zero = self.zero_expr(ty);
+        self.line(format!("{} = {};", target, zero));
+        self.line(format!(
+            "if (lsaca_map_iter_next_index_{}({}, (size_t)({}), &{})) {{",
+            suffix, place, start_value, found
+        ));
+        self.w.indent();
+        self.store_borrowed_some(ty, target, &found);
+        self.w.dedent();
+        self.line("}");
+    }
+
+    /// Borrow the key or value blob stored in one HashMap slot. The slot index
+    /// comes from the iteration helper, so the address is stable while the
+    /// borrowed map iterator is alive.
+    fn gen_map_slot_ref(&mut self, name: &str, args: &[HExpr], ty: &Ty, target: &str) {
+        let (Some(table), Some(index)) = (args.first(), args.get(1)) else {
+            util::internal_error("map slot access expects a map and an index");
+        };
+        let map_ty = self.receiver_value_ty(table);
+        if !matches!(map_ty, Ty::HashMap(_, _)) {
+            util::internal_error(format!(
+                "map slot access on a receiver of type {:?}",
+                map_ty
+            ));
+        }
+        let suffix = self.names.map_suffix(&map_ty).unwrap_or_default();
+        let place = self.map_place(table);
+        let index_value = self.gen_owned(index);
+        let helper = if name == "map_key_ref" {
+            "lsaca_map_key_ptr"
+        } else {
+            "lsaca_map_value_ptr"
+        };
+        let ref_ctype = self.ctype(ty);
+        self.line(format!(
+            "{} = ({})({}_{}({}, (size_t)({})));",
+            target, ref_ctype, helper, suffix, place, index_value
+        ));
     }
 
     /// HashMap::get/get_mut: point the Option payload at the value blob stored

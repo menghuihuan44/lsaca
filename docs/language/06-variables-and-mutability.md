@@ -396,16 +396,18 @@ once. The pattern must be irrefutable: tuples of the right shape and struct
 patterns without `Some`/`Ok`-style alternatives always are. `mut` may be applied
 to individual bindings inside the pattern.
 
-Destructuring a value copies it into the new bindings: `Copy` parts are
-copied, and move-only parts (`String`, `Vec`, `Rc`, `Box`) are deep-copied — for
-`Rc` and `Box` the new binding points to the same cell or heap value and the
-reference count is retained. This is not Rust's move semantics: the source value
-stays fully usable after the pattern, and no partial move happens. Version 2.2.0
-has no partial moves; destructuring always copies the whole value, so a `String`
-field is cloned out rather than moved. Moving a field out of a value *without*
-destructuring it is still rejected (`E0507`), and `match` still moves the
-scrutinee. Partial moves are planned for a later release (see
-[Roadmap](16-roadmap.md)).
+Destructuring binds by value. A pattern that binds only `Copy` values copies
+them, and the source value stays fully usable afterwards. A pattern that binds
+an owning value (`String`, `Vec`, `Rc`, `Box` or a move-only struct) moves the
+whole value out of the source binding: the bound parts move into the new
+bindings, the remaining fields are dropped, and using the source afterwards is
+`error[E0382]` (a partial move). This matches Rust for the common case, with one
+conservative difference: lsaca treats the entire initialiser as moved even when
+only one field is bound, so an unbound `Copy` field cannot be read through the
+source any more (Rust still allows that). `match` has always moved its scrutinee,
+and a value whose type implements `Drop` cannot be destructured by value at all
+(`error[E0509]`, as in Rust). Moving a field out of a value *without*
+destructuring it is still rejected (`E0507`), exactly as in Rust.
 
 ```ls
 struct Point {
@@ -414,11 +416,12 @@ struct Point {
 }
 
 fn main() {
+    // Binding an owning value moves the whole tuple; `pair` is moved.
     let pair = (1, String::from("one"));
     let (number, name) = pair;
     println!("{} {}", number, name);
-    println!("{} {}", pair.0, pair.1);
 
+    // Binding only Copy values copies them; `origin` stays usable.
     let origin = Point { x: 3, y: 4 };
     let Point { x, y } = origin;
     println!("{} {}", x, y);
@@ -432,7 +435,6 @@ fn main() {
 
 Output:
 ```text
-1 one
 1 one
 3 4
 3

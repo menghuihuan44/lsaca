@@ -3880,8 +3880,8 @@ mod tests {
             "fn main() {
                  let numbers: Vec<i64> = vec![1, 2, 3];
                  let offset = 10;
-                 let boosted: Vec<i64> = numbers.iter().map(|item: i64| -> i64 { item + offset }).collect();
-                 for value in boosted.iter() {
+                 let boosted: Vec<i64> = numbers.into_iter().map(|item: i64| -> i64 { item + offset }).collect();
+                 for value in boosted.into_iter() {
                      let borrowed = &offset;
                      println!(\"{}\", value + *borrowed);
                  }
@@ -3895,7 +3895,7 @@ mod tests {
             "fn main() {
                  let numbers: Vec<i64> = vec![1, 2, 3];
                  let label = String::from(\"n\");
-                 for value in numbers.iter() {
+                 for value in numbers.into_iter() {
                      let borrowed = &label;
                      println!(\"{}{}\", borrowed, value);
                  }

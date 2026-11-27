@@ -1,9 +1,10 @@
 //! Emitters for the frozen Phase C operating-system intrinsics.
 //!
 //! The standard library declares these extern functions and every call site is
-//! expanded here into a call of an existing runtime function. No new runtime
-//! entry point is introduced: file, socket, time, environment and process
-//! operations all map onto the frozen ABI in lsaca_rt.h.
+//! expanded here into a call of an existing runtime function. File, socket,
+//! time, environment and process operations map onto the frozen ABI in
+//! lsaca_rt.h; v2.3 adds the four lexical path helpers (join, parent, file name
+//! and extension) declared alongside the file system entry points.
 //!
 //! Ownership follows the runtime contract. Borrowed String arguments are read
 //! through their place and keep their owner; returned String handles are fresh
@@ -53,6 +54,10 @@ pub(crate) const PHASE_C_INTRINSICS: &[&str] = &[
     "__io_current_dir",
     "__io_set_current_dir",
     "__io_temp_dir",
+    "__io_path_join",
+    "__io_path_parent",
+    "__io_path_file_name",
+    "__io_path_extension",
     // Sockets.
     "__net_listen",
     "__net_local_port",
@@ -281,6 +286,33 @@ impl<'a> Gen<'a> {
                 self.w.dedent();
                 self.line("}");
                 self.line(format!("{} = {};", target, value));
+                true
+            }
+            "io_path_join" => {
+                let base = self.phase_c_string(name, args, 0);
+                let segment = self.phase_c_string(name, args, 1);
+                self.line(format!(
+                    "{} = ls_io_path_join({}, {});",
+                    target, base, segment
+                ));
+                true
+            }
+            "io_path_parent" => {
+                let path = self.phase_c_string(name, args, 0);
+                let call = format!("ls_io_path_parent({})", path);
+                self.emit_option_string(name, ty, target, &call);
+                true
+            }
+            "io_path_file_name" => {
+                let path = self.phase_c_string(name, args, 0);
+                let call = format!("ls_io_path_file_name({})", path);
+                self.emit_option_string(name, ty, target, &call);
+                true
+            }
+            "io_path_extension" => {
+                let path = self.phase_c_string(name, args, 0);
+                let call = format!("ls_io_path_extension({})", path);
+                self.emit_option_string(name, ty, target, &call);
                 true
             }
             // ----- sockets -------------------------------------------------

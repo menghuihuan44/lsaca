@@ -34,16 +34,14 @@ fn main() {
     }
     assert_eq!(total, tokens);
     let mut counted: i64 = 0;
-    let keys = counts.keys();
-    for key in keys {
-        let value = *counts.get(&key).unwrap();
+    for key in counts.keys() {
+        let value = *counts.get(key).unwrap();
         counted += value;
     }
     assert_eq!(counted, tokens);
     let mut checksum_map: i64 = 0;
-    let keys_again = counts.keys();
-    for key in keys_again {
-        let value = *counts.get(&key).unwrap();
+    for key in counts.keys() {
+        let value = *counts.get(key).unwrap();
         checksum_map += value * value;
     }
     let mut checksum_array: i64 = 0;

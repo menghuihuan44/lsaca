@@ -8,7 +8,7 @@ the underlying value alive and tracks every allocation exactly as before.
 
 References are the second way to avoid copying data (the first is `Rc<T>`, the shared
 *mutable* cell). They are deliberately small: lifetime annotations appear only on reference fields
-(since 2.2.0 a struct, enum, tuple or `Option` may hold one), references cannot be
+(since 2.2.0 a struct, enum or tuple struct may hold one), references cannot be
 stored in other aggregates or captured by closures, and there are no raw pointers.
 The compiler infers how long each borrow lives — the borrow ends at the last point
 where the reference is used — and rejects code that would let two conflicting
@@ -31,7 +31,7 @@ not keep its referent alive on its own, and the compiler only accepts a borrow w
 owner provably outlives its last use. Most lifetimes are inferred: a borrow ends at the last point where the reference is
 used, and the checker is conservative inside a single expression (two mutable borrows
 there are rejected even when Rust would accept them; see
-[Known limitations](#known-limitations-in-version-220)). Since 2.2.0 an explicit
+[Known limitations](#known-limitations-in-version-230)). Since 2.2.0 an explicit
 `'a` is needed only on reference fields and on functions whose elided signature
 cannot say which input is borrowed. Since 1.4 the ownership
 and move checks (E0382, E0507, E0505) run alongside the reference checks, so moving a
@@ -71,7 +71,7 @@ Output:
 ```
 
 Lifetime syntax is limited: `&'a T` is written only for a reference field (a
-struct, enum, tuple or `Option` declares the parameter) and in function signatures
+struct, enum or tuple struct declares the parameter) and in function signatures
 that share a lifetime explicitly between parameters and a return. Ordinary
 references use elision, described in
 [References and functions](#references-and-functions). See
@@ -1226,14 +1226,14 @@ References are restricted to the places where their lifetime is obvious. They ma
 - reborrowed through other references;
 - mutable references to owned heap values: `&mut String`, `&mut Vec<T>`,
   `&mut Rc<T>` and `&mut Box<T>` (new in version 1.4);
-- reference fields of a struct, enum, tuple or `Option` that declares the lifetime
+- reference fields of a struct, enum or tuple struct that declares the lifetime
   parameter (since 2.2.0).
 
 They may **not** be:
 
 | Use | Result |
 | --- | --- |
-| stored in a struct, enum, tuple or `Option` field without a declared lifetime | error E0106 (a named lifetime parameter makes the field legal since 2.2.0) |
+| stored in a struct, enum or tuple struct field without a declared lifetime | error E0106 (a named lifetime parameter makes the field legal since 2.2.0) |
 | stored in a `Vec<T>`, `HashMap`, `Result<T, E>`, `Box<T>` or array | error E0498 |
 | captured by a closure | error E0498 |
 | returned from a function that cannot name its source | error E0106 |
@@ -1311,45 +1311,22 @@ hi!
 ```
 
 This makes in-place updates through a reference possible without cloning the
-container. The restrictions on *storing* references still apply: a `&mut String`
-cannot be a struct field or a `Vec` element (error `E0498`).
+container. A struct or enum may store one direct `&T` or `&mut T` field when the
+type declares a lifetime (a mutable-reference field makes the type non-Copy).
+References still cannot be stored in `Vec`, `HashMap`, `Result`, `Box`, `Rc`,
+arrays or closures (`E0498`).
 
-For loops iterate over a `Vec<T>` **by value** or over an integer range. A `&Vec<T>` is
-not an iterator, so this is an error:
-
-```ls,compile-fail
-fn main() {
-    let values = vec![1, 2, 3];
-    let r = &values;
-    for value in r {
-        println!("{}", value);
-    }
-}
-```
-
-Error:
-```text
-error[E0277]: cannot iterate over a value of type &Vec<{integer}>; for loops require a range, a Vec<T>, or a type that implements Iterator<T>
-  --> example-47.ls:4:18
-   |
- 4 |     for value in r {
-   |                  ^
-
-lsaca: example-47.ls: could not compile example-47.ls due to previous error(s)
-```
-
-Use an index loop when you want to read a vector through a shared reference without
-copying it:
+A `for` loop over a `Vec<T>` value moves the vector. Since 2.3.0 a loop over
+`&Vec<T>` borrows it instead and yields `&T` items; a loop over `&mut Vec<T>`
+yields `&mut T` items, and `&[T]`/`&mut [T]` slices behave the same way:
 
 ```ls
 fn main() {
     let values = vec![1, 2, 3];
     let r = &values;
-    let mut i = 0;
     let mut total = 0;
-    while i < r.len() {
-        total += r[i];
-        i += 1;
+    for value in r {
+        total += *value;
     }
     println!("{}", total);
 }
@@ -1495,12 +1472,12 @@ reference is permitted only where the compiler can prove the referent stays aliv
 | E0597 | `X does not live long enough` | assigning a borrow of a block-local to an outer variable |
 | E0614 | `type Box<{integer}> cannot be dereferenced` | unary `*` on `Rc` or `Box` |
 | E0745 | `cannot borrow a temporary value, bind it to a local first` | `&(1 + 2)`, `&Some(1)`, `&String::from(..)`, borrowing a constant |
-| E0277 | `cannot iterate over a value of type &Vec<T>` | `for x in &vec` |
+| E0277 | `cannot iterate over an array by value; arrays are not iterable in this language version` | `for x in array` |
 
 Errors without a code (parser level): `reference patterns are not supported; match a
 reference scrutinee directly, bindings become references`.
 
-## Known limitations in version 2.2.0
+## Known limitations in version 2.3.0
 
 Version 1.3.0 introduced references, 1.4.0 added ownership and moves on top of
 them, and 1.5.0 added `==` between references. The current restrictions are:
@@ -1524,8 +1501,10 @@ them, and 1.5.0 added `==` between references. The current restrictions are:
    reference scrutinee directly and the bindings become references.
 6. **Vector borrows are container-granular**: two mutable references to different
    elements conflict. Struct fields are per-field.
-7. **No references in `for` loops** (`for x in &vec` is an error) and no indexing a
-   `&String`; `==` on references compares the pointed-to values.
+7. **No indexing a `&String`**; use `as_str()` or `chars()`. `==` on references
+   compares the pointed-to values. Since 2.3.0 borrowed collections can be
+   iterated directly: `for x in &vec`, `for x in &mut vec`, `for x in &slice`,
+   `for x in &mut slice` and `for (k, v) in &map`.
 8. **No raw pointers and no casts to or from references.**
 9. **The borrow checker is conservative inside a single expression.** Passing two
    mutable borrows as the two arguments of one call, or combining them with `+`,
@@ -1553,8 +1532,9 @@ them, and 1.5.0 added `==` between references. The current restrictions are:
 - References never retain or release ORC allocations and cannot create cycles; ORC
   remains the only owner.
 - References cannot be stored in `Vec`, `HashMap`, `Result`, `Box`, arrays or
-  closures, and cannot be captured by closures; since 2.2.0 a struct, enum, tuple or
-  `Option` field may hold one when the type names a lifetime parameter. They can be
+  closures, and cannot be captured by closures; since 2.2.0 a struct, enum or tuple struct field may hold a direct
+  reference when the type names a lifetime parameter; `Option<&T>` and
+  tuple-typed fields are rejected with `E0498`. They can be
   compared with `==` since 1.5.0 (the comparison reads the pointed-to values).
   Mutable references to `String`, `Vec`, `Rc` and `Box` *are* allowed as
   parameters, locals and return values in version 2.2.0.
@@ -1570,7 +1550,7 @@ them, and 1.5.0 added `==` between references. The current restrictions are:
   ergonomics.
 - [Standard library](15-standard-library.md) — the owned containers references point
   into.
-- [Roadmap](16-roadmap.md) — what is still planned (references in other aggregates,
+- [Known limitations](limitations.md) — what is still missing (references in other aggregates,
   full lifetime relations, generics, traits and iterators).
 - [Benchmarks](21-benchmarks.md) — measured performance of the reference and ORC
   runtime.

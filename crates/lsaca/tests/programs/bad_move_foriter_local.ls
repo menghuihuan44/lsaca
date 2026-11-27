@@ -3,7 +3,7 @@
 fn main() {
     let numbers: Vec<i64> = vec![1, 2, 3];
     let text = String::from("x");
-    for value in numbers.iter() {
+    for value in numbers.into_iter() {
         let moved = text;
         println!("{} {}", value, moved);
     }

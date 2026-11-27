@@ -606,14 +606,7 @@ impl<'a> Checker<'a> {
                 {
                     if self.fns[fn_id].is_method() {
                         let enum_name = self.enum_name(enum_id);
-                        self.error_code(
-                            format!(
-                                "method {}::{} cannot be called as an associated function",
-                                enum_name, item
-                            ),
-                            span,
-                            "E0599",
-                        );
+                        self.reject_method_as_associated(&enum_name, &item, span);
                         for arg in args {
                             let _ = self.check_expr(arg, None);
                         }
@@ -656,14 +649,7 @@ impl<'a> Checker<'a> {
                     }
                     if self.fns[fn_id].is_method() {
                         let owner_name = self.type_name(owner);
-                        self.error_code(
-                            format!(
-                                "method {}::{} cannot be called as an associated function",
-                                owner_name, item
-                            ),
-                            span,
-                            "E0599",
-                        );
+                        self.reject_method_as_associated(&owner_name, &item, span);
                         for arg in args {
                             let _ = self.check_expr(arg, None);
                         }
@@ -718,15 +704,7 @@ impl<'a> Checker<'a> {
                 let receiver_ty = kind.resolve(&fresh).unwrap_or(ITy::Unit);
                 let owner_name = kind.name();
                 if builtin_method(&receiver_ty, &item).is_some() {
-                    self.error_code_note(
-                        format!(
-                            "method {}::{} cannot be called as an associated function",
-                            owner_name, item
-                        ),
-                        span,
-                        "E0599",
-                        format!("call it on a value instead, for example value.{}()", item),
-                    );
+                    self.reject_method_as_associated(owner_name, &item, span);
                 } else {
                     self.error_code(
                         format!(

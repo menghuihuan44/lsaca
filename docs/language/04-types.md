@@ -2,7 +2,7 @@
 
 Every expression in lsaca has a statically known type, checked before any C is
 generated. This page lists the complete type language, explains each builtin
-type, and describes inference and conversions. It describes lsaca 2.2.0, where
+type, and describes inference and conversions. It describes lsaca 2.3.0, where
 unannotated integer literals are `i32` by default, number literals accept
 Rust-style type suffixes, and lengths and indices are `usize`.
 
@@ -24,7 +24,7 @@ Rust-style type suffixes, and lengths and indices are `usize`.
 | `Result<T, E>` | `Ok(T)` or `Err(E)`. | Builtin generic. |
 | `Rc<T>` | Shared, mutable heap cell. | Move-only handle; `.clone()` shares one payload; `get()`/`set()`. |
 | `Box<T>` | Owned heap indirection. | Added in 1.1.0; move-only; `.clone()` deep-copies the payload. |
-| `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. A struct, enum, tuple or `Option` field may store one since 2.2.0 (with a lifetime parameter); `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures still cannot hold references; mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4; see [References and borrowing](12-references-and-borrowing.md) and [Lifetimes](29-lifetimes.md). |
+| `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. A struct, enum or tuple struct field may store a direct `&'a T`/`&'a mut T` since 2.2.0 (with a lifetime parameter); `Option<&T>` and tuple-typed fields are rejected with `E0498`; `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures still cannot hold references; mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4; see [References and borrowing](12-references-and-borrowing.md) and [Lifetimes](29-lifetimes.md). |
 | `&[T]` / `&mut [T]` / `&str` / `&mut str` | References to an unsized slice or UTF-8 text value. | Added in 2.0.0; `&[T]` is a `Copy` fat reference (data pointer plus length); produced by coercions from `Vec`/`String`, by slicing a place with `&`/`&mut`, and for string literals in `&str` contexts; see [Slices and str](26-slices-and-str.md). |
 | `[T; N]` | Fixed-length array value. | Added in 2.2.0; `N` is an integer literal or a path to an integer constant; indexed with `usize`; `Copy` when `T` is `Copy`; `&array` coerces to `&[T]`; no array patterns and no by-value `for`; see [Arrays](#arrays). |
 | `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; tuples can nest. |
@@ -48,9 +48,9 @@ trait name is not a type and using one as a type is `E0412`; since 2.0.0 a trait
 becomes a type only behind `dyn`, as in `Box<dyn Greet>` (see
 [Traits](18-traits.md) and [Trait objects](25-trait-objects.md)). References are
 written `&T` (shared) and `&mut T` (mutable); they are **non-owning** views of
-an existing place, added in 1.3.0. Since 2.2.0 a struct, enum, tuple or
-`Option` may hold references in fields when its declaration names a lifetime
-parameter; `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures still
+an existing place, added in 1.3.0. Since 2.2.0 a struct, enum or tuple struct may hold direct references in
+fields when its declaration names a lifetime parameter; `Option<&T>` and
+tuple-typed fields are rejected with `E0498`; `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures still
 reject reference payloads. They are described in
 [References and borrowing](12-references-and-borrowing.md) and
 [Lifetimes](29-lifetimes.md). `Self` is not a type available to
@@ -344,8 +344,9 @@ and the compiler's lightweight borrow checker enforces that (see
 
 Field access, method calls and indexing automatically dereference a reference,
 so `r.field`, `r.method()` and `r.field = value` all work without an explicit
-`*`; `(*r).field = value` is an equivalent spelling. Since 2.2.0 a reference can be a field of a struct, enum, tuple or
-`Option` when the declaration names a lifetime parameter (see
+`*`; `(*r).field = value` is an equivalent spelling. Since 2.2.0 a reference can be a direct field of a struct, enum or tuple
+struct when the declaration names a lifetime parameter; `Option<&T>` and
+tuple-typed fields are rejected with `E0498` (see
 [Lifetimes](29-lifetimes.md)); it still cannot be stored in a `Vec`, a
 `Result`, a `HashMap`, `Rc`, `Box`, an array or a closure, and it cannot be
 converted with `as`. Since 1.5.0 `==` compares the pointed-to values.
@@ -372,8 +373,8 @@ types such as `String`, `Rc<T>` or `Option<String>` work too.
 ```ls
 fn main() {
     let pair = (1, String::from("one"));
-    let (number, name) = pair;
     println!("{} {}", pair.0, pair.1);
+    let (number, name) = pair;
     println!("{} {}", number, name);
 
     let triple = (1, 2.5, true);

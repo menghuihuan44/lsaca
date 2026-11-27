@@ -1923,8 +1923,11 @@ fn main() {
     println!("{}", mapped);
 }"#,
         );
-        assert!(has_code(&diagnostics, "E0599"));
-        assert!(has_message(&diagnostics, "no method named map_or"));
+        assert!(has_code(&diagnostics, "E0061"));
+        assert!(has_message(
+            &diagnostics,
+            "the method map_or takes 2 argument(s) but 1"
+        ));
 
         let diagnostics = expect_errors(
             r#"fn main() {
@@ -3293,6 +3296,74 @@ fn main() {}"#,
     }
 
     #[test]
+    fn rejects_calling_a_method_as_an_associated_function() {
+        let diagnostics = expect_errors(
+            r#"struct Point {
+    x: i64,
+}
+
+impl Point {
+    fn sum(&self) -> i64 {
+        self.x
+    }
+}
+
+fn main() {
+    let point = Point { x: 1 };
+    Point::sum(&point);
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0599"));
+        assert!(has_message(
+            &diagnostics,
+            "method Point::sum cannot be called as an associated function"
+        ));
+        assert!(has_note(
+            &diagnostics,
+            "call it on a value instead, for example value.sum()"
+        ));
+    }
+
+    #[test]
+    fn rejects_a_builtin_method_as_an_associated_function() {
+        let diagnostics = expect_errors_with_stdlib_program(
+            r#"fn main() {
+    let mut values: Vec<i64> = Vec::new();
+    Vec::push(&mut values, 1);
+}"#,
+        );
+        assert!(has_code(&diagnostics, "E0599"));
+        assert!(has_message(
+            &diagnostics,
+            "method Vec::push cannot be called as an associated function"
+        ));
+        assert!(has_note(
+            &diagnostics,
+            "call it on a value instead, for example value.push()"
+        ));
+    }
+
+    #[test]
+    fn associated_functions_are_still_callable_through_their_type() {
+        expect_ok(
+            r#"struct Point {
+    x: i64,
+}
+
+impl Point {
+    fn new(x: i64) -> Point {
+        Point { x: x }
+    }
+}
+
+fn main() {
+    let point = Point::new(3);
+    println!("{}", point.x);
+}"#,
+        );
+    }
+
+    #[test]
     fn drop_impl_registers_no_callable_method() {
         let diagnostics = expect_errors(
             r#"struct Tracked {
@@ -4186,6 +4257,29 @@ fn main() {
     }
 
     #[test]
+    fn generic_impls_with_lifetime_and_type_parameters_dispatch() {
+        expect_ok(
+            r#"trait Describe { fn describe(&self) -> i64; }
+struct Pair<'a, T> { marker: &'a i64, value: T }
+impl<'a, T> Pair<'a, T> {
+    fn get(&self) -> T {
+        return self.value;
+    }
+}
+impl<'a, T> Describe for Pair<'a, T> {
+    fn describe(&self) -> i64 {
+        return *self.marker;
+    }
+}
+fn main() {
+    let marker = 9;
+    let pair: Pair<i64> = Pair { marker: &marker, value: 5 };
+    println!("{} {}", pair.describe(), pair.get());
+}"#,
+        );
+    }
+
+    #[test]
     fn validates_trait_impls_against_their_own_self_type() {
         expect_ok(
             r#"trait Describe<T> { fn describe(&self, extra: T) -> String; }
@@ -4839,7 +4933,7 @@ fn main() {
             r#"fn main() {
     let parsed = String::from("42").parse::<i64>();
     println!("{}", parsed);
-    let doubled: Vec<i64> = vec![1, 2, 3].iter().map(|value| value * 2).collect::<Vec<i64>>();
+    let doubled: Vec<i64> = vec![1, 2, 3].into_iter().map(|value| value * 2).collect::<Vec<i64>>();
     println!("{:?}", doubled);
 }"#,
         );
@@ -4909,7 +5003,7 @@ fn main() {
         let (program, file, parse_diagnostics) = parse_source(
             r#"fn main() {
     let values: Vec<i64> = vec![1, 2, 3];
-    let iterator = values.iter();
+    let iterator = values.into_iter();
     let total = iterator.flatten();
     let _ = total;
     println!("done");
@@ -5450,7 +5544,7 @@ fn main() {
 
     #[test]
     fn accepts_char_hash_map_keys() {
-        expect_ok(
+        expect_ok_with_prelude(
             r#"fn main() {
     let mut map: HashMap<char, i64> = HashMap::new();
     map.insert('a', 1);
@@ -5458,8 +5552,8 @@ fn main() {
     println!("{}", map.contains_key('a'));
     println!("{}", map.get('b').is_some());
     println!("{}", map.len());
-    let keys: Vec<char> = map.keys();
-    println!("{}", keys.len());
+    let key_count: usize = map.keys().count();
+    println!("{}", key_count);
     map.remove('a');
 }"#,
         );
@@ -8352,24 +8446,26 @@ fn main() { let number: i64 = 3; println!("{}", both(&number)); }"#,
 
     #[test]
     fn lowers_v21_iterator_adapters_to_prelude_calls() {
+        // The v2.1 adapters are exercised over the consuming iterator here;
+        // borrowed iteration has its own test below.
         expect_ok_with_prelude(
             r#"fn main() {
     let zipped: Vec<(i64, i64)> = vec![1i64, 2i64, 3i64]
-        .iter()
-        .zip(vec![4i64, 5i64, 6i64].iter())
+        .into_iter()
+        .zip(vec![4i64, 5i64, 6i64].into_iter())
         .collect();
     let chained: Vec<i64> = vec![1i64, 2i64]
-        .iter()
-        .chain(vec![3i64, 4i64].iter())
+        .into_iter()
+        .chain(vec![3i64, 4i64].into_iter())
         .collect();
     let filtered: Vec<(i64, i64)> = vec![1i64, 2i64, 3i64]
-        .iter()
+        .into_iter()
         .filter(|value| *value > 1)
         .map(|value| value * 2)
-        .zip(vec![9i64, 8i64].iter())
+        .zip(vec![9i64, 8i64].into_iter())
         .collect();
     let mapped: Vec<i64> = vec![1i64, 2i64, 3i64, 4i64]
-        .iter()
+        .into_iter()
         .filter_map(|value| {
             if value % 2 == 0 {
                 return Some(value * 10);
@@ -8378,33 +8474,33 @@ fn main() { let number: i64 = 3; println!("{}", both(&number)); }"#,
         })
         .collect();
     let prefix: Vec<i64> = vec![1i64, 2i64, 3i64, 4i64]
-        .iter()
+        .into_iter()
         .take_while(|value| *value < 3)
         .collect();
     let rest: Vec<i64> = vec![1i64, 2i64, 3i64, 4i64]
-        .iter()
+        .into_iter()
         .skip_while(|value| *value < 3)
         .collect();
     let stepped: Vec<i64> = vec![1i64, 2i64, 3i64, 4i64, 5i64]
-        .iter()
+        .into_iter()
         .step_by(2)
         .collect();
     let inspected: Vec<i64> = vec![1i64, 2i64]
-        .iter()
+        .into_iter()
         .inspect(|value| {
             println!("{}", *value);
         })
         .collect();
-    vec![1i64, 2i64, 3i64].iter().for_each(|value| {
+    vec![1i64, 2i64, 3i64].into_iter().for_each(|value| {
         println!("{}", value);
     });
     let position: Option<usize> = vec![1i64, 2i64, 3i64]
-        .iter()
+        .into_iter()
         .position(|value| value == 3i64);
-    let last: Option<i64> = vec![1i64, 2i64, 3i64].iter().last();
-    let third: Option<i64> = vec![1i64, 2i64, 3i64].iter().nth(2);
+    let last: Option<i64> = vec![1i64, 2i64, 3i64].into_iter().last();
+    let third: Option<i64> = vec![1i64, 2i64, 3i64].into_iter().nth(2);
     let reduced: Option<i64> = vec![1i64, 2i64, 3i64]
-        .iter()
+        .into_iter()
         .reduce(|acc, value| acc + value);
     println!(
         "{} {} {} {} {} {} {} {}",
@@ -8429,17 +8525,100 @@ fn main() { let number: i64 = 3; println!("{}", both(&number)); }"#,
     }
 
     #[test]
+    fn lowers_v23_borrowing_iteration_and_adapters() {
+        check_source_with_embedded_stdlib(
+            r#"fn main() {
+    let values: Vec<i64> = vec![1i64, 2i64, 3i64];
+    let mut sum: i64 = 0;
+    for value in values.iter() {
+        sum += *value;
+    }
+    for value in &values {
+        sum += *value;
+    }
+    for (index, value) in values.iter().enumerate() {
+        sum += index as i64 + *value;
+    }
+    let mut mutable: Vec<i64> = vec![4i64, 5i64];
+    for value in mutable.iter_mut() {
+        *value += 1;
+    }
+    for value in &mut mutable {
+        *value += 1;
+    }
+    let slice: &[i64] = mutable.as_slice();
+    for value in slice {
+        sum += *value;
+    }
+    {
+        let mutable_slice: &mut [i64] = mutable.as_mut_slice();
+        for value in mutable_slice {
+            *value += 1;
+        }
+    }
+    let reversed: Vec<i64> = values.iter().rev().map(|value| *value * 10).collect();
+    let flat: Vec<i64> = values.iter().flat_map(|value| vec![*value, *value]).collect();
+    let flat_iter: Vec<i64> = values
+        .iter()
+        .flat_map(|value| vec![*value].into_iter())
+        .collect();
+    let consumed: i64 = values.into_iter().sum();
+    println!("{} {:?} {:?} {:?} {} {:?}", sum, mutable, reversed, flat, consumed, flat_iter);
+}"#,
+        )
+        .unwrap_or_else(|diagnostics| {
+            panic!(
+                "borrowed Vec, slice, rev and flat_map iteration must type check: {:#?}",
+                diagnostics
+            )
+        });
+    }
+
+    #[test]
+    fn accepts_hash_map_iteration_and_from_pairs() {
+        check_source_with_embedded_stdlib(
+            r#"fn main() {
+    let table: HashMap<String, i64> = HashMap::from(vec![
+        (String::from("a"), 1i64),
+        (String::from("b"), 2i64),
+    ]);
+    let mut sum: i64 = 0;
+    for (key, value) in &table {
+        sum += (key.len() as i64) + *value;
+    }
+    for (key, value) in table.iter() {
+        sum += (key.len() as i64) + *value;
+    }
+    for key in table.keys() {
+        sum += key.len() as i64;
+    }
+    for value in table.values() {
+        sum += *value;
+    }
+    let set: HashSet<i64> = HashSet::from(vec![1i64, 1i64, 2i64]);
+    println!("{} {} {}", sum, table.len(), set.len());
+}"#,
+        )
+        .unwrap_or_else(|diagnostics| {
+            panic!(
+                "HashMap iteration, HashMap::from and HashSet::from must type check: {:#?}",
+                diagnostics
+            )
+        });
+    }
+
+    #[test]
     fn numeric_terminal_methods_use_their_specialized_helpers() {
         check_source_with_embedded_stdlib(
             r#"fn main() {
-    let sum_int: i32 = vec![1, 2, 3].iter().sum();
-    let product_int: i32 = vec![1, 2, 3].iter().product();
-    let sum_wide: i64 = vec![1i64, 2i64, 3i64].iter().sum();
-    let product_wide: i64 = vec![1i64, 2i64, 3i64].iter().product();
-    let sum_count: usize = vec![1usize, 2usize, 3usize].iter().sum();
-    let product_count: usize = vec![1usize, 2usize, 3usize].iter().product();
-    let sum_float: f64 = vec![1.5, 2.5].iter().sum();
-    let product_float: f64 = vec![1.5, 2.5].iter().product();
+    let sum_int: i32 = vec![1, 2, 3].into_iter().sum();
+    let product_int: i32 = vec![1, 2, 3].into_iter().product();
+    let sum_wide: i64 = vec![1i64, 2i64, 3i64].into_iter().sum();
+    let product_wide: i64 = vec![1i64, 2i64, 3i64].into_iter().product();
+    let sum_count: usize = vec![1usize, 2usize, 3usize].into_iter().sum();
+    let product_count: usize = vec![1usize, 2usize, 3usize].into_iter().product();
+    let sum_float: f64 = vec![1.5, 2.5].into_iter().sum();
+    let product_float: f64 = vec![1.5, 2.5].into_iter().product();
     println!(
         "{} {} {} {} {} {} {} {}",
         sum_int,
@@ -8466,8 +8645,8 @@ fn main() { let number: i64 = 3; println!("{}", both(&number)); }"#,
         let diagnostics = expect_errors_with_prelude(
             r#"fn main() {
     let words: Vec<String> = vec![String::from("a")];
-    let total = words.iter().sum();
-    let product = words.iter().product();
+    let total = words.into_iter().sum();
+    let product = words.into_iter().product();
     let _ = total;
     let _ = product;
 }"#,

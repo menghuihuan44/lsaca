@@ -326,6 +326,13 @@ impl<'a> Checker<'a> {
             self.error_code(message, span, "E0001");
             return false;
         }
+        if self.allow_ref_storage {
+            // Compiler-owned iterator machinery stores references in adapter
+            // fields and buffers. The types stay hidden in the prelude and the
+            // borrow checker follows the source loan through the iterator
+            // field, so this internal exemption does not weaken user code.
+            return true;
+        }
         if self.type_contains_ref(&resolved) {
             if std::env::var_os("LSACA_TRACE_STORAGE").is_some() {
                 eprintln!(
@@ -347,9 +354,11 @@ impl<'a> Checker<'a> {
         true
     }
 
-    /// Validate a struct or enum field. A field may hold exactly one shared
-    /// reference whose pointee is itself borrow-free. Mutable reference fields
-    /// are not supported yet, and collections of borrowing values remain
+    /// Validate a struct or enum field. A field may hold exactly one reference,
+    /// shared or mutable, whose pointee is itself borrow-free. A struct with a
+    /// mutable reference field is never Copy (see `Program::classify_types`
+    /// and `is_copy_ty_inner`), so the field cannot be duplicated into two
+    /// aliasing mutable references. Collections of borrowing values remain
     /// rejected (they would weaken the lifetime-erasing storage invariant).
     pub fn validate_field_type(&mut self, ty: &ITy, span: Span) -> bool {
         let resolved = self.infer.resolve(ty);
@@ -372,14 +381,27 @@ impl<'a> Checker<'a> {
                 }
                 true
             }
-            ITy::Ref { mutable: true, .. } => {
-                self.error_code(
-                    "mutable references cannot be stored in a struct or enum field yet; take &T or store an owned value"
-                        .to_string(),
-                    span,
-                    "E0498",
-                );
-                false
+            ITy::Ref {
+                mutable: true,
+                inner,
+            } => {
+                // v2.3: a mutable reference field is allowed when its pointee
+                // is borrow-free. Such a struct is never Copy (see
+                // Program::classify_types and is_copy_ty_inner), so the field
+                // cannot be duplicated into two aliasing mutable references.
+                if self.type_contains_ref(&inner.clone()) {
+                    let described = self.describe_resolved(&resolved);
+                    self.error_code(
+                        format!(
+                            "a reference field cannot point at a value that itself borrows (found {})",
+                            described
+                        ),
+                        span,
+                        "E0498",
+                    );
+                    return false;
+                }
+                true
             }
             _ => self.validate_storage_type(&resolved, span),
         }

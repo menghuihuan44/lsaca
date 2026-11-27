@@ -35,7 +35,7 @@ Using `[T]` or `str` anywhere except behind `&` or `&mut` is error `E0001`:
 > slices and str are unsized; use `&[T]`, `&mut [T]`, `&str` or `&mut str`
 
 Slice and text values are references, so since 2.2.0 they can be stored in the
-reference fields of a struct, enum, tuple or `Option` when the type names a
+reference fields of a struct, enum or tuple struct when the type names a
 lifetime parameter (see [Lifetimes](29-lifetimes.md)). They cannot be stored in
 `Vec` elements, `HashMap` values, `Result`, `Box`, `Rc` or arrays, which still
 reject a reference field with `E0498`.
@@ -184,7 +184,7 @@ enum type defined in this program, found [i64]`). The slice methods are:
 | `first_mut` | `&mut self -> Option<&mut T>` | mutable first element; added in 2.2.0 |
 | `last_mut` | `&mut self -> Option<&mut T>` | mutable last element; added in 2.2.0 |
 
-The 2.2.0 compiler implements every accessor in this table. A `[T]` has no shared
+The 2.3.0 compiler implements every accessor in this table. A `[T]` has no shared
 `first`/`last` accessor: `get` returns a copy (`T` must be `Copy`) and the
 mutable accessors return references. `Vec` also offers shared `first` and
 `last`.
@@ -192,8 +192,11 @@ mutable accessors return references. `Vec` also offers shared `first` and
 `&mut [T]` is accepted as a type and coerces from `&mut Vec<T>`, and an element
 can be written through indexing (`values[0] = 9`). The mutable accessors above
 return `Option<&mut T>`, and a `match` or `if let` may use the call directly as
-its scrutinee. Mutating iterator methods and `for` loops over a slice are not
-implemented in 2.2.0 and are planned for a later release.
+its scrutinee. Since 2.3.0 a slice can be iterated with `.iter()`,
+`.iter_mut()`, `for value in &slice` and `for value in &mut slice`; the
+mutable forms yield `&mut T` items, so elements can be changed in place.
+Collecting borrowed items into a `Vec` is rejected (`E0498`); map them to
+owned values first.
 
 ## Methods on str
 
@@ -301,12 +304,12 @@ length word of the fat struct is the C `size_t`. The generated C project needs n
 new runtime functions for slices and `str`; the small helpers are emitted inline
 by the compiler.
 
-## Known limitations in 2.2.0
+## Known limitations in 2.3.0
 
 * Fixed-length arrays `[T; N]` exist since 2.2.0 and coerce to `&[T]`, but they
   are not iterable by value and cannot be mutated through `&mut` (see
   [Arrays](27-arrays.md)). Use a `Vec` when the length changes.
-* Since 2.2.0 a struct, enum, tuple or `Option` field may hold a slice or text
+* Since 2.2.0 a struct, enum or tuple struct field may hold a slice or text
   reference when the type names a lifetime parameter (see
   [Lifetimes](29-lifetimes.md)), but `Vec` elements, `HashMap` values,
   `Result`/`Box`/`Rc` payloads and arrays still reject references (`E0498`). A
@@ -314,8 +317,8 @@ by the compiler.
   owning `Vec` or `String`.
 * Mutating slice accessors exist (`get_mut`, `first_mut`, `last_mut`) and `&mut [T]`
   coerces, can be passed, and supports element assignment through indexing
-  (`values[0] = 9`). Mutating iterators and `for` loops over a slice are not
-  implemented in 2.2.0 and are planned for a later release.
+  (`values[0] = 9`). Since 2.3.0 slices support borrowing iteration:
+  `.iter()`/`.iter_mut()` and `for value in &slice`/`&mut slice`.
 * No slice patterns and no character ranges in patterns; see
   [Pattern matching](13-pattern-matching.md).
 * A `&str` is passed as `&text` (or `text.as_str()`) when it comes from an owned

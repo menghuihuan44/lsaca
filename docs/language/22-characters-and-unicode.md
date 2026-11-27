@@ -567,7 +567,7 @@ fn main() {
 Panic:
 
 ```text
-thread 'main' panicked at std/string.ls:168:16:
+thread 'main' panicked at std/string.ls:169:16:
 byte index 2 is not a char boundary; it is inside 'é' (bytes 1..3) of `héllo`
 ```
 
@@ -582,7 +582,7 @@ fn main() {
 Panic:
 
 ```text
-thread 'main' panicked at std/string.ls:168:16:
+thread 'main' panicked at std/string.ls:169:16:
 byte index 15 is out of bounds of `héllo`
 ```
 
@@ -624,6 +624,14 @@ STRASSE 7
 i̇ 2
 [hello] 5
 ```
+
+`char` has the same Unicode case methods. Because a `char` cannot grow,
+`char::to_uppercase` and `char::to_lowercase` return a single `char`: the first
+scalar of the full mapping, which is the closest character. `'ß'.to_uppercase()`
+is `'S'` and `'İ'.to_lowercase()` is `'i'`, while the `String` methods above
+return `"SS"` and `i` plus U+0307. The `char` classification methods
+(`is_alphabetic`, `is_numeric`, `is_alphanumeric` and `is_whitespace`) use the
+same Unicode 16.0.0 tables.
 
 ## `Debug` escaping
 
@@ -731,9 +739,10 @@ true
 The printed order of a `HashMap` is not specified; the map prints its slots
 in the order the implementation stores them, which is deterministic for a given
 sequence of operations but is not an insertion order and is not a language
-guarantee. Content equality (`==`) ignores insertion order. The map is not
-iterable with `for` in 1.7.0 (unchanged in 2.2.0); use `keys()` or `values()`
-first. See [HashMap](20-hashmap.md) for the implementation and hashing notes.
+guarantee. Content equality (`==`) ignores insertion order. Since 2.3.0 a map can be
+iterated with `for (key, value) in &map`; `keys()` and `values()` borrow the
+map when only one side is needed. See [HashMap](20-hashmap.md) for the
+implementation and hashing notes.
 
 ## Differences from Rust
 
@@ -745,10 +754,14 @@ The character support follows Rust closely but stays inside lsaca's design:
   `is_ascii_hexdigit()`, `is_ascii_whitespace()`, `is_ascii_control()`,
   `is_ascii_graphic()`, `is_ascii_punctuation()`, `is_ascii_word()`,
   `to_ascii_uppercase()`, `to_ascii_lowercase()` and `to_digit(radix)`, matching
-  Rust's methods (`is_ascii_word` is an lsaca extension used by the lexer). The
-  Unicode predicates (`is_alphabetic()`, `is_numeric()`, `is_whitespace()`) and
-  Unicode case conversion are not implemented yet. See
-  [char](../stdlib/char.md). Case mapping and trimming remain `String` methods.
+  Rust's methods (`is_ascii_word` is an lsaca extension used by the lexer).
+  Since v2.3 it also has the Unicode predicates `is_alphabetic()`,
+  `is_numeric()`, `is_alphanumeric()` and `is_whitespace()`, plus
+  `to_uppercase()` and `to_lowercase()`. Unlike Rust, the case methods return
+  one `char` (the closest scalar, the first of the full mapping) rather than an
+  iterator: `'ß'.to_uppercase()` is `'S'`, while `String::to_uppercase` still
+  produces `"SS"`. See [char](../stdlib/char.md). String case mapping keeps the
+  full one-to-many mappings.
 * There are no character ranges: `'a'..='z'` is not a range, and a string
   cannot be indexed with a character count. Version 2.0 adds *byte* slice
   expressions over strings (`&text[1..4]`, see [Slices and
@@ -769,26 +782,27 @@ The character support follows Rust closely but stays inside lsaca's design:
   (`usize`); `s[0]` is still rejected with E0608 (2.0 adds byte-range slicing
   `&s[0..1]`, but there is still no `char` indexing).
 
-## Known limitations in 2.2.0
+## Known limitations in 2.3.0
 
-* The `char` methods cover ASCII only; the Unicode predicates and Unicode
-  case conversion are not implemented ([char](../stdlib/char.md)), and the
-  Unicode property tables are only used internally by `String` case mapping and
-  trimming.
+* Unicode `char` case conversion returns a single `char`, the closest scalar
+  of the full mapping; Rust's iterator and the `String` methods expose the
+  complete one-to-many mapping. There is no general Unicode property
+  (script/category) or normalization API. See [char](../stdlib/char.md).
 * No grapheme cluster or normalization support; operators work on scalar
   values.
 * No locale-aware collation: comparisons and sorting use code point order.
 * `substring` panics instead of returning an `Option` (so does out-of-range
-  byte-range slicing); a panic cannot be caught in 2.2.0.
+  byte-range slicing); a panic cannot be caught in 2.3.0.
 * Invalid UTF-8 on stdin or in arguments panics rather than returning an error.
 * `chars()` allocates a `Vec`; there is no borrowing character iterator.
-* `HashMap` iteration is still not available; keys with either `String` or
-  `char` hash through a deterministic, non-cryptographic hash function, which
-  is not hardened against adversarial input.
+* `HashMap` can be iterated by reference since 2.3.0, but the order is internal
+  slot order, not insertion order; keys with either `String` or `char` hash
+  through a deterministic, non-cryptographic hash function, which is not
+  hardened against adversarial input.
 * Formatting a character ignores East Asian display width; a character counts
   as one column for width and alignment.
 
-See [Roadmap and differences from Rust](16-roadmap.md#known-limitations-in-220)
+See [Known limitations](limitations.md#current-limitations)
 for the complete list.
 
 ## Summary
@@ -802,7 +816,8 @@ for the complete list.
   `is_char_boundary` and `String::from_char` work with characters.
 * `substring` panics unless both boundaries are character boundaries and the
   range fits; the panic messages follow Rust.
-* Case mapping and trimming are Unicode-aware, and `Debug` escaping follows
+* Case mapping and trimming are Unicode-aware, `char` classifies Unicode text
+  and converts case to the closest scalar, and `Debug` escaping follows
   Rust's `escape_debug`.
 * `read_line` and `args` reject invalid UTF-8 by panicking, `read_file`
   returns an error, and `char` works as a `HashMap` key.
@@ -815,8 +830,5 @@ for the complete list.
 * [Standard library](15-standard-library.md) - complete `String` method tables
   and formatting rules.
 * [HashMap](20-hashmap.md) - the builtin map, including `char` keys.
-* [char](../stdlib/char.md) - the `std::char` classification module (the ASCII
-  methods are implemented; the Unicode helpers are not implemented in 2.2.0 and
-  are planned for a later release).
-* [Roadmap and differences from Rust](16-roadmap.md) - the full set of
-  limitations in 2.2.0.
+* [char](../stdlib/char.md) - the `std::char` classification module (ASCII and
+  Unicode classification, plus closest-scalar Unicode case conversion).

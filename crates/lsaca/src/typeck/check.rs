@@ -208,6 +208,13 @@ pub struct Checker<'a> {
     /// directly in an argument position only needs to live until the end of
     /// the call, so the E0745 temporary-value rejection is skipped there.
     pub temp_borrow_depth: u32,
+    /// True while checking compiler-owned standard-library machinery. The
+    /// borrowing iterator adapters intentionally keep references in their
+    /// upstream-iterator fields and in buffers such as `RevIter`; those
+    /// positions are otherwise rejected by the E0498 storage guard. Since
+    /// every such type is hidden inside the prelude and carries the source
+    /// loan through its iterator field, the borrow checker still tracks it.
+    pub allow_ref_storage: bool,
 }
 
 /// Internal standard-library items are prefixed so user code cannot collide
@@ -274,6 +281,7 @@ impl<'a> Checker<'a> {
             vtable_index: HashMap::new(),
             reported_object_unsafe: HashSet::new(),
             temp_borrow_depth: 0,
+            allow_ref_storage: false,
         }
     }
 
@@ -343,6 +351,22 @@ impl<'a> Checker<'a> {
             Diagnostic::error(message, span)
                 .with_code(code)
                 .with_note(note),
+        );
+    }
+
+    /// Reject a method that was called in associated-function form
+    /// (`Type::method(&value)`). Methods exist only in method-call position, so
+    /// the message names the owner and explains the fix instead of falling
+    /// through to a "cannot find type" error.
+    pub fn reject_method_as_associated(&mut self, owner: &str, item: &str, span: Span) {
+        self.error_code_note(
+            format!(
+                "method {}::{} cannot be called as an associated function",
+                owner, item
+            ),
+            span,
+            "E0599",
+            format!("call it on a value instead, for example value.{}()", item),
         );
     }
 
@@ -863,7 +887,15 @@ impl<'a> Checker<'a> {
             );
         }
         self.frames.push(frame);
+        let previous_allow_ref_storage = self.allow_ref_storage;
+        if origin.is_prelude() {
+            // Iterator adapters in the prelude legitimately store references
+            // inside their generic fields and buffers (see the E0498 guard in
+            // `refs.rs`); this flag is scoped to compiler-owned bodies.
+            self.allow_ref_storage = true;
+        }
         let mut body = self.check_block(&body_src, Some(&sig.ret));
+        self.allow_ref_storage = previous_allow_ref_storage;
         self.frames.pop();
         if pushed_env {
             self.pop_generic_env();

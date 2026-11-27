@@ -5,8 +5,9 @@
  * lsaca_rt.h; everything here is runtime-internal.
  *
  * The Unicode lookup tables are generated deterministically from Python's
- * unicodedata module by scripts/gen_unicode_tables.py and committed in
- * lsaca_rt_unicode.c, so building or running a program never needs Python.
+ * unicodedata module and the committed Unicode 16.0.0 Other_Alphabetic table by
+ * scripts/gen_unicode_tables.py, and are committed in lsaca_rt_unicode.c, so
+ * building or running a program never needs Python.
  */
 
 #ifndef LSACA_RT_UNICODE_H
@@ -64,8 +65,21 @@ bool ls_rt_unicode_char_is_printable(uint32_t scalar);
 size_t ls_rt_unicode_upper(uint32_t scalar, uint32_t out[LS_RT_UNICODE_MAX_EXPANSION]);
 size_t ls_rt_unicode_lower(uint32_t scalar, uint32_t out[LS_RT_UNICODE_MAX_EXPANSION]);
 
-/* True when the scalar has the Unicode White_Space property. Defined in
- * lsaca_rt_unicode.c and used by String.trim(). */
+/* Closest single-scalar case mapping: the first scalar of the full mapping.
+ *
+ * char::to_uppercase()/to_lowercase() in lsaca return char, so a one-to-many
+ * mapping is truncated to its first scalar (U+00DF -> 'S', U+0130 lower ->
+ * 'i'). String::to_uppercase()/to_lowercase() keep the full mapping. */
+uint32_t ls_rt_unicode_upper_scalar(uint32_t scalar);
+uint32_t ls_rt_unicode_lower_scalar(uint32_t scalar);
+
+/* Unicode property predicates used by char::is_alphabetic(), is_numeric(),
+ * is_alphanumeric() and is_whitespace(). Alphabetic is the Unicode Alphabetic
+ * derived property (L* + Nl + Other_Alphabetic); numeric is the union of the
+ * Nd, Nl and No general categories; whitespace is White_Space, the same set
+ * String.trim() uses. All are Unicode 16.0.0 and locale independent. */
+bool ls_rt_unicode_is_alphabetic(uint32_t scalar);
+bool ls_rt_unicode_is_numeric(uint32_t scalar);
 bool ls_rt_unicode_is_whitespace(uint32_t scalar);
 
 #endif /* LSACA_RT_UNICODE_H */

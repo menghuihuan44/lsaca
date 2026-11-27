@@ -20,9 +20,8 @@ fn main() {
     }
     let mut checksum = 0;
     let mut max_count = 0;
-    let keys = counts.keys();
-    for key in keys {
-        let count = *counts.get(&key).unwrap();
+    for key in counts.keys() {
+        let count = *counts.get(key).unwrap();
         checksum += count * count;
         if count > max_count {
             max_count = count;

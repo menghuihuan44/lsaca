@@ -629,6 +629,29 @@ static int ls_rt_io_resolve_address(const LsString* address, bool for_listen,
 
 #if defined(_WIN32)
 
+/* --- Lexical path predicates (Windows) --- */
+
+static int ls_rt_io_path_is_separator(char c) {
+    return c == '/' || c == '\\';
+}
+
+static int ls_rt_io_path_has_drive_prefix(const LsString* path) {
+    char first;
+
+    if (path->len < 2 || path->data[1] != ':') {
+        return 0;
+    }
+    first = path->data[0];
+    return (first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z');
+}
+
+static int ls_rt_io_path_is_absolute(const LsString* path) {
+    if (path->len >= 1 && ls_rt_io_path_is_separator(path->data[0])) {
+        return 1;
+    }
+    return ls_rt_io_path_has_drive_prefix(path);
+}
+
 /* --- UTF-8 / UTF-16 conversion --- */
 
 /* Convert UTF-8 bytes to a NUL terminated UTF-16 string. The caller owns the
@@ -2465,6 +2488,21 @@ static void ls_rt_io_platform_shutdown(void) {
 
 #else /* POSIX implementation */
 
+/* --- Lexical path predicates (POSIX) --- */
+
+static int ls_rt_io_path_is_separator(char c) {
+    return c == '/';
+}
+
+static int ls_rt_io_path_has_drive_prefix(const LsString* path) {
+    (void)path;
+    return 0;
+}
+
+static int ls_rt_io_path_is_absolute(const LsString* path) {
+    return path->len >= 1 && ls_rt_io_path_is_separator(path->data[0]);
+}
+
 /* --- POSIX files --- */
 
 static void ls_rt_io_close_descriptor(intptr_t native) {
@@ -3590,6 +3628,148 @@ static void ls_rt_io_platform_shutdown(void) {
 }
 
 #endif /* platform implementation */
+
+/* --- Lexical path helpers --- */
+
+/* Length after trailing separators are removed. A path made only of separators
+ * trims to zero and is treated as a root by the callers below. */
+static size_t ls_rt_io_path_trimmed_length(const LsString* path) {
+    size_t length = path->len;
+
+    while (length > 0 && ls_rt_io_path_is_separator(path->data[length - 1])) {
+        length -= 1;
+    }
+    return length;
+}
+
+/* Number of leading bytes occupied by a Windows drive prefix ("C:"). Always
+ * zero on POSIX. */
+static size_t ls_rt_io_path_drive_length(const LsString* path) {
+    return ls_rt_io_path_has_drive_prefix(path) ? (size_t)2 : (size_t)0;
+}
+
+LsString* ls_io_path_join(const LsString* base, const LsString* segment) {
+    size_t separator;
+    size_t length;
+    char* bytes;
+    LsString* result;
+
+    if (base == NULL || segment == NULL) {
+        return NULL;
+    }
+    if (segment->len == 0) {
+        return ls_str_alloc_from(base->data, base->len);
+    }
+    if (base->len == 0 || ls_rt_io_path_is_absolute(segment)) {
+        return ls_str_alloc_from(segment->data, segment->len);
+    }
+    separator = ls_rt_io_path_is_separator(base->data[base->len - 1]) ? 0 : 1;
+    length = base->len + separator + segment->len;
+    bytes = (char*)malloc(length);
+    if (bytes == NULL) {
+        ls_rt_alloc_failure(length);
+    }
+    memcpy(bytes, base->data, base->len);
+    if (separator != 0) {
+        bytes[base->len] = '/';
+    }
+    memcpy(bytes + base->len + separator, segment->data, segment->len);
+    result = ls_str_alloc_from(bytes, length);
+    free(bytes);
+    return result;
+}
+
+LsString* ls_io_path_parent(const LsString* path) {
+    size_t length;
+    size_t drive_length;
+    size_t last;
+    size_t prefix_length;
+
+    if (path == NULL) {
+        return NULL;
+    }
+    length = ls_rt_io_path_trimmed_length(path);
+    if (length == 0) {
+        return NULL;
+    }
+    drive_length = ls_rt_io_path_drive_length(path);
+    if (drive_length != 0 && length == drive_length) {
+        return NULL;
+    }
+    last = length;
+    while (last > 0 && !ls_rt_io_path_is_separator(path->data[last - 1])) {
+        last -= 1;
+    }
+    if (last == 0) {
+        if (ls_rt_io_path_is_absolute(path) && drive_length != 0) {
+            return ls_str_alloc_from(path->data, drive_length);
+        }
+        return ls_str_alloc_from(path->data, (size_t)0);
+    }
+    prefix_length = last - 1;
+    while (prefix_length > 0 &&
+           ls_rt_io_path_is_separator(path->data[prefix_length - 1])) {
+        prefix_length -= 1;
+    }
+    if (prefix_length == 0) {
+        return ls_str_alloc_from(path->data + (last - 1), (size_t)1);
+    }
+    if (drive_length != 0 && prefix_length == drive_length) {
+        return ls_str_alloc_from(path->data, drive_length + 1);
+    }
+    return ls_str_alloc_from(path->data, prefix_length);
+}
+
+LsString* ls_io_path_file_name(const LsString* path) {
+    size_t length;
+    size_t drive_length;
+    size_t start;
+
+    if (path == NULL) {
+        return NULL;
+    }
+    length = ls_rt_io_path_trimmed_length(path);
+    if (length == 0) {
+        return NULL;
+    }
+    drive_length = ls_rt_io_path_drive_length(path);
+    if (drive_length != 0 && length == drive_length) {
+        return NULL;
+    }
+    start = length;
+    while (start > drive_length &&
+           !ls_rt_io_path_is_separator(path->data[start - 1])) {
+        start -= 1;
+    }
+    return ls_str_alloc_from(path->data + start, length - start);
+}
+
+LsString* ls_io_path_extension(const LsString* path) {
+    LsString* name = ls_io_path_file_name(path);
+    size_t index;
+    size_t last_dot = 0;
+    size_t length;
+    int found = 0;
+    LsString* result;
+
+    if (name == NULL) {
+        return NULL;
+    }
+    length = name->len;
+    for (index = 0; index < length; index += 1) {
+        if (name->data[index] == '.') {
+            last_dot = index;
+            found = 1;
+        }
+    }
+    if (!found || last_dot == 0 || last_dot + 1 >= length) {
+        ls_release(name);
+        return NULL;
+    }
+    result = ls_str_alloc_from(name->data + last_dot + 1, length - last_dot - 1);
+    ls_release(name);
+    return result;
+}
 
 /* --- Handle-less public helpers --- */
 

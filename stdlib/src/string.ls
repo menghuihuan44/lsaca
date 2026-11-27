@@ -38,6 +38,7 @@ pub extern fn __str_new() -> String;
 pub extern fn __str_from(value: String) -> String;
 pub extern fn __str_from_char(ch: char) -> String;
 pub extern fn __str_from_str(value: &str) -> String;
+pub extern fn __str_from_bytes(bytes: &[u8]) -> String;
 
 // Frozen Phase B read-only text query intrinsics (receiver and text arguments
 // are &str). They are used by both impl String and impl str below.

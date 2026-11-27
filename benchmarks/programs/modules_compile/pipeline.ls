@@ -41,12 +41,12 @@ pub fn words() -> Vec<String> {
 
 pub fn sum_even_squares(limit: i64) -> i64 {
     let values = numbers(limit);
-    values.iter().filter(|n| *n % 2 == 0).map(|n| n * n).fold(0, |acc, item| acc + item)
+    values.into_iter().filter(|n| *n % 2 == 0).map(|n| n * n).fold(0, |acc, item| acc + item)
 }
 
 pub fn product_odd(limit: i64) -> i64 {
     let values = numbers(limit);
-    let odds: Vec<i64> = values.iter().filter(|n| *n % 2 == 1).collect();
+    let odds: Vec<i64> = values.into_iter().filter(|n| *n % 2 == 1).collect();
     let mut product = 1;
     let mut index = 0;
     while index < odds.len() {
@@ -58,36 +58,36 @@ pub fn product_odd(limit: i64) -> i64 {
 
 pub fn count_above(limit: i64, threshold: i64) -> i64 {
     let values = numbers(limit);
-    values.iter().filter(|n| *n > threshold).count() as i64
+    values.into_iter().filter(|n| *n > threshold).count() as i64
 }
 
 pub fn sum_skip_take(limit: i64) -> i64 {
     let values = numbers(limit);
-    values.iter().skip(2).take(4).sum()
+    values.into_iter().skip(2).take(4).sum()
 }
 
 pub fn collect_evens(limit: i64) -> Vec<i64> {
     let values = numbers(limit);
-    let kept: Vec<i64> = values.iter().filter(|n| *n % 2 == 0).collect();
+    let kept: Vec<i64> = values.into_iter().filter(|n| *n % 2 == 0).collect();
     kept
 }
 
 pub fn collect_doubles(limit: i64) -> Vec<i64> {
     let values = numbers(limit);
-    let doubled: Vec<i64> = values.iter().map(|n| n * 2).collect();
+    let doubled: Vec<i64> = values.into_iter().map(|n| n * 2).collect();
     doubled
 }
 
 pub fn collect_cubes(limit: i64) -> Vec<i64> {
     let values = numbers(limit);
-    let cubes = values.iter().map(|n| n * n).map(|n| n * 3).collect::<Vec<i64>>();
+    let cubes = values.into_iter().map(|n| n * n).map(|n| n * 3).collect::<Vec<i64>>();
     cubes
 }
 
 pub fn enumerate_sum(limit: i64) -> i64 {
     let values = numbers(limit);
     let mut total = 0;
-    for pair in values.iter().enumerate() {
+    for pair in values.into_iter().enumerate() {
         let (index, value) = pair;
         total += (index as i64) * value;
     }
@@ -96,17 +96,17 @@ pub fn enumerate_sum(limit: i64) -> i64 {
 
 pub fn chain_sum(limit: i64) -> i64 {
     let values = numbers(limit);
-    values.iter().filter(|n| *n % 2 == 0).map(|n| n * n).fold(0, |acc, item| acc + item)
+    values.into_iter().filter(|n| *n % 2 == 0).map(|n| n * n).fold(0, |acc, item| acc + item)
 }
 
 pub fn chain_product(limit: i64) -> i64 {
     let values = numbers(limit);
-    values.iter().filter(|n| *n % 3 == 0).map(|n| n / 3).fold(1, |acc, item| acc * item)
+    values.into_iter().filter(|n| *n % 3 == 0).map(|n| n / 3).fold(1, |acc, item| acc * item)
 }
 
 pub fn nested_chain(limit: i64) -> i64 {
     let values = squares(limit);
-    values.iter().filter(|n| *n % 3 == 0).map(|n| n / 3).filter(|n| *n > 2).fold(0, |acc, item| acc + item)
+    values.into_iter().filter(|n| *n % 3 == 0).map(|n| n / 3).filter(|n| *n > 2).fold(0, |acc, item| acc + item)
 }
 
 pub fn joined_words(limit: i64) -> String {
@@ -116,7 +116,7 @@ pub fn joined_words(limit: i64) -> String {
         values.push(format!("w{}", index % 7));
         index += 1;
     }
-    let joined = values.iter().fold(String::from(""), |acc, item| acc + &item);
+    let joined = values.into_iter().fold(String::from(""), |acc, item| acc + &item);
     joined
 }
 
@@ -127,7 +127,7 @@ pub fn shouted_words(limit: i64) -> Vec<String> {
         values.push(format!("w{}", index));
         index += 1;
     }
-    let shouted = values.iter().map(|word| word + "!").collect::<Vec<String>>();
+    let shouted = values.into_iter().map(|word| word + "!").collect::<Vec<String>>();
     shouted
 }
 
@@ -138,7 +138,7 @@ pub fn word_lengths(limit: i64) -> Vec<i64> {
         values.push(format!("value-{}", index));
         index += 1;
     }
-    let lengths: Vec<i64> = values.iter().map(|word| word.len() as i64).collect();
+    let lengths: Vec<i64> = values.into_iter().map(|word| word.len() as i64).collect();
     lengths
 }
 
@@ -150,7 +150,7 @@ pub fn longest_word_length(limit: i64) -> i64 {
         values.push(format!("{}-{}", base[0], index));
         index += 1;
     }
-    let lengths: Vec<i64> = values.iter().map(|word| word.len() as i64).collect();
+    let lengths: Vec<i64> = values.into_iter().map(|word| word.len() as i64).collect();
     let mut longest = 0;
     let mut index = 0;
     while index < lengths.len() {
@@ -169,7 +169,7 @@ pub fn total_word_length(limit: i64) -> i64 {
         values.push(format!("word{}", index));
         index += 1;
     }
-    values.iter().map(|word| word.len() as i64).sum()
+    values.into_iter().map(|word| word.len() as i64).sum()
 }
 
 pub fn any_longer_than(limit: i64, threshold: i64) -> bool {
@@ -180,7 +180,7 @@ pub fn any_longer_than(limit: i64, threshold: i64) -> bool {
         values.push(format!("{}-{}", base[1], index));
         index += 1;
     }
-    values.iter().any(|word| word.len() > (threshold as usize))
+    values.into_iter().any(|word| word.len() > (threshold as usize))
 }
 
 pub fn all_shorter_than(limit: i64, threshold: i64) -> bool {
@@ -191,11 +191,11 @@ pub fn all_shorter_than(limit: i64, threshold: i64) -> bool {
         values.push(format!("{}-{}", base[2], index));
         index += 1;
     }
-    values.iter().all(|word| word.len() < (threshold as usize))
+    values.into_iter().all(|word| word.len() < (threshold as usize))
 }
 
 pub fn find_at_least(values: Vec<i64>, threshold: i64) -> i64 {
-    let found = values.iter().find(|n| *n > threshold);
+    let found = values.into_iter().find(|n| *n > threshold);
     match found {
         Some(value) => value,
         None => -1,
@@ -204,7 +204,7 @@ pub fn find_at_least(values: Vec<i64>, threshold: i64) -> i64 {
 
 pub fn first_above_index(limit: i64, threshold: i64) -> i64 {
     let values = squares(limit);
-    let found = values.iter().find(|n| *n > threshold);
+    let found = values.into_iter().find(|n| *n > threshold);
     match found {
         Some(value) => value / threshold,
         None => 0,
@@ -212,7 +212,7 @@ pub fn first_above_index(limit: i64, threshold: i64) -> i64 {
 }
 
 pub fn row_lengths(matrix: Vec<Vec<i64>>) -> Vec<i64> {
-    let lengths: Vec<i64> = matrix.iter().map(|row| row.len() as i64).collect();
+    let lengths: Vec<i64> = matrix.into_iter().map(|row| row.len() as i64).collect();
     lengths
 }
 
@@ -221,7 +221,7 @@ pub fn row_totals(matrix: &Vec<Vec<i64>>) -> Vec<i64> {
     let mut row = 0;
     while row < matrix.len() {
         let row_values = matrix[row].clone();
-        let total: i64 = row_values.iter().sum();
+        let total: i64 = row_values.into_iter().sum();
         totals.push(total);
         row += 1;
     }
@@ -233,7 +233,7 @@ pub fn matrix_flat_total(matrix: &Vec<Vec<i64>>) -> i64 {
     let mut row = 0;
     while row < matrix.len() {
         let row_values = matrix[row].clone();
-        total += row_values.iter().fold(0, |acc, item| acc + item);
+        total += row_values.into_iter().fold(0, |acc, item| acc + item);
         row += 1;
     }
     total
@@ -241,7 +241,7 @@ pub fn matrix_flat_total(matrix: &Vec<Vec<i64>>) -> i64 {
 
 pub fn lazy_locals(limit: i64) -> i64 {
     let values = numbers(limit);
-    let doubled = values.iter().map(|n| n * 2);
+    let doubled = values.into_iter().map(|n| n * 2);
     let kept = doubled.filter(|n| *n > 4);
     let mut total = 0;
     for value in kept {
@@ -252,7 +252,7 @@ pub fn lazy_locals(limit: i64) -> i64 {
 
 pub fn captured_offset(limit: i64, offset: i64) -> i64 {
     let values = numbers(limit);
-    let total: i64 = values.iter().fold(0, |acc, item| acc + item * offset);
+    let total: i64 = values.into_iter().fold(0, |acc, item| acc + item * offset);
     total
 }
 
@@ -264,14 +264,14 @@ pub fn captured_suffix(limit: i64) -> Vec<String> {
         values.push(format!("tag{}", index));
         index += 1;
     }
-    let tagged: Vec<String> = values.iter().map(|word| format!("{}{}", word, suffix)).collect();
+    let tagged: Vec<String> = values.into_iter().map(|word| format!("{}{}", word, suffix)).collect();
     tagged
 }
 
 pub fn window_sums(limit: i64) -> i64 {
     let values = numbers(limit);
     let mut total = 0;
-    for value in values.iter().skip(1).take(5) {
+    for value in values.into_iter().skip(1).take(5) {
         total = total + value;
         total = total + value;
     }
@@ -288,11 +288,11 @@ pub fn checksum(seed: i64) -> i64 {
 
     let evens = collect_evens(10);
     acc = (acc * 31 + evens.len() as i64) % MODULUS;
-    acc = (acc * 31 + evens.iter().sum()) % MODULUS;
+    acc = (acc * 31 + evens.into_iter().sum()) % MODULUS;
 
     let doubles = collect_doubles(6);
     acc = (acc * 31 + doubles.len() as i64) % MODULUS;
-    acc = (acc * 31 + doubles.iter().fold(0, |acc2, item| acc2 + item)) % MODULUS;
+    acc = (acc * 31 + doubles.into_iter().fold(0, |acc2, item| acc2 + item)) % MODULUS;
 
     let cubes = collect_cubes(4);
     acc = (acc * 31 + cubes.len() as i64) % MODULUS;
@@ -312,7 +312,7 @@ pub fn checksum(seed: i64) -> i64 {
 
     let lengths = word_lengths(5);
     acc = (acc * 31 + lengths.len() as i64) % MODULUS;
-    acc = (acc * 31 + lengths.iter().sum()) % MODULUS;
+    acc = (acc * 31 + lengths.into_iter().sum()) % MODULUS;
 
     acc = (acc * 31 + longest_word_length(3)) % MODULUS;
     acc = (acc * 31 + total_word_length(4)) % MODULUS;
@@ -336,7 +336,7 @@ pub fn checksum(seed: i64) -> i64 {
         vec![6, 7, 8, 9],
     ];
     let lengths = row_lengths(matrix);
-    acc = (acc * 31 + lengths.iter().sum()) % MODULUS;
+    acc = (acc * 31 + lengths.into_iter().sum()) % MODULUS;
 
     let grid: Vec<Vec<i64>> = vec![
         vec![2, 4, 6],

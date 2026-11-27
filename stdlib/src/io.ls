@@ -15,6 +15,7 @@
 
 use crate::core::From;
 use crate::error::Error as ErrorTrait;
+use crate::string::__str_from_bytes;
 
 // Intrinsic declarations for the runtime error record.
 pub extern fn __io_last_error_kind() -> i64;
@@ -150,6 +151,231 @@ impl ErrorTrait for Error {
 }
 
 // ===========================================================================
+// Stream traits
+// ===========================================================================
+
+/// A source of bytes.
+///
+/// A single call may read fewer bytes than the buffer can hold, including zero
+/// at the end of the stream. Implementations never inspect the old contents of
+/// the buffer.
+pub trait Read {
+    /// Reads up to buffer.len() bytes, returning the number read.
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Error>;
+}
+
+/// A destination for bytes.
+pub trait Write {
+    /// Writes up to buffer.len() bytes, returning the number written.
+    fn write(&mut self, buffer: &[u8]) -> Result<usize, Error>;
+
+    /// Flushes any buffered bytes to the underlying destination.
+    fn flush(&mut self) -> Result<(), Error>;
+
+    /// Writes every byte of the buffer.
+    ///
+    /// A write that accepts zero bytes is reported as an error so the loop
+    /// cannot spin forever.
+    fn write_all(&mut self, buffer: &[u8]) -> Result<(), Error> {
+        let mut remaining: Vec<u8> = __io_bytes_from(buffer, 0);
+        while remaining.len() > 0 {
+            let count: usize = self.write(remaining.as_slice())?;
+            if count == 0 {
+                return Err(Error::other(String::from("failed to write whole buffer")));
+            }
+            remaining = __io_bytes_from(remaining.as_slice(), count);
+        }
+        return Ok(());
+    }
+}
+
+/// A changeable stream position.
+///
+/// whence is 0 for the start of the stream, 1 for the current position and 2
+/// for the end; the returned value is the new absolute position.
+pub trait Seek {
+    /// Moves the stream position.
+    fn seek(&mut self, offset: i64, whence: i64) -> Result<u64, Error>;
+}
+
+/// A buffered byte source that can produce UTF-8 lines and text.
+pub trait BufRead {
+    /// Reads one line and appends it to line, including the newline.
+    ///
+    /// Returns the number of bytes consumed, or zero at the end of the stream.
+    fn read_line(&mut self, line: &mut String) -> Result<usize, Error>;
+
+    /// Reads the rest of the stream and appends it to buffer.
+    ///
+    /// Returns the number of bytes consumed.
+    fn read_to_string(&mut self, buffer: &mut String) -> Result<usize, Error> {
+        let mut text: String = String::new();
+        let mut total: usize = 0;
+        loop {
+            let count: usize = self.read_line(&mut text)?;
+            if count == 0 {
+                buffer.push_str(&text);
+                return Ok(total);
+            }
+            total = total + count;
+        }
+    }
+}
+
+// ===========================================================================
+// Text decoding helpers
+// ===========================================================================
+
+/// Copies bytes into a fresh Vec, starting at start.
+fn __io_bytes_from(bytes: &[u8], start: usize) -> Vec<u8> {
+    let mut copy: Vec<u8> = Vec::new();
+    let mut index: usize = start;
+    while index < bytes.len() {
+        copy.push(bytes.get(index).unwrap());
+        index = index + 1;
+    }
+    return copy;
+}
+
+fn __io_byte_between(value: i64, low: i64, high: i64) -> bool {
+    return value >= low && value <= high;
+}
+
+fn __io_is_continuation(value: i64) -> bool {
+    return __io_byte_between(value, 0x80, 0xBF);
+}
+
+/// Validates one UTF-8 sequence at a time.
+///
+/// Overlong forms, surrogate code points and values beyond U+10FFFF are
+/// rejected, so a successful call always describes valid UTF-8.
+fn __io_is_valid_utf8(bytes: &[u8]) -> bool {
+    let length: usize = bytes.len();
+    let mut index: usize = 0;
+    while index < length {
+        let first: i64 = bytes.get(index).unwrap() as i64;
+        if first <= 0x7F {
+            index = index + 1;
+        } else if first >= 0xC2 && first <= 0xDF {
+            if index + 1 >= length {
+                return false;
+            }
+            let second: i64 = bytes.get(index + 1).unwrap() as i64;
+            if !__io_is_continuation(second) {
+                return false;
+            }
+            index = index + 2;
+        } else if first >= 0xE0 && first <= 0xEF {
+            if index + 2 >= length {
+                return false;
+            }
+            let second: i64 = bytes.get(index + 1).unwrap() as i64;
+            let third: i64 = bytes.get(index + 2).unwrap() as i64;
+            if !__io_is_continuation(third) {
+                return false;
+            }
+            if first == 0xE0 {
+                if !__io_byte_between(second, 0xA0, 0xBF) {
+                    return false;
+                }
+            } else if first == 0xED {
+                if !__io_byte_between(second, 0x80, 0x9F) {
+                    return false;
+                }
+            } else if !__io_is_continuation(second) {
+                return false;
+            }
+            index = index + 3;
+        } else if first >= 0xF0 && first <= 0xF4 {
+            if index + 3 >= length {
+                return false;
+            }
+            let second: i64 = bytes.get(index + 1).unwrap() as i64;
+            let third: i64 = bytes.get(index + 2).unwrap() as i64;
+            let fourth: i64 = bytes.get(index + 3).unwrap() as i64;
+            if !__io_is_continuation(third) || !__io_is_continuation(fourth) {
+                return false;
+            }
+            if first == 0xF0 {
+                if !__io_byte_between(second, 0x90, 0xBF) {
+                    return false;
+                }
+            } else if first == 0xF4 {
+                if !__io_byte_between(second, 0x80, 0x8F) {
+                    return false;
+                }
+            } else if !__io_is_continuation(second) {
+                return false;
+            }
+            index = index + 4;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Decodes a complete byte sequence as UTF-8 text.
+fn __io_text_from_bytes(bytes: &[u8]) -> Result<String, Error> {
+    if !__io_is_valid_utf8(bytes) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            String::from("stream did not contain valid UTF-8"),
+        ));
+    }
+    return Ok(__str_from_bytes(bytes));
+}
+
+/// Reads one newline-terminated line through a byte source.
+fn __io_read_line<R: Read>(reader: &mut R, line: &mut String) -> Result<usize, Error> {
+    let mut data: Vec<u8> = Vec::new();
+    let mut one: Vec<u8> = Vec::new();
+    one.push(0);
+    let mut total: usize = 0;
+    loop {
+        let count: usize = reader.read(one.as_mut_slice())?;
+        if count == 0 {
+            break;
+        }
+        total = total + count;
+        let mut index: usize = 0;
+        while index < count {
+            data.push(one.get(index).unwrap());
+            index = index + 1;
+        }
+        if data.get(data.len() - 1).unwrap() == 10 {
+            break;
+        }
+    }
+    let text: String = __io_text_from_bytes(data.as_slice())?;
+    line.push_str(&text);
+    return Ok(total);
+}
+
+/// Reads the rest of a byte source and appends it as UTF-8 text.
+fn __io_read_to_string<R: Read>(reader: &mut R, buffer: &mut String) -> Result<usize, Error> {
+    let mut data: Vec<u8> = Vec::new();
+    let mut chunk: Vec<u8> = Vec::new();
+    while chunk.len() < 4096 {
+        chunk.push(0);
+    }
+    loop {
+        let count: usize = reader.read(chunk.as_mut_slice())?;
+        if count == 0 {
+            break;
+        }
+        let mut index: usize = 0;
+        while index < count {
+            data.push(chunk.get(index).unwrap());
+            index = index + 1;
+        }
+    }
+    let text: String = __io_text_from_bytes(data.as_slice())?;
+    buffer.push_str(&text);
+    return Ok(data.len());
+}
+
+// ===========================================================================
 // Handles and standard streams
 // ===========================================================================
 
@@ -252,6 +478,16 @@ impl File {
         return Ok(());
     }
 
+    /// Reads the rest of the file and returns it as UTF-8 text.
+    ///
+    /// Invalid UTF-8 is reported as an InvalidInput error; the bytes are not
+    /// silently replaced. The file position advances to the end.
+    pub fn read_to_string(&mut self) -> Result<String, Error> {
+        let mut text: String = String::new();
+        __io_read_to_string(self, &mut text)?;
+        return Ok(text);
+    }
+
     /// The total size of the file in bytes.
     ///
     /// Sizes are u64 (like fs::Metadata::size); byte counts and positions are
@@ -287,11 +523,298 @@ impl File {
     }
 }
 
+impl Read for File {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
+        return self.read(buffer);
+    }
+}
+
+impl Write for File {
+    fn write(&mut self, buffer: &[u8]) -> Result<usize, Error> {
+        return self.write(buffer);
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        return self.flush();
+    }
+}
+
+impl Seek for File {
+    fn seek(&mut self, offset: i64, whence: i64) -> Result<u64, Error> {
+        return self.seek(offset, whence);
+    }
+}
+
+impl BufRead for File {
+    fn read_line(&mut self, line: &mut String) -> Result<usize, Error> {
+        return __io_read_line(self, line);
+    }
+
+    fn read_to_string(&mut self, buffer: &mut String) -> Result<usize, Error> {
+        return __io_read_to_string(self, buffer);
+    }
+}
+
 impl Drop for File {
     fn drop(&mut self) {
         if self.close_on_drop {
             __io_close(self.handle);
         }
+    }
+}
+
+// Internal bridge helpers. Calling a trait method directly on a struct field
+// would borrow the whole receiver in the current borrow checker, so these free
+// functions borrow the inner value as an ordinary local parameter instead.
+
+fn __io_fill<R: Read>(inner: &mut R, buffer: &mut [u8]) -> Result<usize, Error> {
+    return inner.read(buffer);
+}
+
+fn __io_send_all<W: Write>(inner: &mut W, bytes: &[u8]) -> Result<(), Error> {
+    return inner.write_all(bytes);
+}
+
+fn __io_finish<W: Write>(inner: &mut W) -> Result<(), Error> {
+    return inner.flush();
+}
+
+// ===========================================================================
+// Buffered adapters
+// ===========================================================================
+
+/// A reader that buffers byte reads from an inner reader.
+///
+/// The default capacity is 8192 bytes. BufReader implements Read and BufRead;
+/// pass it to code that expects an R: Read bound, or read UTF-8 lines with
+/// read_line.
+pub struct BufReader<R> {
+    inner: R,
+    buffer: Vec<u8>,
+    position: usize,
+    filled: usize,
+}
+
+impl<R> BufReader<R> {
+    /// Wraps a reader with the default 8192 byte buffer.
+    pub fn new(inner: R) -> BufReader<R> {
+        return BufReader::with_capacity(8192, inner);
+    }
+
+    /// Wraps a reader with an explicit buffer capacity.
+    pub fn with_capacity(capacity: usize, inner: R) -> BufReader<R> {
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut index: usize = 0;
+        while index < capacity {
+            buffer.push(0);
+            index = index + 1;
+        }
+        return BufReader {
+            inner: inner,
+            buffer: buffer,
+            position: 0,
+            filled: 0,
+        };
+    }
+
+    /// A reference to the wrapped reader.
+    pub fn get_ref(&self) -> &R {
+        return &self.inner;
+    }
+
+    /// The number of buffered bytes that have not been consumed yet.
+    pub fn buffered(&self) -> usize {
+        return self.filled - self.position;
+    }
+}
+
+impl<R: Read> Read for BufReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
+        let wanted: usize = buffer.len();
+        if wanted == 0 {
+            return Ok(0);
+        }
+        if self.buffer.len() == 0 {
+            return __io_fill(&mut self.inner, buffer);
+        }
+        if self.position >= self.filled {
+            let mut temp: Vec<u8> = Vec::new();
+            let mut prefill: usize = 0;
+            while prefill < self.buffer.len() {
+                temp.push(0);
+                prefill = prefill + 1;
+            }
+            let count: usize = __io_fill(&mut self.inner, temp.as_mut_slice())?;
+            if count == 0 {
+                return Ok(0);
+            }
+            let mut copy: usize = 0;
+            while copy < count {
+                self.buffer[copy] = temp.get(copy).unwrap();
+                copy = copy + 1;
+            }
+            self.position = 0;
+            self.filled = count;
+        }
+        let available: usize = self.filled - self.position;
+        let count: usize = if wanted < available { wanted } else { available };
+        let mut index: usize = 0;
+        while index < count {
+            buffer[index] = self.buffer.get(self.position + index).unwrap();
+            index = index + 1;
+        }
+        self.position = self.position + count;
+        return Ok(count);
+    }
+}
+
+impl<R: Read> BufRead for BufReader<R> {
+    fn read_line(&mut self, line: &mut String) -> Result<usize, Error> {
+        return __io_read_line(self, line);
+    }
+
+    fn read_to_string(&mut self, buffer: &mut String) -> Result<usize, Error> {
+        return __io_read_to_string(self, buffer);
+    }
+}
+
+impl<R: Seek> Seek for BufReader<R> {
+    fn seek(&mut self, offset: i64, whence: i64) -> Result<u64, Error> {
+        let mut adjusted: i64 = offset;
+        if whence == 1 {
+            adjusted = adjusted - ((self.filled - self.position) as i64);
+        }
+        self.position = 0;
+        self.filled = 0;
+        return self.inner.seek(adjusted, whence);
+    }
+}
+
+/// A writer that buffers byte writes before sending them to an inner writer.
+///
+/// The default capacity is 8192 bytes. Writes smaller than the remaining
+/// capacity are accepted immediately; reaching the capacity flushes the buffer
+/// to the inner writer. Call flush before dropping with a capacity of zero.
+pub struct BufWriter<W> {
+    inner: W,
+    buffer: Vec<u8>,
+    capacity: usize,
+}
+
+impl<W> BufWriter<W> {
+    /// Wraps a writer with the default 8192 byte buffer.
+    pub fn new(inner: W) -> BufWriter<W> {
+        return BufWriter::with_capacity(8192, inner);
+    }
+
+    /// Wraps a writer with an explicit buffer capacity.
+    pub fn with_capacity(capacity: usize, inner: W) -> BufWriter<W> {
+        return BufWriter {
+            inner: inner,
+            buffer: Vec::new(),
+            capacity: capacity,
+        };
+    }
+
+    /// A reference to the wrapped writer.
+    pub fn get_ref(&self) -> &W {
+        return &self.inner;
+    }
+
+    /// The number of bytes waiting in the buffer.
+    pub fn buffered(&self) -> usize {
+        return self.buffer.len();
+    }
+}
+
+impl<W: Write> BufWriter<W> {
+    fn flush_buffer(&mut self) -> Result<(), Error> {
+        if self.buffer.len() > 0 {
+            let mut pending: Vec<u8> = Vec::new();
+            let mut index: usize = 0;
+            while index < self.buffer.len() {
+                pending.push(self.buffer.get(index).unwrap());
+                index = index + 1;
+            }
+            self.buffer.clear();
+            let result = __io_send_all(&mut self.inner, pending.as_slice());
+            match result {
+                Ok(()) => {}
+                Err(error) => {
+                    return Err(error);
+                }
+            }
+        }
+        let result = __io_finish(&mut self.inner);
+        return result;
+    }
+}
+
+impl<W: Write> Write for BufWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> Result<usize, Error> {
+        let mut index: usize = 0;
+        while index < buffer.len() {
+            self.buffer.push(buffer.get(index).unwrap());
+            index = index + 1;
+            if self.capacity == 0 || self.buffer.len() >= self.capacity {
+                self.flush_buffer()?;
+            }
+        }
+        return Ok(index);
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        return self.flush_buffer();
+    }
+}
+
+impl<W: Write> Drop for BufWriter<W> {
+    fn drop(&mut self) {
+        if self.buffer.len() > 0 {
+            let _ = self.flush_buffer();
+        }
+    }
+}
+
+impl<W: Write + Seek> Seek for BufWriter<W> {
+    fn seek(&mut self, offset: i64, whence: i64) -> Result<u64, Error> {
+        self.flush_buffer()?;
+        return self.inner.seek(offset, whence);
+    }
+}
+
+// Trait objects can be wrapped by generic readers and writers only when the
+// trait is also implemented for Box<dyn Trait>. These forwarding impls give
+// the wrappers that bound while calls still dispatch to the boxed value.
+impl Read for Box<dyn Read> {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
+        return self.read(buffer);
+    }
+}
+
+impl Write for Box<dyn Write> {
+    fn write(&mut self, buffer: &[u8]) -> Result<usize, Error> {
+        return self.write(buffer);
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        return self.flush();
+    }
+}
+
+impl Seek for Box<dyn Seek> {
+    fn seek(&mut self, offset: i64, whence: i64) -> Result<u64, Error> {
+        return self.seek(offset, whence);
+    }
+}
+
+impl BufRead for Box<dyn BufRead> {
+    fn read_line(&mut self, line: &mut String) -> Result<usize, Error> {
+        return self.read_line(line);
+    }
+
+    fn read_to_string(&mut self, buffer: &mut String) -> Result<usize, Error> {
+        return self.read_to_string(buffer);
     }
 }
 

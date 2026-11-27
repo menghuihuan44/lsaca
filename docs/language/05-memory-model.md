@@ -53,8 +53,9 @@ Every lsaca value is represented in one of three ways:
    *fat* value: a data pointer plus a length for `&[T]`/`&mut [T]`/`&str`/
    `&mut str`, or a data pointer plus a vtable pointer for `&dyn Trait`/
    `&mut dyn Trait`. A reference is a non-owning view of an existing place; it
-   is never retained or released. Since 2.2.0 it may be a field of a struct, enum,
-   tuple or `Option` that names a lifetime parameter; `Vec`, `HashMap`, `Result`,
+   is never retained or released. Since 2.2.0 it may be a direct field of a struct, enum or tuple
+   struct that names a lifetime parameter; `Option<&T>` and tuple-typed fields
+   are rejected; `Vec`, `HashMap`, `Result`,
    `Box`, arrays and closures still reject it (`E0498`).
 
 `Copy` and `Clone` are derived automatically from a type's definition;
@@ -381,16 +382,25 @@ assignment or moving the value somewhere that releases it. See [Ownership and
 moves](11-ownership-and-moves.md#the-drop-trait) for the full set of rules and
 errors.
 
-## Iterators own the vector they read
+## Iterators borrow or own the vector they read
 
-`.iter()` consumes a `Vec<T>` and returns an iterator value that owns the
-vector. The iterator is an ordinary move-only value: it lives in a local, is
-passed and returned like any value, and releases its vector (and its elements)
-when it is dropped. Each adapter in a chain such as
-`values.iter().filter(...).map(...)` creates a new iterator value, and a terminal
-operation (such as `collect`, `fold`, `sum` or `count`) consumes the
-chain and produces an ordinary value. A `for` loop over an iterator releases it
-at loop exit. See [Iterators](19-iterators.md).
+`.iter()` borrows a `Vec<T>` and returns an iterator that yields `&T`
+items. The vector stays usable while the iterator lives, and the iterator does
+not release it when dropped. `.iter_mut()` borrows the vector mutably and
+yields `&mut T` items, so the elements can be changed in place. `.into_iter()`
+is the consuming form: it moves the vector into the iterator, which releases the
+vector and its elements when it is dropped. The same split applies to
+`&[T]`/`&mut [T]` slices and to `HashMap::iter()`, `keys()` and
+`values()`, which borrow the map instead of cloning it.
+
+An iterator is an ordinary move-only value: it lives in a local, is passed and
+returned like any value, and releases whatever it owns when it is dropped. Each
+adapter in a chain such as `values.iter().filter(...).map(...)` creates a new
+iterator value. A terminal operation (`collect`, `fold`, `sum`, `count`,
+`for_each`, ...) consumes the chain and produces an ordinary value, or releases
+it when the operation ends. A `for` loop over an iterator releases the
+iterator at loop exit, but a loop over `&values` leaves the vector owned by its
+original binding. See [Iterators](19-iterators.md).
 
 ## HashMap owns its keys and values
 
@@ -701,7 +711,7 @@ Version 1.4 also allows mutable borrows of owned heap values: `&mut String`,
 return types, and mutating methods work through them. References cannot be
 captured by closures, and most aggregates cannot store one: `Vec`, `Result`,
 `HashMap`, `Rc`, `Box` and arrays reject a reference field with `E0498`. Since
-2.2.0 a struct, enum, tuple struct or `Option` may hold a reference field when
+2.2.0 a struct, enum or tuple struct may hold a reference field when
 its declaration names a lifetime parameter (`struct View<'a> { data: &'a [i64] }`);
 such aggregates are `Copy` when every field is a reference. See
 [Lifetimes](29-lifetimes.md).
@@ -712,8 +722,7 @@ They are produced by coercion (`&Vec<T>` to `&[T]`, `&mut Vec<T>` to
 `&mut [T]`, `&String` to `&str`, `&mut String` to `&mut str`, `&T` to
 `&dyn Trait`) or by taking a slice with `&values[1..3]`; copying one copies the
 two words and never touches a reference count, and none of them can be stored
-in a `Vec`, `HashMap`, `Result`, `Box` or an array (a struct, enum, tuple or
-`Option` field may hold one since 2.2.0). Since 2.1.0 a string literal used where a `&str` is
+in a `Vec`, `HashMap`, `Result`, `Box` or an array (a struct, enum or tuple struct field may hold one since 2.2.0). Since 2.1.0 a string literal used where a `&str` is
 expected — `greet("hello")`, `s.contains("x")`, `let t: &str = "x";` — is a
 **static slice**: the bytes live in the program image, the two-word view
 points at them, and no `String` is allocated or reference-counted. An owned

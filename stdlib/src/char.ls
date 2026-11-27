@@ -1,12 +1,23 @@
 // Character classification helpers.
 //
-// The methods in `impl char` below are pure lsaca code (no extern
-// intrinsics): they compare the scalar value against ASCII code point
-// ranges, exactly like Rust's `char::is_ascii_*` family. They report
-// ASCII results only; Unicode classification such as `is_alphabetic`
-// over non-ASCII scalars needs the Unicode tables and is planned for a
-// later version, so it is documented as a limitation instead of being
-// silently wrong.
+// The `is_ascii_*` family is pure lsaca code (no extern intrinsics):
+// it compares the scalar value against ASCII code point ranges, exactly
+// like Rust's `char::is_ascii_*` family. The Unicode classification and
+// case conversion methods call extern intrinsics backed by the generated
+// tables in runtime/lsaca_rt_unicode.c, the same tables String case
+// mapping and trimming use.
+//
+// char::to_uppercase and char::to_lowercase return the closest single
+// scalar. When the Unicode mapping expands to several scalars (U+00DF
+// uppercases to "SS", U+0130 lowercases to "i" + U+0307), only the first
+// scalar is returned; String::to_uppercase/to_lowercase keep the full
+// mapping. This deviation is documented in docs/stdlib/char.md.
+
+pub extern fn __char_is_alphabetic(value: char) -> bool;
+pub extern fn __char_is_numeric(value: char) -> bool;
+pub extern fn __char_is_whitespace(value: char) -> bool;
+pub extern fn __char_to_uppercase(value: char) -> char;
+pub extern fn __char_to_lowercase(value: char) -> char;
 
 impl char {
     /// Returns `true` when the scalar is an ASCII letter, digit or
@@ -85,6 +96,43 @@ impl char {
             || (code >= 58 && code <= 64)
             || (code >= 91 && code <= 96)
             || (code >= 123 && code <= 126);
+    }
+
+    /// Returns `true` when the scalar has the Unicode Alphabetic property:
+    /// general categories L* and Nl plus Other_Alphabetic. Locale independent.
+    pub fn is_alphabetic(&self) -> bool {
+        return __char_is_alphabetic(*self);
+    }
+
+    /// Returns `true` when the scalar has the Unicode numeric property:
+    /// general categories Nd (decimal), Nl (letter) and No (other).
+    pub fn is_numeric(&self) -> bool {
+        return __char_is_numeric(*self);
+    }
+
+    /// Returns `true` for Unicode alphabetic or numeric scalars.
+    pub fn is_alphanumeric(&self) -> bool {
+        return self.is_alphabetic() || self.is_numeric();
+    }
+
+    /// Returns `true` when the scalar has the Unicode White_Space property,
+    /// the same set `String::trim` removes.
+    pub fn is_whitespace(&self) -> bool {
+        return __char_is_whitespace(*self);
+    }
+
+    /// Returns the closest single-scalar Unicode uppercase mapping.
+    /// Multi-scalar mappings are truncated to their first scalar: `'ß'`
+    /// returns `'S'` and `'ﬁ'` returns `'F'`.
+    pub fn to_uppercase(&self) -> char {
+        return __char_to_uppercase(*self);
+    }
+
+    /// Returns the closest single-scalar Unicode lowercase mapping.
+    /// Multi-scalar mappings are truncated to their first scalar: `'İ'`
+    /// returns `'i'`.
+    pub fn to_lowercase(&self) -> char {
+        return __char_to_lowercase(*self);
     }
 
     /// Maps an ASCII lowercase letter to uppercase; other scalars unchanged.

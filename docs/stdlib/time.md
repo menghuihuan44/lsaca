@@ -1,6 +1,6 @@
 # time: clocks, sleeps and dates
 
-**Status in 2.2.0.** Implemented in `stdlib/src/time.ls`. Since 2.1.0 the module
+**Status in 2.3.0.** Implemented in `stdlib/src/time.ls`. Since 2.1.0 the module
 provides the Rust-shaped values `Duration`, `Instant` and `SystemTime` plus
 `sleep(Duration)`. The older `now_ms`, `monotonic_ns`, `sleep_ms` and
 `DateTime` helpers remain for compatibility and are marked deprecated in the
@@ -105,7 +105,7 @@ and `yearday` (`0` based day of the year). `format_date`, `format_time`,
 * Times before the Unix epoch have negative millisecond counts, and `modified()`
   in [fs](fs.md) reports an error for them.
 
-## Limits in 2.2.0
+## Limits in 2.3.0
 
 There is no calendar arithmetic (add days or months to a date), no date parsing,
 no formatting beyond the `DateTime` helpers, no time zone database beyond the

@@ -10,10 +10,15 @@
 // value cloned. The returned reference points into the map's storage and keeps
 // the map borrow live (v2.2 Phase C borrowed accessors).
 //
-// get_with and values intentionally stay on the compiler fallback table: only
-// the compiler knows which value types can be cloned, and those methods report
-// E0277 for values with drop glue (use get_with instead). Keeping them there
-// preserves that diagnostic and its wording.
+// get_with stays on the compiler fallback table: only the compiler knows which
+// value types can be cloned, and it reports E0277 for values with drop glue
+// (use get_with instead). Keeping it there preserves that diagnostic and its
+// wording.
+//
+// Since 2.3 keys(), values(), iter() and iter_mut() are borrowing iterator
+// sugar provided by the compiler (see stdlib/src/iter.ls): keys() yields &K,
+// values() yields &V and iter() yields (&K, &V) pairs, so none of them clones.
+// HashMap::from(Vec<(K, V)>) builds a map from owned pairs.
 //
 // Since 2.1.0 len() returns usize like the other collection lengths.
 //
@@ -82,7 +87,13 @@ impl<K, V> HashMap<K, V> {
         __map_clear(self);
     }
 
-    pub fn keys(&self) -> Vec<K> {
-        return __map_keys(self);
+    /// Builds a map from owned (key, value) pairs. A repeated key keeps the
+    /// value from the last pair, the same as inserting the pairs in order.
+    pub fn from(pairs: Vec<(K, V)>) -> HashMap<K, V> {
+        let mut table: HashMap<K, V> = HashMap::new();
+        for (key, value) in pairs {
+            table.insert(key, value);
+        }
+        return table;
     }
 }

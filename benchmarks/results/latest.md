@@ -1,6 +1,6 @@
 # lsaca cross-language benchmarks
 
-Generated: 2026-11-07T17:21:34+08:00  
+Generated: 2026-11-27T09:03:48+08:00  
 Harness: python scripts/bench.py (see benchmarks/README.md)
 
 ## Environment
@@ -8,12 +8,12 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 - OS: Windows-11-10.0.26300-SP0
 - CPU: 12th Gen Intel(R) Core(TM) i7-1260P (16 logical CPUs)
 - RAM: 15.63 GiB
-- lsaca: lsaca 2.2.0 (target\bench-tools\lsaca.exe)
+- lsaca: lsaca 2.3.0 (target\bench-tools\lsaca.exe)
 - lsaca build backend: direct C compiler back end (default; --cmake available)
-- gcc: gcc.EXE (Rev14, Built by MSYS2 project) 15.2.0
+- gcc: gcc.EXE (Rev6, Built by MSYS2 project) 16.2.0
 - rustc: rustc 1.99.0 (b940084d7 2026-09-28)
-- Python: Python 3.14.4
-- Node.js: v24.14.1
+- Python: Python 3.14.10
+- Node.js: v26.13.0
 - cmake: cmake version 4.1.0
 - ninja: 1.13.2
 - lsaca build mode: official
@@ -22,31 +22,31 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 
 | program | lsaca cold build (default back end) | lsaca cached build | lsaca emit-c + gcc | gcc -O2 | rustc -O | Python 3 | Node.js |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fib | 1.081 | 0.083 | n/a | 0.346 | 0.712 | n/a | n/a |
-| fib_iter | 0.668 | 0.069 | n/a | 0.334 | n/a | n/a | n/a |
-| fib_memo | 0.728 | 0.072 | n/a | 0.333 | n/a | n/a | n/a |
-| loop_sum | 0.582 | 0.072 | n/a | 0.442 | 0.725 | n/a | n/a |
-| string_build | 0.791 | 0.119 | n/a | 0.292 | 0.435 | n/a | n/a |
-| vec_memory | 0.515 | 0.073 | n/a | 0.270 | 0.309 | n/a | n/a |
-| sort_i64 | 0.609 | 0.081 | n/a | 0.347 | 0.583 | n/a | n/a |
-| sort_insertion | 0.603 | 0.069 | n/a | 0.288 | n/a | n/a | n/a |
-| matrix_multiply | 0.515 | 0.067 | n/a | 0.279 | 0.336 | n/a | n/a |
-| binary_trees | 0.578 | 0.061 | n/a | 0.379 | 0.448 | n/a | n/a |
-| binary_trees_refs | 0.662 | 0.066 | n/a | 0.312 | 0.427 | n/a | n/a |
-| string_split | 0.535 | 0.065 | n/a | 0.252 | 0.421 | n/a | n/a |
-| sieve | 0.685 | 0.065 | n/a | 0.262 | 0.423 | n/a | n/a |
-| mandelbrot | 0.480 | 0.064 | n/a | 0.255 | 0.252 | n/a | n/a |
-| iterator_pipeline | 2.069 | 0.076 | n/a | 0.270 | 0.349 | n/a | n/a |
-| hashmap_wordcount | 0.940 | 0.122 | n/a | 0.366 | 0.560 | n/a | n/a |
-| array_wordcount | 0.626 | 0.064 | n/a | 0.292 | n/a | n/a | n/a |
-| generic_stack | 0.667 | 0.088 | n/a | 0.291 | 0.366 | n/a | n/a |
-| fn_pipeline | 1.969 | 0.073 | n/a | 0.284 | 0.305 | n/a | n/a |
-| string_unicode | 0.797 | 0.095 | n/a | 0.437 | 0.449 | n/a | n/a |
-| hashmap_i64 | 0.505 | 0.060 | n/a | 0.273 | 0.546 | n/a | n/a |
-| hashmap_string | 0.625 | 0.075 | n/a | 0.311 | 0.699 | n/a | n/a |
-| compile_large (compile-only) | 2.367 | 0.662 | n/a | n/a | n/a | n/a | n/a |
-| modules_compile (compile-only) | 4.210 | 0.814 | n/a | n/a | n/a | n/a | n/a |
-| package_compile (compile-only) | 1.615 | 0.174 | n/a | n/a | n/a | n/a | n/a |
+| fib | 0.827 | 0.122 | n/a | 0.429 | 0.598 | n/a | n/a |
+| fib_iter | 0.667 | 0.099 | n/a | 0.311 | n/a | n/a | n/a |
+| fib_memo | 0.670 | 0.096 | n/a | 0.384 | n/a | n/a | n/a |
+| loop_sum | 0.592 | 0.092 | n/a | 0.265 | 0.388 | n/a | n/a |
+| string_build | 0.497 | 0.091 | n/a | 0.263 | 0.387 | n/a | n/a |
+| vec_memory | 0.447 | 0.086 | n/a | 0.278 | 0.313 | n/a | n/a |
+| sort_i64 | 0.645 | 0.100 | n/a | 0.374 | 0.447 | n/a | n/a |
+| sort_insertion | 0.611 | 0.102 | n/a | 0.338 | n/a | n/a | n/a |
+| matrix_multiply | 0.604 | 0.097 | n/a | 0.393 | 0.358 | n/a | n/a |
+| binary_trees | 0.572 | 0.098 | n/a | 0.269 | 0.348 | n/a | n/a |
+| binary_trees_refs | 0.590 | 0.090 | n/a | 0.361 | 0.344 | n/a | n/a |
+| string_split | 0.485 | 0.115 | n/a | 0.311 | 0.502 | n/a | n/a |
+| sieve | 0.553 | 0.099 | n/a | 0.311 | 0.410 | n/a | n/a |
+| mandelbrot | 0.487 | 0.098 | n/a | 0.274 | 0.277 | n/a | n/a |
+| iterator_pipeline | 2.674 | 0.110 | n/a | 0.283 | 0.328 | n/a | n/a |
+| hashmap_wordcount | 0.684 | 0.114 | n/a | 0.425 | 0.512 | n/a | n/a |
+| array_wordcount | 0.486 | 0.118 | n/a | 0.363 | n/a | n/a | n/a |
+| generic_stack | 0.748 | 0.110 | n/a | 0.326 | 0.384 | n/a | n/a |
+| fn_pipeline | 2.643 | 0.105 | n/a | 0.268 | 0.314 | n/a | n/a |
+| string_unicode | 0.634 | 0.115 | n/a | 0.457 | 0.461 | n/a | n/a |
+| hashmap_i64 | 0.882 | 0.154 | n/a | 0.327 | 0.598 | n/a | n/a |
+| hashmap_string | 0.880 | 0.127 | n/a | 0.514 | 0.634 | n/a | n/a |
+| compile_large (compile-only) | 3.138 | 0.906 | n/a | n/a | n/a | n/a | n/a |
+| modules_compile (compile-only) | 5.238 | 0.888 | n/a | n/a | n/a | n/a | n/a |
+| package_compile (compile-only) | 1.968 | 0.221 | n/a | n/a | n/a | n/a | n/a |
 
 > lsaca cold build: the default `lsaca build -r`, repeated --compile-repeats times (default 3), each repeat starting from a fresh LSACA_CACHE_DIR. Since 1.2 the default build back end is the compiler's built-in direct C compiler back end: it emits the generated C and compiles it together with the cached runtime translation units using gcc. The cached build repeats the command against the same cache directory (the runtime objects and the content-addressed project are reused, so it mostly just re-links). The compiler still supports the older CMake + Ninja path via `lsaca build -r --cmake`; the harness does not measure it by default. Cold and cached compile times are medians of --compile-repeats runs (default 3); latest.json stores every run plus the minimum and maximum.
 
@@ -58,65 +58,65 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 
 | language | fib | fib_iter | fib_memo | loop_sum | string_build | vec_memory | sort_i64 | sort_insertion | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot | iterator_pipeline | hashmap_wordcount | array_wordcount | generic_stack | fn_pipeline | string_unicode | hashmap_i64 | hashmap_string |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 37.4 (34.0) | 16.1 (15.6) | 17.2 (16.6) | 27.6 (23.9) | 108.4 (99.4) | 23.0 (20.6) | 43.6 (40.4) | 14.5 (14.0) | 18.0 (16.6) | 192.9 (189.0) | 36.8 (35.4) | 25.9 (25.1) | 36.0 (34.1) | 34.2 (33.8) | 20.1 (19.3) | 49.3 (43.5) | 19.0 (17.4) | 25.2 (23.1) | 15.5 (15.0) | 42.7 (40.6) | 234.4 (220.9) | 227.5 (224.0) |
-| C (gcc -O2) | 30.5 (27.7) | 14.0 (12.8) | 11.6 (11.0) | 22.6 (17.5) | 15.9 (14.4) | 16.4 (15.7) | 30.9 (28.8) | 10.0 (9.2) | 12.2 (11.7) | 23.6 (21.0) | 20.8 (19.7) | 12.9 (12.4) | 30.0 (28.8) | 32.0 (28.7) | 18.1 (17.6) | 28.6 (27.0) | 10.6 (9.8) | 22.0 (20.6) | 13.0 (12.0) | 14.9 (13.3) | 148.8 (144.2) | 246.2 (170.5) |
-| Rust (rustc -O) | 25.4 (22.5) | n/a | n/a | 22.7 (18.9) | 74.5 (67.2) | 16.9 (15.8) | 32.5 (30.8) | n/a | 12.1 (11.8) | 24.4 (22.2) | 24.2 (23.4) | 13.2 (12.4) | 28.2 (26.7) | 30.1 (28.8) | 20.5 (19.1) | 53.7 (52.1) | n/a | 19.6 (19.1) | 13.3 (12.7) | 15.1 (13.8) | 200.7 (188.9) | 256.8 (249.5) |
-| Python 3 | 1273.7 (1145.5) | n/a | n/a | 1138.7 (1057.9) | 450.6 (411.9) | 549.2 (503.9) | 761.8 (629.9) | n/a | 1306.9 (1165.6) | 105.5 (98.8) | 119.8 (107.8) | 64.3 (60.7) | 546.6 (523.6) | 2523.5 (2367.7) | 231.5 (227.3) | 115.5 (109.9) | n/a | 364.1 (341.7) | 41.8 (39.4) | 240.6 (226.7) | 2118.3 (1887.5) | 1031.6 (994.4) |
-| Node.js | 307.2 (262.5) | n/a | n/a | 177.0 (148.1) | 266.1 (235.5) | 268.1 (231.4) | 224.3 (212.7) | n/a | 139.2 (136.6) | 155.6 (144.6) | 149.2 (143.5) | 148.2 (134.0) | 186.7 (156.0) | 166.5 (160.0) | 156.9 (151.0) | 174.9 (152.3) | n/a | 152.0 (149.3) | 128.9 (124.5) | 174.8 (161.7) | 665.8 (639.1) | 373.4 (357.8) |
+| lsaca | 33.1 (30.5) | 15.4 (13.9) | 17.1 (14.1) | 17.5 (16.3) | 85.5 (76.9) | 18.4 (17.6) | 39.0 (36.8) | 18.3 (16.9) | 18.7 (18.2) | 209.1 (202.7) | 38.8 (34.5) | 34.1 (28.5) | 57.7 (47.4) | 38.9 (34.6) | 18.5 (17.6) | 43.3 (38.5) | 18.2 (16.5) | 21.2 (20.1) | 13.7 (13.1) | 41.5 (38.5) | 309.7 (283.0) | 300.2 (252.3) |
+| C (gcc -O2) | 33.3 (31.3) | 12.2 (11.2) | 11.3 (10.5) | 12.4 (11.7) | 13.7 (13.0) | 15.6 (14.1) | 35.5 (34.9) | 13.6 (11.1) | 15.5 (15.1) | 16.7 (16.2) | 21.0 (20.2) | 22.0 (17.7) | 38.4 (34.5) | 34.9 (31.4) | 17.3 (16.6) | 32.9 (31.1) | 13.6 (12.4) | 25.1 (21.8) | 13.0 (12.2) | 18.2 (17.3) | 187.4 (181.4) | 230.8 (219.9) |
+| Rust (rustc -O) | 20.7 (19.2) | n/a | n/a | 12.9 (11.7) | 56.5 (55.4) | 17.8 (16.7) | 33.9 (31.9) | n/a | 13.5 (12.4) | 24.4 (23.6) | 18.0 (17.4) | 21.1 (18.8) | 32.9 (29.3) | 32.8 (31.6) | 17.1 (17.0) | 51.6 (49.7) | n/a | 19.2 (17.0) | 13.3 (12.8) | 16.1 (15.7) | 209.2 (205.2) | 245.9 (235.8) |
+| Python 3 | 1074.2 (975.5) | n/a | n/a | 302.1 (278.6) | 167.2 (163.1) | 264.2 (251.0) | 372.6 (350.4) | n/a | 421.5 (393.3) | 81.3 (76.5) | 83.5 (81.5) | 66.8 (54.7) | 259.9 (251.6) | 726.1 (708.5) | 117.7 (113.1) | 79.4 (74.3) | n/a | 226.8 (212.0) | 38.4 (35.8) | 158.2 (139.3) | 1095.1 (1013.9) | 706.1 (669.5) |
+| Node.js | 158.8 (154.0) | n/a | n/a | 95.8 (93.7) | 107.7 (104.2) | 157.2 (145.7) | 118.4 (111.3) | n/a | 88.4 (83.2) | 69.0 (67.3) | 71.4 (70.0) | 88.3 (84.1) | 97.6 (91.4) | 86.9 (84.9) | 96.5 (90.7) | 88.3 (82.0) | n/a | 101.7 (95.2) | 69.2 (66.8) | 134.5 (128.6) | 691.3 (634.2) | 522.5 (478.4) |
 
 ## Peak memory (MiB, peak working set; lower is better)
 
 | language | fib | fib_iter | fib_memo | loop_sum | string_build | vec_memory | sort_i64 | sort_insertion | matrix_multiply | binary_trees | binary_trees_refs | string_split | sieve | mandelbrot | iterator_pipeline | hashmap_wordcount | array_wordcount | generic_stack | fn_pipeline | string_unicode | hashmap_i64 | hashmap_string |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lsaca | 5.1 | 5.1 | 5.1 | 5.1 | 11.7 | 20.1 | 7.9 | 5.2 | 5.5 | 53.1 | 17.1 | 10.6 | 20.1 | 5.1 | 12.5 | 5.5 | 5.1 | 13.9 | 5.2 | 6.4 | 56.6 | 30.8 |
-| C (gcc -O2) | 4.0 | 4.0 | 4.0 | 4.0 | 7.3 | 18.8 | 5.1 | 4.0 | 4.4 | 7.7 | 7.7 | 4.1 | 18.8 | 4.0 | 11.2 | 4.2 | 4.1 | 12.6 | 4.0 | 4.3 | 52.5 | 19.7 |
-| Rust (rustc -O) | 4.2 | n/a | n/a | 4.2 | 7.4 | 18.9 | 5.2 | n/a | 4.5 | 7.7 | 7.7 | 4.4 | 18.9 | 4.2 | 11.3 | 4.4 | n/a | 12.7 | 4.1 | 4.7 | 55.9 | 19.8 |
-| Python 3 | 11.0 | n/a | n/a | 10.9 | 74.5 | 142.8 | 20.4 | n/a | 13.8 | 21.0 | 21.1 | 17.1 | 26.2 | 11.0 | 49.2 | 11.4 | n/a | 54.2 | 11.1 | 25.6 | 113.5 | 38.0 |
-| Node.js | 42.9 | n/a | n/a | 44.9 | 88.4 | 121.3 | 51.6 | n/a | 47.1 | 56.4 | 56.5 | 50.9 | 59.0 | 44.6 | 58.0 | 46.6 | n/a | 72.3 | 43.1 | 69.2 | 102.7 | 90.6 |
+| lsaca | 4.5 | 4.5 | 4.5 | 4.5 | 11.0 | 19.3 | 7.1 | 4.5 | 4.6 | 52.3 | 16.2 | 9.8 | 19.3 | 4.5 | 11.6 | 4.7 | 4.5 | 13.0 | 4.5 | 5.6 | 55.8 | 30.0 |
+| C (gcc -O2) | 4.0 | 4.0 | 4.0 | 4.0 | 7.3 | 18.8 | 5.0 | 4.0 | 4.3 | 7.6 | 7.6 | 4.0 | 18.8 | 4.0 | 11.1 | 4.2 | 4.0 | 12.5 | 4.0 | 4.7 | 52.5 | 19.6 |
+| Rust (rustc -O) | 4.1 | n/a | n/a | 4.1 | 7.3 | 18.9 | 5.2 | n/a | 4.5 | 7.7 | 7.7 | 4.4 | 18.9 | 4.1 | 11.2 | 4.3 | n/a | 12.6 | 4.1 | 4.7 | 55.8 | 19.7 |
+| Python 3 | 10.9 | n/a | n/a | 10.9 | 74.4 | 142.7 | 20.2 | n/a | 13.5 | 21.0 | 21.0 | 17.0 | 26.2 | 11.0 | 49.2 | 11.3 | n/a | 54.2 | 11.0 | 25.8 | 113.4 | 38.0 |
+| Node.js | 43.1 | n/a | n/a | 44.9 | 93.4 | 128.5 | 51.6 | n/a | 47.2 | 52.5 | 52.6 | 53.5 | 59.5 | 45.3 | 56.0 | 46.7 | n/a | 74.7 | 40.3 | 65.0 | 116.7 | 91.4 |
 
 ## Runtime by data scale (median (min), milliseconds; lower is better)
 
 | program | scale | lsaca | C (gcc -O2) | Rust (rustc -O) | Python 3 | Node.js |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| fib | small | 20.1 (19.5) | 10.3 (9.9) | 20.4 (19.7) | 70.9 (64.6) | 220.6 (215.1) |
-| fib | medium | 37.4 (34.0) | 30.5 (27.7) | 25.4 (22.5) | 1273.7 (1145.5) | 307.2 (262.5) |
-| fib | large | 44.3 (44.1) | 36.9 (35.5) | 21.2 (20.6) | 2192.4 (1750.6) | 541.3 (512.4) |
-| fib_iter | small | 15.9 (15.6) | 13.6 (13.1) | n/a | n/a | n/a |
-| fib_iter | medium | 16.1 (15.6) | 14.0 (12.8) | n/a | n/a | n/a |
-| fib_iter | large | 17.4 (16.4) | 13.5 (12.8) | n/a | n/a | n/a |
-| fib_memo | small | 16.6 (16.3) | 11.6 (11.5) | n/a | n/a | n/a |
-| fib_memo | medium | 17.2 (16.6) | 11.6 (11.0) | n/a | n/a | n/a |
-| fib_memo | large | 16.1 (16.0) | 12.0 (11.3) | n/a | n/a | n/a |
-| loop_sum | small | 26.1 (25.1) | 18.5 (18.1) | 18.5 (16.7) | 225.6 (204.5) | 139.8 (135.1) |
-| loop_sum | medium | 27.6 (23.9) | 22.6 (17.5) | 22.7 (18.9) | 1138.7 (1057.9) | 177.0 (148.1) |
-| loop_sum | large | 22.8 (22.2) | 22.2 (20.7) | 22.4 (18.8) | 1676.0 (1640.1) | 173.8 (163.4) |
-| string_build | small | 15.8 (13.9) | 10.0 (9.9) | 12.6 (12.0) | 42.0 (40.0) | 189.4 (180.0) |
-| string_build | medium | 108.4 (99.4) | 15.9 (14.4) | 74.5 (67.2) | 450.6 (411.9) | 266.1 (235.5) |
-| string_build | large | 330.8 (329.1) | 27.8 (25.4) | 293.3 (264.4) | 1560.1 (1516.5) | 607.1 (500.6) |
-| sort_i64 | small | 17.0 (15.7) | 14.5 (11.5) | 9.8 (9.5) | 41.3 (40.3) | 176.2 (160.4) |
-| sort_i64 | medium | 43.6 (40.4) | 30.9 (28.8) | 32.5 (30.8) | 761.8 (629.9) | 224.3 (212.7) |
-| sort_i64 | large | 82.2 (81.7) | 68.0 (66.5) | 63.5 (62.5) | 1844.5 (1834.9) | 260.7 (231.9) |
-| sort_insertion | small | 13.8 (13.6) | 10.7 (10.6) | n/a | n/a | n/a |
-| sort_insertion | medium | 14.5 (14.0) | 10.0 (9.2) | n/a | n/a | n/a |
-| sort_insertion | large | 17.3 (17.1) | 12.4 (12.3) | n/a | n/a | n/a |
-| binary_trees | small | 15.5 (14.8) | 13.1 (13.0) | 12.5 (12.3) | 38.2 (37.1) | 148.8 (142.2) |
-| binary_trees | medium | 192.9 (189.0) | 23.6 (21.0) | 24.4 (22.2) | 105.5 (98.8) | 155.6 (144.6) |
-| binary_trees | large | 1044.1 (920.3) | 52.5 (51.1) | 55.7 (55.5) | 308.6 (305.8) | 202.5 (202.0) |
-| binary_trees_refs | small | 16.8 (16.4) | 9.9 (9.3) | 13.3 (13.2) | 51.0 (48.2) | 127.0 (125.3) |
-| binary_trees_refs | medium | 36.8 (35.4) | 20.8 (19.7) | 24.2 (23.4) | 119.8 (107.8) | 149.2 (143.5) |
-| binary_trees_refs | large | 96.1 (95.9) | 52.9 (50.0) | 59.8 (56.4) | 391.0 (301.0) | 159.4 (159.0) |
-| string_split | small | 14.9 (14.7) | 9.8 (9.1) | 10.9 (10.6) | 33.1 (32.8) | 149.7 (146.9) |
-| string_split | medium | 25.9 (25.1) | 12.9 (12.4) | 13.2 (12.4) | 64.3 (60.7) | 148.2 (134.0) |
-| string_split | large | 138.0 (136.5) | 44.3 (42.0) | 43.3 (41.2) | 342.5 (323.1) | 323.5 (316.7) |
-| sieve | small | 16.5 (16.3) | 10.9 (10.7) | 11.7 (10.6) | 65.4 (62.6) | 151.6 (150.2) |
-| sieve | medium | 36.0 (34.1) | 30.0 (28.8) | 28.2 (26.7) | 546.6 (523.6) | 186.7 (156.0) |
-| sieve | large | 89.6 (78.7) | 78.2 (75.1) | 70.9 (67.5) | 1236.3 (1224.2) | 269.8 (241.5) |
-| hashmap_wordcount | small | 30.6 (26.7) | 23.5 (19.9) | 16.1 (15.9) | 43.9 (41.7) | 152.0 (145.3) |
-| hashmap_wordcount | medium | 49.3 (43.5) | 28.6 (27.0) | 53.7 (52.1) | 115.5 (109.9) | 174.9 (152.3) |
-| hashmap_wordcount | large | 171.4 (167.6) | 120.7 (114.7) | 188.1 (182.9) | 454.4 (437.4) | 254.6 (247.2) |
-| array_wordcount | small | 16.5 (15.9) | 10.6 (10.5) | n/a | n/a | n/a |
-| array_wordcount | medium | 19.0 (17.4) | 10.6 (9.8) | n/a | n/a | n/a |
-| array_wordcount | large | 21.5 (18.6) | 10.9 (10.5) | n/a | n/a | n/a |
+| fib | small | 14.4 (14.1) | 15.2 (14.0) | 22.2 (15.6) | 42.2 (40.3) | 66.7 (65.4) |
+| fib | medium | 33.1 (30.5) | 33.3 (31.3) | 20.7 (19.2) | 1074.2 (975.5) | 158.8 (154.0) |
+| fib | large | 44.3 (42.3) | 55.2 (45.5) | 23.6 (21.2) | 1551.0 (1526.4) | 210.3 (209.3) |
+| fib_iter | small | 17.8 (15.7) | 12.3 (11.2) | n/a | n/a | n/a |
+| fib_iter | medium | 15.4 (13.9) | 12.2 (11.2) | n/a | n/a | n/a |
+| fib_iter | large | 19.3 (18.8) | 12.1 (11.1) | n/a | n/a | n/a |
+| fib_memo | small | 16.4 (14.5) | 13.1 (12.0) | n/a | n/a | n/a |
+| fib_memo | medium | 17.1 (14.1) | 11.3 (10.5) | n/a | n/a | n/a |
+| fib_memo | large | 15.7 (14.9) | 12.8 (11.7) | n/a | n/a | n/a |
+| loop_sum | small | 15.0 (14.3) | 9.6 (9.3) | 9.5 (9.0) | 75.0 (69.9) | 67.2 (66.3) |
+| loop_sum | medium | 17.5 (16.3) | 12.4 (11.7) | 12.9 (11.7) | 302.1 (278.6) | 95.8 (93.7) |
+| loop_sum | large | 18.5 (17.4) | 13.6 (13.2) | 10.9 (10.1) | 406.6 (402.4) | 111.7 (109.8) |
+| string_build | small | 12.1 (11.8) | 9.0 (8.7) | 10.3 (10.2) | 29.9 (28.9) | 61.6 (60.6) |
+| string_build | medium | 85.5 (76.9) | 13.7 (13.0) | 56.5 (55.4) | 167.2 (163.1) | 107.7 (104.2) |
+| string_build | large | 282.8 (281.4) | 26.3 (24.9) | 199.3 (196.2) | 624.8 (616.6) | 289.6 (288.7) |
+| sort_i64 | small | 16.9 (13.8) | 14.4 (13.7) | 11.6 (11.1) | 36.2 (34.3) | 71.6 (70.0) |
+| sort_i64 | medium | 39.0 (36.8) | 35.5 (34.9) | 33.9 (31.9) | 372.6 (350.4) | 118.4 (111.3) |
+| sort_i64 | large | 82.2 (74.4) | 75.9 (72.4) | 72.0 (64.7) | 979.6 (935.5) | 171.3 (168.6) |
+| sort_insertion | small | 20.9 (19.2) | 12.9 (11.9) | n/a | n/a | n/a |
+| sort_insertion | medium | 18.3 (16.9) | 13.6 (11.1) | n/a | n/a | n/a |
+| sort_insertion | large | 23.1 (19.1) | 16.2 (13.9) | n/a | n/a | n/a |
+| binary_trees | small | 13.6 (13.1) | 11.9 (8.6) | 13.0 (12.8) | 32.7 (30.4) | 65.5 (63.4) |
+| binary_trees | medium | 209.1 (202.7) | 16.7 (16.2) | 24.4 (23.6) | 81.3 (76.5) | 69.0 (67.3) |
+| binary_trees | large | 912.2 (866.9) | 43.3 (42.4) | 53.2 (52.2) | 254.8 (243.1) | 90.5 (88.5) |
+| binary_trees_refs | small | 16.3 (14.6) | 10.3 (10.2) | 9.6 (9.5) | 34.7 (33.9) | 65.3 (60.0) |
+| binary_trees_refs | medium | 38.8 (34.5) | 21.0 (20.2) | 18.0 (17.4) | 83.5 (81.5) | 71.4 (70.0) |
+| binary_trees_refs | large | 97.2 (93.8) | 50.7 (50.7) | 51.2 (47.7) | 276.9 (270.7) | 96.1 (92.7) |
+| string_split | small | 21.5 (16.6) | 21.1 (18.3) | 15.9 (15.8) | 41.5 (40.7) | 69.1 (68.3) |
+| string_split | medium | 34.1 (28.5) | 22.0 (17.7) | 21.1 (18.8) | 66.8 (54.7) | 88.3 (84.1) |
+| string_split | large | 149.4 (149.1) | 55.2 (53.3) | 53.8 (51.4) | 185.8 (179.8) | 200.5 (199.3) |
+| sieve | small | 18.3 (18.2) | 18.3 (16.3) | 15.1 (14.8) | 48.9 (45.5) | 76.0 (73.8) |
+| sieve | medium | 57.7 (47.4) | 38.4 (34.5) | 32.9 (29.3) | 259.9 (251.6) | 97.6 (91.4) |
+| sieve | large | 102.1 (99.5) | 87.8 (86.2) | 97.0 (79.4) | 590.0 (569.7) | 180.7 (165.8) |
+| hashmap_wordcount | small | 21.5 (19.8) | 15.7 (15.5) | 20.0 (15.7) | 34.7 (33.7) | 70.7 (69.7) |
+| hashmap_wordcount | medium | 43.3 (38.5) | 32.9 (31.1) | 51.6 (49.7) | 79.4 (74.3) | 88.3 (82.0) |
+| hashmap_wordcount | large | 139.6 (134.4) | 83.2 (81.8) | 202.8 (199.2) | 259.3 (249.7) | 171.3 (170.4) |
+| array_wordcount | small | 16.1 (16.0) | 13.7 (13.3) | n/a | n/a | n/a |
+| array_wordcount | medium | 18.2 (16.5) | 13.6 (12.4) | n/a | n/a | n/a |
+| array_wordcount | large | 20.6 (20.4) | 14.9 (13.9) | n/a | n/a | n/a |
 
 > The medium scale reuses the primary measurement above (default arguments); the small and large scales pass explicit arguments, listed under Data scales below.
 
@@ -124,31 +124,31 @@ Harness: python scripts/bench.py (see benchmarks/README.md)
 
 | program | lsaca executable (bytes) | lsaca generated C (bytes) | C executable (bytes) | Rust executable (bytes) |
 | --- | ---: | ---: | ---: | ---: |
-| fib | 335,640 | 16,911 | 141,002 | 141,312 |
-| fib_iter | 334,621 | 17,184 | 139,870 | n/a |
-| fib_memo | 336,338 | 22,700 | 142,044 | n/a |
-| loop_sum | 334,517 | 15,015 | 139,870 | 141,312 |
-| string_build | 334,658 | 17,761 | 140,382 | 142,336 |
-| vec_memory | 333,260 | 9,347 | 139,058 | 132,096 |
-| sort_i64 | 337,077 | 29,327 | 140,557 | 142,336 |
-| sort_insertion | 336,059 | 23,738 | 140,557 | n/a |
-| matrix_multiply | 332,459 | 15,679 | 139,745 | 132,608 |
-| binary_trees | 339,888 | 24,368 | 143,819 | 142,336 |
-| binary_trees_refs | 340,400 | 23,887 | 143,839 | 142,336 |
-| string_split | 335,305 | 21,160 | 142,849 | 142,848 |
-| sieve | 335,371 | 19,025 | 140,045 | 141,824 |
-| mandelbrot | 330,994 | 8,550 | 139,058 | 131,072 |
-| iterator_pipeline | 420,445 | 329,216 | 139,253 | 132,096 |
-| hashmap_wordcount | 340,189 | 30,562 | 143,556 | 145,920 |
-| array_wordcount | 335,371 | 20,232 | 140,045 | n/a |
-| generic_stack | 337,653 | 21,170 | 142,725 | 133,632 |
-| fn_pipeline | 415,258 | 310,306 | 139,238 | 132,096 |
-| string_unicode | 339,095 | 35,371 | 142,035 | 140,800 |
-| hashmap_i64 | 336,853 | 24,196 | 140,381 | 136,192 |
-| hashmap_string | 339,916 | 31,417 | 143,360 | 138,240 |
-| compile_large (compile-only) | 452,777 | 301,361 | n/a | n/a |
-| modules_compile (compile-only) | 647,429 | 2,327,016 | n/a | n/a |
-| package_compile (compile-only) | 387,602 | 681,780 | n/a | n/a |
+| fib | 239,768 | 16,911 | 40,164 | 141,312 |
+| fib_iter | 238,749 | 17,184 | 39,032 | n/a |
+| fib_memo | 240,466 | 22,734 | 41,381 | n/a |
+| loop_sum | 238,133 | 15,015 | 39,032 | 141,312 |
+| string_build | 238,786 | 17,761 | 39,717 | 142,336 |
+| vec_memory | 237,388 | 9,347 | 38,393 | 132,096 |
+| sort_i64 | 241,205 | 29,327 | 40,404 | 142,336 |
+| sort_insertion | 240,187 | 23,738 | 39,892 | n/a |
+| matrix_multiply | 236,075 | 15,679 | 39,080 | 132,608 |
+| binary_trees | 245,552 | 24,368 | 43,154 | 142,336 |
+| binary_trees_refs | 246,064 | 23,887 | 43,174 | 142,336 |
+| string_split | 239,433 | 21,160 | 40,396 | 142,848 |
+| sieve | 239,499 | 19,025 | 39,555 | 141,824 |
+| mandelbrot | 235,122 | 8,550 | 38,732 | 131,072 |
+| iterator_pipeline | 339,895 | 408,276 | 38,588 | 132,096 |
+| hashmap_wordcount | 246,121 | 38,689 | 42,302 | 145,920 |
+| array_wordcount | 239,499 | 20,232 | 39,207 | n/a |
+| generic_stack | 241,781 | 21,170 | 40,784 | 133,632 |
+| fn_pipeline | 334,708 | 389,405 | 38,400 | 132,096 |
+| string_unicode | 242,711 | 35,371 | 41,377 | 140,800 |
+| hashmap_i64 | 241,177 | 25,011 | 39,891 | 136,192 |
+| hashmap_string | 244,761 | 32,268 | 41,594 | 138,240 |
+| compile_large (compile-only) | 356,905 | 301,361 | n/a | n/a |
+| modules_compile (compile-only) | 569,544 | 2,501,276 | n/a | n/a |
+| package_compile (compile-only) | 291,423 | 710,610 | n/a | n/a |
 
 ## Independent oracles
 

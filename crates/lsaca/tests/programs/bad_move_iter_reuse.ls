@@ -2,7 +2,7 @@
 // using it again after the for loop is E0382.
 fn main() {
     let numbers: Vec<i64> = vec![1, 2, 3];
-    for value in numbers.iter() {
+    for value in numbers.into_iter() {
         println!("{}", value);
     }
     println!("{}", numbers.len());

@@ -3962,7 +3962,7 @@ fn expands_every_phase_c_intrinsic_into_a_runtime_call() {
 
     // Name, parameter types, return type and the runtime entry point the call
     // site must reach, in Appendix C order.
-    let table: [(&str, Vec<Ty>, Ty, &str); 41] = [
+    let table: [(&str, Vec<Ty>, Ty, &str); 45] = [
         ("__io_stdin", Vec::new(), Ty::i64(), "ls_io_stdin()"),
         ("__io_stdout", Vec::new(), Ty::i64(), "ls_io_stdout()"),
         ("__io_stderr", Vec::new(), Ty::i64(), "ls_io_stderr()"),
@@ -4083,6 +4083,30 @@ fn expands_every_phase_c_intrinsic_into_a_runtime_call() {
             Vec::new(),
             Ty::string(),
             "ls_io_temp_dir()",
+        ),
+        (
+            "__io_path_join",
+            vec![Ty::string(), Ty::string()],
+            Ty::string(),
+            "ls_io_path_join(",
+        ),
+        (
+            "__io_path_parent",
+            vec![Ty::string()],
+            option_string.clone(),
+            "ls_io_path_parent(",
+        ),
+        (
+            "__io_path_file_name",
+            vec![Ty::string()],
+            option_string.clone(),
+            "ls_io_path_file_name(",
+        ),
+        (
+            "__io_path_extension",
+            vec![Ty::string()],
+            option_string.clone(),
+            "ls_io_path_extension(",
         ),
         (
             "__net_listen",
@@ -4344,7 +4368,7 @@ fn expands_every_phase_c_intrinsic_into_a_runtime_call() {
     );
 }
 
-const FUSED_PIPELINE: &str = "fn main() {\n    let mut values: Vec<i64> = Vec::new();\n    values.push(2);\n    values.push(3);\n    values.push(4);\n    let total: i64 = values.iter().filter(|x| *x % 2 == 0).map(|x| x * x).fold(0, |acc, x| acc + x);\n    println!(\"{}\", total);\n}\n";
+const FUSED_PIPELINE: &str = "fn main() {\n    let mut values: Vec<i64> = Vec::new();\n    values.push(2);\n    values.push(3);\n    values.push(4);\n    let total: i64 = values.into_iter().filter(|x| *x % 2 == 0).map(|x| x * x).fold(0, |acc, x| acc + x);\n    println!(\"{}\", total);\n}\n";
 
 #[test]
 fn fuses_iterator_pipeline_into_a_c_loop() {
@@ -4372,7 +4396,7 @@ fn fuses_iterator_pipeline_into_a_c_loop() {
     );
 }
 
-const FUSED_FOR_LOOP: &str = "fn main() {\n    let mut values: Vec<i64> = Vec::new();\n    values.push(1);\n    values.push(2);\n    values.push(3);\n    let mut total = 0;\n    for value in values.iter().filter(|x| *x % 2 == 0) {\n        total += value;\n    }\n    println!(\"{}\", total);\n}\n";
+const FUSED_FOR_LOOP: &str = "fn main() {\n    let mut values: Vec<i64> = Vec::new();\n    values.push(1);\n    values.push(2);\n    values.push(3);\n    let mut total = 0;\n    for value in values.into_iter().filter(|x| *x % 2 == 0) {\n        total += value;\n    }\n    println!(\"{}\", total);\n}\n";
 
 #[test]
 fn fuses_for_loop_over_iterator_pipeline() {
@@ -4395,7 +4419,7 @@ fn fuses_for_loop_over_iterator_pipeline() {
     );
 }
 
-const FUSED_ENUMERATE: &str = "fn main() {\n    let values: Vec<usize> = vec![4, 5, 6];\n    let mut total: usize = 0;\n    for pair in values.iter().enumerate() {\n        let (index, value) = pair;\n        total += index * value;\n    }\n    println!(\"{}\", total);\n}\n";
+const FUSED_ENUMERATE: &str = "fn main() {\n    let values: Vec<usize> = vec![4, 5, 6];\n    let mut total: usize = 0;\n    for pair in values.into_iter().enumerate() {\n        let (index, value) = pair;\n        total += index * value;\n    }\n    println!(\"{}\", total);\n}\n";
 
 #[test]
 fn fuses_enumerate_pairs_without_nesting_the_element_tuple() {
@@ -4418,7 +4442,7 @@ fn fuses_enumerate_pairs_without_nesting_the_element_tuple() {
     );
 }
 
-const CAPTURING_PIPELINE: &str = "fn main() {\n    let base = 10;\n    let mut values: Vec<i64> = Vec::new();\n    values.push(2);\n    values.push(3);\n    let total: i64 = values.iter().map(|x| x + base).fold(0, |acc, x| acc + x);\n    println!(\"{}\", total);\n}\n";
+const CAPTURING_PIPELINE: &str = "fn main() {\n    let base = 10;\n    let mut values: Vec<i64> = Vec::new();\n    values.push(2);\n    values.push(3);\n    let total: i64 = values.into_iter().map(|x| x + base).fold(0, |acc, x| acc + x);\n    println!(\"{}\", total);\n}\n";
 
 #[test]
 fn keeps_generic_lowering_for_capturing_closures() {

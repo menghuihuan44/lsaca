@@ -56,6 +56,9 @@ jobs:
       - name: Build the release compiler
         run: cargo build --release -p lsaca-cli
 
+      - name: Self-test the incremental speed guard
+        run: python scripts/bench_guard.py --self-test
+
       # The check programs cover the small functional/property suite: exact
       # closed-form results, sort invariants, implementation equivalence and
       # the argument-driven small/medium/large scale checksums.

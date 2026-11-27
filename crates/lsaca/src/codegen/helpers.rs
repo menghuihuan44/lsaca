@@ -182,6 +182,18 @@ fn emit_map_decls(w: &mut CWriter, registry: &TypeRegistry, key: &Ty, value: &Ty
         value_vec, suffix, cell_ptr
     ));
     w.line(format!(
+        "bool lsaca_map_iter_next_index_{}({} self, size_t start, size_t* out);",
+        suffix, cell_ptr
+    ));
+    w.line(format!(
+        "const void* lsaca_map_key_ptr_{}({} self, size_t index);",
+        suffix, cell_ptr
+    ));
+    w.line(format!(
+        "const void* lsaca_map_value_ptr_{}({} self, size_t index);",
+        suffix, cell_ptr
+    ));
+    w.line(format!(
         "void lsaca_map_debug_{}(const {}* self, LsString** out);",
         suffix, cell
     ));

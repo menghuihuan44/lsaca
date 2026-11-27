@@ -1865,6 +1865,49 @@ fn emit_map_helpers(w: &mut CWriter, names: &TypeNames, ty: &Ty, key: &Ty, value
     w.line("}");
     w.blank();
 
+    // Borrowed iteration (v2.3): locate the next occupied slot at or after
+    // `start` and return the borrowed key/value blobs. The visitor walks the
+    // table through LsMapIter so the control-byte layout stays private to the
+    // runtime; `ls_map_iter_next` advances the index past the found slot.
+    w.line(format!(
+        "bool lsaca_map_iter_next_index_{}({} self, size_t start, size_t* out) {{",
+        suffix, cell_ptr
+    ));
+    w.indent();
+    w.line("LsMapIter iter;");
+    w.line("iter.table = &self->table;");
+    w.line("iter.index = start;");
+    w.line("if (!ls_map_iter_next(&iter, NULL, NULL)) {");
+    w.indent();
+    w.line("return false;");
+    w.dedent();
+    w.line("}");
+    w.line("*out = iter.index - 1;");
+    w.line("return true;");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!(
+        "const void* lsaca_map_key_ptr_{}({} self, size_t index) {{",
+        suffix, cell_ptr
+    ));
+    w.indent();
+    w.line("return (const void*)(self->table.keys + index * self->table.key_size);");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(format!(
+        "const void* lsaca_map_value_ptr_{}({} self, size_t index) {{",
+        suffix, cell_ptr
+    ));
+    w.indent();
+    w.line("return (const void*)(self->table.values + index * self->table.value_size);");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
     // The debug helper appends the rendered map through its out parameter, in
     // the statement form used by the other generated debug helpers (DESIGN
     // 5.5). The out parameter points at the accumulator handle.

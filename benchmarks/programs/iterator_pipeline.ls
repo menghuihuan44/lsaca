@@ -14,6 +14,6 @@ fn make_numbers(n: i64) -> Vec<i64> {
 
 fn main() {
     let values = make_numbers(1000000);
-    let total: i64 = values.iter().filter(|x| *x % 2 == 0).map(|x| x * x).fold(0, |acc, x| acc + x);
+    let total: i64 = values.into_iter().filter(|x| *x % 2 == 0).map(|x| x * x).fold(0, |acc, x| acc + x);
     println!("checksum={}", total);
 }

@@ -279,6 +279,47 @@ impl<'a> FnChecker<'a> {
     // Bindings and patterns
     // ------------------------------------------------------------------
 
+    /// Whether `pat` binds at least one owning value by value.
+    ///
+    /// Mirrors the codegen rule (`codegen::control::pattern_binds_owned`): the
+    /// HIR Copy classification decides, not `is_copy_value` (which treats
+    /// Rc<dyn Trait> as Copy for move checking).
+    fn pattern_binds_owned(&self, pat: &HPat) -> bool {
+        match &pat.kind {
+            HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => false,
+            HPatKind::Bind { .. } => !self.program.is_copy(&pat.ty),
+            HPatKind::Tuple(parts) | HPatKind::Or(parts) => {
+                parts.iter().any(|part| self.pattern_binds_owned(part))
+            }
+            HPatKind::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, part)| self.pattern_binds_owned(part)),
+            HPatKind::Enum { args, .. } => args.iter().any(|part| self.pattern_binds_owned(part)),
+            HPatKind::OptionSome(inner)
+            | HPatKind::ResultOk(inner)
+            | HPatKind::ResultErr(inner) => self.pattern_binds_owned(inner),
+        }
+    }
+
+    /// Whether `let <pat> = <init>` consumes its initializer.
+    ///
+    /// This mirrors the codegen partial-move rule: a compound pattern that
+    /// binds an owning value moves the whole initializer out of a local or a
+    /// constructor. Aggregate places other than a local, reference
+    /// initializers and values with a user Drop hook are not consumed.
+    fn let_pattern_moves(&self, pat: &HPat, init: &HExpr) -> bool {
+        if matches!(&init.ty, Ty::Ref { .. }) {
+            return false;
+        }
+        if init.is_place() && !matches!(&init.kind, HExprKind::Local { .. }) {
+            return false;
+        }
+        if self.program.drop_hook(&init.ty).is_some() {
+            return false;
+        }
+        self.pattern_binds_owned(pat)
+    }
+
     /// Pattern bindings are fresh values: they shadow the moved state and are
     /// live after the pattern was matched. The type checker owns E0509 for
     /// bindings of drop-glue types, so no ownership diagnostics are emitted
@@ -331,15 +372,14 @@ impl<'a> FnChecker<'a> {
             match stmt {
                 HStmt::Let { pat, init, .. } => {
                     if let Some(init) = init {
-                        // A plain identifier binding moves the initializer; a
-                        // compound pattern binds copies (the type checker rejects
-                        // drop-glue bindings).
-                        let init_ctx = if matches!(&pat.kind, HPatKind::Bind { .. }) {
-                            Ctx::Consume
-                        } else {
-                            Ctx::Borrow
-                        };
-                        self.walk_expr(init, init_ctx);
+                        // A plain identifier binding moves the initializer, and
+                        // so does a compound pattern that binds an owning value
+                        // (a partial move). Patterns that only bind Copy values
+                        // copy it; aggregate places other than a local and
+                        // reference initializers are not consumed by codegen.
+                        let consumes = matches!(&pat.kind, HPatKind::Bind { .. })
+                            || self.let_pattern_moves(pat, init);
+                        self.walk_expr(init, if consumes { Ctx::Consume } else { Ctx::Borrow });
                     }
                     self.bind_pat(pat);
                 }
@@ -1154,6 +1194,57 @@ fn main() {
     let point = Point { x: 1, y: 2 };
     let copy = point;
     println!("{} {}", point.x, copy.y);
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn partial_move_of_an_owning_field_rejects_later_use() {
+        expect_rejected(
+            r#"
+struct Payload {
+    name: String,
+    id: i64,
+}
+
+fn main() {
+    let payload = Payload { name: String::from("x"), id: 1 };
+    let Payload { name, .. } = payload;
+    println!("{} {}", name, payload.id);
+}
+"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn tuple_partial_move_rejects_use_of_the_moved_tuple() {
+        expect_rejected(
+            r#"
+fn main() {
+    let pair = (String::from("a"), 1);
+    let (text, number) = pair;
+    println!("{} {} {}", text, number, pair.1);
+}
+"#,
+            "E0382",
+        );
+    }
+
+    #[test]
+    fn copy_only_destructuring_keeps_the_source_live() {
+        expect_accepted(
+            r#"
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn main() {
+    let point = Point { x: 1, y: 2 };
+    let Point { x, y } = point;
+    println!("{} {} {}", x, y, point.x);
 }
 "#,
         );
@@ -2085,7 +2176,7 @@ fn main() {
             r#"
 fn main() {
     let numbers: Vec<i64> = vec![1, 2, 3, 4, 5];
-    let doubled: Vec<i64> = numbers.iter().map(|value| value * 2).collect();
+    let doubled: Vec<i64> = numbers.into_iter().map(|value| value * 2).collect();
     println!("{:?}", doubled);
 }
 "#,
@@ -2099,7 +2190,7 @@ fn main() {
 fn main() {
     let numbers: Vec<i64> = vec![1, 2, 3, 4, 5];
     let mut total: i64 = 0;
-    for value in numbers.iter().map(|n| n * 3).filter(|n| *n % 2 == 0) {
+    for value in numbers.into_iter().map(|n| n * 3).filter(|n| *n % 2 == 0) {
         total = total + value;
     }
     println!("total {}", total);
@@ -2114,7 +2205,7 @@ fn main() {
             r#"
 fn main() {
     let numbers: Vec<i64> = vec![1, 2, 3];
-    let iter = numbers.iter();
+    let iter = numbers.into_iter();
     for value in iter {
         println!("{}", value);
     }
@@ -2194,7 +2285,7 @@ fn main() {
             r#"
 fn main() {
     let words: Vec<String> = vec![String::from("hi"), String::from("hello")];
-    let found: Option<String> = words.iter().find(|word| word.len() > 3);
+    let found: Option<String> = words.into_iter().find(|word| word.len() > 3);
     println!("{:?}", found);
 }
 "#,
@@ -2209,9 +2300,9 @@ fn main() {
     let mut counts: HashMap<String, i64> = HashMap::new();
     counts.insert(String::from("a"), 1);
     counts.insert(String::from("b"), 2);
-    let keys: Vec<String> = counts.keys();
-    let values: Vec<i64> = counts.values();
-    println!("{:?} {:?} {}", keys, values, counts.len());
+    let key_count: usize = counts.keys().count();
+    let value_count: usize = counts.values().count();
+    println!("{} {} {}", key_count, value_count, counts.len());
 }
 "#,
         );

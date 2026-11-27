@@ -9,10 +9,36 @@ use crate::ast;
 use crate::span::Span;
 use crate::typeck::check::Checker;
 use crate::typeck::itype::ITy;
-use crate::typeck::tree::{TArm, TBlock, TExpr, TExprKind, TPat, TPatKind, TStmt};
+use crate::typeck::tree::{TArm, TBlock, TExpr, TExprKind, TLit, TPat, TPatKind, TStmt};
 
-const OPTION_METHODS: [&str; 5] = ["map", "map_or", "and_then", "filter", "ok_or"];
-const RESULT_METHODS: [&str; 3] = ["map", "map_err", "and_then"];
+const OPTION_METHODS: [&str; 12] = [
+    "map",
+    "map_or",
+    "map_or_else",
+    "and_then",
+    "or_else",
+    "filter",
+    "ok_or",
+    "ok_or_else",
+    "unwrap_or_else",
+    "is_some_and",
+    "is_none_or",
+    "and",
+];
+const RESULT_METHODS: [&str; 12] = [
+    "map",
+    "map_or",
+    "map_or_else",
+    "map_err",
+    "and_then",
+    "or",
+    "or_else",
+    "is_ok_and",
+    "is_err_and",
+    "inspect",
+    "inspect_err",
+    "unwrap_or_else",
+];
 
 /// Whether the combinator desugaring handles this method on this receiver type.
 pub fn is_combinator_method(receiver: &ITy, method: &str) -> bool {
@@ -92,6 +118,10 @@ fn err_expr(value: TExpr, ok: &ITy, err: &ITy, span: Span) -> TExpr {
         TExprKind::ResultErr(Box::new(value)),
         span,
     )
+}
+
+fn bool_expr(value: bool, span: Span) -> TExpr {
+    TExpr::new(ITy::Bool, TExprKind::Lit(TLit::Bool(value)), span)
 }
 
 impl<'a> Checker<'a> {
@@ -199,6 +229,19 @@ impl<'a> Checker<'a> {
         match self.infer.resolve(&expr.ty) {
             ITy::Fn(params, ret) if params.len() == 1 => (expr, params[0].clone(), *ret),
             _ => (expr, param_ty.clone(), ret_ty.clone()),
+        }
+    }
+
+    /// Check a closure argument expected to take no parameters.
+    fn closure_arg0(&mut self, arg: &ast::Expr, ret_ty: &ITy) -> (TExpr, ITy) {
+        let expected = ITy::function(Vec::new(), ret_ty.clone());
+        let expr = self.check_expr(arg, Some(&expected));
+        if !self.unify_or_report(&expected, &expr.ty, arg.span) {
+            return (expr, ret_ty.clone());
+        }
+        match self.infer.resolve(&expr.ty) {
+            ITy::Fn(params, ret) if params.is_empty() => (expr, *ret),
+            _ => (expr, ret_ty.clone()),
         }
     }
 
@@ -479,6 +522,205 @@ impl<'a> Checker<'a> {
                 ];
                 block_expr(stmts, mat, span)
             }
+            "or_else" => {
+                if !self.combinator_arity("or_else", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let result_ty = ITy::option(payload.clone());
+                self.apply_hint(&result_ty, hint);
+                let (closure, ret) = self.closure_arg0(&args[0], &result_ty);
+                let _ = self.unify_quiet(&result_ty, &ret);
+                let (pat, read) = self.bind_value("value", &payload, span);
+                let call = call_expr(closure, Vec::new(), &result_ty, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::OptionSome(Box::new(pat)),
+                            span,
+                        ),
+                        some_expr(read, &payload, span),
+                    ),
+                    arm(TPat::new(receiver_ty, TPatKind::OptionNone, span), call),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "map_or_else" => {
+                if !self.combinator_arity("map_or_else", 2, args, span) {
+                    return self.never_expr(span);
+                }
+                let result_ty = self.hint_expected(hint);
+                let (default, default_ret) = self.closure_arg0(&args[0], &result_ty);
+                let _ = self.unify_quiet(&result_ty, &default_ret);
+                let expected_ret = self.infer.resolve(&result_ty);
+                let (map, _, ret) = self.closure_arg(&args[1], &payload, &expected_ret);
+                let _ = self.unify_quiet(&result_ty, &ret);
+                let result_ty = self.infer.resolve(&result_ty);
+                self.apply_hint(&result_ty, hint);
+                let (pat, read) = self.bind_value("value", &payload, span);
+                let map_call = call_expr(map, vec![read], &result_ty, span);
+                let default_call = call_expr(default, Vec::new(), &result_ty, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::OptionSome(Box::new(pat)),
+                            span,
+                        ),
+                        map_call,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::OptionNone, span),
+                        default_call,
+                    ),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "ok_or_else" => {
+                if !self.combinator_arity("ok_or_else", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let err_hint = self.hint_result_parts(hint).1;
+                let (closure, ret) = self.closure_arg0(&args[0], &err_hint);
+                let _ = self.unify_quiet(&err_hint, &ret);
+                let err_ty = self.infer.resolve(&err_hint);
+                let result_ty = ITy::result(payload.clone(), err_ty.clone());
+                self.apply_hint(&result_ty, hint);
+                let (pat, read) = self.bind_value("value", &payload, span);
+                let call = call_expr(closure, Vec::new(), &err_ty, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::OptionSome(Box::new(pat)),
+                            span,
+                        ),
+                        ok_expr(read, &payload, &err_ty, span),
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::OptionNone, span),
+                        err_expr(call, &payload, &err_ty, span),
+                    ),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "unwrap_or_else" => {
+                if !self.combinator_arity("unwrap_or_else", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let result_ty = self.infer.resolve(&payload);
+                let (closure, ret) = self.closure_arg0(&args[0], &result_ty);
+                let _ = self.unify_quiet(&result_ty, &ret);
+                let result_ty = self.infer.resolve(&result_ty);
+                self.apply_hint(&result_ty, hint);
+                let (pat, read) = self.bind_value("value", &payload, span);
+                let call = call_expr(closure, Vec::new(), &result_ty, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::OptionSome(Box::new(pat)),
+                            span,
+                        ),
+                        read,
+                    ),
+                    arm(TPat::new(receiver_ty, TPatKind::OptionNone, span), call),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "is_some_and" => {
+                if !self.combinator_arity("is_some_and", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let (predicate, _, _) = self.closure_arg(&args[0], &payload, &ITy::Bool);
+                let (pat, read) = self.bind_value("value", &payload, span);
+                let call = call_expr(predicate, vec![read], &ITy::Bool, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::OptionSome(Box::new(pat)),
+                            span,
+                        ),
+                        call,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::OptionNone, span),
+                        bool_expr(false, span),
+                    ),
+                ];
+                match_expr(receiver, arms, &ITy::Bool, span)
+            }
+            "is_none_or" => {
+                if !self.combinator_arity("is_none_or", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let (predicate, _, _) = self.closure_arg(&args[0], &payload, &ITy::Bool);
+                let (pat, read) = self.bind_value("value", &payload, span);
+                let call = call_expr(predicate, vec![read], &ITy::Bool, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::OptionSome(Box::new(pat)),
+                            span,
+                        ),
+                        call,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::OptionNone, span),
+                        bool_expr(true, span),
+                    ),
+                ];
+                match_expr(receiver, arms, &ITy::Bool, span)
+            }
+            "and" => {
+                if !self.combinator_arity("and", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let other_inner = self.hint_option_inner(hint);
+                let expected_other = ITy::option(other_inner.clone());
+                let other = self.check_expr(&args[0], Some(&expected_other));
+                let _ = self.unify_or_report(&expected_other, &other.ty, args[0].span);
+                let other_ty = self.infer.resolve(&other.ty);
+                let result_inner = match &other_ty {
+                    ITy::Option(inner) => (**inner).clone(),
+                    _ => self.infer.resolve(&other_inner),
+                };
+                let result_ty = ITy::option(result_inner.clone());
+                self.apply_hint(&result_ty, hint);
+                let (receiver_pat, receiver_read) = self.bind_value("receiver", &receiver_ty, span);
+                let (other_pat, other_read) = self.bind_value("other", &result_ty, span);
+                let wild = TPat::new(payload.clone(), TPatKind::Wild, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::OptionSome(Box::new(wild)),
+                            span,
+                        ),
+                        other_read,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::OptionNone, span),
+                        none_expr(&result_inner, span),
+                    ),
+                ];
+                let mat = match_expr(receiver_read, arms, &result_ty, span);
+                let stmts = vec![
+                    TStmt::Let {
+                        pat: receiver_pat,
+                        init: Some(receiver),
+                        span,
+                    },
+                    TStmt::Let {
+                        pat: other_pat,
+                        init: Some(other),
+                        span,
+                    },
+                ];
+                block_expr(stmts, mat, span)
+            }
             other => self.unknown_combinator(receiver, &receiver_ty, other, args, span),
         }
     }
@@ -578,6 +820,374 @@ impl<'a> Checker<'a> {
                     arm(
                         TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(err_pat)), span),
                         err_expr(err_read, &ok, &err, span),
+                    ),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "map_or" => {
+                if !self.combinator_arity("map_or", 2, args, span) {
+                    return self.never_expr(span);
+                }
+                let result_ty = self.hint_expected(hint);
+                let default = self.check_expr(&args[0], Some(&result_ty));
+                let _ = self.unify_or_report(&result_ty, &default.ty, args[0].span);
+                let expected_ret = self.infer.resolve(&result_ty);
+                let (map, _, ret) = self.closure_arg(&args[1], &ok, &expected_ret);
+                let _ = self.unify_quiet(&result_ty, &ret);
+                let result_ty = self.infer.resolve(&result_ty);
+                self.apply_hint(&result_ty, hint);
+                let (receiver_pat, receiver_read) = self.bind_value("receiver", &receiver_ty, span);
+                let (fallback_pat, fallback_read) = self.bind_value("fallback", &result_ty, span);
+                let (ok_pat, ok_read) = self.bind_value("value", &ok, span);
+                let call = call_expr(map, vec![ok_read], &result_ty, span);
+                let wild = TPat::new(err.clone(), TPatKind::Wild, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(ok_pat)),
+                            span,
+                        ),
+                        call,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(wild)), span),
+                        fallback_read,
+                    ),
+                ];
+                let mat = match_expr(receiver_read, arms, &result_ty, span);
+                let stmts = vec![
+                    TStmt::Let {
+                        pat: receiver_pat,
+                        init: Some(receiver),
+                        span,
+                    },
+                    TStmt::Let {
+                        pat: fallback_pat,
+                        init: Some(default),
+                        span,
+                    },
+                ];
+                block_expr(stmts, mat, span)
+            }
+            "map_or_else" => {
+                if !self.combinator_arity("map_or_else", 2, args, span) {
+                    return self.never_expr(span);
+                }
+                let result_ty = self.hint_expected(hint);
+                let (default, _, default_ret) = self.closure_arg(&args[0], &err, &result_ty);
+                let _ = self.unify_quiet(&result_ty, &default_ret);
+                let expected_ret = self.infer.resolve(&result_ty);
+                let (map, _, ret) = self.closure_arg(&args[1], &ok, &expected_ret);
+                let _ = self.unify_quiet(&result_ty, &ret);
+                let result_ty = self.infer.resolve(&result_ty);
+                self.apply_hint(&result_ty, hint);
+                let (ok_pat, ok_read) = self.bind_value("value", &ok, span);
+                let (err_pat, err_read) = self.bind_value("error", &err, span);
+                let map_call = call_expr(map, vec![ok_read], &result_ty, span);
+                let default_call = call_expr(default, vec![err_read], &result_ty, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(ok_pat)),
+                            span,
+                        ),
+                        map_call,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(err_pat)), span),
+                        default_call,
+                    ),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "or" => {
+                if !self.combinator_arity("or", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let other_err = self.hint_result_parts(hint).1;
+                let expected_other = ITy::result(ok.clone(), other_err.clone());
+                let other = self.check_expr(&args[0], Some(&expected_other));
+                let _ = self.unify_or_report(&expected_other, &other.ty, args[0].span);
+                let other_ty = self.infer.resolve(&other.ty);
+                let (result_ok, result_err) = match &other_ty {
+                    ITy::Result(ok, err) => ((**ok).clone(), (**err).clone()),
+                    _ => (ok.clone(), self.infer.resolve(&other_err)),
+                };
+                let result_ty = ITy::result(result_ok.clone(), result_err.clone());
+                self.apply_hint(&result_ty, hint);
+                let (receiver_pat, receiver_read) = self.bind_value("receiver", &receiver_ty, span);
+                let (other_pat, other_read) = self.bind_value("other", &result_ty, span);
+                let (ok_pat, ok_read) = self.bind_value("value", &result_ok, span);
+                let wild = TPat::new(result_err.clone(), TPatKind::Wild, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(ok_pat)),
+                            span,
+                        ),
+                        ok_expr(ok_read, &result_ok, &result_err, span),
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(wild)), span),
+                        other_read,
+                    ),
+                ];
+                let mat = match_expr(receiver_read, arms, &result_ty, span);
+                let stmts = vec![
+                    TStmt::Let {
+                        pat: receiver_pat,
+                        init: Some(receiver),
+                        span,
+                    },
+                    TStmt::Let {
+                        pat: other_pat,
+                        init: Some(other),
+                        span,
+                    },
+                ];
+                block_expr(stmts, mat, span)
+            }
+            "or_else" => {
+                if !self.combinator_arity("or_else", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let new_err = self.hint_result_parts(hint).1;
+                let expected_ret = ITy::result(ok.clone(), new_err.clone());
+                let (closure, _, ret) = self.closure_arg(&args[0], &err, &expected_ret);
+                let result_ty = match self.infer.resolve(&ret) {
+                    ITy::Result(ok, err) => ITy::result(*ok, *err),
+                    ITy::Never => expected_ret.clone(),
+                    _ => expected_ret.clone(),
+                };
+                self.apply_hint(&result_ty, hint);
+                let (result_ok, result_err) = match &result_ty {
+                    ITy::Result(ok, err) => ((**ok).clone(), (**err).clone()),
+                    _ => (ok.clone(), self.infer.resolve(&new_err)),
+                };
+                let (ok_pat, ok_read) = self.bind_value("value", &ok, span);
+                let (err_pat, err_read) = self.bind_value("error", &err, span);
+                let call = call_expr(closure, vec![err_read], &result_ty, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(ok_pat)),
+                            span,
+                        ),
+                        ok_expr(ok_read, &result_ok, &result_err, span),
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(err_pat)), span),
+                        call,
+                    ),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "is_ok_and" => {
+                if !self.combinator_arity("is_ok_and", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let (predicate, _, _) = self.closure_arg(&args[0], &ok, &ITy::Bool);
+                let (ok_pat, ok_read) = self.bind_value("value", &ok, span);
+                let (err_pat, _) = self.bind_value("error", &err, span);
+                let call = call_expr(predicate, vec![ok_read], &ITy::Bool, span);
+                let wild = TPat::new(err_pat.ty.clone(), TPatKind::Wild, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(ok_pat)),
+                            span,
+                        ),
+                        call,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(wild)), span),
+                        bool_expr(false, span),
+                    ),
+                ];
+                match_expr(receiver, arms, &ITy::Bool, span)
+            }
+            "is_err_and" => {
+                if !self.combinator_arity("is_err_and", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let (predicate, _, _) = self.closure_arg(&args[0], &err, &ITy::Bool);
+                let (err_pat, err_read) = self.bind_value("error", &err, span);
+                let (ok_pat, _) = self.bind_value("value", &ok, span);
+                let call = call_expr(predicate, vec![err_read], &ITy::Bool, span);
+                let wild = TPat::new(ok_pat.ty.clone(), TPatKind::Wild, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(wild)),
+                            span,
+                        ),
+                        bool_expr(false, span),
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(err_pat)), span),
+                        call,
+                    ),
+                ];
+                match_expr(receiver, arms, &ITy::Bool, span)
+            }
+            "inspect" => {
+                if !self.combinator_arity("inspect", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let borrowed = ITy::Ref {
+                    mutable: false,
+                    inner: Box::new(ok.clone()),
+                };
+                let (closure, _, _) = self.closure_arg(&args[0], &borrowed, &ITy::unit());
+                let result_ty = ITy::result(ok.clone(), err.clone());
+                self.apply_hint(&result_ty, hint);
+                let (ok_pat, ok_read) = self.bind_value("value", &ok, span);
+                let (err_pat, err_read) = self.bind_value("error", &err, span);
+                let reference_c_name = self.fresh_local_c_name();
+                let reference_pat = TPat::new(
+                    borrowed.clone(),
+                    TPatKind::Bind {
+                        name: "reference".to_string(),
+                        c_name: reference_c_name.clone(),
+                        mutable: false,
+                    },
+                    span,
+                );
+                let reference_read = TExpr::new(
+                    borrowed.clone(),
+                    TExprKind::Local {
+                        name: "reference".to_string(),
+                        c_name: reference_c_name,
+                        mutable: false,
+                    },
+                    span,
+                );
+                let reference_init = TExpr::new(
+                    borrowed,
+                    TExprKind::Ref {
+                        mutable: false,
+                        expr: Box::new(ok_read.clone()),
+                    },
+                    span,
+                );
+                let borrow_stmt = TStmt::Let {
+                    pat: reference_pat,
+                    init: Some(reference_init),
+                    span,
+                };
+                let call = call_expr(closure, vec![reference_read], &ITy::unit(), span);
+                let keep = ok_expr(ok_read, &ok, &err, span);
+                let some_body = block_expr(vec![borrow_stmt, TStmt::Expr(call)], keep, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(ok_pat)),
+                            span,
+                        ),
+                        some_body,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(err_pat)), span),
+                        err_expr(err_read, &ok, &err, span),
+                    ),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "inspect_err" => {
+                if !self.combinator_arity("inspect_err", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let borrowed = ITy::Ref {
+                    mutable: false,
+                    inner: Box::new(err.clone()),
+                };
+                let (closure, _, _) = self.closure_arg(&args[0], &borrowed, &ITy::unit());
+                let result_ty = ITy::result(ok.clone(), err.clone());
+                self.apply_hint(&result_ty, hint);
+                let (ok_pat, ok_read) = self.bind_value("value", &ok, span);
+                let (err_pat, err_read) = self.bind_value("error", &err, span);
+                let reference_c_name = self.fresh_local_c_name();
+                let reference_pat = TPat::new(
+                    borrowed.clone(),
+                    TPatKind::Bind {
+                        name: "reference".to_string(),
+                        c_name: reference_c_name.clone(),
+                        mutable: false,
+                    },
+                    span,
+                );
+                let reference_read = TExpr::new(
+                    borrowed.clone(),
+                    TExprKind::Local {
+                        name: "reference".to_string(),
+                        c_name: reference_c_name,
+                        mutable: false,
+                    },
+                    span,
+                );
+                let reference_init = TExpr::new(
+                    borrowed,
+                    TExprKind::Ref {
+                        mutable: false,
+                        expr: Box::new(err_read.clone()),
+                    },
+                    span,
+                );
+                let borrow_stmt = TStmt::Let {
+                    pat: reference_pat,
+                    init: Some(reference_init),
+                    span,
+                };
+                let call = call_expr(closure, vec![reference_read], &ITy::unit(), span);
+                let keep = err_expr(err_read, &ok, &err, span);
+                let err_body = block_expr(vec![borrow_stmt, TStmt::Expr(call)], keep, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(ok_pat)),
+                            span,
+                        ),
+                        ok_expr(ok_read, &ok, &err, span),
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(err_pat)), span),
+                        err_body,
+                    ),
+                ];
+                match_expr(receiver, arms, &result_ty, span)
+            }
+            "unwrap_or_else" => {
+                if !self.combinator_arity("unwrap_or_else", 1, args, span) {
+                    return self.never_expr(span);
+                }
+                let result_ty = self.infer.resolve(&ok);
+                let (closure, _, ret) = self.closure_arg(&args[0], &err, &result_ty);
+                let _ = self.unify_quiet(&result_ty, &ret);
+                let result_ty = self.infer.resolve(&result_ty);
+                self.apply_hint(&result_ty, hint);
+                let (ok_pat, ok_read) = self.bind_value("value", &ok, span);
+                let (err_pat, err_read) = self.bind_value("error", &err, span);
+                let call = call_expr(closure, vec![err_read], &result_ty, span);
+                let arms = vec![
+                    arm(
+                        TPat::new(
+                            receiver_ty.clone(),
+                            TPatKind::ResultOk(Box::new(ok_pat)),
+                            span,
+                        ),
+                        ok_read,
+                    ),
+                    arm(
+                        TPat::new(receiver_ty, TPatKind::ResultErr(Box::new(err_pat)), span),
+                        call,
                     ),
                 ];
                 match_expr(receiver, arms, &result_ty, span)

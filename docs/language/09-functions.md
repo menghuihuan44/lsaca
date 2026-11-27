@@ -544,7 +544,7 @@ implicitly:
 * `&array` coerces to `&[T]` (but `&mut array` is not supported in 2.2.0);
 * a string literal is compiled as a static `&str` where a `&str` is expected.
 
-Reference types may be used as struct, enum, tuple and `Option` fields since
+Reference types may be used as struct, enum or tuple struct fields since
 2.2.0, with a lifetime parameter; see [Lifetimes](29-lifetimes.md).
 
 Methods with `&self`/`&mut self` receivers are covered in [Structs, enums and

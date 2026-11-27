@@ -571,7 +571,7 @@ impl Grid {
 // iterator_checksum: exercise the lazy iterator adapters on a Vec<i64>.
 pub fn iterator_checksum(values: Vec<i64>) -> i64 {
     let total: i64 = values
-        .iter()
+        .into_iter()
         .filter(|value| *value % 2 == 0)
         .map(|value| value * 3)
         .fold(0, |accumulator, value| accumulator + value);
@@ -581,7 +581,7 @@ pub fn iterator_checksum(values: Vec<i64>) -> i64 {
 // enumerate_checksum: fold (index + 1) * value over a slice iterator.
 pub fn enumerate_checksum(values: Vec<i64>) -> i64 {
     let mut total = 0;
-    for pair in values.iter().enumerate() {
+    for pair in values.into_iter().enumerate() {
         let (index, value) = pair;
         total += ((index as i64) + 1) * value;
     }
@@ -590,7 +590,7 @@ pub fn enumerate_checksum(values: Vec<i64>) -> i64 {
 
 // count_greater uses any/all/find on an iterator pipeline.
 pub fn count_greater(values: Vec<i64>, limit: i64) -> i64 {
-    let found = values.iter().find(|value| *value > limit);
+    let found = values.into_iter().find(|value| *value > limit);
     match found {
         Some(value) => value,
         None => 0,
@@ -598,11 +598,11 @@ pub fn count_greater(values: Vec<i64>, limit: i64) -> i64 {
 }
 
 pub fn any_greater(values: Vec<i64>, limit: i64) -> bool {
-    values.iter().any(|value| *value > limit)
+    values.into_iter().any(|value| *value > limit)
 }
 
 pub fn all_positive(values: Vec<i64>) -> bool {
-    values.iter().all(|value| *value > 0)
+    values.into_iter().all(|value| *value > 0)
 }
 
 pub fn checksum(seed: i64) -> i64 {

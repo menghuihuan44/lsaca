@@ -388,7 +388,9 @@ empty ranges are fine
 `for` over a `Vec<T>` visits every element, but it **consumes the vector**: the
 vector is moved into the loop, so the binding cannot be used afterwards.
 Elements are yielded by value — Copy elements as copies, move-only elements as
-moves out of the vector:
+moves out of the vector. Since 2.3.0, `for n in &numbers` borrows the vector
+instead and yields `&T` items, `for n in &mut numbers` yields `&mut T`, and
+the vector remains usable after the loop:
 
 ```ls
 fn main() {
@@ -456,8 +458,9 @@ lowering (see [Iterators](19-iterators.md)):
 fn main() {
     let words = vec![String::from("alpha"), String::from("beta")];
     for (index, word) in words.iter().enumerate() {
-        // enumerate yields a usize index and the element type
-        println!("{}: {}", index, word);
+        // enumerate yields a usize index and the element type; `.iter()`
+        // borrows `words`, so the item type here is `&String`
+        println!("{}: {}", index, word.as_str());
     }
 }
 ```
@@ -468,29 +471,32 @@ Output:
 1: beta
 ```
 
-Iterating a *reference* to a vector is still an error; use `.iter()` instead of
-`for value in &vec`:
+Since 2.3.0 a `for` loop can also iterate over a borrowed vector with
+`for value in &numbers` (shared items) or `for value in &mut numbers`
+(mutable items). The loop borrows the vector for its duration and leaves it
+usable afterwards:
 
-```ls,compile-fail
+```ls
 fn main() {
     let numbers = vec![1, 2, 3];
     let borrowed = &numbers;
     for value in borrowed {
-        println!("{}", value);
+        println!("{}", *value);
     }
+    println!("{}", numbers.len());
 }
 ```
 
-Error:
+Output:
 ```text
-error[E0277]: cannot iterate over a value of type &Vec<{integer}>; for loops require a range, a Vec<T>, or a type that implements Iterator<T>
-  --> example-18.ls:4:18
-   |
- 4 |     for value in borrowed {
-   |                  ^^^^^^^^
-
-lsaca: example-18.ls: could not compile example-18.ls due to previous error(s)
+1
+2
+3
+3
 ```
+
+The same applies to `&[T]`/`&mut [T]` slices and to `&HashMap<K, V>`; see
+[Iterators](19-iterators.md#borrowing-loops-and-slices).
 
 ## break and continue
 

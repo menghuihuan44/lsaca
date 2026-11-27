@@ -1,6 +1,6 @@
 # net: TCP sockets
 
-**Status in 2.2.0.** Implemented in `stdlib/src/net.ls`. The module provides
+**Status in 2.3.0.** Implemented in `stdlib/src/net.ls`. The module provides
 plain, blocking TCP over addresses as text: `bind` and `connect` take a
 `"host:port"` string. There is no TLS, no UDP, no DNS lookup API beyond the
 resolver built into `connect`, and no async I/O in 2.2.0.
@@ -73,7 +73,7 @@ stream.read(&mut buffer)?;
 stream.write(&buffer[0..count])?;
 ```
 
-## Limits in 2.2.0
+## Limits in 2.3.0
 
 The module is TCP only: no UDP, no Unix domain sockets, no TLS, no `SocketAddr`
 type, no DNS lookup API, no listener iterator and no async I/O. Addresses are

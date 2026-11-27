@@ -874,6 +874,20 @@ impl<'a> Gen<'a> {
                 ));
                 true
             }
+            "str_from_bytes" => {
+                let Some(arg) = args.first() else {
+                    return false;
+                };
+                if !is_slice_value(&arg.ty) {
+                    return false;
+                }
+                let fat = self.fat_value(arg, "bytes");
+                self.line(format!(
+                    "{} = ls_str_from_parts((const char*)(({}).data), (size_t)(({}).len));",
+                    target, fat, fat
+                ));
+                true
+            }
             "str_trim" => {
                 let Some(arg) = args.first() else {
                     return false;

@@ -24,15 +24,17 @@
 
         io_tests_release.exe  plain -O1 build
         io_tests_debug.exe    -DLSACA_DEBUG
+        io_tests_rc.exe       -DLSACA_DEBUG_RC
 
     Every build must compile warning free under -std=c17 -Wall -Wextra
     -Wpedantic. The script then checks:
 
       * the in-process suite passes and prints ALL CHECKS PASSED with no stderr
         output (in particular the debug builds must report no leaked objects),
-      * the standalone I/O suite (io_tests) passes in release and debug mode and
-        writes nothing to stderr (handles, files, directories, TCP loopback,
-        time and environment),
+      * the standalone I/O suite (io_tests) passes in release, debug and rc mode
+        and writes nothing to stderr (handles, files, directories, TCP loopback,
+        time and environment, lexical path join/parent/name/extension helpers,
+        buffered multi-chunk write/read round-trip and directory iteration),
       * --leak intentionally leaks two objects and is reported only by the
         debug / rc builds,
       * every panic mode exits 101 and prints the exact Rust-style message

@@ -234,6 +234,18 @@ LsString* ls_str_to_lowercase(const LsString* s);
 /* Trim leading and trailing Unicode White_Space scalars. */
 LsString* ls_str_trim(const LsString* s);
 
+/* Unicode scalar classification and case conversion used by the char methods.
+ * Alphabetic is the Unicode Alphabetic derived property, numeric is the Nd/Nl/No
+ * categories and whitespace is White_Space; all use the generated tables and
+ * are locale independent. char::to_uppercase()/to_lowercase() return char, so
+ * one-to-many mappings keep the first scalar (sharp s -> 'S'); the String
+ * transformations above keep the full mapping. */
+bool ls_rt_unicode_is_alphabetic(uint32_t scalar);
+bool ls_rt_unicode_is_numeric(uint32_t scalar);
+bool ls_rt_unicode_is_whitespace(uint32_t scalar);
+uint32_t ls_rt_unicode_upper_scalar(uint32_t scalar);
+uint32_t ls_rt_unicode_lower_scalar(uint32_t scalar);
+
 /* Bounds-checked; panic with the given source location when out of range.
  * substring(s, start, len): start + len must be <= s.len and both start and
  * start + len must fall on a UTF-8 scalar boundary; the panic messages match
@@ -899,6 +911,19 @@ LsString* ls_io_current_dir(void);
 int64_t ls_io_set_current_dir(const LsString* path);
 /* The operating system temporary directory (fresh owned string). */
 LsString* ls_io_temp_dir(void);
+
+/* Lexical path helpers. Paths are UTF-8 byte strings and are never resolved
+ * against the file system here. ls_io_path_join returns a fresh owned path:
+ * an absolute segment replaces the base, an empty segment returns the base, and
+ * '/' is inserted when neither side already supplies a separator. The parent,
+ * file name and extension helpers return fresh owned strings or NULL when the
+ * path has no such component. On Windows both '/' and '\\' are separators and a
+ * drive prefix such as "C:" is recognized; on POSIX only '/' is a separator.
+ * These helpers do not set the per-thread I/O error. */
+LsString* ls_io_path_join(const LsString* base, const LsString* segment);
+LsString* ls_io_path_parent(const LsString* path);
+LsString* ls_io_path_file_name(const LsString* path);
+LsString* ls_io_path_extension(const LsString* path);
 
 /* TCP networking. Addresses use the "host:port" form; the host may be an IPv4
  * address, an IPv6 address in square brackets, or a name. Port 0 in
