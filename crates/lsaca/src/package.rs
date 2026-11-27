@@ -2271,12 +2271,12 @@ b = { path = "../b" }
         assert_eq!(graph.packages[15].name, "app");
         assert!(!graph.packages[15].is_dependency);
         assert!(graph.packages[0].dependencies.is_empty());
-        for index in 0..15 {
-            assert!(graph.packages[index].is_dependency);
-            assert_eq!(graph.packages[index].name, format!("p{}", 14 - index));
+        for (index, package) in graph.packages.iter().enumerate().take(15) {
+            assert!(package.is_dependency);
+            assert_eq!(package.name, format!("p{}", 14 - index));
         }
-        for index in 1..15 {
-            assert_eq!(graph.packages[index].dependencies, vec![index - 1]);
+        for (index, package) in graph.packages.iter().enumerate().skip(1).take(14) {
+            assert_eq!(package.dependencies, vec![index - 1]);
         }
     }
 }

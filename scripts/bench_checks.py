@@ -266,6 +266,11 @@ class CheckRunner:
             cmd.append("-Werror")
         cmd.extend(["-O0", "-g", "-DLSACA_DEBUG"] if debug else ["-O2", "-DNDEBUG"])
         cmd.extend(str(path) for path in generated_c)
+        if os.name == "nt":
+            # The C runtime uses Winsock (net) and CNG (random seeds); the
+            # project the compiler driver builds links these itself, so the
+            # fallback gcc command has to link them too.
+            cmd.extend(["-lws2_32", "-lbcrypt"])
         cmd.extend(["-lm", "-o", str(exe)])
         proc = run_command(cmd, env, cwd=gen, timeout=300)
         if proc.returncode != 0:
