@@ -20,7 +20,7 @@ Builtin generic types are `Vec<T>`, `HashMap<K, V>`, `Option<T>`,
 non-generic. The prelude also provides the generic functions behind the
 iterator adapters (see [Iterators](19-iterators.md)); those are ordinary public
 items of the `std` crate. This page describes the language-level library
-behaviour of version 2.3.0; the API of each module is documented in the
+behaviour of version 2.4.0; the API of each module is documented in the
 [standard library reference](../stdlib/README.md).
 
 The 2.1.0 changes you meet on every page are: a bare integer literal defaults
@@ -39,11 +39,16 @@ The 2.2.0 changes you meet here are: `std::core` provides the `From` trait, so
 [From and ?](30-from-try.md)); `std::error::Error` gains a default `source`
 method; and borrowed access arrives — `HashMap::get`/`get_mut` take `&K` and
 return references, and `Vec` and slices gain `get_mut`, `first_mut` and
-`last_mut`. Version 2.3.0 completes borrowing iteration: `Vec::iter` yields
+`last_mut`. Version 2.3.0 completed borrowing iteration: `Vec::iter` yields
 `&T` without consuming the vector, `Vec::iter_mut` yields `&mut T`,
 `Vec::into_iter` is the consuming iterator, slices and `HashMap` iterate by
-borrow, and the `rev` and `flat_map` adapters are implemented. Arrays, loop
-labels and reference fields are language features rather than library surface;
+borrow, and the `rev` and `flat_map` adapters are implemented. Version 2.4.0 adds the
+`HashMap` entry idioms, fills out the `HashSet`/`BTreeSet`/`BTreeMap`/
+`VecDeque`/`BinaryHeap` surfaces (see [Collections beyond
+HashMap](#collections-beyond-hashmap)), and adds the iterator terminal
+adapters, `process::Command` and UDP sockets described in their sections.
+Arrays, loop labels and reference fields are language features rather than
+library surface;
 they are documented in [Arrays](27-arrays.md), [Loop labels](28-loop-labels.md)
 and [Lifetimes](29-lifetimes.md).
 
@@ -56,41 +61,43 @@ rules. Version 2.0 also adds the unsized slice types and `dyn` trait objects:
 str](26-slices-and-str.md), and `dyn Trait` in [Trait
 objects](25-trait-objects.md).
 
-## The std crate in 2.3
+## The std crate in 2.4
 
 The library source lives in `stdlib/src/` as one crate of ordinary lsaca code.
 It is embedded into the compiler at build time and parsed with a reserved
 `SourceMap` base, so a diagnostic or a panic inside the library is reported as
 `std/vec.ls:line:column`. The crate is written in safe lsaca and uses the same
 language as user code; only the `extern fn` intrinsics declared in it are
-implemented by code generation.
+implemented by code generation. Version 2.4.0 adds `HashMap::get_or_insert` and
+`get_or_insert_with`, constructors and accessors on the other collections, the
+`min` and `max` iterator terminals, `process::Command` and the UDP surface of
+`std::net`; the module pages describe each addition.
 
-| Module | Page | Status in 2.3.0 |
+| Module | Page | Status in 2.4.0 |
 | --- | --- | --- |
 | `std::core` (`Option`, `Result`, `Iterator`) | [core](../stdlib/core.md) | migrated; 2.1.0 adds the new `Option`/`Result` combinators and iterator methods; 2.2.0 adds the `From` trait |
 | `std::string` | [string](../stdlib/string.md) | migrated; `&str` parameters, the typed `parse` surface and the `String` forwarders for the `str` methods |
 | `std::char` | [char](../stdlib/char.md) | ASCII classification methods; 2.1.0 adds `is_ascii`, the `to_ascii_*` conversions and `to_digit`; 2.3.0 adds Unicode 16.0.0 classification and case mapping |
 | `std::vec` | [vec](../stdlib/vec.md) | migrated; `sort`, `as_slice` and `as_mut_slice` implemented; 2.1.0 adds `truncate`, `swap` and `contains`; 2.2.0 adds the borrowed accessors `get_mut`, `first_mut` and `last_mut`; 2.3.0 adds `iter`, `iter_mut` and `into_iter` |
-| `std::iter` | [iter](../stdlib/iter.md) | migrated; 2.1.0 adds `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by`, `position`, `last`, `nth`, `reduce`, `product`, `inspect` and `for_each`; 2.3.0 adds borrowed vector and slice iterators, `VecIterMut`, `into_iter`, `rev` and `flat_map` |
+| `std::iter` | [iter](../stdlib/iter.md) | migrated; 2.1.0 adds `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by`, `position`, `last`, `nth`, `reduce`, `product`, `inspect` and `for_each`; 2.3.0 adds borrowed vector and slice iterators, `VecIterMut`, `into_iter`, `rev` and `flat_map`; 2.4.0 adds `min`/`max` and widens `product` |
 | `std::fmt` | [fmt](../stdlib/fmt.md) | compiler-implemented |
 | `std::math` | [math](../stdlib/math.md) | migrated; `abs`/`min`/`max` remain compiler builtins; 2.1.0 adds the `f64` constants |
 | `std::collections` | [collections](../stdlib/collections/README.md) | `HashMap` migrated; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented; 2.1.0 follows the `usize` and `&str` rules; 2.2.0 makes `HashMap::get`/`get_mut` borrow the key and return a reference; 2.3.0 adds borrowed `HashMap` iteration, `HashMap::from` and `HashSet::from` |
 | `std::io` | [io](../stdlib/io.md) | error types, `File` and stream handles implemented; 2.1.0 adds `Error::new`/`other` and the integer-shaped read/write/seek results (the `io::Result<T>` alias is not implemented); v2.3 adds the `Read`, `Write`, `Seek` and `BufRead` traits, `BufReader`, `BufWriter` and `File::read_to_string` |
 | `std::fs` | [fs](../stdlib/fs.md) | path, directory and metadata API implemented; 2.1.0 returns `u64` sizes and `SystemTime` modification times; v2.3 adds `Path`, `PathBuf`, `read_dir_entries`, `DirEntry` and `ReadDir` |
-| `std::net` | [net](../stdlib/net.md) | implemented (plain TCP); 2.1.0 adds `Shutdown` |
+| `std::net` | [net](../stdlib/net.md) | implemented: plain TCP and UDP; 2.1.0 adds `Shutdown`; 2.4.0 adds `SocketAddr`, `UdpSocket` and UDP datagrams |
 | `std::time` | [time](../stdlib/time.md) | implemented; 2.1.0 adds `Duration`, `Instant`, `SystemTime`, `unix_epoch()` and `sleep` |
 | `std::env` | [env](../stdlib/env.md) | implemented; 2.1.0 changes `var` to `Result<String, VarError>` |
-| `std::process` | [process](../stdlib/process.md) | `args` implemented; `exit` remains the compiler builtin, now taking `i32` |
+| `std::process` | [process](../stdlib/process.md) | `args` and `exit` implemented; 2.4.0 adds `Command`, `ExitStatus` and `Output` for child processes |
 | `std::error` | [error](../stdlib/error.md) | the `Error` trait implemented with a default `source` method (2.2.0); 2.1.0 adds the `io::Error` and parse-error implementations |
 
 "Migrated from 1.7" means the surface described in this chapter is unchanged but
 the implementation now lives in the `std` crate. "Implemented" names what
-version 2.3.0 provides; each module page lists it separately from the v2.3
-additions, which are implemented in the same tree, and from APIs that remain
-unimplemented. The pages document the current surface; features added for v2.3
-are called out explicitly. The whole library is versioned with the compiler
-(2.3.0) and cannot be replaced by a user package: the package name `std` is
-reserved.
+version 2.4.0 provides; each module page lists it separately from the v2.4
+additions and from APIs that remain unimplemented. The pages document the
+current surface; features added for v2.4 are called out explicitly. The whole
+library is versioned with the compiler (2.4.0) and cannot be replaced by a user
+package: the package name `std` is reserved.
 
 ## Formatting and printing
 
@@ -565,7 +572,7 @@ ababab
 Parsing returns a typed `Result`. `parse_i64` returns
 `Result<i64, ParseIntError>` and `parse_f64` returns
 `Result<f64, ParseFloatError>`; the generic form `parse::<T>()` takes its target
-type from the turbofish and accepts `i64` and `f64` in 2.2.0 (other numeric
+type from the turbofish and accepts `i64` and `f64` in the current release (other numeric
 target types are rejected with `E0107`). The error values implement
 `error::Error`, whose `message()` method returns the diagnostic text:
 
@@ -743,7 +750,8 @@ Slices (`&[T]` and `&mut [T]`) and `HashMap` iterate by borrow through the
 same adapter pipeline. Adapters such as `map`, `filter`, `take`, `skip`,
 `enumerate`, `rev` and `flat_map` build new iterators; terminal operations such
 as `collect`, `sum`, `count`, `fold`, `any`, `all` and `find` consume the
-iterator and produce a value.
+iterator and produce a value. Version 2.4.0 adds the `min` and `max` terminals
+and widens `product` to eight numeric item types.
 
 | Item | Description |
 | --- | --- |
@@ -764,7 +772,8 @@ iterator and produce a value.
 | `collect()` | collects into a `Vec<T>`; the target type must be known, and `Vec<&T>` is rejected |
 | `fold(init, f)` | folds with `f: Fn(U, T) -> U` |
 | `count()` / `sum()` | number of values (`usize`) / sum of numbers (`i32`, `i64`, `usize` or `f64`) |
-| `product()` | product of the numbers (`i32`, `i64`, `usize` or `f64`) |
+| `product()` | product of the numbers (`i32`, `i64`, `u32`, `u64`, `isize`, `usize`, `f32` or `f64`) |
+| `min()` / `max()` | smallest / largest number, as `Option<T>`; empty gives `None`; ties keep the first minimum / last maximum (2.4.0) |
 | `any(p)` / `all(p)` | short-circuit boolean tests with `p: Fn(&T) -> bool` |
 | `find(p)` | first value satisfying `p`, as `Option<T>` |
 | `position(p)` | `Option<usize>` of the first value satisfying `p` |
@@ -773,18 +782,19 @@ iterator and produce a value.
 | `reduce(f)` | `Option<T>`: like `fold` without an initial value |
 | `inspect(f)` / `for_each(f)` | trace each value (`f: Fn(&T)`) / consume each value (`f: Fn(T)`) |
 
-Version 2.3.0 provides the full adapter set: the original adapters (`map`,
+Version 2.4.0 provides the full adapter set: the original adapters (`map`,
 `filter`, `take`, `skip`, `enumerate`), the adapters added in 2.1.0 (`zip`,
 `chain`, `filter_map`, `take_while`, `skip_while` and `step_by`), the
 borrowing constructors (`iter`, `iter_mut`, `into_iter`), `rev` and
 `flat_map`, and the terminals `collect`, `fold`, `count`, `sum`, `product`,
-`any`, `all`, `find`, `position`, `last`, `nth`, `reduce`, `inspect` and
-`for_each` (see [iter](../stdlib/iter.md)).
+`min`, `max`, `any`, `all`, `find`, `position`, `last`, `nth`, `reduce`,
+`inspect` and `for_each` (see [iter](../stdlib/iter.md)).
 
-`sum` and `product` dispatch on the iterator item type: `i32`, `i64`, `usize`
-and `f64` items are supported, and any other item type is `E0277`. A borrowed
-vector has item type `&T`, so map to owned values first. An unannotated integer
-vector has `i32` items, so
+`sum` dispatches on the iterator item type: `i32`, `i64`, `usize` and `f64`
+items are supported, and any other item type is `E0277`. `product`, `min` and
+`max` accept the wider numeric set `i32`, `i64`, `u32`, `u64`, `isize`,
+`usize`, `f32` and `f64`. A borrowed vector has item type `&T`, so map to
+owned values first. An unannotated integer vector has `i32` items, so
 `vec![1, 2, 3].iter().map(|value| *value).sum()` sums `i32` values.
 
 ```ls
@@ -813,15 +823,23 @@ Full details, user-defined iterators and the exact rules are on
 A `HashMap` is a builtin map from keys to values added in 1.5. Keys are limited
 to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and `char` (character keys
 since 1.6.0, the pointer-sized integer keys since 2.0.0). The list is exhaustive:
-`i32` and the narrower integer types are not key types in 2.3.0, so a map with
+`i32` and the narrower integer types are not key types in the current release, so a map with
 an `i32` key is rejected with `E0277` — use `i64`. Values may be any value type.
 Since 2.2.0 `get` and `get_mut` borrow the key and return a reference to the
 living value, so no clone is needed; the other lookups still take the key by
 value. Since 2.3.0 the map also iterates by borrow: `map.iter()` yields
 `(&K, &V)`, `map.keys()` yields `&K`, `map.values()` yields `&V`,
 `for (key, value) in &map` is the borrowed loop, and
-`HashMap::from(Vec<(K, V)>)` builds a map from owned pairs. Iteration does not
-clone entries or consume the map. A map is move-only and owns its keys and
+`HashMap::from(Vec<(K, V)>)` builds a map from owned pairs. Version 2.4.0 adds
+`get_or_insert(key, default)` and `get_or_insert_with(key, f)`, which return
+`&mut V` and insert only when the key is absent; the lazy form takes
+`fn() -> V` and calls it only on the absent path. The language has no generic
+methods, so that function type is concrete: a named function or a closure with
+the signature `fn() -> V` fits. Closures capture by value, so a capturing
+closure sees a snapshot of its captures, not live variables. Both entry idioms
+look the entry up again after an insert, because growing the table rehashes it;
+the returned reference comes from that fresh lookup. Iteration does not clone
+entries or consume the map. A map is move-only and owns its keys and
 values; `.clone()` produces an independent copy when the key and value types
 are cloneable. Since 1.6.0 the implementation is a Swiss-Table-style
 open-addressed table with a deterministic, non-cryptographic 64-bit hash. The
@@ -853,6 +871,8 @@ Some(3)
 | `insert(key, value)` | moves both in, returns the previous value |
 | `get(&key)` | returns `Option<&V>`, a borrowed view of the stored value (2.2.0) |
 | `get_mut(&key)` | returns `Option<&mut V>`, a mutable borrowed view; the map binding must be `mut` (2.2.0) |
+| `get_or_insert(key, default)` | moves the key and default; inserts the default when absent and returns `&mut V` (2.4.0) |
+| `get_or_insert_with(key, f)` | moves the key; calls `f: fn() -> V` only when absent and returns `&mut V` (2.4.0) |
 | `get_with(key, f)` | copies the key, applies `f: Fn(&V) -> U` to the stored value, returns `Option<U>` |
 | `contains_key(key)` | true when the key is present |
 | `remove(key)` | removes the entry, returns `Option<V>` |
@@ -862,8 +882,8 @@ Some(3)
 | `keys()` / `values()` | borrow the map and yield `&K` / `&V` without cloning (2.3.0) |
 
 `get` and `get_mut` borrow the key, so pass `&key`; `insert`, `contains_key`,
-`remove` and `get_with` take the key by value. Borrowed iteration is the
-supported `for` form:
+`remove`, `get_with` and the two `get_or_insert` forms take the key by value.
+Borrowed iteration is the supported `for` form:
 
 ```ls
 fn main() {
@@ -890,6 +910,33 @@ Output:
 ```
 
 Full details, ownership rules and limitations are on [HashMap](20-hashmap.md).
+
+## Collections beyond HashMap
+
+The other containers live in `std::collections` and are ordinary value types
+written in lsaca. Version 2.4.0 fills out their constructors and accessors:
+
+| Type | Surface added or completed in 2.4.0 | Order |
+| --- | --- | --- |
+| `HashSet<T>` | `extend(Vec<T>)`; `from` and set algebra already existed | insertion order |
+| `BTreeSet<T>` | `from(Vec<T>)`, `to_vec()`; `first`/`last` return the smallest/largest value | ascending |
+| `BTreeMap<K, V>` | `from(Vec<(K, V)>)`, `get_mut(K)`, `first_key()`, `last_key()`, `to_vec()` | ascending key order |
+| `VecDeque<T>` | `with_capacity(usize)`, `from(Vec<T>)`, `get_mut(usize)`, `front()`, `back()`, `to_vec()` | front to back |
+| `BinaryHeap<T>` | `from(Vec<T>)`, `to_vec()`; `pop`/`peek` return the largest value | internal heap order, not sorted |
+
+Set elements and ordered-map keys are the ordered scalar types (integers,
+`char` and `String`); `HashSet` accepts the same keys as `HashMap`. The
+`BTree*` containers keep a sorted vector and scan it with linear comparisons,
+so lookups are linear; `VecDeque` and `BinaryHeap` use a vector as well.
+`BTreeMap::get_mut` returns a reference into the map and therefore keeps it
+borrowed; the other `BTreeMap` accessors clone because the storage is private.
+None of these containers supports a borrowing iterator or a `for` loop yet:
+`elements()`, `to_vec()`, `keys()` and `values()` return cloned `Vec`s.
+`BinaryHeap::to_vec` returns the heap's internal storage order, not a sorted
+sequence; call `pop` repeatedly when the values are needed from largest to
+smallest. See
+the [collections reference](../stdlib/collections/README.md) for the full
+per-type surfaces and caveats.
 
 ## Option
 
@@ -1473,14 +1520,14 @@ These are the legacy prelude helpers; they are items of the `std` crate root and
 stay in scope for every program. The richer per-module APIs — `std::io`,
 `std::fs`, `std::net`, `std::time`, `std::env` and `std::process` — are
 documented in the [standard library reference](../stdlib/README.md), which marks
-each item as implemented in 2.2.0, added for v2.3, or not yet implemented. In
-2.2.0 the `fs` functions and the `read_file`/`write_file` helpers take `&str`
-paths and contents, `io` has `io::Result`, `io::Error::new`/`other` and
-integer-sized `read`/`write`/`seek`, `process::exit` is implemented, and `time`,
-`env` and `net` gain the new types described in the reference. The v2.3 work
-adds `Path`, `PathBuf` and `read_dir_entries` to `fs`, and the `Read`, `Write`,
-`Seek` and `BufRead` traits with `BufReader` and `BufWriter` to `io`;
-`read_file`/`write_file` keep their `&str` signatures.
+each item with the release that added it. The `fs` functions and the
+`read_file`/`write_file` helpers take `&str` paths and contents; `io` has
+`io::Result`, `io::Error::new`/`other` and integer-sized `read`/`write`/`seek`.
+Version 2.3 added `Path`, `PathBuf` and `read_dir_entries` to `fs`, and the
+`Read`, `Write`, `Seek` and `BufRead` traits with `BufReader` and `BufWriter`
+to `io`. Version 2.4 adds `process::Command` and the UDP surface
+(`SocketAddr`, `UdpSocket`) of `std::net`; the module pages give the full
+signatures. `read_file`/`write_file` keep their `&str` signatures.
 
 ### I/O and process
 
@@ -1586,6 +1633,57 @@ true
 hello file
 true
 ```
+
+### Child processes
+
+Version 2.4.0 adds `std::process::Command` for running one external program
+without a shell. The program and every argument are passed as one exact argument
+vector; there is no quoting, wildcard expansion or variable substitution. The
+builder methods mutate the command and return nothing:
+
+| API | Signature | Meaning |
+| --- | --- | --- |
+| `Command::new` | `(String) -> Command` | creates a builder for the program |
+| `arg` | `(&mut self, String)` | appends one argument |
+| `args` | `(&mut self, Vec<String>)` | appends every argument in order |
+| `current_dir` | `(&mut self, String)` | sets the working directory; the empty string inherits the parent's |
+| `status` | `(&self) -> Result<ExitStatus, Error>` | runs with inherited standard streams and waits |
+| `output` | `(&self) -> Result<Output, Error>` | runs, captures stdout and stderr, and waits |
+| `ExitStatus::code` | `(&self) -> i32` | the child exit code; POSIX signals report `128 + signal` |
+| `ExitStatus::success` | `(&self) -> bool` | true when the code is zero |
+| `Output::status` | `(&self) -> ExitStatus` | the child status |
+| `Output::stdout` / `stderr` | `(&self) -> String` | the captured text; invalid UTF-8 becomes `?` |
+
+A non-zero child status is not an error: both calls return `Ok` with the
+`ExitStatus`, and `Err` means the child could not be started. The error type is
+[`io::Error`](../stdlib/io.md). See [process](../stdlib/process.md) for the
+cross-platform notes and the limits (no `spawn`, pipes or asynchronous mode).
+
+### Networking
+
+`std::net` provides blocking TCP and, since 2.4.0, UDP. Socket methods take
+address text of the form `"host:port"`; IPv6 hosts are bracketed as
+`"[::1]:80"`. Failures are [`io::Error`](../stdlib/io.md) values.
+
+| API | Signature | Meaning |
+| --- | --- | --- |
+| `TcpListener::bind` | `(&str) -> Result<TcpListener, Error>` | binds and starts listening |
+| `TcpListener::accept` | `(&self) -> Result<TcpStream, Error>` | waits for the next connection |
+| `TcpStream::connect` | `(&str) -> Result<TcpStream, Error>` | opens a connection |
+| `TcpStream::read` / `write` | `(&mut self, &mut [u8]) -> Result<usize, Error>` / `(&mut self, &[u8]) -> Result<usize, Error>` | byte I/O; `read` returns `0` at end of stream |
+| `TcpStream::set_timeout` | `(&self, i64) -> Result<(), Error>` | read/write timeout in milliseconds; `0` disables |
+| `TcpStream::shutdown` | `(&self, Shutdown) -> Result<(), Error>` | shuts down read, write or both |
+| `SocketAddr::parse` | `(&str) -> Result<SocketAddr, Error>` | parses `IP:port`; a host name is rejected, and no DNS lookup happens |
+| `SocketAddr::ip` / `port` | `(&self) -> String` / `(&self) -> i64` | the parsed address parts |
+| `UdpSocket::bind` | `(&str) -> Result<UdpSocket, Error>` | binds a local UDP address; port `0` is ephemeral |
+| `UdpSocket::send_to` | `(&self, &[u8], &str) -> Result<usize, Error>` | sends one datagram |
+| `UdpSocket::recv_from` | `(&mut self, i64) -> Result<Option<(Vec<u8>, String)>, Error>` | receives one datagram and its peer; a timeout is `Ok(None)` |
+| `UdpSocket::set_timeout` / `close` | `(&self, i64)` / `(&mut self)` | receive timeout / close, idempotently |
+| `TcpListener::local_port`, `UdpSocket::local_port` | `(&self) -> i64` | the bound port |
+
+There is no TLS, no Unix-domain socket API, no nonblocking mode, no listener
+iterator and no asynchronous I/O. See [net](../stdlib/net.md) for the complete
+surface, including the `handle` accessors and the drop behaviour.
 
 ### Math
 

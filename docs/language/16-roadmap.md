@@ -18,11 +18,36 @@ and the completion matrix in [STATUS.md](../../STATUS.md).
 
 ## Compatibility
 
-lsaca 2.2.0 is an additive release for most code: arrays, loop labels,
-reference fields and `From`/`?` conversions are new forms, and `lsaca fmt` is a
-new command. The largest break remains 2.1.0, which breaks programs that relied
-on 2.0's numeric and text defaults; the rest of the standard-library surface is
-additive. The 2.2-specific changes are:
+lsaca 2.4.0 is an additive release for most accepted code. It adds
+array/slice/`@` patterns, break values, `pub(super)`/`pub(in path)` and module
+aliases, collection entry idioms and constructors, the `min`/`max` iterator
+terminals, `process::Command`, UDP sockets and crate-wide formatting. The
+2.4-specific changes are:
+
+* **New syntax and typing.** Fixed-size array patterns, slice patterns with at
+  most one `..`, and `name @ pattern` bindings work in every pattern position.
+  A `loop` expression takes the type of its break values; a value in a
+  `while`/`for` break is `E0571`, and a value on `continue` is `E0308`.
+  `pub(super)` and `pub(in path)` are accepted, and a `use … as …` alias may
+  name a module as well as an item.
+* **New library surface.** `HashMap::get_or_insert` and
+  `get_or_insert_with` (a borrowed `Entry` is deferred to v2.6 per
+  [RFC 0002](../../rfcs/0002-hashmap-entry.md)), constructors and accessors on
+  `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap`, the
+  `min`/`max` iterator terminals, `process::Command`, and
+  `net::SocketAddr`/`UdpSocket`. The additions are additive; no C ABI breaks.
+* **Formatter package mode.** `lsaca fmt [PATH] [--check]` accepts a file or a
+  directory, discovers the nearest `lsaca.toml` for a directory, validates every
+  module before writing, and lists unformatted files from `--check`. `--stdout`
+  remains single-file only.
+* **Protocol boundaries.** [RFC 0003](../../rfcs/0003-derive-and-protocols.md)
+  keeps protocols compiler-defined in 2.x: no derive attributes, operator
+  overloading or user `Display`/`Debug`/`Default`/`Ord`/`Hash` impls.
+  [RFC 0004](../../rfcs/0004-concurrency.md) records that 2.x is single-threaded
+  by contract and leaves the concurrency model to v3.0. UFCS stays `E0599`
+  (deviation 19).
+
+The 2.2 changes remain when upgrading from 2.1 or earlier:
 
 * **New syntax.** Array types `[T; N]` and literals, array repeat literals
   `[value; N]`, loop labels `'outer: …` with `break 'outer`/`continue 'outer`,
@@ -33,6 +58,10 @@ additive. The 2.2-specific changes are:
   `&K` — call with `&key`); `get` on a map now borrows its key and returns
   `Option<&V>`, while `get_with` and `values()` keep cloning.
 * **New command.** `lsaca fmt <FILE.ls>` with `--check` and `--stdout`.
+
+The 2.3 release added borrowed iteration, I/O streams, `PathBuf`/`Path`, Unicode
+character classification and partial moves; it introduced no incompatible
+language change.
 
 The 2.1 incompatibilities remain when upgrading from 2.0 or earlier:
 
@@ -101,6 +130,10 @@ release and compared with C, Rust, Python and Node; see
 * Error conversion with `From` and `?`: [From and ?](30-from-try.md).
 * The standard library modules: [Standard library
   reference](../stdlib/README.md).
+* Why protocols and formatting traits stay compiler-defined:
+  [RFC 0003: derive and protocols](../../rfcs/0003-derive-and-protocols.md).
+* Why 2.x has no threads: [RFC 0004:
+  concurrency](../../rfcs/0004-concurrency.md).
 * Ownership, moves and destruction: [Ownership and
   moves](11-ownership-and-moves.md).
 * Non-owning views and the borrow checker: [References and

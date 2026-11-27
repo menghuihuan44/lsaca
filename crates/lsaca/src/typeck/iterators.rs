@@ -22,7 +22,7 @@ use crate::span::Span;
 use crate::types::{FloatTy, IntTy};
 
 /// The method names resolved by the iterator sugar.
-pub const SUGAR_METHODS: [&str; 32] = [
+pub const SUGAR_METHODS: [&str; 34] = [
     "iter",
     "iter_mut",
     "into_iter",
@@ -52,6 +52,8 @@ pub const SUGAR_METHODS: [&str; 32] = [
     "reduce",
     "sum",
     "product",
+    "min",
+    "max",
     "any",
     "all",
     "find",
@@ -126,18 +128,25 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The numeric specialization used by .sum()/.product().
+    /// The numeric specialization used by .sum(), .product(), .min() and
+    /// .max().
     ///
     /// Unannotated integer literals take their i32 default; every other
-    /// supported numeric item type picks its matching helper. The returned
-    /// string is the helper suffix (i32/i64/usize/f64).
-    fn numeric_terminal_suffix(&mut self, item: &ITy) -> Option<&'static str> {
+    /// supported numeric item type picks its matching helper. `wide` selects
+    /// the v2.4 product/min/max item types (u32, u64, isize, f32) in addition
+    /// to the four types .sum() has always accepted. The returned string is the
+    /// helper suffix (i32/i64/u32/u64/isize/usize/f32/f64).
+    fn numeric_terminal_suffix(&mut self, item: &ITy, wide: bool) -> Option<&'static str> {
         let resolved = self.infer.resolve(item);
         match &resolved {
             ITy::Int(IntTy::I32) => Some("i32"),
             ITy::Int(IntTy::I64) => Some("i64"),
             ITy::Int(IntTy::Usize) => Some("usize"),
+            ITy::Int(IntTy::U32) if wide => Some("u32"),
+            ITy::Int(IntTy::U64) if wide => Some("u64"),
+            ITy::Int(IntTy::Isize) if wide => Some("isize"),
             ITy::Float(FloatTy::F64) => Some("f64"),
+            ITy::Float(FloatTy::F32) if wide => Some("f32"),
             ITy::Var(id) => match self.infer.var_kind(*id) {
                 VarKind::IntLiteral => {
                     let _ = self.infer.unify(&resolved, &ITy::i32());
@@ -759,17 +768,27 @@ impl<'a> Checker<'a> {
                 ))
             }
             "sum" | "product" => {
-                let suffix = match self.numeric_terminal_suffix(&item) {
+                // .sum() keeps its four historical item types; .product()
+                // accepts the wider v2.4 numeric set. Both pick a helper by
+                // the item type, like .count() picks its fixed helper.
+                let wide = method == "product";
+                let suffix = match self.numeric_terminal_suffix(&item, wide) {
                     Some(suffix) => suffix,
                     None => {
                         let resolved_item = self.infer.resolve(&item);
                         let described = self.describe_resolved(&resolved_item);
+                        let supported = if wide {
+                            "i32, i64, u32, u64, isize, usize, f32 or f64"
+                        } else {
+                            "i32, i64, usize or f64"
+                        };
                         self.error_code(
                             format!(
-                                "cannot {} an iterator of type {}; .{}() is only supported for iterators of i32, i64, usize or f64",
+                                "cannot {} an iterator of type {}; .{}() is only supported for iterators of {}",
                                 if method == "sum" { "sum" } else { "multiply" },
                                 described,
-                                method
+                                method,
+                                supported
                             ),
                             method_span,
                             "E0277",
@@ -788,6 +807,50 @@ impl<'a> Checker<'a> {
                 Some(self.instantiate_sugar_fn(
                     def_id,
                     vec![receiver_ty],
+                    receiver_expr,
+                    Vec::new(),
+                    span,
+                    hint,
+                ))
+            }
+            "min" | "max" => {
+                // The item type must be one of the eight numeric types. The
+                // generic helper uses the language's comparison operators, so
+                // it needs no per-type instantiation; the suffix check is what
+                // keeps the surface numeric and defaults literal variables.
+                if self.numeric_terminal_suffix(&item, true).is_none() {
+                    let resolved_item = self.infer.resolve(&item);
+                    let described = self.describe_resolved(&resolved_item);
+                    let action = if method == "min" {
+                        "find the minimum of"
+                    } else {
+                        "find the maximum of"
+                    };
+                    self.error_code(
+                        format!(
+                            "cannot {} an iterator of type {}; .{}() is only supported for iterators of i32, i64, u32, u64, isize, usize, f32 or f64",
+                            action, described, method
+                        ),
+                        method_span,
+                        "E0277",
+                    );
+                    for arg in args {
+                        let _ = self.check_expr(arg, None);
+                    }
+                    return Some(self.never_expr(span));
+                }
+                let name = if method == "min" {
+                    "__lsaca_it_min"
+                } else {
+                    "__lsaca_it_max"
+                };
+                let def_id = self.prelude_fn(name)?;
+                if self.sugar_args(&[], args, span).is_none() {
+                    return Some(self.never_expr(span));
+                }
+                Some(self.instantiate_sugar_fn(
+                    def_id,
+                    vec![item, receiver_ty],
                     receiver_expr,
                     Vec::new(),
                     span,

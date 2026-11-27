@@ -610,6 +610,20 @@ impl<'a> Collector<'a> {
                     self.visit_pat(part);
                 }
             }
+            HPatKind::Array(parts) => {
+                for part in parts {
+                    self.visit_pat(part);
+                }
+            }
+            HPatKind::Slice { prefix, suffix, .. } => {
+                for part in prefix.iter().chain(suffix.iter()) {
+                    self.visit_pat(part);
+                }
+            }
+            HPatKind::At { binding, pattern } => {
+                self.visit_pat(binding);
+                self.visit_pat(pattern);
+            }
             HPatKind::Struct { fields, .. } => {
                 for (_, part) in fields {
                     self.visit_pat(part);
@@ -788,7 +802,12 @@ impl<'a> Collector<'a> {
                     self.visit_expr(arg);
                 }
             }
-            HExprKind::Break { .. } | HExprKind::Continue { .. } => {}
+            HExprKind::Break { value, .. } => {
+                if let Some(value) = value {
+                    self.visit_expr(value);
+                }
+            }
+            HExprKind::Continue { .. } => {}
             HExprKind::Return(value) => {
                 if let Some(value) = value {
                     self.visit_expr(value);

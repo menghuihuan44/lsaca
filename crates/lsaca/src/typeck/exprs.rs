@@ -9,7 +9,7 @@ mod generic_calls;
 mod ops;
 mod paths;
 
-use super::check::{Checker, Frame, block_type};
+use super::check::{Checker, Frame, LoopKind, block_type};
 use super::items::TypeKey;
 use super::itype::ITy;
 use super::tree::{TBlock, TCapture, TClosure, TExpr, TExprKind, TLit, TParam};
@@ -281,10 +281,15 @@ impl<'a> Checker<'a> {
     }
 
     fn check_loop(&mut self, label: Option<&ast::Label>, body: &ast::Block, span: Span) -> TExpr {
-        let label = self.push_loop(label);
+        let label = self.push_loop(label, LoopKind::Loop);
         let body = self.check_block(body, None);
-        self.pop_loop();
-        TExpr::new(ITy::never(), TExprKind::Loop { label, body }, span)
+        let state = self.pop_loop();
+        let ty = if state.saw_break {
+            state.result
+        } else {
+            ITy::never()
+        };
+        TExpr::new(ty, TExprKind::Loop { label, body }, span)
     }
 
     fn check_while(
@@ -296,7 +301,7 @@ impl<'a> Checker<'a> {
     ) -> TExpr {
         let cond = self.check_expr(cond, Some(&ITy::bool_()));
         self.require_bool(&cond.ty, cond.span);
-        let label = self.push_loop(label);
+        let label = self.push_loop(label, LoopKind::While);
         let body = self.check_block(body, None);
         self.pop_loop();
         TExpr::new(
@@ -352,7 +357,7 @@ impl<'a> Checker<'a> {
             }
             self.push_scope();
             let pat = self.check_irrefutable_pattern(pat, &elem_ty, pat.span);
-            self.push_loop(label);
+            self.push_loop(label, LoopKind::For);
             let body = self.check_block(body, None);
             self.pop_loop();
             self.pop_scope();
@@ -406,7 +411,7 @@ impl<'a> Checker<'a> {
             let elem_ty = (**elem).clone();
             self.push_scope();
             let pat = self.check_irrefutable_pattern(pat, &elem_ty, pat.span);
-            self.push_loop(label);
+            self.push_loop(label, LoopKind::For);
             let body = self.check_block(body, None);
             self.pop_loop();
             self.pop_scope();
@@ -457,7 +462,7 @@ impl<'a> Checker<'a> {
             if let Some(next_fn) = next_fn {
                 self.push_scope();
                 let pat = self.check_irrefutable_pattern(pat, &item_ty, pat.span);
-                self.push_loop(label);
+                self.push_loop(label, LoopKind::For);
                 let body = self.check_block(body, None);
                 self.pop_loop();
                 self.pop_scope();
@@ -491,7 +496,7 @@ impl<'a> Checker<'a> {
         }
         self.push_scope();
         let pat = self.check_irrefutable_pattern(pat, &ITy::Unit, pat.span);
-        self.push_loop(label);
+        self.push_loop(label, LoopKind::For);
         let body = self.check_block(body, None);
         self.pop_loop();
         self.pop_scope();
@@ -513,15 +518,22 @@ impl<'a> Checker<'a> {
         value: Option<&ast::Expr>,
         span: Span,
     ) -> TExpr {
-        match label {
+        let target = match label {
             Some(label) => {
-                if !self.loop_label_exists(&label.name) {
+                let index = self.frames.last().and_then(|frame| {
+                    frame
+                        .loops
+                        .iter()
+                        .rposition(|state| state.label.as_deref() == Some(label.name.as_str()))
+                });
+                if index.is_none() {
                     self.error_code(
                         format!("use of undeclared label '{}'", label.name),
                         label.name_span,
                         "E0426",
                     );
                 }
+                index
             }
             None => {
                 if !self.in_loop() {
@@ -539,19 +551,64 @@ impl<'a> Checker<'a> {
                             .with_note("break cannot cross a closure boundary".to_string());
                     }
                     self.diagnostics.push(diagnostic);
+                    None
+                } else {
+                    self.frames
+                        .last()
+                        .map(|frame| frame.loops.len().saturating_sub(1))
+                }
+            }
+        };
+        let target = target.map(|index| {
+            let state = &self.frames.last().expect("loop frame").loops[index];
+            (index, state.kind, state.result.clone())
+        });
+        let checked_value = value.map(|value| self.check_expr(value, None));
+        if let Some((index, kind, result)) = &target {
+            match kind {
+                LoopKind::Loop => {
+                    let value_ty = match &checked_value {
+                        Some(value) => {
+                            self.unify_or_report(result, &value.ty, value.span);
+                            value.ty.clone()
+                        }
+                        None => ITy::unit(),
+                    };
+                    if checked_value.is_none() {
+                        self.unify_or_report(result, &value_ty, span);
+                    }
+                    if let Some(frame) = self.frames.last_mut()
+                        && let Some(state) = frame.loops.get_mut(*index)
+                    {
+                        state.saw_break = true;
+                    }
+                }
+                LoopKind::While | LoopKind::For => {
+                    if let Some(value) = &checked_value {
+                        let loop_name = match kind {
+                            LoopKind::While => "while",
+                            LoopKind::For => "for",
+                            LoopKind::Loop => unreachable!(),
+                        };
+                        self.error_code_note(
+                            format!("break with value from a {} loop", loop_name),
+                            value.span,
+                            "E0571",
+                            "remove the value, or use a loop when a result is needed".to_string(),
+                        );
+                    }
                 }
             }
         }
-        if let Some(value) = value {
-            let _ = self.check_expr(value, None);
-            self.error_code(
-                "break with a value is not supported; loops have type ()".to_string(),
-                value.span,
-                "E0308",
-            );
-        }
         let label = label.map(|label| label.name.clone());
-        TExpr::new(ITy::never(), TExprKind::Break { label }, span)
+        TExpr::new(
+            ITy::never(),
+            TExprKind::Break {
+                label,
+                value: checked_value.map(Box::new),
+            },
+            span,
+        )
     }
 
     fn check_continue(&mut self, label: Option<&ast::Label>, span: Span) -> TExpr {
@@ -591,20 +648,39 @@ impl<'a> Checker<'a> {
     /// Enter a loop, recording its label and raising the loop depth so that
     /// break and continue are accepted in the body. Returns the label stored
     /// in the typed tree.
-    pub fn push_loop(&mut self, label: Option<&ast::Label>) -> Option<String> {
+    pub fn push_loop(&mut self, label: Option<&ast::Label>, kind: LoopKind) -> Option<String> {
         let name = label.map(|label| label.name.clone());
+        // The result of a `loop` starts as a fresh variable so the first
+        // `break value` can determine it; while/for loops never carry a value.
+        let result = match kind {
+            LoopKind::Loop => self.infer.fresh_var(),
+            LoopKind::While | LoopKind::For => ITy::unit(),
+        };
         if let Some(frame) = self.frames.last_mut() {
             frame.loop_depth += 1;
-            frame.loop_labels.push(name.clone());
+            frame.loops.push(super::check::LoopState {
+                label: name.clone(),
+                kind,
+                result,
+                saw_break: false,
+            });
         }
         name
     }
 
-    /// Leave the innermost loop.
-    pub fn pop_loop(&mut self) {
+    /// Leave the innermost loop and return its recorded break state.
+    pub fn pop_loop(&mut self) -> super::check::LoopState {
         if let Some(frame) = self.frames.last_mut() {
             frame.loop_depth = frame.loop_depth.saturating_sub(1);
-            frame.loop_labels.pop();
+            if let Some(state) = frame.loops.pop() {
+                return state;
+            }
+        }
+        super::check::LoopState {
+            label: None,
+            kind: LoopKind::Loop,
+            result: ITy::unit(),
+            saw_break: false,
         }
     }
 
@@ -615,9 +691,9 @@ impl<'a> Checker<'a> {
             .last()
             .map(|frame| {
                 frame
-                    .loop_labels
+                    .loops
                     .iter()
-                    .any(|label| label.as_deref() == Some(name))
+                    .any(|state| state.label.as_deref() == Some(name))
             })
             .unwrap_or(false)
     }
@@ -1754,7 +1830,14 @@ impl<'a> Checker<'a> {
     }
 
     pub fn never_expr(&self, span: Span) -> TExpr {
-        TExpr::new(ITy::never(), TExprKind::Break { label: None }, span)
+        TExpr::new(
+            ITy::never(),
+            TExprKind::Break {
+                label: None,
+                value: None,
+            },
+            span,
+        )
     }
 
     pub fn require_bool(&mut self, ty: &ITy, span: Span) {

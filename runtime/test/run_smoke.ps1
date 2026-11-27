@@ -32,9 +32,10 @@
       * the in-process suite passes and prints ALL CHECKS PASSED with no stderr
         output (in particular the debug builds must report no leaked objects),
       * the standalone I/O suite (io_tests) passes in release, debug and rc mode
-        and writes nothing to stderr (handles, files, directories, TCP loopback,
-        time and environment, lexical path join/parent/name/extension helpers,
-        buffered multi-chunk write/read round-trip and directory iteration),
+        and writes nothing to stderr (handles, files, directories, TCP and UDP
+        loopback, process status/output capture, time and environment, lexical
+        path join/parent/name/extension helpers, buffered multi-chunk
+        write/read round-trip and directory iteration),
       * --leak intentionally leaks two objects and is reported only by the
         debug / rc builds,
       * every panic mode exits 101 and prints the exact Rust-style message

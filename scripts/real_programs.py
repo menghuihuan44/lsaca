@@ -5,7 +5,7 @@ Every case is compared byte for byte with the golden files used by the
 real_programs_match_expected_output end-to-end test:
 
     crates/lsaca/tests/real_programs/expected/{json,json_file,markdown,
-    markdown_file,lisp,lisp_file}.out
+    markdown_file,lisp,lisp_file,wordstats,wordstats_file}.out
 
 The lsaca cases invoke "lsaca run <program>.ls [-- <args>]" from
 examples/programs, require exit status 0 and an empty stderr, normalize CRLF to
@@ -34,7 +34,7 @@ import sys
 import time
 from pathlib import Path
 
-PROGRAMS = ("json", "markdown", "lisp")
+PROGRAMS = ("json", "markdown", "lisp", "wordstats")
 
 CASES = (
     ("json", "json", [], "json.out"),
@@ -43,6 +43,8 @@ CASES = (
     ("markdown_file", "markdown", ["data/sample.md"], "markdown_file.out"),
     ("lisp", "lisp", [], "lisp.out"),
     ("lisp_file", "lisp", ["data/sample.lisp"], "lisp_file.out"),
+    ("wordstats", "wordstats", [], "wordstats.out"),
+    ("wordstats_file", "wordstats", ["data/sample.txt"], "wordstats_file.out"),
 )
 
 

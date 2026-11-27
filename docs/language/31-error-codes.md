@@ -44,13 +44,14 @@ Name resolution, imports, visibility, module files, and package layout.
 | `E0425` | A function or value name cannot be resolved in this scope. | `crates/lsaca/src/typeck/exprs/paths.rs`, `crates/lsaca/src/typeck/exprs/calls.rs` |
 | `E0428` | A name is defined more than once in the same scope. | `crates/lsaca/src/typeck/items.rs`, `crates/lsaca/src/typeck/modules.rs`, `crates/lsaca/src/typeck/traits.rs`, `crates/lsaca/src/driver.rs` |
 | `E0432` | An import cannot be resolved, or a glob import is used, which is not supported. | `crates/lsaca/src/typeck/modules.rs` |
-| `E0433` | A module or a segment of a path cannot be resolved. | `crates/lsaca/src/typeck/modules.rs`, `crates/lsaca/src/typeck/exprs/paths.rs`, `crates/lsaca/src/typeck/exprs/calls.rs` |
+| `E0433` | A module or a segment of a path cannot be resolved, including the path of a `pub(in …)` restriction. | `crates/lsaca/src/typeck/modules.rs`, `crates/lsaca/src/typeck/exprs/paths.rs`, `crates/lsaca/src/typeck/exprs/calls.rs` |
 | `E0451` | A struct field named in a struct literal or pattern is private. | `crates/lsaca/src/typeck/exprs.rs`, `crates/lsaca/src/typeck/patterns.rs` |
 | `E0583` | A module file cannot be found, read, or loaded from an in-memory source. | `crates/lsaca/src/driver.rs` |
 | `E0603` | An item or module is private and cannot be accessed from here. | `crates/lsaca/src/typeck/modules.rs` |
 | `E0616` | A field accessed on a value is private. | `crates/lsaca/src/typeck/exprs.rs` |
 | `E0624` | An associated function or method is private. | `crates/lsaca/src/typeck/exprs/calls.rs`, `crates/lsaca/src/typeck/exprs/generic_calls.rs` |
 | `E0659` | An enum variant name is ambiguous and must be qualified with the enum name. | `crates/lsaca/src/typeck/exprs/paths.rs` |
+| `E0742` | A restricted visibility names a module that is not an ancestor of the item, including `pub(super)` at the crate root. | `crates/lsaca/src/typeck/modules.rs` |
 | `E0761` | A module has files at both `name.ls` and `name/mod.ls`. | `crates/lsaca/src/driver.rs` |
 
 ## Types, generics and traits
@@ -77,7 +78,7 @@ Type checking, inference, generic instantiation, trait matching, and member look
 | `E0277` | A use requires a trait bound or iterator capability that the type does not provide, such as `Iterator` for a `for` loop or `Hash`/`Eq` for a map key. | `crates/lsaca/src/typeck/generics.rs`, `crates/lsaca/src/typeck/dyn_traits.rs`, `crates/lsaca/src/typeck/iterators.rs`, `crates/lsaca/src/typeck/hash_map.rs` |
 | `E0282` | The compiler cannot infer a type and a type annotation is needed. | `crates/lsaca/src/typeck/check.rs`, `crates/lsaca/src/typeck/generics.rs`, `crates/lsaca/src/typeck/patterns.rs` |
 | `E0283` | The compiler cannot infer the generic arguments of a call and a type annotation is needed. | `crates/lsaca/src/typeck/generics.rs`, `crates/lsaca/src/typeck/exprs/generic_calls.rs` |
-| `E0308` | Mismatched types, including errors in operator and cast operand types. | `crates/lsaca/src/typeck/check.rs`, `crates/lsaca/src/typeck/exprs/ops.rs`, `crates/lsaca/src/typeck/generics.rs` |
+| `E0308` | Mismatched types, including errors in operator and cast operand types, a fixed-size array pattern whose length differs from the array, and a value on `continue`. | `crates/lsaca/src/parser.rs`, `crates/lsaca/src/typeck/check.rs`, `crates/lsaca/src/typeck/exprs/ops.rs`, `crates/lsaca/src/typeck/generics.rs`, `crates/lsaca/src/typeck/patterns.rs` |
 | `E0369` | A binary operator cannot be applied to these operand types, or cannot be used as an assignment operator. | `crates/lsaca/src/typeck/exprs/ops.rs` |
 | `E0392` | A lifetime parameter is declared but never used. | `crates/lsaca/src/typeck/items.rs` |
 | `E0403` | A generic parameter name is already used by another generic parameter. | `crates/lsaca/src/typeck/items.rs`, `crates/lsaca/src/typeck/traits.rs` |
@@ -130,6 +131,7 @@ Pattern shape and bindings, labels, loop control, and match coverage.
 | `E0408` | A variable is not bound in every alternative of an or-pattern. | `crates/lsaca/src/typeck/patterns.rs` |
 | `E0416` | An identifier is bound more than once in one pattern. | `crates/lsaca/src/typeck/patterns.rs` |
 | `E0426` | A label name is used but never declared. | `crates/lsaca/src/typeck/exprs.rs` |
+| `E0571` | A `break` carries a value from a `while` or `for` loop, whose type is `()`. | `crates/lsaca/src/typeck/exprs.rs` |
 
 ## Standard library and const evaluation
 
@@ -161,7 +163,7 @@ documented but never raised, when a row has an empty meaning, or when a code is
 listed twice. On success it prints one summary line:
 
 ```text
-error index: 87 codes documented and all raised in the compiler
+error index: 89 codes documented and all raised in the compiler
 ```
 
 The documentation gate runs the script in CI with the link check and the prose

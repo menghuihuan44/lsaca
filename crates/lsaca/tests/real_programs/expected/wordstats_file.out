@@ -1,0 +1,44 @@
+word statistics
+lines: 6
+long lines: 4
+bytes: 273
+words: 51
+unique words: 34
+average word length: 4
+longest word: iterators (9)
+top words:
+  the 7
+  dog 4
+  fox 3
+  lazy 3
+  a 2
+histogram:
+  1-2: 6
+  3-4: 28
+  5-6: 9
+  7-8: 6
+  9-10: 2
+  11+: 0
+word bytes: 212
+file: data/sample.txt
+lines: 4
+long lines: 3
+bytes: 262
+words: 49
+unique words: 40
+average word length: 4
+longest word: patterns (8)
+top words:
+  and 4
+  14 2
+  3 2
+  at 2
+  beats 2
+histogram:
+  1-2: 9
+  3-4: 17
+  5-6: 17
+  7-8: 6
+  9-10: 0
+  11+: 0
+word bytes: 205

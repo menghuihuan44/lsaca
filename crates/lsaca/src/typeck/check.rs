@@ -36,6 +36,25 @@ pub struct CaptureInfo {
     pub parent_expr: TExpr,
 }
 
+/// Which kind of loop a break targets. Only `loop` has a result value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopKind {
+    Loop,
+    While,
+    For,
+}
+
+/// State of one loop currently being checked inside a function frame.
+pub struct LoopState {
+    pub label: Option<String>,
+    pub kind: LoopKind,
+    /// Type of the loop expression. Starts as `()` for `loop` and is unified
+    /// with every `break` value; unused `loop` expressions become `!` after
+    /// the loop is popped when it has no break at all.
+    pub result: ITy,
+    pub saw_break: bool,
+}
+
 /// One function or closure body being checked.
 pub struct Frame {
     pub ret: ITy,
@@ -45,10 +64,9 @@ pub struct Frame {
     pub capture_map: HashMap<String, usize>,
     pub is_closure: bool,
     pub loop_depth: usize,
-    /// Labels of the loops currently open in this frame, innermost last.
-    /// Closures get a fresh frame, so a labelled break cannot cross a
-    /// closure boundary.
-    pub loop_labels: Vec<Option<String>>,
+    /// The loops currently open in this frame, innermost last. Closures get a
+    /// fresh frame, so a labelled break cannot cross a closure boundary.
+    pub loops: Vec<LoopState>,
 }
 
 impl Frame {
@@ -60,7 +78,7 @@ impl Frame {
             capture_map: HashMap::new(),
             is_closure: false,
             loop_depth: 0,
-            loop_labels: Vec::new(),
+            loops: Vec::new(),
         }
     }
 
@@ -726,7 +744,10 @@ impl<'a> Checker<'a> {
         if level == 0 {
             return TExpr::new(
                 ty.clone(),
-                super::tree::TExprKind::Break { label: None },
+                super::tree::TExprKind::Break {
+                    label: None,
+                    value: None,
+                },
                 span,
             );
         }
@@ -746,7 +767,10 @@ impl<'a> Checker<'a> {
         }
         TExpr::new(
             ty.clone(),
-            super::tree::TExprKind::Break { label: None },
+            super::tree::TExprKind::Break {
+                label: None,
+                value: None,
+            },
             span,
         )
     }

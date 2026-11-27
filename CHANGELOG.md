@@ -8,6 +8,107 @@ Release dates before 2.3 were not recorded in the repository. This file was
 reconstructed on 2026-11-15 from the release documentation; entries describe
 user-visible behaviour, not the internal refactoring history.
 
+## [2.4.0] - 2026-11-27
+
+This release makes the language comfortable for programs bigger than benchmarks.
+The scope was frozen in [ROADMAP.md](ROADMAP.md) before the work started; every
+item has a [STATUS.md](STATUS.md) row and a definition-of-done trail.
+
+### Added
+
+- Array patterns `[a, b, c]`: they match a fixed-size array and the pattern's
+  length must equal the array's length (E0308).
+- Slice patterns `[a, b, ..]`, `[.., y]`, `[first, .., last]` and `[..]` over
+  `&[T]`/`&mut [T]` and arrays, with match ergonomics (`&T`/`&mut T` bindings)
+  and at most one `..`. Exhaustiveness is Rust compatible: a match whose arms
+  cover every slice length is accepted, so `[]`, `[only]` and
+  `[first, .., last]` together are exhaustive; element refutability inside the
+  sub-patterns participates as usual and the non-exhaustive witness is rendered
+  as a slice pattern.
+- `name @ pattern` bindings (including `mut name @ pattern`) in every pattern
+  position, with E0382 when the whole by-move binding and a moved-out non-`Copy`
+  part overlap.
+- Values out of `break`: `break value` and `break 'label value` give the loop
+  expression that value's type (a bare `break` gives `()`), including loops
+  nested inside the moved-from scope. A value in a `while`/`for` break is E0571
+  and `continue value` is E0308.
+- `HashMap::get_or_insert` and `get_or_insert_with` (the callable is an
+  `fn() -> V`, capturing closures included); the borrowed `Entry` value stays
+  deferred to v2.6 per [RFC 0002](rfcs/0002-hashmap-entry.md), so the methods
+  always re-look-up the key after a potential insert.
+- Collection API density: `HashSet::extend`, `BTreeSet::from`/`to_vec`,
+  `BTreeMap::get_mut`/`first_key`/`last_key`/`from`/`to_vec`,
+  `VecDeque::with_capacity`/`from`/`get_mut`/`front`/`back`/`to_vec` and
+  `BinaryHeap::from`/`to_vec`; `BinaryHeap::to_vec` returns the internal heap
+  order, not sorted order.
+- Iterator completion: `filter_map`, `zip`, `chain`, `take_while`,
+  `skip_while`, `position`, `nth`, `last`, and `min`/`max` returning
+  `Option<T>`; `product` is widened to i32/i64/u32/u64/isize/usize/f32/f64
+  while `sum` keeps its four integer types.
+- System surface: `process::Command` (arg/args/current_dir/status/output),
+  `ExitStatus` and `Output`; `net::SocketAddr` (parse/ip/port/to_string/display)
+  and `UdpSocket` (bind/local_port/send_to/recv_from/set_timeout/close; Drop
+  closes). The C runtime gains one additive ABI family implemented with
+  `CreateProcessW` on Windows and `fork`/`execvp` on POSIX; the existing TCP API
+  is unchanged.
+- Visibility: `pub(super)` and `pub(in path)` with Rust semantics (E0433 for an
+  unknown path, E0742 for a path that does not name an ancestor);
+  `use path::module as alias;` and `pub use path::module as alias;`.
+- Formatter crate mode: `lsaca fmt PATH` formats every module file of a package
+  (auto-discovered `lsaca.toml`) after validating all of them; `--check` lists
+  the files that would change and exits 1 without writing; `--stdout` keeps the
+  single-file mode.
+- [RFC 0003](rfcs/0003-derive-and-protocols.md) records the refusal of derive
+  macros, operator overloading and user-defined `Display`/`Debug`/`Default`/
+  `Ord`/`Hash` protocols in 2.x and fixes what each protocol means;
+  [RFC 0004](rfcs/0004-concurrency.md) records the v3.0 concurrency decision.
+- The diagnostic-code index grows to 89 codes (E0571 and E0742 are new) and
+  `scripts/check_error_index.py` keeps it exact.
+
+### Changed
+
+- `lsaca fmt DIR` formats a whole package instead of failing; single-file mode
+  is unchanged.
+- Every workflow pins one Rust toolchain through `RUST_TOOLCHAIN` (1.100.0), so
+  a new stable clippy lint cannot break main without a reviewed version bump.
+- `continue value` is reported as E0308 with a "use break with a value" note
+  instead of surfacing as a parse error.
+
+### Fixed
+
+- Slice and array patterns bind ergonomic references (`&T`/`&mut T`) by
+  emitting the address of the element instead of its value, and match ergonomics
+  now works identically for prefix, suffix and array patterns.
+- Destructuring an array by value no longer double-releases elements that the
+  pattern does not bind.
+- The unreachable-pattern warning is emitted once per arm instead of twice.
+
+### Testing
+
+- 1,185 Rust tests pass in the workspace: 1,011 library unit tests, 21
+  end-to-end suite functions (compiling and running the whole fixture set), 2
+  module audits, 121 robustness tests, 1 v2.3 feature test, 1 v2.4 feature test
+  and 28 CLI tests.
+- The C runtime smoke suite passes its 121 checks in the release, debug and
+  leak-tracking profiles.
+- The generated-C checker, the documented-example runner, the link checker, the
+  prose checker, the diagnostic-code index, the status traceability check, the
+  documentation drift check and the real-program gate (four programs, eight
+  invocations including the hand-written C references) pass.
+
+### Benchmarks
+
+- The official 2.4.0 matrix was rerun on 2026-11-27: 16 of the 22 executed
+  workloads are within 1.4x of C, 17 within 1.5x and 9 within 1.15x, with a
+  median of 1.20x (13, 14, 6 and 1.34x at 2.3.0). Cold single-file builds take
+  0.57-2.54 s (median 0.88 s) and cached rebuilds 130-219 ms (median 164 ms).
+  Four C-normalised runtime medians are outside the 10% budget against the
+  2.3.0 archive; a same-host A/B run of the two compilers measured a median
+  runtime ratio of 0.993, so those deltas are host-state noise, and the release
+  page records the details. The results are archived in
+  benchmarks/results/archive/v2.4/ and the page is regenerated by
+  scripts/gen_bench_page.py from the machine-readable run.
+
 ## [2.3.0] - 2026-11-27
 
 This release closes the promises the v2.0-v2.2 releases left open. The scope was

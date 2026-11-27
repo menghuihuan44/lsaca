@@ -1,6 +1,6 @@
 # vec: Vec<T>
 
-**Status in 2.3.0.** Implemented. `Vec<T>` and its methods live in
+**Status in 2.4.0.** Implemented. `Vec<T>` and its methods live in
 `stdlib/src/vec.ls` (`std::vec`); capacities, lengths and indices are `usize`
 since 2.1.0. The slice methods `len`, `is_empty`, `get`, `get_mut`, `first_mut`
 and `last_mut` are implemented for `[T]` in the same file. Version 2.3.0 adds

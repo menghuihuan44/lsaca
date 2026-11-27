@@ -782,7 +782,7 @@ The character support follows Rust closely but stays inside lsaca's design:
   (`usize`); `s[0]` is still rejected with E0608 (2.0 adds byte-range slicing
   `&s[0..1]`, but there is still no `char` indexing).
 
-## Known limitations in 2.3.0
+## Known limitations in 2.4.0
 
 * Unicode `char` case conversion returns a single `char`, the closest scalar
   of the full mapping; Rust's iterator and the `String` methods expose the

@@ -94,6 +94,13 @@ impl<K> HashSet<K> {
         return self.order.clone();
     }
 
+    /// Inserts every value, keeping the first occurrence of each.
+    pub fn extend(&mut self, values: Vec<K>) {
+        for value in values {
+            self.insert(value);
+        }
+    }
+
     /// The set of values that occur in this set or in other.
     pub fn union(&self, other: &HashSet<K>) -> HashSet<K> {
         let mut result: HashSet<K> = HashSet::new();
@@ -153,6 +160,15 @@ impl<K> BTreeSet<K> {
     /// Creates an empty set.
     pub fn new() -> BTreeSet<K> {
         return BTreeSet { items: Vec::new() };
+    }
+
+    /// Builds a set from owned values, keeping the first occurrence of each.
+    pub fn from(values: Vec<K>) -> BTreeSet<K> {
+        let mut set: BTreeSet<K> = BTreeSet::new();
+        for value in values {
+            set.insert(value);
+        }
+        return set;
     }
 
     /// Inserts a value and returns true when it was not present yet.
@@ -227,6 +243,11 @@ impl<K> BTreeSet<K> {
         return self.items.clone();
     }
 
+    /// The values in ascending order, the same as elements.
+    pub fn to_vec(&self) -> Vec<K> {
+        return self.items.clone();
+    }
+
     /// The smallest value, when the set is not empty.
     pub fn first(&self) -> Option<K> {
         if self.items.len() == 0 {
@@ -295,6 +316,16 @@ impl<K, V> BTreeMap<K, V> {
         return None;
     }
 
+    /// Returns a mutable reference to the value stored for the key, when
+    /// present. The reference keeps the map mutably borrowed.
+    pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
+        let position = self.find(key);
+        if position.1 {
+            return self.values.get_mut(position.0);
+        }
+        return None;
+    }
+
     /// Returns true when the map contains the key.
     pub fn contains_key(&self, key: K) -> bool {
         let position = self.find(key);
@@ -337,6 +368,45 @@ impl<K, V> BTreeMap<K, V> {
     pub fn values(&self) -> Vec<V> {
         return self.values.clone();
     }
+
+    /// The smallest key, when the map is not empty.
+    pub fn first_key(&self) -> Option<K> {
+        if self.keys.len() == 0 {
+            return None;
+        }
+        return Some(self.keys.get(0).unwrap().clone());
+    }
+
+    /// The largest key, when the map is not empty.
+    pub fn last_key(&self) -> Option<K> {
+        if self.keys.len() == 0 {
+            return None;
+        }
+        return Some(self.keys.get(self.keys.len() - 1).unwrap().clone());
+    }
+
+    /// Builds a map from owned pairs. A repeated key keeps the value from the
+    /// last pair, the same as inserting the pairs in order.
+    pub fn from(pairs: Vec<(K, V)>) -> BTreeMap<K, V> {
+        let mut map: BTreeMap<K, V> = BTreeMap::new();
+        for (key, value) in pairs {
+            map.insert(key, value);
+        }
+        return map;
+    }
+
+    /// The entries as owned pairs in ascending key order.
+    pub fn to_vec(&self) -> Vec<(K, V)> {
+        let mut result: Vec<(K, V)> = Vec::with_capacity(self.keys.len());
+        let mut index: usize = 0;
+        while index < self.keys.len() {
+            let key = self.keys.get(index).unwrap().clone();
+            let value = self.values.get(index).unwrap().clone();
+            result.push((key, value));
+            index = index + 1;
+        }
+        return result;
+    }
 }
 
 /// A double ended queue.
@@ -348,6 +418,16 @@ impl<T> VecDeque<T> {
     /// Creates an empty queue.
     pub fn new() -> VecDeque<T> {
         return VecDeque { items: Vec::new() };
+    }
+
+    /// Creates an empty queue with room for at least capacity values.
+    pub fn with_capacity(capacity: usize) -> VecDeque<T> {
+        return VecDeque { items: Vec::with_capacity(capacity) };
+    }
+
+    /// Builds a queue from values ordered from front to back.
+    pub fn from(values: Vec<T>) -> VecDeque<T> {
+        return VecDeque { items: values };
     }
 
     /// Appends a value at the back.
@@ -399,8 +479,34 @@ impl<T> VecDeque<T> {
         return Some(self.items.get(index).unwrap().clone());
     }
 
+    /// Returns a mutable reference to the value at the given position.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        return self.items.get_mut(index);
+    }
+
+    /// The front value, when the queue is not empty.
+    pub fn front(&self) -> Option<T> {
+        if self.items.len() == 0 {
+            return None;
+        }
+        return Some(self.items.get(0).unwrap().clone());
+    }
+
+    /// The back value, when the queue is not empty.
+    pub fn back(&self) -> Option<T> {
+        if self.items.len() == 0 {
+            return None;
+        }
+        return Some(self.items.get(self.items.len() - 1).unwrap().clone());
+    }
+
     /// The values ordered from front to back.
     pub fn elements(&self) -> Vec<T> {
+        return self.items.clone();
+    }
+
+    /// The values ordered from front to back, the same as elements.
+    pub fn to_vec(&self) -> Vec<T> {
         return self.items.clone();
     }
 }
@@ -414,6 +520,15 @@ impl<T> BinaryHeap<T> {
     /// Creates an empty heap.
     pub fn new() -> BinaryHeap<T> {
         return BinaryHeap { items: Vec::new() };
+    }
+
+    /// Builds a heap from owned values.
+    pub fn from(values: Vec<T>) -> BinaryHeap<T> {
+        let mut heap: BinaryHeap<T> = BinaryHeap::new();
+        for value in values {
+            heap.push(value);
+        }
+        return heap;
     }
 
     /// The number of values in the heap.
@@ -462,6 +577,12 @@ impl<T> BinaryHeap<T> {
 
     /// The values ordered from largest to smallest.
     pub fn elements(&self) -> Vec<T> {
+        return self.items.clone();
+    }
+
+    /// The heap's internal storage, the same as elements. This is not a
+    /// sorted sequence; pop returns values from largest to smallest.
+    pub fn to_vec(&self) -> Vec<T> {
         return self.items.clone();
     }
 }

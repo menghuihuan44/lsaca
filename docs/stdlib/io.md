@@ -1,6 +1,6 @@
 # io: input/output
 
-**Status in 2.3.0.** Implemented. The error types, the file and standard-stream
+**Status in 2.4.0.** Implemented. The error types, the file and standard-stream
 handles, the text helpers and the handle-level primitives are implemented in
 `stdlib/src/io.ls`. The v2.3 work adds the `Read`, `Write`, `Seek` and
 `BufRead` traits, the `BufReader` and `BufWriter` adapters and

@@ -1,6 +1,6 @@
 # core: Option, Result and Iterator
 
-**Status in 2.3.0.** `Option`, `Result` and `Iterator` live in `stdlib/src/core.ls`
+**Status in 2.4.0.** `Option`, `Result` and `Iterator` live in `stdlib/src/core.ls`
 (`std::core`) and are re-exported unqualified, so existing programs keep working.
 The 2.1.0 additions are the `Option::or` and `Option::xor` combinators and the
 `usize` counts in the iterator surface; 2.2.0 adds the `From` trait used by the
@@ -8,7 +8,8 @@ The 2.1.0 additions are the `Option::or` and `Option::xor` combinators and the
 
 Version 2.3 adds the remaining Rust `Option` and `Result` combinators listed in
 deviation 12 of the roadmap; `Option::unwrap_or_default` waits for the `Default`
-trait planned for v2.4.
+trait, which remains deferred with the other protocol work (see
+[RFC 0003](../../rfcs/0003-derive-and-protocols.md)).
 
 ## Option<T>
 
@@ -136,7 +137,8 @@ live in [iter](iter.md).
 
 * Iterator fusion in the compiler (an optimisation, no API change).
 * `Option::unwrap_or_default` waits for the `Default` trait; protocol work
-  (including `Default`) is planned for v2.4.
+  (including `Default`) remains deferred (see
+  [RFC 0003](../../rfcs/0003-derive-and-protocols.md)).
 * No `core`-level error trait: `std::error::Error` is defined in the error
   module and used by `io` and `fs`.
 

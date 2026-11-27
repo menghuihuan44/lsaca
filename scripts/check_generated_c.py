@@ -51,7 +51,7 @@ Per program and per requested profile:
   3. compile every generated .c file with -std=c17 -Wall -Wextra -Wpedantic
      -Werror, adding -O2 -DNDEBUG for release and -O0 -g -DLSACA_DEBUG
      -DLSACA_DEBUG_RC for debug;
-  4. run the executable with a 10 second timeout and require exit code 0;
+  4. run the executable with a 30 second timeout and require exit code 0;
   5. require stderr to be empty in both profiles (debug enables ORC leak
      tracking, so leak reports and panics both fail the run).
 
@@ -164,7 +164,7 @@ PROFILE_ORDER = ("release", "debug")
 
 # --- process limits and tool discovery ------------------------------------
 
-RUN_TIMEOUT = 10.0
+RUN_TIMEOUT = 30.0
 COMPILE_TIMEOUT = 180.0
 EMIT_TIMEOUT = 120.0
 

@@ -48,6 +48,7 @@
 
 #include "lsaca_rt_internal.h"
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -68,7 +69,10 @@
 #  include <fcntl.h>
 #  include <netdb.h>
 #  include <netinet/in.h>
+#  include <poll.h>
+#  include <signal.h>
 #  include <sys/socket.h>
+#  include <sys/wait.h>
 #  include <sys/stat.h>
 #  include <sys/time.h>
 #  include <sys/types.h>
@@ -604,6 +608,42 @@ static int ls_rt_io_resolve_address(const LsString* address, bool for_listen,
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
+    if (for_listen) {
+        hints.ai_flags = AI_PASSIVE;
+    }
+    status = getaddrinfo(host[0] == '\0' ? NULL : host, port, &hints, out);
+    free(host);
+    free(port);
+    if (status != 0) {
+        const char* text = gai_strerror(status);
+        char message[LS_RT_IO_INITIAL_ERROR_MESSAGE_MAX];
+
+        (void)snprintf(message, sizeof message,
+                       "the address could not be resolved: %s",
+                       text == NULL ? "unknown error" : text);
+        (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT, message);
+        return -1;
+    }
+    return 0;
+}
+
+/* Resolve a "host:port" address for a UDP datagram socket. The grammar and
+ * errors are shared with the TCP resolver above; only the socket type differs. */
+static int ls_rt_io_resolve_udp_address(const LsString* address, bool for_listen,
+                                        struct addrinfo** out) {
+    char* host = NULL;
+    char* port = NULL;
+    struct addrinfo hints;
+    int status;
+
+    *out = NULL;
+    if (ls_rt_io_parse_address(address, &host, &port) != 0) {
+        return -1;
+    }
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
     if (for_listen) {
         hints.ai_flags = AI_PASSIVE;
     }
@@ -2220,6 +2260,162 @@ int64_t ls_net_shutdown(int64_t handle, int32_t how) {
     return 0;
 }
 
+
+/* --- UDP sockets (Windows) --- */
+
+static LsString* ls_rt_io_sockaddr_text(const struct sockaddr* address,
+                                        int length) {
+    char host[128];
+    char service[16];
+    char formatted[192];
+    int written;
+
+    if (getnameinfo(address, (socklen_t)length, host, (DWORD)sizeof host,
+                    service, (DWORD)sizeof service,
+                    NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+        (void)ls_rt_io_fail(LS_IO_ERROR_OTHER,
+                            "the peer address could not be formatted");
+        return NULL;
+    }
+    if (address->sa_family == AF_INET6) {
+        written = snprintf(formatted, sizeof formatted, "[%s]:%s", host,
+                           service);
+    } else if (address->sa_family == AF_INET) {
+        written = snprintf(formatted, sizeof formatted, "%s:%s", host, service);
+    } else {
+        (void)ls_rt_io_fail(LS_IO_ERROR_OTHER,
+                            "the peer address has an unsupported family");
+        return NULL;
+    }
+    if (written < 0 || (size_t)written >= sizeof formatted) {
+        (void)ls_rt_io_fail(LS_IO_ERROR_OTHER,
+                            "the peer address could not be formatted");
+        return NULL;
+    }
+    return ls_str_alloc_from(formatted, (size_t)written);
+}
+
+int64_t ls_net_udp_bind(const LsString* address) {
+    struct addrinfo* results = NULL;
+    struct addrinfo* candidate;
+    SOCKET socket_value = INVALID_SOCKET;
+    int last_error = 0;
+
+    ls_rt_io_error_reset();
+    if (ls_rt_io_resolve_udp_address(address, true, &results) != 0) {
+        return -1;
+    }
+    for (candidate = results; candidate != NULL; candidate = candidate->ai_next) {
+        SOCKET current = socket(candidate->ai_family, candidate->ai_socktype,
+                                candidate->ai_protocol);
+
+        if (current == INVALID_SOCKET) {
+            last_error = WSAGetLastError();
+            continue;
+        }
+        if (bind(current, candidate->ai_addr, (int)candidate->ai_addrlen) == 0) {
+            socket_value = current;
+            break;
+        }
+        last_error = WSAGetLastError();
+        (void)closesocket(current);
+    }
+    freeaddrinfo(results);
+    if (socket_value == INVALID_SOCKET) {
+        if (last_error == 0) {
+            return ls_rt_io_fail(LS_IO_ERROR_ADDRESS_NOT_AVAILABLE,
+                                 "the address could not be bound");
+        }
+        return ls_rt_io_fail_wsa(last_error);
+    }
+    return ls_rt_io_handle_allocate(LS_RT_IO_KIND_SOCKET,
+                                    (intptr_t)socket_value);
+}
+
+int64_t ls_net_udp_send_to(int64_t handle, const void* bytes, int64_t length,
+                           const LsString* address) {
+    LsRtIoHandle slot;
+    struct addrinfo* results = NULL;
+    struct addrinfo* candidate;
+    int last_error = 0;
+    int sent = SOCKET_ERROR;
+
+    ls_rt_io_error_reset();
+    if (!ls_rt_io_handle_acquire(handle, LS_RT_IO_ALLOW_SOCKET, &slot)) {
+        return -1;
+    }
+    if (length < 0 || length > (int64_t)INT_MAX ||
+        (length > 0 && bytes == NULL)) {
+        return ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                             "the datagram length is invalid");
+    }
+    if (ls_rt_io_resolve_udp_address(address, false, &results) != 0) {
+        return -1;
+    }
+    for (candidate = results; candidate != NULL; candidate = candidate->ai_next) {
+        sent = sendto((SOCKET)slot.native, (const char*)bytes, (int)length, 0,
+                      candidate->ai_addr, (int)candidate->ai_addrlen);
+        if (sent != SOCKET_ERROR) {
+            break;
+        }
+        last_error = WSAGetLastError();
+    }
+    freeaddrinfo(results);
+    if (sent == SOCKET_ERROR) {
+        if (last_error == 0) {
+            return ls_rt_io_fail(LS_IO_ERROR_ADDRESS_NOT_AVAILABLE,
+                                 "the datagram could not be sent");
+        }
+        return ls_rt_io_fail_wsa(last_error);
+    }
+    return (int64_t)sent;
+}
+
+int64_t ls_net_udp_recv_from(int64_t handle, void* buffer, int64_t capacity,
+                             LsString** out_address) {
+    LsRtIoHandle slot;
+    struct sockaddr_storage address;
+    int address_length = (int)sizeof address;
+    char empty = '\0';
+    void* target;
+    int received;
+
+    ls_rt_io_error_reset();
+    if (out_address != NULL) {
+        *out_address = NULL;
+    }
+    if (!ls_rt_io_handle_acquire(handle, LS_RT_IO_ALLOW_SOCKET, &slot)) {
+        return -1;
+    }
+    if (capacity < 0 || capacity > (int64_t)INT_MAX ||
+        (capacity > 0 && buffer == NULL)) {
+        return ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                             "the receive capacity is invalid");
+    }
+    target = buffer != NULL ? buffer : (void*)&empty;
+    received = recvfrom((SOCKET)slot.native, (char*)target, (int)capacity, 0,
+                        (struct sockaddr*)&address, &address_length);
+    if (received == SOCKET_ERROR) {
+        int code = WSAGetLastError();
+
+        if (code == WSAEWOULDBLOCK) {
+            return ls_rt_io_fail(LS_IO_ERROR_WOULD_BLOCK,
+                                 "the operation would block");
+        }
+        return ls_rt_io_fail_wsa(code);
+    }
+    if (out_address != NULL) {
+        LsString* peer = ls_rt_io_sockaddr_text((struct sockaddr*)&address,
+                                                address_length);
+
+        if (peer == NULL) {
+            return -1;
+        }
+        *out_address = peer;
+    }
+    return (int64_t)received;
+}
+
 /* --- Time (Windows) --- */
 
 #define LS_RT_IO_FILETIME_UNIX_EPOCH ((uint64_t)116444736000000000ULL)
@@ -2460,6 +2656,431 @@ LsVec_String* ls_env_vars(void) {
               ls_rt_io_string_compare);
     }
     return result;
+}
+
+
+/* --- Process spawning (Windows) --- */
+
+typedef struct LsRtIoCapture {
+    HANDLE pipe;
+    char* bytes;
+    size_t length;
+    size_t capacity;
+    DWORD error;
+} LsRtIoCapture;
+
+static bool ls_rt_io_capture_push(LsRtIoCapture* capture, const char* bytes,
+                                  size_t length) {
+    size_t needed;
+    size_t capacity;
+    char* data;
+
+    if (length == 0) {
+        return true;
+    }
+    if (length > SIZE_MAX - capture->length) {
+        return false;
+    }
+    needed = capture->length + length;
+    if (needed > capture->capacity) {
+        capacity = capture->capacity == 0 ? 4096 : capture->capacity;
+        while (capacity < needed) {
+            if (capacity > SIZE_MAX / 2) {
+                return false;
+            }
+            capacity *= 2;
+        }
+        data = (char*)realloc(capture->bytes, capacity);
+        if (data == NULL) {
+            return false;
+        }
+        capture->bytes = data;
+        capture->capacity = capacity;
+    }
+    memcpy(capture->bytes + capture->length, bytes, length);
+    capture->length = needed;
+    return true;
+}
+
+static DWORD WINAPI ls_rt_io_capture_thread(LPVOID parameter) {
+    LsRtIoCapture* capture = (LsRtIoCapture*)parameter;
+    char chunk[4096];
+
+    while (true) {
+        DWORD received = 0;
+
+        if (!ReadFile(capture->pipe, chunk, (DWORD)sizeof chunk, &received,
+                      NULL)) {
+            DWORD code = GetLastError();
+
+            if (code == ERROR_BROKEN_PIPE || code == ERROR_HANDLE_EOF ||
+                code == ERROR_PIPE_NOT_CONNECTED) {
+                break;
+            }
+            capture->error = code;
+            break;
+        }
+        if (received == 0) {
+            break;
+        }
+        if (!ls_rt_io_capture_push(capture, chunk, (size_t)received)) {
+            capture->error = ERROR_NOT_ENOUGH_MEMORY;
+            break;
+        }
+    }
+    return 0;
+}
+
+static void ls_rt_io_capture_dispose(LsRtIoCapture* capture) {
+    free(capture->bytes);
+    capture->bytes = NULL;
+    capture->length = 0;
+    capture->capacity = 0;
+}
+
+static int ls_rt_io_append_wide(LsRtIoWideBuffer* buffer, wchar_t value) {
+    if (!ls_rt_io_wide_buffer_push(buffer, value)) {
+        (void)ls_rt_io_fail(LS_IO_ERROR_OTHER, "out of memory");
+        return -1;
+    }
+    return 0;
+}
+
+/* CommandLineToArgvW only needs quotes when an argument is empty or contains
+ * whitespace or a quote. Leaving ordinary arguments unquoted keeps argv exact
+ * and also lets programs such as cmd.exe interpret their own switches. */
+static bool ls_rt_io_argument_needs_quotes(const wchar_t* text) {
+    if (*text == L'\0') {
+        return true;
+    }
+    while (*text != L'\0') {
+        if (*text == L' ' || *text == L'\t' || *text == L'"') {
+            return true;
+        }
+        text += 1;
+    }
+    return false;
+}
+
+/* Quote one argument with the CommandLineToArgvW rules: surround it with
+ * double quotes, double every run of backslashes that precedes a quote (or the
+ * closing quote), and escape an embedded quote with a backslash. */
+static int ls_rt_io_append_quoted_argument(LsRtIoWideBuffer* line,
+                                           const wchar_t* text) {
+    size_t length = wcslen(text);
+    size_t index = 0;
+
+    if (ls_rt_io_append_wide(line, L'"') != 0) {
+        return -1;
+    }
+    while (index < length) {
+        size_t backslashes = 0;
+        size_t part;
+
+        while (index < length && text[index] == L'\\') {
+            backslashes += 1;
+            index += 1;
+        }
+        if (index == length) {
+            for (part = 0; part < backslashes * 2; part += 1) {
+                if (ls_rt_io_append_wide(line, L'\\') != 0) {
+                    return -1;
+                }
+            }
+            break;
+        }
+        if (text[index] == L'"') {
+            for (part = 0; part < backslashes * 2 + 1; part += 1) {
+                if (ls_rt_io_append_wide(line, L'\\') != 0) {
+                    return -1;
+                }
+            }
+            if (ls_rt_io_append_wide(line, L'"') != 0) {
+                return -1;
+            }
+            index += 1;
+        } else {
+            for (part = 0; part < backslashes; part += 1) {
+                if (ls_rt_io_append_wide(line, L'\\') != 0) {
+                    return -1;
+                }
+            }
+            if (ls_rt_io_append_wide(line, text[index]) != 0) {
+                return -1;
+            }
+            index += 1;
+        }
+    }
+    return ls_rt_io_append_wide(line, L'"');
+}
+
+static int ls_rt_io_build_command_line(const LsVec_String* argv,
+                                       LsRtIoWideBuffer* line) {
+    size_t index;
+
+    if (argv == NULL || argv->len == 0 || argv->data == NULL) {
+        (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                            "the argument vector is empty");
+        return -1;
+    }
+    line->data = NULL;
+    line->length = 0;
+    line->capacity = 0;
+    for (index = 0; index < argv->len; index += 1) {
+        const LsString* item = argv->data[index];
+        wchar_t* wide;
+        int quoted;
+
+        if (item == NULL) {
+            (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                                "the argument is null");
+            return -1;
+        }
+        if (item->len != 0 && memchr(item->data, 0, item->len) != NULL) {
+            (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                                "the argument contains a NUL byte");
+            return -1;
+        }
+        if (index == 0 && item->len == 0) {
+            (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                                "the program is empty");
+            return -1;
+        }
+        wide = ls_rt_io_wide_from_bytes(item->data, item->len);
+        if (wide == NULL) {
+            return -1;
+        }
+        if (index != 0 && ls_rt_io_append_wide(line, L' ') != 0) {
+            free(wide);
+            return -1;
+        }
+        if (ls_rt_io_argument_needs_quotes(wide)) {
+            quoted = ls_rt_io_append_quoted_argument(line, wide);
+        } else {
+            const wchar_t* cursor = wide;
+
+            quoted = 0;
+            while (quoted == 0 && *cursor != L'\0') {
+                quoted = ls_rt_io_append_wide(line, *cursor);
+                cursor += 1;
+            }
+        }
+        free(wide);
+        if (quoted != 0) {
+            return -1;
+        }
+    }
+    return ls_rt_io_append_wide(line, L'\0');
+}
+
+static void ls_rt_io_close_handle(HANDLE* handle) {
+    if (*handle != NULL && *handle != INVALID_HANDLE_VALUE) {
+        (void)CloseHandle(*handle);
+    }
+    *handle = NULL;
+}
+
+/* Run argv and wait for it. When capture is true both standard output streams
+ * are collected; capture_stdout/stderr then receive owned strings. */
+static int64_t ls_rt_io_process_run(const LsVec_String* argv,
+                                    const LsString* current_dir, bool capture,
+                                    int64_t* exit_code, LsString** capture_stdout,
+                                    LsString** capture_stderr) {
+    LsRtIoWideBuffer line;
+    wchar_t* cwd_wide = NULL;
+    HANDLE out_read = NULL;
+    HANDLE out_write = NULL;
+    HANDLE err_read = NULL;
+    HANDLE err_write = NULL;
+    HANDLE out_thread = NULL;
+    HANDLE err_thread = NULL;
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION process;
+    SECURITY_ATTRIBUTES security;
+    LsRtIoCapture out_capture;
+    LsRtIoCapture err_capture;
+    bool out_started = false;
+    bool err_started = false;
+    DWORD thread_error = 0;
+    DWORD wait_error = 0;
+    DWORD exit_value = 0;
+    int64_t result = -1;
+
+    line.data = NULL;
+    line.length = 0;
+    line.capacity = 0;
+    out_capture.pipe = NULL;
+    out_capture.bytes = NULL;
+    out_capture.length = 0;
+    out_capture.capacity = 0;
+    out_capture.error = 0;
+    err_capture.pipe = NULL;
+    err_capture.bytes = NULL;
+    err_capture.length = 0;
+    err_capture.capacity = 0;
+    err_capture.error = 0;
+    memset(&process, 0, sizeof process);
+    process.hProcess = NULL;
+    process.hThread = NULL;
+    memset(&security, 0, sizeof security);
+    security.nLength = sizeof security;
+    security.bInheritHandle = TRUE;
+
+    if (ls_rt_io_build_command_line(argv, &line) != 0) {
+        goto cleanup;
+    }
+    if (current_dir != NULL && current_dir->len != 0) {
+        char* cwd_text = ls_rt_io_text_copy(current_dir, "working directory");
+
+        if (cwd_text == NULL) {
+            goto cleanup;
+        }
+        cwd_wide = ls_rt_io_wide_from_bytes(cwd_text, strlen(cwd_text));
+        free(cwd_text);
+        if (cwd_wide == NULL) {
+            goto cleanup;
+        }
+    }
+    memset(&startup, 0, sizeof startup);
+    startup.cb = (DWORD)sizeof startup;
+    if (capture) {
+        if (!CreatePipe(&out_read, &out_write, &security, 0)) {
+            (void)ls_rt_io_fail_last_win32();
+            goto cleanup;
+        }
+        if (!CreatePipe(&err_read, &err_write, &security, 0)) {
+            (void)ls_rt_io_fail_last_win32();
+            goto cleanup;
+        }
+        if (!SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0) ||
+            !SetHandleInformation(err_read, HANDLE_FLAG_INHERIT, 0)) {
+            (void)ls_rt_io_fail_last_win32();
+            goto cleanup;
+        }
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        startup.hStdOutput = out_write;
+        startup.hStdError = err_write;
+    }
+    if (!CreateProcessW(NULL, line.data, NULL, NULL, capture ? TRUE : FALSE, 0,
+                        NULL, cwd_wide, &startup, &process)) {
+        (void)ls_rt_io_fail_last_win32();
+        goto cleanup;
+    }
+    if (capture) {
+        (void)CloseHandle(out_write);
+        out_write = NULL;
+        (void)CloseHandle(err_write);
+        err_write = NULL;
+        out_capture.pipe = out_read;
+        err_capture.pipe = err_read;
+        out_thread = CreateThread(NULL, 0, ls_rt_io_capture_thread,
+                                  &out_capture, 0, NULL);
+        if (out_thread == NULL) {
+            thread_error = GetLastError();
+            (void)CloseHandle(out_read);
+            out_read = NULL;
+            (void)CloseHandle(err_read);
+            err_read = NULL;
+            out_capture.pipe = NULL;
+            err_capture.pipe = NULL;
+        } else {
+            out_started = true;
+            err_thread = CreateThread(NULL, 0, ls_rt_io_capture_thread,
+                                      &err_capture, 0, NULL);
+            if (err_thread == NULL) {
+                thread_error = GetLastError();
+                (void)CloseHandle(err_read);
+                err_read = NULL;
+                err_capture.pipe = NULL;
+            } else {
+                err_started = true;
+            }
+        }
+    }
+    if (!capture || (out_started && err_started)) {
+        if (WaitForSingleObject(process.hProcess, INFINITE) != WAIT_OBJECT_0) {
+            wait_error = GetLastError();
+            (void)TerminateProcess(process.hProcess, 1);
+            (void)WaitForSingleObject(process.hProcess, INFINITE);
+        }
+    } else {
+        (void)TerminateProcess(process.hProcess, 1);
+        (void)WaitForSingleObject(process.hProcess, INFINITE);
+    }
+    if (capture && out_started) {
+        (void)WaitForSingleObject(out_thread, INFINITE);
+    }
+    if (capture && err_started) {
+        (void)WaitForSingleObject(err_thread, INFINITE);
+    }
+    if (wait_error != 0) {
+        (void)ls_rt_io_fail_win32(wait_error);
+        goto cleanup;
+    }
+    if (capture && (!out_started || !err_started)) {
+        if (thread_error != 0) {
+            (void)ls_rt_io_fail_win32(thread_error);
+            goto cleanup;
+        }
+    }
+    if (capture && (out_capture.error != 0 || err_capture.error != 0)) {
+        DWORD code = out_capture.error != 0 ? out_capture.error
+                                            : err_capture.error;
+        (void)ls_rt_io_fail_win32(code);
+        goto cleanup;
+    }
+    if (!GetExitCodeProcess(process.hProcess, &exit_value)) {
+        (void)ls_rt_io_fail_last_win32();
+        goto cleanup;
+    }
+    *exit_code = (int64_t)(int32_t)exit_value;
+    if (capture) {
+        *capture_stdout =
+            ls_rt_io_string_lossy(out_capture.bytes, out_capture.length);
+        *capture_stderr =
+            ls_rt_io_string_lossy(err_capture.bytes, err_capture.length);
+    }
+    result = 0;
+
+cleanup:
+    (void)ls_rt_io_close_handle(&out_thread);
+    (void)ls_rt_io_close_handle(&err_thread);
+    (void)ls_rt_io_close_handle(&out_read);
+    (void)ls_rt_io_close_handle(&err_read);
+    (void)ls_rt_io_close_handle(&out_write);
+    (void)ls_rt_io_close_handle(&err_write);
+    (void)ls_rt_io_close_handle(&process.hThread);
+    (void)ls_rt_io_close_handle(&process.hProcess);
+    ls_rt_io_capture_dispose(&out_capture);
+    ls_rt_io_capture_dispose(&err_capture);
+    free(cwd_wide);
+    free(line.data);
+    return result;
+}
+
+int64_t ls_proc_status(const LsVec_String* argv, const LsString* current_dir,
+                       int64_t* exit_code) {
+    ls_rt_io_error_reset();
+    if (exit_code == NULL) {
+        return ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                             "the exit code destination is null");
+    }
+    return ls_rt_io_process_run(argv, current_dir, false, exit_code, NULL, NULL);
+}
+
+int64_t ls_proc_output(const LsVec_String* argv, const LsString* current_dir,
+                       int64_t* exit_code, LsString** out_stdout,
+                       LsString** out_stderr) {
+    ls_rt_io_error_reset();
+    if (exit_code == NULL || out_stdout == NULL || out_stderr == NULL) {
+        return ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                             "the output destination is null");
+    }
+    *out_stdout = NULL;
+    *out_stderr = NULL;
+    return ls_rt_io_process_run(argv, current_dir, true, exit_code, out_stdout,
+                                out_stderr);
 }
 
 /* --- Platform lifetime (Windows) --- */
@@ -3466,6 +4087,159 @@ int64_t ls_net_shutdown(int64_t handle, int32_t how) {
     return 0;
 }
 
+
+/* --- UDP sockets (POSIX) --- */
+
+static LsString* ls_rt_io_sockaddr_text(const struct sockaddr* address,
+                                        socklen_t length) {
+    char host[128];
+    char service[16];
+    char formatted[192];
+    int written;
+
+    if (getnameinfo(address, length, host, (socklen_t)sizeof host, service,
+                    (socklen_t)sizeof service,
+                    NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+        (void)ls_rt_io_fail(LS_IO_ERROR_OTHER,
+                            "the peer address could not be formatted");
+        return NULL;
+    }
+    if (address->sa_family == AF_INET6) {
+        written = snprintf(formatted, sizeof formatted, "[%s]:%s", host,
+                           service);
+    } else if (address->sa_family == AF_INET) {
+        written = snprintf(formatted, sizeof formatted, "%s:%s", host, service);
+    } else {
+        (void)ls_rt_io_fail(LS_IO_ERROR_OTHER,
+                            "the peer address has an unsupported family");
+        return NULL;
+    }
+    if (written < 0 || (size_t)written >= sizeof formatted) {
+        (void)ls_rt_io_fail(LS_IO_ERROR_OTHER,
+                            "the peer address could not be formatted");
+        return NULL;
+    }
+    return ls_str_alloc_from(formatted, (size_t)written);
+}
+
+int64_t ls_net_udp_bind(const LsString* address) {
+    struct addrinfo* results = NULL;
+    struct addrinfo* candidate;
+    int last_error = 0;
+    int socket_value = -1;
+
+    ls_rt_io_error_reset();
+    if (ls_rt_io_resolve_udp_address(address, true, &results) != 0) {
+        return -1;
+    }
+    for (candidate = results; candidate != NULL; candidate = candidate->ai_next) {
+        int current = socket(candidate->ai_family, candidate->ai_socktype,
+                             candidate->ai_protocol);
+
+        if (current < 0) {
+            last_error = errno;
+            continue;
+        }
+        if (bind(current, candidate->ai_addr, candidate->ai_addrlen) == 0) {
+            socket_value = current;
+            break;
+        }
+        last_error = errno;
+        (void)close(current);
+    }
+    freeaddrinfo(results);
+    if (socket_value < 0) {
+        if (last_error == 0) {
+            return ls_rt_io_fail(LS_IO_ERROR_ADDRESS_NOT_AVAILABLE,
+                                 "the address could not be bound");
+        }
+        return ls_rt_io_fail_errno(last_error);
+    }
+    return ls_rt_io_handle_allocate(LS_RT_IO_KIND_SOCKET,
+                                    (intptr_t)socket_value);
+}
+
+int64_t ls_net_udp_send_to(int64_t handle, const void* bytes, int64_t length,
+                           const LsString* address) {
+    LsRtIoHandle slot;
+    struct addrinfo* results = NULL;
+    struct addrinfo* candidate;
+    char empty = '\0';
+    const void* source;
+    int last_error = 0;
+    ssize_t sent = -1;
+
+    ls_rt_io_error_reset();
+    if (!ls_rt_io_handle_acquire(handle, LS_RT_IO_ALLOW_SOCKET, &slot)) {
+        return -1;
+    }
+    if (length < 0 || length > (int64_t)INT_MAX ||
+        (length > 0 && bytes == NULL)) {
+        return ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                             "the datagram length is invalid");
+    }
+    source = bytes != NULL ? bytes : (const void*)&empty;
+    if (ls_rt_io_resolve_udp_address(address, false, &results) != 0) {
+        return -1;
+    }
+    for (candidate = results; candidate != NULL; candidate = candidate->ai_next) {
+        sent = sendto((int)slot.native, source, (size_t)length, 0,
+                      candidate->ai_addr, candidate->ai_addrlen);
+        if (sent >= 0) {
+            break;
+        }
+        last_error = errno;
+    }
+    freeaddrinfo(results);
+    if (sent < 0) {
+        if (last_error == 0) {
+            return ls_rt_io_fail(LS_IO_ERROR_ADDRESS_NOT_AVAILABLE,
+                                 "the datagram could not be sent");
+        }
+        return ls_rt_io_fail_errno(last_error);
+    }
+    return (int64_t)sent;
+}
+
+int64_t ls_net_udp_recv_from(int64_t handle, void* buffer, int64_t capacity,
+                             LsString** out_address) {
+    LsRtIoHandle slot;
+    struct sockaddr_storage address;
+    socklen_t address_length = (socklen_t)sizeof address;
+    char empty = '\0';
+    void* target;
+    ssize_t received;
+
+    ls_rt_io_error_reset();
+    if (out_address != NULL) {
+        *out_address = NULL;
+    }
+    if (!ls_rt_io_handle_acquire(handle, LS_RT_IO_ALLOW_SOCKET, &slot)) {
+        return -1;
+    }
+    if (capacity < 0 || capacity > (int64_t)INT_MAX ||
+        (capacity > 0 && buffer == NULL)) {
+        return ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                             "the receive capacity is invalid");
+    }
+    target = buffer != NULL ? buffer : (void*)&empty;
+    received = recvfrom((int)slot.native, target, (size_t)capacity, 0,
+                        (struct sockaddr*)&address, &address_length);
+    if (received < 0) {
+        return ls_rt_io_fail_errno(errno);
+    }
+    if (out_address != NULL) {
+        LsString* peer = ls_rt_io_sockaddr_text((struct sockaddr*)&address,
+                                                address_length);
+
+        if (peer == NULL) {
+            return -1;
+        }
+        *out_address = peer;
+    }
+    return (int64_t)received;
+}
+
 /* --- POSIX time --- */
 
 int64_t ls_time_now_ms(void) {
@@ -3616,6 +4390,361 @@ LsVec_String* ls_env_vars(void) {
               ls_rt_io_string_compare);
     }
     return result;
+}
+
+
+/* --- Process spawning (POSIX) --- */
+
+typedef struct LsRtIoFdCapture {
+    int descriptor;
+    char* bytes;
+    size_t length;
+    size_t capacity;
+} LsRtIoFdCapture;
+
+static bool ls_rt_io_fd_capture_push(LsRtIoFdCapture* capture, const char* bytes,
+                                     size_t length) {
+    size_t needed;
+    size_t capacity;
+    char* data;
+
+    if (length == 0) {
+        return true;
+    }
+    if (length > SIZE_MAX - capture->length) {
+        return false;
+    }
+    needed = capture->length + length;
+    if (needed > capture->capacity) {
+        capacity = capture->capacity == 0 ? 4096 : capture->capacity;
+        while (capacity < needed) {
+            if (capacity > SIZE_MAX / 2) {
+                return false;
+            }
+            capacity *= 2;
+        }
+        data = (char*)realloc(capture->bytes, capacity);
+        if (data == NULL) {
+            return false;
+        }
+        capture->bytes = data;
+        capture->capacity = capacity;
+    }
+    memcpy(capture->bytes + capture->length, bytes, length);
+    capture->length = needed;
+    return true;
+}
+
+static void ls_rt_io_fd_capture_dispose(LsRtIoFdCapture* capture) {
+    free(capture->bytes);
+    capture->bytes = NULL;
+    capture->length = 0;
+    capture->capacity = 0;
+}
+
+static void ls_rt_io_close_fd(int* descriptor) {
+    if (*descriptor >= 0) {
+        (void)close(*descriptor);
+    }
+    *descriptor = -1;
+}
+
+static char** ls_rt_io_process_argv(const LsVec_String* argv) {
+    char** result;
+    size_t index;
+
+    if (argv == NULL || argv->len == 0 || argv->data == NULL) {
+        (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                            "the argument vector is empty");
+        return NULL;
+    }
+    if (argv->len > SIZE_MAX / sizeof *result - 1) {
+        (void)ls_rt_io_fail(LS_IO_ERROR_OTHER, "the argument vector is too large");
+        return NULL;
+    }
+    result = (char**)calloc(argv->len + 1, sizeof *result);
+    if (result == NULL) {
+        ls_rt_alloc_failure((argv->len + 1) * sizeof *result);
+    }
+    for (index = 0; index < argv->len; index += 1) {
+        const LsString* item = argv->data[index];
+
+        if (item == NULL) {
+            (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                                "the argument is null");
+            goto failure;
+        }
+        if (index == 0 && item->len == 0) {
+            (void)ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                                "the program is empty");
+            goto failure;
+        }
+        result[index] = ls_rt_io_text_copy(item, "argument");
+        if (result[index] == NULL) {
+            goto failure;
+        }
+    }
+    result[argv->len] = NULL;
+    return result;
+
+failure:
+    for (index = 0; index < argv->len; index += 1) {
+        free(result[index]);
+    }
+    free(result);
+    return NULL;
+}
+
+static void ls_rt_io_process_argv_dispose(char** argv) {
+    size_t index;
+
+    if (argv == NULL) {
+        return;
+    }
+    for (index = 0; argv[index] != NULL; index += 1) {
+        free(argv[index]);
+    }
+    free(argv);
+}
+
+/* Read both pipes until EOF. Returns 0 or -1 with errno recorded. */
+static int ls_rt_io_read_capture_pipes(LsRtIoFdCapture* out,
+                                       LsRtIoFdCapture* err) {
+    struct pollfd descriptors[2];
+    int open_count = 2;
+
+    descriptors[0].fd = out->descriptor;
+    descriptors[0].events = POLLIN;
+    descriptors[0].revents = 0;
+    descriptors[1].fd = err->descriptor;
+    descriptors[1].events = POLLIN;
+    descriptors[1].revents = 0;
+    while (open_count > 0) {
+        int status = poll(descriptors, 2, -1);
+        int index;
+
+        if (status < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        for (index = 0; index < 2; index += 1) {
+            LsRtIoFdCapture* capture = index == 0 ? out : err;
+            char chunk[4096];
+            ssize_t received;
+
+            if (descriptors[index].fd < 0 ||
+                descriptors[index].revents == 0) {
+                continue;
+            }
+            if ((descriptors[index].revents &
+                 (POLLIN | POLLHUP | POLLERR)) == 0) {
+                if ((descriptors[index].revents & POLLNVAL) != 0) {
+                    errno = EBADF;
+                    return -1;
+                }
+                continue;
+            }
+            received = read(descriptors[index].fd, chunk, sizeof chunk);
+            if (received < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return -1;
+            }
+            if (received == 0) {
+                (void)close(descriptors[index].fd);
+                descriptors[index].fd = -1;
+                capture->descriptor = -1;
+                open_count -= 1;
+                continue;
+            }
+            if (!ls_rt_io_fd_capture_push(capture, chunk, (size_t)received)) {
+                errno = ENOMEM;
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int64_t ls_rt_io_process_run(const LsVec_String* argv,
+                                    const LsString* current_dir, bool capture,
+                                    int64_t* exit_code, LsString** capture_stdout,
+                                    LsString** capture_stderr) {
+    char** arguments = NULL;
+    char* cwd_text = NULL;
+    int error_pipe[2] = {-1, -1};
+    int out_pipe[2] = {-1, -1};
+    int err_pipe[2] = {-1, -1};
+    LsRtIoFdCapture out_capture;
+    LsRtIoFdCapture err_capture;
+    pid_t child;
+    int wait_status = 0;
+    int child_error = 0;
+    int read_error = 0;
+    int64_t result = -1;
+
+    out_capture.descriptor = -1;
+    out_capture.bytes = NULL;
+    out_capture.length = 0;
+    out_capture.capacity = 0;
+    err_capture.descriptor = -1;
+    err_capture.bytes = NULL;
+    err_capture.length = 0;
+    err_capture.capacity = 0;
+
+    arguments = ls_rt_io_process_argv(argv);
+    if (arguments == NULL) {
+        goto cleanup;
+    }
+    if (current_dir != NULL && current_dir->len != 0) {
+        cwd_text = ls_rt_io_text_copy(current_dir, "working directory");
+        if (cwd_text == NULL) {
+            goto cleanup;
+        }
+    }
+    if (pipe(error_pipe) != 0) {
+        (void)ls_rt_io_fail_errno(errno);
+        goto cleanup;
+    }
+    (void)fcntl(error_pipe[1], F_SETFD, FD_CLOEXEC);
+    if (capture) {
+        if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
+            (void)ls_rt_io_fail_errno(errno);
+            goto cleanup;
+        }
+    }
+    child = fork();
+    if (child < 0) {
+        (void)ls_rt_io_fail_errno(errno);
+        goto cleanup;
+    }
+    if (child == 0) {
+        int child_errno = 0;
+
+        (void)close(error_pipe[0]);
+        if (capture) {
+            (void)close(out_pipe[0]);
+            (void)close(err_pipe[0]);
+            if (dup2(out_pipe[1], STDOUT_FILENO) < 0 ||
+                dup2(err_pipe[1], STDERR_FILENO) < 0) {
+                child_errno = errno;
+            }
+            if (out_pipe[1] != STDOUT_FILENO &&
+                out_pipe[1] != STDERR_FILENO) {
+                (void)close(out_pipe[1]);
+            }
+            if (err_pipe[1] != STDOUT_FILENO &&
+                err_pipe[1] != STDERR_FILENO) {
+                (void)close(err_pipe[1]);
+            }
+        }
+        if (child_errno == 0 && cwd_text != NULL && chdir(cwd_text) != 0) {
+            child_errno = errno;
+        }
+        if (child_errno == 0) {
+            execvp(arguments[0], arguments);
+            child_errno = errno;
+        }
+        if (child_errno != 0) {
+            ssize_t ignored = write(error_pipe[1], &child_errno,
+                                    sizeof child_errno);
+            (void)ignored;
+        }
+        _exit(127);
+    }
+    (void)close(error_pipe[1]);
+    error_pipe[1] = -1;
+    if (capture) {
+        (void)close(out_pipe[1]);
+        out_pipe[1] = -1;
+        (void)close(err_pipe[1]);
+        err_pipe[1] = -1;
+        out_capture.descriptor = out_pipe[0];
+        out_pipe[0] = -1;
+        err_capture.descriptor = err_pipe[0];
+        err_pipe[0] = -1;
+        if (ls_rt_io_read_capture_pipes(&out_capture, &err_capture) != 0) {
+            read_error = errno;
+        }
+    }
+    while (waitpid(child, &wait_status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        (void)ls_rt_io_fail_errno(errno);
+        goto cleanup;
+    }
+    {
+        ssize_t received;
+
+        do {
+            received = read(error_pipe[0], &child_error, sizeof child_error);
+        } while (received < 0 && errno == EINTR);
+        if (received == (ssize_t)sizeof child_error) {
+            (void)ls_rt_io_fail_errno(child_error);
+            goto cleanup;
+        }
+    }
+    if (read_error != 0) {
+        (void)ls_rt_io_fail_errno(read_error);
+        goto cleanup;
+    }
+    if (WIFEXITED(wait_status)) {
+        *exit_code = (int64_t)WEXITSTATUS(wait_status);
+    } else if (WIFSIGNALED(wait_status)) {
+        *exit_code = (int64_t)(128 + WTERMSIG(wait_status));
+    } else {
+        *exit_code = 1;
+    }
+    if (capture) {
+        *capture_stdout =
+            ls_rt_io_string_lossy(out_capture.bytes, out_capture.length);
+        *capture_stderr =
+            ls_rt_io_string_lossy(err_capture.bytes, err_capture.length);
+    }
+    result = 0;
+
+cleanup:
+    (void)ls_rt_io_close_fd(&error_pipe[0]);
+    (void)ls_rt_io_close_fd(&error_pipe[1]);
+    (void)ls_rt_io_close_fd(&out_pipe[0]);
+    (void)ls_rt_io_close_fd(&out_pipe[1]);
+    (void)ls_rt_io_close_fd(&err_pipe[0]);
+    (void)ls_rt_io_close_fd(&err_pipe[1]);
+    (void)ls_rt_io_close_fd(&out_capture.descriptor);
+    (void)ls_rt_io_close_fd(&err_capture.descriptor);
+    ls_rt_io_fd_capture_dispose(&out_capture);
+    ls_rt_io_fd_capture_dispose(&err_capture);
+    free(cwd_text);
+    ls_rt_io_process_argv_dispose(arguments);
+    return result;
+}
+
+int64_t ls_proc_status(const LsVec_String* argv, const LsString* current_dir,
+                       int64_t* exit_code) {
+    ls_rt_io_error_reset();
+    if (exit_code == NULL) {
+        return ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                             "the exit code destination is null");
+    }
+    return ls_rt_io_process_run(argv, current_dir, false, exit_code, NULL, NULL);
+}
+
+int64_t ls_proc_output(const LsVec_String* argv, const LsString* current_dir,
+                       int64_t* exit_code, LsString** out_stdout,
+                       LsString** out_stderr) {
+    ls_rt_io_error_reset();
+    if (exit_code == NULL || out_stdout == NULL || out_stderr == NULL) {
+        return ls_rt_io_fail(LS_IO_ERROR_INVALID_INPUT,
+                             "the output destination is null");
+    }
+    *out_stdout = NULL;
+    *out_stderr = NULL;
+    return ls_rt_io_process_run(argv, current_dir, true, exit_code, out_stdout,
+                                out_stderr);
 }
 
 /* --- Platform lifetime (POSIX) --- */

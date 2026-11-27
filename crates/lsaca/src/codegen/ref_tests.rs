@@ -1911,7 +1911,10 @@ fn releases_the_iterator_once_when_the_loop_breaks() {
                     print_iteration(),
                     HStmt::Expr(HExpr::new(
                         Ty::unit(),
-                        HExprKind::Break { label: None },
+                        HExprKind::Break {
+                            label: None,
+                            value: None,
+                        },
                         sp(),
                     )),
                 ],
@@ -2953,5 +2956,574 @@ fn orders_fat_reference_views_before_aggregates_that_embed_them() {
     assert!(
         main_c.contains("(v.f_text)"),
         "the debug helper reads the borrowed field: {main_c}"
+    );
+}
+
+/// A value-carrying break transfers its payload into the loop slot that the
+/// surrounding expression has already zeroed and declared.
+#[test]
+fn break_values_are_written_to_the_loop_result_slot() {
+    let break_expr = HExpr::new(
+        Ty::unit(),
+        HExprKind::Break {
+            label: None,
+            value: Some(Box::new(int_lit(7))),
+        },
+        sp(),
+    );
+    let loop_expr = HExpr::new(
+        int_ty(),
+        HExprKind::Loop {
+            label: None,
+            body: block(vec![HStmt::Expr(break_expr)], None),
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(int_ty(), "v0"), loop_expr),
+            HStmt::Expr(println_of(vec![display_arg(local("r", "v0", int_ty()))])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "break_value",
+        &program("break_value", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    let loop_at = body
+        .find("for (;;)")
+        .unwrap_or_else(|| panic!("missing loop in generated C: {body}"));
+    let goto_at = body[loop_at..]
+        .find("goto ")
+        .map(|offset| loop_at + offset)
+        .unwrap_or_else(|| panic!("missing break jump in generated C: {body}"));
+    let segment = &body[loop_at..goto_at];
+    assert!(
+        segment.contains("v0 = "),
+        "the break payload is not transferred into the loop slot: {segment}"
+    );
+    assert!(
+        segment.contains('7'),
+        "the break payload is not evaluated before the jump: {segment}"
+    );
+    assert!(
+        main_c.contains("int64_t v0 ="),
+        "the loop result local is not declared before the loop: {main_c}"
+    );
+}
+
+/// A labelled break value must target the labelled loop's slot even when it is
+/// nested inside one or more inner loops.
+#[test]
+fn labelled_break_values_leave_nested_loops() {
+    let break_outer = HExpr::new(
+        Ty::unit(),
+        HExprKind::Break {
+            label: Some("outer".to_string()),
+            value: Some(Box::new(int_lit(9))),
+        },
+        sp(),
+    );
+    let inner_loop = HExpr::new(
+        Ty::unit(),
+        HExprKind::Loop {
+            label: None,
+            body: block(vec![HStmt::Expr(break_outer)], None),
+        },
+        sp(),
+    );
+    let outer_loop = HExpr::new(
+        int_ty(),
+        HExprKind::Loop {
+            label: Some("outer".to_string()),
+            body: block(vec![HStmt::Expr(inner_loop)], None),
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(int_ty(), "v0"), outer_loop),
+            HStmt::Expr(println_of(vec![display_arg(local("r", "v0", int_ty()))])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "labelled_break_value",
+        &program("labelled_break_value", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        body.contains("((int64_t)9)")
+            && body
+                .lines()
+                .any(|line| line.trim_start().starts_with("v0 = t")),
+        "the labelled break payload is not stored in the outer loop slot: {body}"
+    );
+    assert_eq!(
+        body.matches("for (;;)").count(),
+        2,
+        "a labelled break value test needs both the outer and inner loops: {body}"
+    );
+}
+
+/// The value produced by an inner loop must flow through its own result slot
+/// before the outer loop's break value consumes it.
+#[test]
+fn nested_loop_values_flow_through_inner_results() {
+    let inner_break = HExpr::new(
+        Ty::unit(),
+        HExprKind::Break {
+            label: None,
+            value: Some(Box::new(int_lit(7))),
+        },
+        sp(),
+    );
+    let inner_loop = HExpr::new(
+        int_ty(),
+        HExprKind::Loop {
+            label: None,
+            body: block(vec![HStmt::Expr(inner_break)], None),
+        },
+        sp(),
+    );
+    let outer_break = HExpr::new(
+        Ty::unit(),
+        HExprKind::Break {
+            label: None,
+            value: Some(Box::new(add(local("next", "v1", int_ty()), int_lit(1)))),
+        },
+        sp(),
+    );
+    let outer_loop = HExpr::new(
+        int_ty(),
+        HExprKind::Loop {
+            label: None,
+            body: block(
+                vec![
+                    let_stmt(bind_pat(int_ty(), "v1"), inner_loop),
+                    HStmt::Expr(outer_break),
+                ],
+                None,
+            ),
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(int_ty(), "v0"), outer_loop),
+            HStmt::Expr(println_of(vec![display_arg(local("r", "v0", int_ty()))])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "nested_loop_value",
+        &program("nested_loop_value", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        body.contains("((int64_t)7)")
+            && body
+                .lines()
+                .any(|line| line.trim_start().starts_with("v1 = t")),
+        "the inner break payload is not stored in the inner loop slot: {body}"
+    );
+    assert!(
+        body.lines()
+            .any(|line| line.trim_start().starts_with("v0 = t")),
+        "the outer break does not store the combined value: {body}"
+    );
+    assert!(
+        body.contains("ls_add_i64_checked(v1,"),
+        "the outer break value does not read the inner result: {body}"
+    );
+}
+
+/// An array pattern binds each element from the inline data array and never
+/// emits a runtime length check: the array type already fixes the length.
+#[test]
+fn array_patterns_bind_elements_in_place() {
+    let array_ty = Ty::array(int_ty(), 2);
+    let pat = HPat {
+        ty: array_ty.clone(),
+        kind: HPatKind::Array(vec![bind_pat(int_ty(), "v1"), bind_pat(int_ty(), "v2")]),
+        span: sp(),
+    };
+    let init = HExpr::new(
+        array_ty.clone(),
+        HExprKind::Array {
+            elems: vec![int_lit(1), int_lit(2)],
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(pat, init),
+            HStmt::Expr(println_of(vec![
+                display_arg(local("a", "v1", int_ty())),
+                display_arg(local("b", "v2", int_ty())),
+            ])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "array_pattern",
+        &program("array_pattern", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        body.contains(".data[0]"),
+        "the first array element is not bound from data[0]: {body}"
+    );
+    assert!(
+        body.contains(".data[1]"),
+        "the second array element is not bound from data[1]: {body}"
+    );
+    assert!(
+        !body.contains(".len"),
+        "an array pattern must not emit a slice length check: {body}"
+    );
+}
+
+/// An At pattern binds the whole value first and then binds the selected
+/// parts from the same source.
+#[test]
+fn at_patterns_bind_the_whole_value_and_its_parts() {
+    let array_ty = Ty::array(int_ty(), 2);
+    let pat = HPat {
+        ty: array_ty.clone(),
+        kind: HPatKind::At {
+            binding: Box::new(bind_pat(array_ty.clone(), "v1")),
+            pattern: Box::new(HPat {
+                ty: array_ty.clone(),
+                kind: HPatKind::Array(vec![bind_pat(int_ty(), "v2"), bind_pat(int_ty(), "v3")]),
+                span: sp(),
+            }),
+        },
+        span: sp(),
+    };
+    let init = HExpr::new(
+        array_ty.clone(),
+        HExprKind::Array {
+            elems: vec![int_lit(4), int_lit(5)],
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(pat, init),
+            HStmt::Expr(println_of(vec![
+                display_arg(local("whole", "v1", array_ty)),
+                display_arg(local("a", "v2", int_ty())),
+                display_arg(local("b", "v3", int_ty())),
+            ])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "at_pattern",
+        &program("at_pattern", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        body.contains("v1 = "),
+        "the whole-value binding is not assigned before the sub-pattern: {body}"
+    );
+    assert!(
+        body.contains(".data[0]"),
+        "the sub-pattern does not read the first element: {body}"
+    );
+    assert!(
+        body.contains(".data[1]"),
+        "the sub-pattern does not read the second element: {body}"
+    );
+}
+
+/// Slice patterns check the length exactly for [a, b] or as a minimum for
+/// [a, .., b] and bind the suffix from the end of the view.
+#[test]
+fn slice_patterns_check_length_and_bind_prefix_and_suffix() {
+    let array_ty = Ty::array(int_ty(), 3);
+    let slice_ty = Ty::slice(int_ty());
+    let shared_slice = ref_ty(false, slice_ty.clone());
+    let shared_i64 = ref_ty(false, int_ty());
+    let pattern = |rest: bool| HPat {
+        ty: slice_ty.clone(),
+        kind: HPatKind::Slice {
+            prefix: vec![bind_pat(shared_i64.clone(), "v1")],
+            suffix: vec![bind_pat(shared_i64.clone(), "v2")],
+            rest,
+        },
+        span: sp(),
+    };
+    let wildcard = HPat {
+        ty: slice_ty.clone(),
+        kind: HPatKind::Wild,
+        span: sp(),
+    };
+    let match_on = |rest: bool| {
+        HExpr::new(
+            int_ty(),
+            HExprKind::Match {
+                scrutinee: Box::new(local("s", "v3", shared_slice.clone())),
+                arms: vec![
+                    arm(pattern(rest), int_lit(1)),
+                    arm(wildcard.clone(), int_lit(0)),
+                ],
+            },
+            sp(),
+        )
+    };
+    let init = HExpr::new(
+        array_ty.clone(),
+        HExprKind::Array {
+            elems: vec![int_lit(1), int_lit(2), int_lit(3)],
+        },
+        sp(),
+    );
+    let slice_expr = HExpr::new(
+        shared_slice.clone(),
+        HExprKind::Slice {
+            base: Box::new(local("numbers", "v0", array_ty.clone())),
+            start: None,
+            end: None,
+            inclusive: false,
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(array_ty, "v0"), init),
+            let_stmt(bind_pat(shared_slice.clone(), "v3"), slice_expr),
+            HStmt::Expr(match_on(true)),
+            HStmt::Expr(match_on(false)),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "slice_pattern",
+        &program("slice_pattern", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        body.contains(".len < (size_t)2"),
+        "a rest slice pattern must check the minimum length: {body}"
+    );
+    assert!(
+        body.contains(".len != (size_t)2"),
+        "an exact slice pattern must check the exact length: {body}"
+    );
+    assert!(
+        body.contains(".len - 1 + 0"),
+        "the suffix binding must index from the end of the view: {body}"
+    );
+}
+
+/// Consuming an At pattern moves the whole value into the binding exactly
+/// once; the wildcard sub-pattern must not drop it a second time.
+#[test]
+fn at_patterns_with_a_wildcard_release_the_whole_value_once() {
+    let array_ty = Ty::array(Ty::string(), 2);
+    let pat = HPat {
+        ty: array_ty.clone(),
+        kind: HPatKind::At {
+            binding: Box::new(bind_pat(array_ty.clone(), "v1")),
+            pattern: Box::new(HPat {
+                ty: array_ty.clone(),
+                kind: HPatKind::Wild,
+                span: sp(),
+            }),
+        },
+        span: sp(),
+    };
+    let init = HExpr::new(
+        array_ty.clone(),
+        HExprKind::Array {
+            elems: vec![str_lit("a"), str_lit("b")],
+        },
+        sp(),
+    );
+    let main = main_fn(block(vec![let_stmt(pat, init)], None));
+    let main_c = generate_program(
+        "at_pattern_consume",
+        &program("at_pattern_consume", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        body.contains("v1 = "),
+        "the whole owning array is not moved into the at-binding: {body}"
+    );
+    assert_eq!(
+        body.matches("lsaca_release_Array_String_2(").count(),
+        2,
+        "the whole owning array must only be released through the binding: {body}"
+    );
+    assert_eq!(
+        body.matches("if (v1_live) {").count(),
+        2,
+        "both array releases must be guarded by the binding live flag: {body}"
+    );
+}
+
+/// A bracket pattern over an array reads the elements directly: arrays carry
+/// no runtime length, so both the length check and the suffix index must be
+/// static.
+#[test]
+fn slice_patterns_on_arrays_use_the_static_length() {
+    let array_ty = Ty::array(int_ty(), 3);
+    let pat = HPat {
+        ty: array_ty.clone(),
+        kind: HPatKind::Slice {
+            prefix: vec![bind_pat(int_ty(), "v1")],
+            suffix: vec![bind_pat(int_ty(), "v2")],
+            rest: true,
+        },
+        span: sp(),
+    };
+    let init = HExpr::new(
+        array_ty.clone(),
+        HExprKind::Array {
+            elems: vec![int_lit(1), int_lit(2), int_lit(3)],
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(pat, init),
+            HStmt::Expr(println_of(vec![
+                display_arg(local("a", "v1", int_ty())),
+                display_arg(local("b", "v2", int_ty())),
+            ])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "array_slice_pattern",
+        &program("array_slice_pattern", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        body.lines()
+            .any(|line| line.trim_start().starts_with("v1 = ") && line.contains(".data[0];")),
+        "the prefix element is not read from data[0]: {body}"
+    );
+    assert!(
+        body.lines()
+            .any(|line| line.trim_start().starts_with("v2 = ") && line.contains(".data[2];")),
+        "the suffix element is not read from the static last index: {body}"
+    );
+    assert!(
+        !body.contains(".len"),
+        "an array-slice pattern must not read a runtime length: {body}"
+    );
+}
+
+/// Matching an array with a bracket pattern must only emit the element tests;
+/// the static array length makes a runtime length test unnecessary.
+#[test]
+fn slice_patterns_on_arrays_emit_no_runtime_length_test() {
+    let array_ty = Ty::array(int_ty(), 3);
+    let pattern = HPat {
+        ty: array_ty.clone(),
+        kind: HPatKind::Slice {
+            prefix: vec![bind_pat(int_ty(), "v1")],
+            suffix: vec![bind_pat(int_ty(), "v2")],
+            rest: false,
+        },
+        span: sp(),
+    };
+    let wildcard = HPat {
+        ty: array_ty.clone(),
+        kind: HPatKind::Wild,
+        span: sp(),
+    };
+    let match_expr = HExpr::new(
+        int_ty(),
+        HExprKind::Match {
+            scrutinee: Box::new(local("values", "v0", array_ty.clone())),
+            arms: vec![arm(pattern, int_lit(1)), arm(wildcard, int_lit(0))],
+        },
+        sp(),
+    );
+    let init = HExpr::new(
+        array_ty.clone(),
+        HExprKind::Array {
+            elems: vec![int_lit(1), int_lit(2), int_lit(3)],
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(array_ty, "v0"), init),
+            let_stmt(bind_pat(int_ty(), "v3"), match_expr),
+            HStmt::Expr(println_of(vec![display_arg(local("r", "v3", int_ty()))])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "array_slice_match",
+        &program("array_slice_match", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        !body.contains(".len"),
+        "an array-slice match must not read a runtime length: {body}"
+    );
+}
+
+/// Destructuring an owned String array must move the selected element and
+/// drop every unbound element exactly once, without releasing the moved-out
+/// array shell again.
+#[test]
+fn slice_patterns_on_arrays_move_unbound_elements_to_temporaries() {
+    let array_ty = Ty::array(Ty::string(), 3);
+    let pat = HPat {
+        ty: array_ty.clone(),
+        kind: HPatKind::Slice {
+            prefix: vec![bind_pat(Ty::string(), "v1")],
+            suffix: vec![bind_pat(Ty::string(), "v2")],
+            rest: true,
+        },
+        span: sp(),
+    };
+    let init = HExpr::new(
+        array_ty.clone(),
+        HExprKind::Array {
+            elems: vec![str_lit("a"), str_lit("b"), str_lit("c")],
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(pat, init),
+            HStmt::Expr(println_of(vec![
+                display_arg(local("head", "v1", Ty::string())),
+                display_arg(local("tail", "v2", Ty::string())),
+            ])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "array_slice_consume",
+        &program("array_slice_consume", Vec::new(), vec![main], 0),
+    );
+    let body = function_body(&main_c, "LsUnit lsaca_fn_main()");
+    assert!(
+        body.lines()
+            .any(|line| line.trim_start().starts_with("v1 = ") && line.contains(".data[0];")),
+        "the head element is not moved into its binding: {body}"
+    );
+    assert!(
+        body.lines()
+            .any(|line| line.trim_start().starts_with("v2 = ") && line.contains(".data[2];")),
+        "the tail element is not moved from the static last index: {body}"
+    );
+    assert!(
+        body.contains(".data[1]"),
+        "the unbound middle element is not moved into a temporary: {body}"
+    );
+    assert!(
+        !body.contains("lsaca_release_Array_String_3("),
+        "the moved-out array shell must not be released again: {body}"
     );
 }

@@ -429,8 +429,10 @@ impl Frontend {
                 Ok((program, diagnostics))
             }
             Err(errors) => {
+                // The error result already carries the warnings: type checking
+                // has historically returned every diagnostic on failure, so
+                // extending with the warning list here would duplicate them.
                 diagnostics.extend(errors);
-                diagnostics.extend(type_diagnostics);
                 Err(diagnostics)
             }
         }

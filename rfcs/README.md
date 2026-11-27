@@ -62,5 +62,13 @@ What the RFC does not settle.
 
 ## Accepted RFCs
 
-None yet. The first candidates are the v2.3 items that need a design decision:
-the HashMap entry API, and the UFCS call form (diagnostic only or implemented).
+- [0002: HashMap entry API](0002-hashmap-entry.md) - deferred to v2.6 because a
+  borrowed `Entry` cannot survive an open-addressed rehash; v2.4 ships the
+  by-value `get_or_insert` / `get_or_insert_with` idioms instead.
+- [0003: Derive, operators and formatting protocols stay closed in 2.x](0003-derive-and-protocols.md)
+  - the protocol decisions and their boundary conditions.
+- [0004: Concurrency stays out of 2.x](0004-concurrency.md) - the v3.0
+  memory-model package.
+
+Open candidates for a future decision: the UFCS call form (implemented or
+diagnostic only; it is diagnostic only today, deviation 19).

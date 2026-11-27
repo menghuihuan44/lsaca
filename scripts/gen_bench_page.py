@@ -18,7 +18,7 @@ and re-running the script keeps the edits. Everything else is generated.
 Usage:
     python scripts/gen_bench_page.py
     python scripts/gen_bench_page.py --check
-    python scripts/gen_bench_page.py --baseline benchmarks/results/archive/v2.2/latest.json
+    python scripts/gen_bench_page.py --baseline benchmarks/results/archive/v2.3/latest.json
 
 Exit status: 0 when the page was written (or --check found it up to date), 1 otherwise.
 """
@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PAGE = REPO_ROOT / "docs" / "language" / "21-benchmarks.md"
 LATEST_JSON = REPO_ROOT / "benchmarks" / "results" / "latest.json"
 LATEST_MD = REPO_ROOT / "benchmarks" / "results" / "latest.md"
-DEFAULT_BASELINE = REPO_ROOT / "benchmarks" / "results" / "archive" / "v2.2" / "latest.json"
+DEFAULT_BASELINE = REPO_ROOT / "benchmarks" / "results" / "archive" / "v2.3" / "latest.json"
 
 BT = chr(96)
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
@@ -253,11 +253,15 @@ def first_group(pattern, text):
 
 
 class Context:
-    def __init__(self, data, md, page, baseline):
+    def __init__(self, data, md, page, baseline, baseline_path=DEFAULT_BASELINE):
         self.data = data
         self.md = md
         self.page = page
         self.baseline = baseline
+        self.baseline_path = baseline_path
+        self.current_version = self.extract_version(data) or "unknown"
+        self.baseline_version = self.extract_version(baseline) or "the previous release"
+        self.baseline_gcc_version = self.extract_gcc(baseline)
         self.tables = parse_tables(md)
         self.compile_table = find_table(self.tables, "Compile time")
         self.runtime_table = find_table(self.tables, "Runtime (median")
@@ -294,6 +298,32 @@ class Context:
             tables = parse_tables("\n".join(fairness))
             if tables:
                 self.idiomatic_table = tables[0]
+
+    @staticmethod
+    def extract_version(results):
+        text = str(((results or {}).get("toolchains") or {}).get("lsaca", ""))
+        match = re.search(r"\d+\.\d+\.\d+", text)
+        return match.group(0) if match else None
+
+    @staticmethod
+    def extract_gcc(results):
+        text = str(((results or {}).get("toolchains") or {}).get("gcc", ""))
+        match = re.search(r"\d+\.\d+\.\d+", text)
+        return match.group(0) if match else None
+
+    def baseline_gcc_phrase(self):
+        if self.baseline_gcc_version:
+            return "gcc " + self.baseline_gcc_version
+        return "the previous C compiler"
+
+    def baseline_relative_path(self):
+        try:
+            return str(Path(self.baseline_path).resolve().relative_to(REPO_ROOT)).replace("\\", "/")
+        except ValueError:
+            return str(self.baseline_path).replace("\\", "/")
+
+    def current_gcc_version(self):
+        return self.extract_gcc(self.data)
 
     def is_compile_only(self, name):
         program = self.data["programs"].get(name)
@@ -446,7 +476,7 @@ def render_preamble(ctx):
                + " on " + date + ", at " + generated_at + ", from commit " + commit
                + " with compiler build " + sha + " (" + compiler_mtime + "). The C "
                "reference was built with " + str(toolchains.get("gcc", "gcc")) + ". The "
-               "2.2.0 baseline was measured with gcc 15.2.0; comparisons against it are "
+               + ctx.baseline_version + " baseline was measured with " + ctx.baseline_gcc_phrase() + "; comparisons against it are "
                "normalised by the C reference and explained in the fairness notes.")
     out.append("")
     headline = [str(within_14) + " of the " + str(executed) + " executed workloads run within "
@@ -669,16 +699,26 @@ def render_analysis(ctx):
                + " inside 1.15x. The median lsaca/C ratio over the executed workloads is "
                + fmt_ratio(sorted(ratios.values())[len(ratios) // 2] if ratios else None) + ".")
     out.append("")
-    out.append("Absolute milliseconds are not comparable with the 2.2.0 baseline, because the "
-               "C reference compiler changed from gcc 15.2.0 to "
-               + str(ctx.data.get("toolchains", {}).get("gcc", "the current gcc"))
-               + " and that compiler is measurably slower on the same sources. The table below "
-               "therefore compares C-normalised ratios: each language's time divided by the C "
-               "time of the same run. A positive change means lsaca lost ground relative to the "
-               "C reference.")
+    if ctx.current_gcc_version() and ctx.current_gcc_version() == ctx.baseline_gcc_version:
+        out.append("Absolute milliseconds are not comparable with the " + str(ctx.baseline_version)
+                   + " baseline even though both runs used the same C reference compiler ("
+                   + ctx.baseline_gcc_phrase() + "): the archived run was taken earlier on a "
+                   "different host state. The table below therefore compares C-normalised "
+                   "ratios: each language's time divided by the C time of the same run. A "
+                   "positive change means lsaca lost ground relative to the C reference.")
+    else:
+        out.append("Absolute milliseconds are not comparable with the " + str(ctx.baseline_version)
+                   + " baseline, because the C reference compiler changed from "
+                   + ctx.baseline_gcc_phrase() + " to "
+                   + str(ctx.data.get("toolchains", {}).get("gcc", "the current gcc"))
+                   + " and that compiler is measurably slower on the same sources. The table "
+                   "below therefore compares C-normalised ratios: each language's time divided "
+                   "by the C time of the same run. A positive change means lsaca lost ground "
+                   "relative to the C reference.")
     out.append("")
     if changes:
-        header = ["workload", "2.2.0 ratio to C", "2.3.0 ratio to C", "change"]
+        header = ["workload", str(ctx.baseline_version) + " ratio to C",
+                  str(ctx.current_version) + " ratio to C", "change"]
         rows = []
         for name, old_ratio, new_ratio, change in sorted(changes, key=lambda item: item[3], reverse=True):
             rows.append([bt(name), fmt_ratio(old_ratio), fmt_ratio(new_ratio), fmt_change(change)])
@@ -689,14 +729,14 @@ def render_analysis(ctx):
         improved.sort(key=lambda item: item[3])
         worsened.sort(key=lambda item: item[3], reverse=True)
         if improved:
-            out.append("### Largest improvements against the 2.2.0 baseline")
+            out.append("### Largest improvements against the " + str(ctx.baseline_version) + " baseline")
             out.append("")
             for name, old_ratio, new_ratio, change in improved[:6]:
                 out.append("- " + bt(name) + ": " + fmt_ratio(old_ratio) + " to "
                            + fmt_ratio(new_ratio) + " (" + fmt_change(change) + ").")
             out.append("")
         if worsened:
-            out.append("### Largest regressions against the 2.2.0 baseline")
+            out.append("### Largest regressions against the " + str(ctx.baseline_version) + " baseline")
             out.append("")
             for name, old_ratio, new_ratio, change in worsened[:6]:
                 out.append("- " + bt(name) + ": " + fmt_ratio(old_ratio) + " to "
@@ -748,7 +788,7 @@ def render_analysis(ctx):
         ["Independent oracle agreement",
          str(program_count) + " program checksums and " + str(scale_count) + " data-scale checksums agree",
          "met"],
-        ["Runtime medians within 10% of 2.2.0 (C-normalised)",
+        ["Runtime medians within 10% of " + str(ctx.baseline_version) + " (C-normalised)",
          str(len(normalized_regressions)) + " of " + str(len(changes)) + " outside the budget",
          "met" if not normalized_regressions else "partly met"],
     ]
@@ -795,9 +835,9 @@ def render_fairness(ctx):
     out.append("2. Absolute milliseconds are specific to this host and toolchain: "
                + str(ctx.data.get("host", {}).get("cpu", "unknown CPU")) + " running "
                + str(ctx.data.get("host", {}).get("platform", "an unknown OS")) + ", C reference "
-               + str(toolchains.get("gcc", "unknown")) + ". The 2.2.0 baseline was measured "
-               "with gcc 15.2.0, so cross-release claims are made about C-normalised ratios "
-               "only.")
+               + str(toolchains.get("gcc", "unknown")) + ". The " + str(ctx.baseline_version)
+               + " baseline was measured with " + ctx.baseline_gcc_phrase()
+               + ", so cross-release claims are made about C-normalised ratios only.")
     out.append("")
     out.append("3. All measurements were taken in one session on an otherwise idle machine; "
                "the harness runs one program at a time and does not overlap builds with "
@@ -852,14 +892,15 @@ def render_fairness(ctx):
         if regressions:
             regressions.sort(key=lambda item: item[3], reverse=True)
             names = ", ".join(bt(row[0]) for row in regressions[:6])
-            out.append("13. Relative to the 2.2.0 baseline, " + names + " moved outside the "
-                       "2.2.0 measurement noise after normalising by the C reference. The "
+            out.append("13. Relative to the " + str(ctx.baseline_version) + " baseline, "
+                       + names + " moved outside the " + str(ctx.baseline_version)
+                       + " measurement noise after normalising by the C reference. The "
                        "release notes track these explicitly instead of hiding them in a "
                        "different host speed.")
             out.append("")
         else:
             out.append("13. After normalising by the C reference, no workload regressed by "
-                       "more than 2% relative to the 2.2.0 baseline.")
+                       "more than 2% relative to the " + str(ctx.baseline_version) + " baseline.")
             out.append("")
     out.append("14. The harness itself is part of the measurement: it compiles, runs, samples "
                 "memory and validates checksums, and its overhead is outside the timed child "
@@ -870,7 +911,7 @@ def render_fairness(ctx):
 
 def render_reproducing(ctx):
     fence = BT * 3
-    baseline = ctx.baseline.get("toolchains", {}).get("lsaca", "2.2.0") if ctx.baseline else "2.2.0"
+    baseline = ctx.baseline.get("toolchains", {}).get("lsaca", ctx.baseline_version) if ctx.baseline else ctx.baseline_version
     out = ["## Reproducing", ""]
     out.append("The page is generated from the results of the official harness, so the exact "
                "commands are:")
@@ -886,15 +927,15 @@ def render_reproducing(ctx):
                + " to measure a subset. The harness rejects an incomplete official run, so a "
                "green page always corresponds to a full suite.")
     out.append("")
-    out.append("The 2.2.0 baseline used for the comparison table lives in "
-               + bt("benchmarks/results/archive/v2.2/latest.json") + "; it reports "
+    out.append("The " + str(ctx.baseline_version) + " baseline used for the comparison table "
+               "lives in " + bt(ctx.baseline_relative_path()) + "; it reports "
                + str(baseline) + " and is never overwritten by the harness.")
     out.append("")
     out.append("The regression guard reads the same files:")
     out.append("")
     out.append(fence + "sh")
     out.append("python scripts/bench_guard.py --results benchmarks/results/latest.json \\")
-    out.append("    --baseline benchmarks/results/archive/v2.2/latest.json")
+    out.append("    --baseline " + ctx.baseline_relative_path())
     out.append(fence)
     out.append("")
     out.append("The guard compares absolute times when the host and toolchains match the "
@@ -961,7 +1002,7 @@ def main(argv=None):
     baseline = None
     if args.baseline.exists():
         baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
-    ctx = Context(data, md, page, baseline)
+    ctx = Context(data, md, page, baseline, args.baseline)
     text = assemble(ctx)
     if args.check:
         current = page.replace("\r\n", "\n")

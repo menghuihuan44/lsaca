@@ -204,6 +204,8 @@ pub enum TExprKind {
     Macro(TMacroCall),
     Break {
         label: Option<String>,
+        /// Value produced by `break value`; `None` for a bare `break`.
+        value: Option<Box<TExpr>>,
     },
     Continue {
         label: Option<String>,
@@ -328,6 +330,20 @@ pub enum TPatKind {
     },
     Lit(TLit),
     Tuple(Vec<TPat>),
+    /// A fixed-length array pattern: every element is written out.
+    Array(Vec<TPat>),
+    /// A slice pattern with optional leading and trailing elements. When
+    /// `rest` is true a `..` separates `prefix` from `suffix`.
+    Slice {
+        prefix: Vec<TPat>,
+        suffix: Vec<TPat>,
+        rest: bool,
+    },
+    /// `binding @ pattern`: bind the whole matched value and destructure it.
+    At {
+        binding: Box<TPat>,
+        pattern: Box<TPat>,
+    },
     Struct {
         struct_id: usize,
         fields: Vec<(usize, TPat)>,

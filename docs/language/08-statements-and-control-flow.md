@@ -270,10 +270,13 @@ done -2
 ## loop
 
 `loop` repeats its block forever. Leave it with `break` (optionally from inside a
-nested `if`). `continue` skips to the next iteration. A loop has type `()`:
-`break` cannot carry a value in 2.2.0. Since 2.2.0 a loop may also be labelled,
-which lets `break` and `continue` name an outer loop; see
-[Loop labels](28-loop-labels.md).
+nested `if`). `continue` skips to the next iteration. Since 2.4.0 a `loop` can
+produce a value: `break value` makes the loop expression evaluate to `value`, and
+a bare `break` gives `()`. Every `break` that leaves the same loop must produce
+the same type. Since 2.2.0 a loop may also be labelled, which lets `break` and
+`continue` name an outer loop; see [Loop labels](28-loop-labels.md).
+
+A bare `break` loop still has type `()`:
 
 ```ls
 fn main() {
@@ -298,26 +301,43 @@ Output:
 25
 ```
 
-Breaking with a value is not supported:
+To produce a value, use `break value` inside a `loop`. The value becomes the
+result of the loop expression, so it can be bound, returned or passed to another
+expression:
 
-```ls,compile-fail
+```ls
 fn main() {
-    let x = loop {
-        break 5;
+    let answer = loop {
+        break 42;
     };
+    println!("{}", answer);
+
+    let mut n = 0;
+    let doubled = loop {
+        n += 1;
+        if n == 3 {
+            break n * 2;
+        }
+    };
+    println!("{} {}", n, doubled);
 }
 ```
 
-Error:
+Output:
 ```text
-error[E0308]: break with a value is not supported; loops have type ()
-  --> example-11.ls:3:15
-   |
- 3 |         break 5;
-   |               ^
-
-lsaca: example-11.ls: could not compile example-11.ls due to previous error(s)
+42
+3 6
 ```
+
+The value type is inferred from the `break` expressions and can be any type,
+including an owned `String` or a tuple. A bare `break` has type `()`, so mixing
+`break;` and `break value;` in one loop is a type mismatch (`E0308`).
+
+`while` and `for` loops always have type `()`; a value attached to a `break` in
+one of them is rejected with `E0571`. Move the value out in a variable, or use a
+`loop` when the loop itself must produce a result. `continue` never accepts a
+value: `continue value;` is rejected with `E0308` and a note that the language
+has no continue values.
 
 ## for and ranges
 
@@ -521,8 +541,32 @@ then names that loop instead of the innermost one:
 
 The label name may shadow an outer label of the same name (the innermost wins),
 a label before a non-loop item is a syntax error, and a label that no enclosing
-loop declares is `E0426`. `break` still cannot carry a value, labelled or not.
-The full rules, including `while let`, are on [Loop labels](28-loop-labels.md).
+loop declares is `E0426`. A values-out-of-`break` loop follows the same rules
+when labelled: `break 'outer value;` produces the value for the labelled loop.
+The full rules, including `while let`, are on
+[Loop labels](28-loop-labels.md).
+
+A labelled `loop` can both choose an outer loop and produce a value:
+
+```ls
+fn main() {
+    let found = 'outer: loop {
+        let mut n = 0;
+        loop {
+            n += 1;
+            if n == 5 {
+                break 'outer n;
+            }
+        }
+    };
+    println!("{}", found);
+}
+```
+
+Output:
+```text
+5
+```
 
 Outside a loop, `continue` (and `break`) is a compile error:
 
@@ -535,12 +579,12 @@ fn main() {
 Error:
 ```text
 error[E0268]: continue outside of a loop
-  --> example-19.ls:2:5
+  --> example-20.ls:2:5
    |
  2 |     continue;
    |     ^^^^^^^^
 
-lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
+lsaca: example-20.ls: could not compile example-20.ls due to previous error(s)
 ```
 
 ## if let and while let
@@ -628,3 +672,4 @@ on `main` — see [Functions](09-functions.md).
 * The operators used in these conditions: [Operators](07-operators.md).
 * Closures, which appear wherever a function value is expected:
   [Closures](14-closures.md).
+

@@ -1,6 +1,6 @@
 # string: String and str
 
-**Status in 2.3.0.** Implemented. The `String` type and its methods live in
+**Status in 2.4.0.** Implemented. The `String` type and its methods live in
 `stdlib/src/string.ls` (`std::string`); the borrowed `str` type is a builtin
 unsized type (see [Slices and str](../language/26-slices-and-str.md)) and every
 `str` method is also implemented there. `impl String` forwards each `str`

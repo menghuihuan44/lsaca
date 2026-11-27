@@ -864,3 +864,117 @@ fn fmt_validates_its_command_line() {
         .expect("could not run lsaca");
     assert_eq!(unknown.status.code(), Some(2));
 }
+
+#[test]
+fn fmt_formats_every_module_of_a_package() {
+    let dir = unique_dir("fmt-package");
+    let package = dir.join("app");
+    let source_root = package.join("src");
+    fs::create_dir_all(source_root.join("sub")).expect("could not create the package tree");
+    fs::write(
+        package.join("lsaca.toml"),
+        "[package]\nname = \"fmt_app\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("could not write the manifest");
+    fs::write(
+        source_root.join("main.ls"),
+        "fn main() {\nlet x = 1;\nprintln!(\"{}\", x);\n}\n",
+    )
+    .expect("could not write main.ls");
+    fs::write(
+        source_root.join("util.ls"),
+        "pub fn double(value: i64) -> i64 {\nvalue * 2\n}\n",
+    )
+    .expect("could not write util.ls");
+    fs::write(
+        source_root.join("sub").join("mod.ls"),
+        "pub fn triple(value: i64) -> i64 {\nvalue * 3\n}\n",
+    )
+    .expect("could not write sub/mod.ls");
+
+    let check = lsaca()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&package)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(
+        check.status.code(),
+        Some(1),
+        "fmt --check should report files to format"
+    );
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(
+        stderr.contains("would format"),
+        "unexpected output: {:?}",
+        stderr
+    );
+    assert!(
+        stderr.contains("main.ls"),
+        "main.ls was not reported: {:?}",
+        stderr
+    );
+    assert!(
+        stderr.contains("sub/mod.ls"),
+        "sub/mod.ls was not reported: {:?}",
+        stderr
+    );
+
+    let formatted = lsaca()
+        .arg("fmt")
+        .arg(&package)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(
+        formatted.status.code(),
+        Some(0),
+        "fmt failed: {:?}",
+        String::from_utf8_lossy(&formatted.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&formatted.stderr);
+    assert!(
+        stderr.contains("formatted 3 files"),
+        "unexpected summary: {:?}",
+        stderr
+    );
+    let main_text =
+        fs::read_to_string(source_root.join("main.ls")).expect("could not read main.ls");
+    assert_eq!(
+        main_text,
+        "fn main() {\n    let x = 1;\n    println!(\"{}\", x);\n}\n"
+    );
+    let module_text = fs::read_to_string(source_root.join("sub").join("mod.ls"))
+        .expect("could not read sub/mod.ls");
+    assert_eq!(
+        module_text,
+        "pub fn triple(value: i64) -> i64 {\n    value * 3\n}\n"
+    );
+
+    let clean = lsaca()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&package)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(clean.status.code(), Some(0));
+    assert!(clean.stdout.is_empty());
+    assert!(
+        clean.stderr.is_empty(),
+        "second check was not quiet: {:?}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+
+    let stdout_mode = lsaca()
+        .arg("fmt")
+        .arg("--stdout")
+        .arg(&package)
+        .output()
+        .expect("could not run lsaca");
+    assert_eq!(stdout_mode.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&stdout_mode.stderr);
+    assert!(
+        stderr.contains("whole package"),
+        "unexpected usage error: {:?}",
+        stderr
+    );
+}

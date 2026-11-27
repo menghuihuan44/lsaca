@@ -15,18 +15,16 @@ This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
-The current release is **2.3.0**. It is the borrowing and system-surface
-release: `Vec` iterators borrow instead of consuming, `HashMap` can be iterated
-by reference and built from pairs, the `Read`/`Write`/`Seek`/`BufRead` traits
-with buffered adapters join the I/O surface, `Path`/`PathBuf` and directory
-iteration join `fs`, `char` gains Unicode classification and case mapping, the
-remaining `Option`/`Result` combinators are available, and destructuring `let`
-can move fields out of an aggregate. It also ships a formatter, indexed
-diagnostics and a documentation-drift gate; real programs written in lsaca are
-executed in CI. Version 2.1.0 had aligned numeric defaults and suffixes, `usize`
-lengths and indices, `&str` text parameters, tuple and unit structs, and
-`mut` parameters with Rust, and the standard library and system interfaces
-grew the types and combinators that were missing:
+The current release is **2.4.0**, the tool-grade language release: array, slice
+and `name @ pattern` patterns with Rust-compatible exhaustiveness, values out
+of `break`, `HashMap::get_or_insert` plus a denser collection API, iterator
+`min`/`max`/`product`, `process::Command`, UDP networking with `SocketAddr`,
+`pub(super)`/`pub(in path)` visibility and module aliases, formatter crate mode,
+and RFCs that freeze the protocol and concurrency boundaries. Version 2.3.0 made
+iterators borrow, added `HashMap` iteration, the `io` stream traits and
+`Path`/`PathBuf`, Unicode `char` methods, and partial moves; 2.2.0 added arrays,
+loop labels, reference fields and `From`/`?`. Earlier releases grew the standard
+library and system interfaces, starting with:
 
 - **Rust-style numeric defaults and suffixes**: integer literals infer `i32`
   and float literals `f64`; every integer type accepts a Rust suffix
@@ -862,61 +860,62 @@ before it is timed; the harness records cold and cached build time, runtime
 median and peak working set. lsaca programs go through the normal cached
 `lsaca build -r` pipeline (the default direct C backend).
 
-The official 2.3.0 result is [benchmarks/results/latest.md](benchmarks/results/latest.md),
-archived under [benchmarks/results/archive/v2.3/](benchmarks/results/archive/v2.3/),
+The official 2.4.0 result is [benchmarks/results/latest.md](benchmarks/results/latest.md),
+archived under [benchmarks/results/archive/v2.4/](benchmarks/results/archive/v2.4/),
 with the run published in
-[docs/language/21-benchmarks.md](docs/language/21-benchmarks.md) and the 2.2.0
-baseline analysis in
+[docs/language/21-benchmarks.md](docs/language/21-benchmarks.md); the previous
+release is frozen in [benchmarks/results/archive/v2.3/](benchmarks/results/archive/v2.3/)
+and the 2.2.0 baseline analysis is in
 [benchmarks/results/v2.2-report.md](benchmarks/results/v2.2-report.md). The run
 used Windows 11 on a Core i7-1260P (16 threads, 15.6 GiB), gcc.EXE (Rev6, MSYS2)
-16.2.0 (-O2), rustc 1.99 (-O), Node 26 and Python 3.14; runtimes are medians of
-seven runs after one warmup and are lower-is-better. The 2.2.0 baseline was
-measured with gcc 15.2.0, so cross-release claims are made about C-normalised
-ratios only; short workloads on this laptop vary noticeably between runs, so the
-tables below are one recorded official run.
+16.2.0 (-O2), rustc 1.100 (-O), Node 26 and Python 3.14; runtimes are medians of
+seven runs after one warmup and are lower-is-better. The 2.3.0 baseline was
+measured with the same gcc 16.2.0 but an earlier host state, so cross-release
+claims are made about C-normalised ratios only; short workloads on this laptop
+vary noticeably between runs, so the tables below are one recorded official run.
 
-| workload | lsaca 2.3.0 | C (gcc -O2) | Rust (rustc -O) | ratio vs C |
+| workload | lsaca 2.4.0 | C (gcc -O2) | Rust (rustc -O) | ratio vs C |
 | --- | ---: | ---: | ---: | ---: |
-| `fib` | 33.1 ms | 33.3 ms | 20.7 ms | 0.99x |
-| `fib_iter` | 15.4 ms | 12.2 ms | - | 1.27x |
-| `fib_memo` | 17.1 ms | 11.3 ms | - | 1.51x |
-| `loop_sum` | 17.5 ms | 12.4 ms | 12.9 ms | 1.42x |
-| `string_build` | 85.5 ms | 13.7 ms | 56.5 ms | 6.23x |
-| `vec_memory` | 18.4 ms | 15.6 ms | 17.8 ms | 1.18x |
-| `sort_i64` | 39.0 ms | 35.5 ms | 33.9 ms | 1.10x |
-| `sort_insertion` | 18.3 ms | 13.6 ms | - | 1.34x |
-| `matrix_multiply` | 18.7 ms | 15.5 ms | 13.5 ms | 1.21x |
-| `binary_trees` | 209.1 ms | 16.7 ms | 24.4 ms | 12.56x |
-| `binary_trees_refs` | 38.8 ms | 21.0 ms | 18.0 ms | 1.85x |
-| `string_split` | 34.1 ms | 22.0 ms | 21.1 ms | 1.55x |
-| `sieve` | 57.7 ms | 38.4 ms | 32.9 ms | 1.50x |
-| `mandelbrot` | 38.9 ms | 34.9 ms | 32.8 ms | 1.11x |
-| `iterator_pipeline` | 18.5 ms | 17.3 ms | 17.1 ms | 1.07x |
-| `hashmap_wordcount` | 43.3 ms | 32.9 ms | 51.6 ms | 1.32x |
-| `array_wordcount` | 18.2 ms | 13.6 ms | - | 1.34x |
-| `generic_stack` | 21.2 ms | 25.1 ms | 19.2 ms | 0.85x |
-| `fn_pipeline` | 13.7 ms | 13.0 ms | 13.3 ms | 1.05x |
-| `string_unicode` | 41.5 ms | 18.2 ms | 16.1 ms | 2.28x |
-| `hashmap_i64` | 309.7 ms | 187.4 ms | 209.2 ms | 1.65x |
-| `hashmap_string` | 300.2 ms | 230.8 ms | 245.9 ms | 1.30x |
+| `fib` | 38.6 ms | 32.2 ms | 18.6 ms | 1.20x |
+| `fib_iter` | 16.1 ms | 16.3 ms | - | 0.99x |
+| `fib_memo` | 17.7 ms | 17.2 ms | - | 1.03x |
+| `loop_sum` | 23.4 ms | 19.6 ms | 16.1 ms | 1.19x |
+| `string_build` | 99.7 ms | 20.9 ms | 83.1 ms | 4.77x |
+| `vec_memory` | 27.4 ms | 22.7 ms | 19.0 ms | 1.21x |
+| `sort_i64` | 44.8 ms | 42.5 ms | 46.0 ms | 1.05x |
+| `sort_insertion` | 17.9 ms | 14.4 ms | - | 1.24x |
+| `matrix_multiply` | 23.2 ms | 21.7 ms | 18.9 ms | 1.07x |
+| `binary_trees` | 321.7 ms | 28.0 ms | 34.2 ms | 11.48x |
+| `binary_trees_refs` | 42.7 ms | 23.9 ms | 25.6 ms | 1.79x |
+| `string_split` | 31.2 ms | 26.7 ms | 20.0 ms | 1.17x |
+| `sieve` | 47.8 ms | 43.0 ms | 39.8 ms | 1.11x |
+| `mandelbrot` | 44.3 ms | 43.7 ms | 33.7 ms | 1.01x |
+| `iterator_pipeline` | 20.1 ms | 13.6 ms | 15.7 ms | 1.48x |
+| `hashmap_wordcount` | 43.1 ms | 32.5 ms | 52.5 ms | 1.33x |
+| `array_wordcount` | 19.3 ms | 18.4 ms | - | 1.05x |
+| `generic_stack` | 23.2 ms | 20.5 ms | 19.5 ms | 1.13x |
+| `fn_pipeline` | 17.0 ms | 13.8 ms | 15.5 ms | 1.23x |
+| `string_unicode` | 42.4 ms | 23.6 ms | 20.7 ms | 1.80x |
+| `hashmap_i64` | 355.6 ms | 227.7 ms | 309.0 ms | 1.56x |
+| `hashmap_string` | 263.0 ms | 242.3 ms | 248.6 ms | 1.09x |
 
 Compile times on the same machine (cold: fresh program cache with a warm
 shared runtime-object cache; cached: only relinking):
 
-| build | lsaca 2.3.0 |
+| build | lsaca 2.4.0 |
 | --- | ---: |
-| cold build, typical single file | 0.45-2.67 s (median 0.64 s) |
-| cached build, typical single file | 86-154 ms (median 104 ms) |
-| `compile_large` (4,511 lines), cold / cached | 3.14 s / 906 ms |
-| `modules_compile` (9 files), cold / cached | 5.24 s / 888 ms |
-| `package_compile` (13 files, 3 packages), cold / cached | 1.97 s / 221 ms |
+| cold build, typical single file | 0.57-2.54 s (median 0.88 s) |
+| cached build, typical single file | 130-219 ms (median 164 ms) |
+| `compile_large` (4,511 lines), cold / cached | 3.53 s / 1,105 ms |
+| `modules_compile` (9 files), cold / cached | 5.17 s / 1,032 ms |
+| `package_compile` (13 files, 3 packages), cold / cached | 2.38 s / 352 ms |
 
 Peak memory is at parity with C for most workloads: `fib` 4.5 vs 4.0 MiB,
-`vec_memory` 19.3 vs 18.8 MiB, `sieve` 19.3 vs 18.8 MiB, `hashmap_i64` 55.8
+`vec_memory` 19.2 vs 18.8 MiB, `sieve` 19.3 vs 18.8 MiB, `hashmap_i64` 55.9
 vs 52.5 MiB. The exceptions are documented workload-fairness effects: by-value
-`binary_trees` deep-copies the tree when summing (52.3 vs 7.6 MiB, 12.56x
+`binary_trees` deep-copies the tree when summing (52.3 vs 7.6 MiB, 11.48x
 runtime) while the borrowed `binary_trees_refs` variant is the fair comparison
-(16.2 vs 7.6 MiB, 1.85x), and `hashmap_string` allocates one shared `String`
+(16.2 vs 7.6 MiB, 1.79x), and `hashmap_string` allocates one shared `String`
 buffer per unique word (30.0 vs 19.6 MiB).
 
 The single-file cold build is dominated by the system C compiler compiling the
@@ -925,34 +924,31 @@ toolchain and profile into a shared runtime-object cache, so a normal program
 build compiles only its own generated unit(s) and links. Cached rebuilds skip
 the C compiler for unchanged content.
 
-At run time, 13 of the 22 executed workloads are within 1.4x of C, 14 are within
-1.5x and 6 are within 1.15x; the median lsaca/C ratio is 1.34x. `generic_stack`
-(0.85x), `fib` (0.99x), `fn_pipeline` (1.05x), `iterator_pipeline` (1.07x),
-`sort_i64` (1.10x) and `mandelbrot` (1.11x) are the closest workloads. The
-eight above 1.5x are analyzed individually on the benchmarks page:
-`binary_trees` (12.56x) is the deliberate by-value semantics comparison;
-`string_build` (6.23x) builds a temporary `String` per token in the frozen
-two-step form; `string_unicode` (2.28x) pays the documented O(n) character API
-plus Unicode table lookups; `binary_trees_refs` (1.85x), `hashmap_i64`
-(1.65x), `string_split` (1.55x), `fib_memo` (1.51x) and `sieve` (1.50x) pay
-reference-count traffic, hashing, allocations and checked indexing on top of C's
-specialized code.
+At run time, 16 of the 22 executed workloads are within 1.4x of C, 17 are within
+1.5x and 9 are within 1.15x; the median lsaca/C ratio is 1.20x. `fib_iter`
+(0.99x), `mandelbrot` (1.01x), `fib_memo` (1.03x), `array_wordcount` (1.05x),
+`sort_i64` (1.05x), `matrix_multiply` (1.07x) and `hashmap_string` (1.09x) are
+the closest workloads. The five above 1.5x are analyzed individually on the
+benchmarks page: `binary_trees` (11.48x) is the deliberate by-value semantics
+comparison; `string_build` (4.77x) builds a temporary `String` per token in the
+frozen two-step form; `string_unicode` (1.80x) pays the documented O(n)
+character API plus Unicode table lookups; `binary_trees_refs` (1.79x) pays
+reference-count traffic on the borrowed traversal; and `hashmap_i64` (1.56x)
+pays hashing and allocations on top of C's hand-written open-addressing table.
 
-Against the archived 2.2.0 run, compared as C-normalised ratios because the C
-reference compiler changed from gcc 15.2.0 to gcc 16.2.0, the largest gains are
-`generic_stack` (1.15x to 0.85x), `array_wordcount` (1.79x to 1.34x),
-`hashmap_wordcount` (1.72x to 1.32x), `string_split` (2.00x to 1.55x),
-`sort_i64` (1.41x to 1.10x) and `string_unicode` (2.88x to 2.28x); the
-largest normalised regressions are `binary_trees` (8.17x to 12.56x),
-`hashmap_string` (0.92x to 1.30x), `sieve` (1.20x to 1.50x), `loop_sum`
-(1.22x to 1.42x) and `fib_iter` (1.15x to 1.27x). A same-host A/B run of the
-2.2.0 and 2.3.0 compilers on nine of these workloads measured lsaca medians
-between 0.88x and 1.24x of the 2.2.0 compiler's, with the C reference medians
-themselves moving by up to 16% between the two runs, so the normalised deltas
-are within this laptop's run-to-run noise. The
-[benchmarks page](docs/language/21-benchmarks.md) and
-[benchmarks/results/v2.2-report.md](benchmarks/results/v2.2-report.md) have the
-complete before/after tables.
+Against the archived 2.3.0 run, compared as C-normalised ratios because the two
+runs were taken on different host states, the largest gains are `fib_memo`
+(1.51x to 1.03x), `sieve` (1.50x to 1.11x), `string_split` (1.55x to 1.17x),
+`string_build` (6.23x to 4.77x), `fib_iter` (1.27x to 0.99x) and
+`array_wordcount` (1.34x to 1.05x); the largest normalised regressions are
+`iterator_pipeline` (1.07x to 1.48x), `generic_stack` (0.85x to 1.13x), `fib`
+(0.99x to 1.20x), `fn_pipeline` (1.05x to 1.23x) and `vec_memory`
+(1.18x to 1.21x). A same-host A/B run of the 2.3.0 and 2.4.0 compilers on
+twelve of these workloads measured a median runtime ratio of 0.993 with the C
+reference medians themselves moving by up to 42% between the two runs, so the
+normalised deltas are within this laptop's run-to-run noise. The
+[benchmarks page](docs/language/21-benchmarks.md) has the complete before/after
+tables.
 
 ## Environment variables
 
@@ -1002,7 +998,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 library - including the lexer, parser, type checker, borrow checker, move
 checker, C code generator and the embedded standard library loader - plus 21
 end-to-end test functions that compile and run more than 150 programs: single
-files under `crates/lsaca/tests/programs/`, the three real programs under
+files under `crates/lsaca/tests/programs/`, the four real programs under
 `examples/programs/` whose output is compared byte for byte with stored golden
 files, module trees under
 `tests/programs/modules/`, package projects (including path dependencies)
@@ -1029,8 +1025,9 @@ anchor, and the prose claims. The complete CI definition is in
 
 ### Real example programs
 
-`scripts/real_programs.py` is the end-to-end gate for the three programs under
-`examples/programs/`. It runs the JSON, Markdown and Lisp programs with and
+`scripts/real_programs.py` is the end-to-end gate for the four programs under
+`examples/programs/`. It runs the JSON, Markdown, Lisp and word-statistics
+programs with and
 without their sample data through the release compiler, compiles the matching
 hand-written C references with `gcc -std=c17 -O2 -Wall -Wextra -Werror`, and
 compares every stdout byte with the goldens under
@@ -1047,7 +1044,7 @@ python scripts/real_programs.py --bin target/release/lsaca --json target/real-pr
 The C comparison is on by default and is skipped with `--no-c`. GCC is taken
 from `PATH`, with `C:\msys64\ucrt64\bin\gcc.exe` as the Windows fallback;
 `--keep` preserves the per-case stdout/stderr under `target/real-programs/runs`.
-The `Real example programs` CI job runs all six invocations with both
+The `Real example programs` CI job runs all eight invocations with both
 implementations on Ubuntu.
 
 ### Documentation drift
@@ -1100,9 +1097,11 @@ check and tees its output to `target/check-status.log`; the
 
 `scripts/bench_guard.py` compares a result file produced by `scripts/bench.py`
 with the most recently released baseline,
-`benchmarks/results/archive/v2.3/latest.json` (2.3.0). The limits are a runtime
+`benchmarks/results/archive/v2.4/latest.json` (2.4.0). The limits are a runtime
 median regression of at most 10% and a cold compile median regression of at
-most 20% against the previous release in each case. The guard compares the primary runtime, every data scale present in
+most 20% against the previous release in each case. The guard is a hard check
+when the measurement host matches the baseline; on the shared CI runners it
+reports advisory results, and a release is validated with a same-host A/B run. The guard compares the primary runtime, every data scale present in
 both runs, and the cold compile median.
 
 ```sh
@@ -1140,6 +1139,26 @@ only that CLI test; the dedicated CI job still covers the CMake backend.
 
 ## Release history
 
+- **2.4.0** - the tool-grade language release. Array, slice and `name @ pattern`
+  patterns with Rust-compatible exhaustiveness, values out of `break`,
+  `HashMap::get_or_insert`/`get_or_insert_with` plus a denser collection
+  surface, iterator `min`/`max`/`product`, `process::Command`, UDP
+  networking with `SocketAddr`, `pub(super)`/`pub(in path)` visibility and
+  module aliases, formatter crate mode (`lsaca fmt DIR`), a fourth real program
+  (word statistics), the error-code index, and RFCs 0003/0004 that freeze the
+  protocol and concurrency boundaries. The CI Rust toolchain is pinned to
+  1.100.0. Source compatible with 2.3.0 apart from `continue` with a value,
+  which is now reported as `E0308`.
+- **2.3.0** - closes the promises made in 2.2.0. Borrowed iteration
+  (`Vec::iter`, `iter_mut`, `into_iter`, `for` over `&Vec`/`&mut Vec`/
+  `&[T]`/`&mut [T]`), borrowed `HashMap` iteration plus
+  `HashMap::from`/`HashSet::from`, `rev` and `flat_map`, the remaining
+  Option/Result combinators, Unicode `char` classification and case mapping,
+  the `io` stream traits with `BufReader`/`BufWriter`, `Path`/`PathBuf` and
+  `read_dir_entries`, partial moves, the error-code index, and the
+  ROADMAP/STATUS governance pages with their CI checks. Source compatible with
+  2.2.0 except that `Vec::iter` now borrows (the consuming iterator is
+  `into_iter`) and `HashMap` iteration yields references.
 - **2.2.0** - the expressiveness release. Fixed-size arrays: `[T; N]` types,
   the literals `[1, 2, 3]`, `[0; 4]` and `[]`, `.len()`/`.is_empty()`,
   bounds-checked indexing, elementwise equality, `Debug`, `[T; 0]`, implicit

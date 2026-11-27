@@ -34,7 +34,7 @@ impl<'a> Checker<'a> {
     /// Register a trait declaration, validating its shape.
     pub fn register_trait_decl(&mut self, decl: &TraitDecl) {
         let module = self.current_module;
-        let vis = self.item_visibility(decl.vis);
+        let vis = self.item_visibility(&decl.vis);
         if let Some(previous) = self
             .lookup_type_in(module, &decl.name)
             .map(|binding| binding.span)

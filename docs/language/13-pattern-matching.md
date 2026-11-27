@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-220), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-240), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 2.2.0 are:
+The pattern forms available in 2.4.0 are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -48,6 +48,9 @@ The pattern forms available in 2.2.0 are:
 | Tuple and unit struct | `Meters(value)`, `Pair(x, y)`, `Marker` | a tuple struct or unit struct of that type |
 | Enum variant | `Shape::Empty`, `Shape::Circle(r)` | that variant, binding the payload |
 | Or-pattern | `0 \| 1`, `E::A(x) \| E::B(x)` | at least one alternative matches; every alternative binds the same names |
+| Fixed-size array | `[a, b, c]`, `[]` | an array of exactly that length, binding the elements in order |
+| Slice | `[a, b, ..]`, `[.., y]`, `[first, .., last]`, `[..]` | a slice behind `&[T]` or `&mut [T]`; `..` matches zero or more elements |
+| At-binding | `whole @ [a, .., z]`, `n @ 1` | the whole value plus a sub-pattern; both must match |
 
 Patterns nest: a variant pattern can contain a struct pattern, a struct pattern
 can contain tuple patterns, and so on. Tuple struct patterns (`Meters(value)`)
@@ -55,11 +58,13 @@ and unit struct patterns (`Marker`) were added in 2.1.0; they destructure and
 name tuple structs and unit structs declared with the same syntax. String and
 character literals are supported as patterns and match the exact string content
 or Unicode scalar; or-patterns (`p | q`) and match
-guards (`pattern if condition`) are fully supported. There are no range, slice,
-`@`-binding or `ref` patterns, and a reference scrutinee is matched with
-*match ergonomics* rather than a `&`-pattern — see
-[Match ergonomics](#match-ergonomics). Or-patterns and guards are described in
-[Or-patterns](#or-patterns) and [Match guards](#match-guards).
+guards (`pattern if condition`) are fully supported. Version 2.4.0 adds
+fixed-size array patterns, slice patterns behind `&[T]`/`&mut [T]`, and
+`@`-bindings. There are still no range patterns and no `ref` or `&` patterns,
+and a reference scrutinee is matched with *match ergonomics* rather than a
+`&`-pattern — see [Match ergonomics](#match-ergonomics). Or-patterns and guards
+are described in [Or-patterns](#or-patterns) and
+[Match guards](#match-guards).
 
 ```ls
 fn main() {
@@ -238,6 +243,101 @@ Output:
 1 lsaca
 1 2.5 x
 1 2 3
+```
+
+### Array patterns
+
+A fixed-size array pattern lists one pattern per element between square
+brackets. It matches an array only when the pattern length equals the array
+length; a length mismatch is `E0308`. For an array of that exact length the
+pattern is irrefutable, so it can also be used in a `let`:
+
+```ls
+fn main() {
+    let pair = [10, 20];
+    let [first, second] = pair;
+    println!("{} {}", first, second);
+
+    let triple = [1, 2, 3];
+    match triple {
+        [a, b, c] => println!("{} {} {}", a, b, c),
+    }
+}
+```
+
+Output:
+```text
+10 20
+1 2 3
+```
+
+### Slice patterns
+
+A slice pattern matches a slice behind `&[T]` or `&mut [T]`. The `..` token
+matches zero or more elements and may appear at most once; it can be a prefix
+(`[.., last]`), a suffix (`[first, ..]`) or in the middle
+(`[first, .., last]`). `[..]` matches any slice and is irrefutable. A pattern
+with a fixed prefix or suffix is refutable on its own, but exhaustiveness still
+understands how the patterns partition the possible lengths, so `[]`, `[only]`
+and `[first, .., last]` together cover every slice without a wildcard arm (see
+[Exhaustiveness](#exhaustiveness)). Match ergonomics applies: when the
+scrutinee is `&[T]`, the bindings are `&T` (and `&mut T` for `&mut [T]`).
+
+```ls
+fn describe(values: &[i64]) {
+    match values {
+        [] => println!("empty"),
+        [only] => println!("one {}", *only),
+        [first, .., last] => println!("ends {} {}", *first, *last),
+    }
+}
+
+fn main() {
+    let empty: Vec<i64> = Vec::new();
+    let one = vec![7];
+    let many = vec![1, 2, 3, 4];
+    describe(&empty);
+    describe(&one);
+    describe(&many);
+}
+```
+
+Output:
+```text
+empty
+one 7
+ends 1 4
+```
+
+### At-bindings
+
+`name @ pattern` binds the whole matched value to `name` and also applies the
+sub-pattern. Both bindings must succeed. The `mut` keyword is allowed
+(`mut name @ pattern`). Binding the whole value by move while a non-`Copy` part
+is also moved out of it is `E0382`, because the same value cannot be owned
+twice:
+
+```ls
+fn main() {
+    let values = vec![1, 2, 3, 4];
+    match values.as_slice() {
+        whole @ [first, .., last] => {
+            println!("{} {} {}", whole.len(), *first, *last);
+        }
+        _ => println!("empty"),
+    }
+
+    let pair = [5, 6];
+    match pair {
+        both @ [left, right] => println!("{} {} {} {}", both[0], both[1], left, right),
+    }
+}
+```
+
+Output:
+```text
+4 1 4
+5 6 5 6
 ```
 
 ### Struct patterns
@@ -494,18 +594,18 @@ fn main() {
 Error:
 ```text
 error[E0408]: variable x is not bound in all patterns of this or-pattern
-  --> example-16.ls:8:9
+  --> example-19.ls:8:9
    |
  8 |         E::A(x) | E::B(y) => x,
    |         ^^^^^^^^^^^^^^^^^
 
 error[E0408]: variable y is not bound in all patterns of this or-pattern
-  --> example-16.ls:8:9
+  --> example-19.ls:8:9
    |
  8 |         E::A(x) | E::B(y) => x,
    |         ^^^^^^^^^^^^^^^^^
 
-lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
+lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
 ```
 
 Or-patterns also nest inside other patterns: a struct field or a tuple component
@@ -689,13 +789,13 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: 0 not covered
-  --> example-23.ls:3:5
+  --> example-26.ls:3:5
    |
  3 |     match n {
    |     ^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-23.ls: could not compile example-23.ls due to previous error(s)
+lsaca: example-26.ls: could not compile example-26.ls due to previous error(s)
 ```
 
 The guard itself is an ordinary expression, so it must have type `bool`. An
@@ -715,13 +815,13 @@ fn main() {
 Error:
 ```text
 error[E0308]: mismatched types
-  --> example-24.ls:4:14
+  --> example-27.ls:4:14
    |
  4 |         n if n => println!("guard"),
    |              ^
    = note: expected bool, found {integer}
 
-lsaca: example-24.ls: could not compile example-24.ls due to previous error(s)
+lsaca: example-27.ls: could not compile example-27.ls due to previous error(s)
 ```
 
 ### Nested patterns
@@ -798,8 +898,10 @@ Output:
 ```
 
 The bindings are references (`x: &i64`, `value: &i64`), so you read through
-them with `*`. The same applies to struct, enum, tuple, `Option` and `Result`
-patterns, and to an `if let`/`while let` scrutinee.
+them with `*`. The same applies to struct, enum, tuple, `Option`, `Result`,
+fixed-size array and slice patterns, and to an `if let`/`while let` scrutinee.
+For a slice behind `&[T]`, the element bindings are `&T`; for `&mut [T]` they
+are `&mut T`.
 
 Matching a **mutable** reference follows the same ergonomics: the bindings are `&mut`
 references, so both reads and assignments go through `*`. A `&mut` scalar can be
@@ -876,13 +978,13 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: 2 not covered
-  --> example-29.ls:3:16
+  --> example-32.ls:3:16
    |
  3 |     let text = match n {
    |                ^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-29.ls: could not compile example-29.ls due to previous error(s)
+lsaca: example-32.ls: could not compile example-32.ls due to previous error(s)
 ```
 
 ```ls,compile-fail
@@ -897,25 +999,32 @@ fn main() {
 Error:
 ```text
 error[E0004]: non-exhaustive patterns: None not covered
-  --> example-30.ls:3:5
+  --> example-33.ls:3:5
    |
  3 |     match maybe {
    |     ^^^^^^^^^^^^^
    = note: match must be exhaustive; add a wildcard arm or cover the missing patterns
 
-lsaca: example-30.ls: could not compile example-30.ls due to previous error(s)
+lsaca: example-33.ls: could not compile example-33.ls due to previous error(s)
 ```
 
 A wildcard `_` or a binding covers everything and silences the exhaustiveness
 check. Note that the unit type `()` is a single value, so the arm `()` alone is
-exhaustive.
+exhaustive. A fixed-size array pattern is exhaustive for an array of exactly
+that length. Slice patterns participate in length-partition exhaustiveness: for
+a slice, `[]` covers length 0, `[only]` covers length 1, and `[first, .., last]`
+covers length 2 or more, so those three arms are exhaustive without a wildcard
+(Rust parity). More generally each pattern contributes the set of lengths it can
+match, with `..` covering a range, and a `match` over a slice is exhaustive when
+those sets cover every length.
 
 ## Refutable patterns outside match
 
 `let`, `for` and closure parameters need **irrefutable** patterns — patterns that
-always match. `let (a, b) = pair;` and `let Point { x, y } = p;` are fine, but a
-pattern that may fail (`Some(x)`, literals) must be written with `match`, `if let`
-or `while let`. Using one in `let` is an error:
+always match. `let (a, b) = pair;`, `let Point { x, y } = p;` and
+`let [a, b] = pair;` are fine, but a pattern that may fail (`Some(x)`, literals,
+`[]`, `[first, .., last]`) must be written with `match`, `if let` or `while let`.
+Using one in `let` is an error:
 
 ```ls,compile-fail
 fn main() {
@@ -928,13 +1037,13 @@ fn main() {
 Error:
 ```text
 error[E0005]: refutable pattern in local binding: patterns in this position must be irrefutable
-  --> example-31.ls:3:9
+  --> example-34.ls:3:9
    |
  3 |     let Some(value) = maybe;
    |         ^^^^^^^^^^^
    = note: only wildcards, bindings and single-variant destructuring are allowed here
 
-lsaca: example-31.ls: could not compile example-31.ls due to previous error(s)
+lsaca: example-34.ls: could not compile example-34.ls due to previous error(s)
 ```
 
 The irrefutable forms `if let` and `while let` are described in
@@ -962,11 +1071,11 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 2.2.0
+## Known limitations in 2.4.0
 
-Or-patterns, match guards and string-literal patterns are fully supported, and
-2.1.0 adds tuple struct and unit struct patterns. The pattern restrictions that
-remain in 2.2.0 are:
+Or-patterns, match guards and string-literal patterns are fully supported;
+2.1.0 added tuple struct and unit struct patterns, and 2.4.0 adds array, slice
+and `@` patterns. The pattern restrictions that remain in 2.4.0 are:
 
 * **Guards only in `match`** — `if let` and `while let` take a pattern but no
   guard; nest an `if` inside the body instead.
@@ -974,8 +1083,13 @@ remain in 2.2.0 are:
   `let &x = r` form; match a reference scrutinee directly and the bindings
   become references (see [Match ergonomics](#match-ergonomics)). For a `&mut`
   scrutinee those bindings are `&mut` references, so reads and assignments go
-  through `*binding`. There are no range or slice patterns at all, for strings
-  or integers.
+  through `*binding`. There are no range patterns, for strings or integers.
+* **Slice patterns are shallow** — a slice pattern can split off fixed prefix
+  and suffix elements around one `..`, but it cannot bind the skipped middle
+  section as a subslice. Match the slice again inside the arm if it needs a
+  different split.
+* **No `..=` or `ref` in patterns** — integer ranges are not patterns, and
+  reference patterns are replaced by match ergonomics, not written explicitly.
 
 The remaining restrictions are listed in [Known limitations](limitations.md) together with
 the other known limitations of the release.
@@ -989,3 +1103,4 @@ the other known limitations of the release.
 * Borrowing rules behind match ergonomics: [References and
   borrowing](12-references-and-borrowing.md).
 * `Option` and `Result` API: [Standard library](15-standard-library.md#option).
+

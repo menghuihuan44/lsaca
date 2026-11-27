@@ -304,7 +304,7 @@ length word of the fat struct is the C `size_t`. The generated C project needs n
 new runtime functions for slices and `str`; the small helpers are emitted inline
 by the compiler.
 
-## Known limitations in 2.3.0
+## Known limitations in 2.4.0
 
 * Fixed-length arrays `[T; N]` exist since 2.2.0 and coerce to `&[T]`, but they
   are not iterable by value and cannot be mutated through `&mut` (see

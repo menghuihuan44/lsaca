@@ -1,7 +1,7 @@
 # hash_set: HashSet<T>
 
-**Status in 2.3.0.** Implemented in `stdlib/src/collections.ls`. Version 2.3.0
-adds `HashSet::from(Vec<T>)`.
+**Status in 2.4.0.** Implemented in `stdlib/src/collections.ls`. Version 2.3.0
+added `HashSet::from(Vec<T>)`; version 2.4.0 adds `HashSet::extend(Vec<T>)`.
 
 `HashSet<T>` is an insertion-ordered set: it stores its keys in a
 `HashMap<T, ()>` for membership and additionally keeps a `Vec<T>` of the keys in
@@ -21,6 +21,7 @@ internal slot order.
 | `len` | `(&self) -> usize` | number of values |
 | `is_empty` | `(&self) -> bool` | whether the set is empty |
 | `clear` | `(&mut self)` | removes every value |
+| `extend` | `(&mut self, Vec<T>)` | inserts every value, keeping the first occurrence of each (2.4.0) |
 | `elements` | `(&self) -> Vec<T>` | the values in insertion order |
 | `to_vec` | `(&self) -> Vec<T>` | the same vector as `elements` |
 | `union` | `(&self, &HashSet<T>) -> HashSet<T>` | values in either set |
@@ -39,9 +40,11 @@ internal slot order.
   sequence, and it does not depend on hashing.
 * `remove` rebuilds the insertion-order vector, so it costs linear time in the
   number of values; the hash lookup itself is constant time on average.
+* `extend` consumes the vector and inserts its values in order; a value that is
+  already present is ignored, so the insertion order of the set is unchanged.
 * Lengths are `usize` since 2.1.0.
 
-## Limitations in 2.3.0
+## Limitations in 2.4.0
 
 There is no `for` loop over a `HashSet` and no borrowing iterator yet: read the
 values with `elements()` or `to_vec()` (both clone) and iterate the resulting

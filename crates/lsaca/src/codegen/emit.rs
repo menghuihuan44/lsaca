@@ -81,6 +81,9 @@ pub(crate) struct LoopCtx {
     /// Only a labelled jump consults it.
     pub label: Option<String>,
     pub body_frame: usize,
+    /// Lvalue that receives the value of a break expression targeting this loop.
+    /// None for loops whose completion type is unit.
+    pub result: Option<String>,
     pub used_break: bool,
     pub used_continue: bool,
 }
@@ -1011,7 +1014,7 @@ impl<'a> Gen<'a> {
             HExprKind::ResultErr(inner) => self.gen_result_variant(false, inner, &expr.ty, target),
             HExprKind::Format { parts } => self.gen_format(parts, target, expr.span),
             HExprKind::Macro(macro_call) => self.gen_macro(macro_call, target, expr.span),
-            HExprKind::Break { label } => self.gen_break(label.as_deref()),
+            HExprKind::Break { label, value } => self.gen_break(label.as_deref(), value.as_deref()),
             HExprKind::Continue { label } => self.gen_continue(label.as_deref()),
             HExprKind::Return(value) => self.gen_return(value.as_deref(), target),
             HExprKind::Ref {

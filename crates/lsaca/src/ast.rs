@@ -65,7 +65,7 @@ impl Item {
 /// struct; `pub` fields are visible wherever the struct is visible, and
 /// `pub(crate)` fields are visible only inside their own crate. Enum
 /// tuple-variant fields are public whenever the enum itself is visible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Visibility {
     /// Visible in the defining module and its descendant modules (default).
     #[default]
@@ -74,11 +74,22 @@ pub enum Visibility {
     Public,
     /// Visible anywhere inside the defining crate (`pub(crate)`).
     Crate,
+    /// Visible in the parent module and its descendants (`pub(super)`).
+    Super,
+    /// Visible inside the named ancestor module and its descendants
+    /// (`pub(in path)`). The path is written relative to the current module and
+    /// may start with `crate`, `super` or `self`.
+    In(Vec<String>),
 }
 
 impl Visibility {
-    pub fn is_public(self) -> bool {
+    pub fn is_public(&self) -> bool {
         matches!(self, Visibility::Public)
+    }
+
+    /// True for `pub(super)` and `pub(in path)`.
+    pub fn is_restricted(&self) -> bool {
+        matches!(self, Visibility::Super | Visibility::In(_))
     }
 }
 
@@ -778,6 +789,26 @@ pub enum PatternKind {
     /// A literal pattern such as 1, 'text', true or -1.
     Lit(Lit),
     Tuple(Vec<Pattern>),
+    /// A fixed-size array pattern: `[a, b, c]`. The pattern length must equal
+    /// the array length exactly.
+    Array(Vec<Pattern>),
+    /// A slice pattern over `&[T]` / `&mut [T]`: `[a, b, ..]` binds a prefix,
+    /// `[.., y]` a suffix and `[first, .., last]` both. At most one `..` is
+    /// allowed; `[..]` matches any slice. `rest` records whether the `..`
+    /// was written: without it the pattern requires an exact length.
+    Slice {
+        prefix: Vec<Pattern>,
+        suffix: Vec<Pattern>,
+        rest: bool,
+    },
+    /// An `@` binding: `name @ pattern` binds the whole matched value to `name`
+    /// and also matches `pattern` against it.
+    At {
+        name: String,
+        name_span: Span,
+        mutable: bool,
+        pattern: Box<Pattern>,
+    },
     /// A path pattern with optional payload: None, Some(x), Color::Red,
     /// Shape::Circle(r).
     Path {
@@ -1641,6 +1672,25 @@ impl Pattern {
                 for pattern in patterns {
                     pattern.for_each_span_mut(visit);
                 }
+            }
+            PatternKind::Array(patterns) => {
+                for pattern in patterns {
+                    pattern.for_each_span_mut(visit);
+                }
+            }
+            PatternKind::Slice { prefix, suffix, .. } => {
+                for pattern in prefix {
+                    pattern.for_each_span_mut(visit);
+                }
+                for pattern in suffix {
+                    pattern.for_each_span_mut(visit);
+                }
+            }
+            PatternKind::At {
+                name_span, pattern, ..
+            } => {
+                visit(name_span);
+                pattern.for_each_span_mut(visit);
             }
         }
     }

@@ -505,8 +505,13 @@ impl<'a> Checker<'a> {
         for item in items {
             match item {
                 Item::Mod(decl) => {
-                    let child =
-                        self.child_module(module, &decl.name, decl.name_span, decl.vis, decl.span);
+                    let child = self.child_module(
+                        module,
+                        &decl.name,
+                        decl.name_span,
+                        decl.vis.clone(),
+                        decl.span,
+                    );
                     self.collect_module_tree(child, &decl.items);
                 }
                 other => own.push(other.clone()),
@@ -594,11 +599,11 @@ impl<'a> Checker<'a> {
 
     /// Visibility written on an item, forced public inside the standard
     /// library so user code can see prelude items.
-    pub(super) fn item_visibility(&self, vis: Visibility) -> Visibility {
+    pub(super) fn item_visibility(&self, vis: &Visibility) -> Visibility {
         if self.force_public_items {
             Visibility::Public
         } else {
-            vis
+            vis.clone()
         }
     }
 
@@ -610,7 +615,7 @@ impl<'a> Checker<'a> {
     /// be named, exactly like Rust.
     pub fn method_visible(&self, fn_id: usize) -> bool {
         let info = &self.fns[fn_id];
-        self.visibility_allows(info.vis, info.module, self.privacy_module())
+        self.visibility_allows_decl(&info.vis, info.module, self.privacy_module())
     }
 
     fn module_prefix(&self, module: ModuleId) -> String {
@@ -629,7 +634,7 @@ impl<'a> Checker<'a> {
 
     fn register_struct(&mut self, decl: &StructDecl) {
         let module = self.current_module;
-        let vis = self.item_visibility(decl.vis);
+        let vis = self.item_visibility(&decl.vis);
         if let Some(previous) = self
             .lookup_type_in(module, &decl.name)
             .map(|binding| binding.span)
@@ -727,7 +732,7 @@ impl<'a> Checker<'a> {
 
     fn register_enum(&mut self, decl: &EnumDecl) {
         let module = self.current_module;
-        let vis = self.item_visibility(decl.vis);
+        let vis = self.item_visibility(&decl.vis);
         if let Some(previous) = self
             .lookup_type_in(module, &decl.name)
             .map(|binding| binding.span)
@@ -942,7 +947,7 @@ impl<'a> Checker<'a> {
 
     fn register_alias(&mut self, decl: &TypeAliasDecl) {
         let module = self.current_module;
-        let vis = self.item_visibility(decl.vis);
+        let vis = self.item_visibility(&decl.vis);
         if let Some(previous) = self
             .lookup_type_in(module, &decl.name)
             .map(|binding| binding.span)
@@ -981,7 +986,7 @@ impl<'a> Checker<'a> {
             );
         }
         let module = self.current_module;
-        let vis = self.item_visibility(decl.vis);
+        let vis = self.item_visibility(&decl.vis);
         if let Some(previous) = self
             .lookup_value_in(module, &decl.name)
             .map(|binding| binding.span)
@@ -1025,7 +1030,7 @@ impl<'a> Checker<'a> {
             display: decl.name.clone(),
             c_name,
             module,
-            vis,
+            vis: vis.clone(),
             decl: decl.clone(),
             origin: self.collecting_origin,
             generic: None,
@@ -1124,7 +1129,7 @@ impl<'a> Checker<'a> {
             ));
             let id = self.fns.len();
             let module = self.current_module;
-            let vis = self.item_visibility(func.vis);
+            let vis = self.item_visibility(&func.vis);
             self.fns.push(FnInfo {
                 name: func.name.clone(),
                 display,
@@ -1375,7 +1380,7 @@ impl<'a> Checker<'a> {
         ));
         let id = self.fns.len();
         let module = self.current_module;
-        let vis = self.item_visibility(func.vis);
+        let vis = self.item_visibility(&func.vis);
         self.fns.push(FnInfo {
             name: func.name.clone(),
             display,
@@ -1401,7 +1406,7 @@ impl<'a> Checker<'a> {
 
     fn register_const(&mut self, decl: &ast::ConstDecl) {
         let module = self.current_module;
-        let vis = self.item_visibility(decl.vis);
+        let vis = self.item_visibility(&decl.vis);
         if let Some(previous) = self
             .lookup_value_in(module, &decl.name)
             .map(|binding| binding.span)
@@ -2098,6 +2103,7 @@ impl<'a> Checker<'a> {
             // structs never take this path, so E0498 still applies to them.
             self.allow_ref_storage = true;
         }
+        let module = self.structs[id].module;
         let decl_fields = self.structs[id].decl_fields.clone();
         let mut fields: Vec<StructField> = Vec::with_capacity(decl_fields.len());
         let mut seen: HashMap<String, Span> = HashMap::new();
@@ -2117,6 +2123,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             seen.insert(field.name.clone(), field.name_span);
+            let _ = self.resolve_visibility_target(module, &field.vis, field.name_span);
             let ty = match self.resolve_ty(&field.ty, None) {
                 Some(ty) => ty,
                 None => self.infer.fresh_var(),

@@ -23,7 +23,9 @@ Version 2.2.0 made the lookups borrowed: `get` takes the key by reference
 iteration borrowed as well: `map.iter()` yields `(&K, &V)`, `map.keys()`
 yields `&K`, `map.values()` yields `&V`, and `for (key, value) in &map`
 iterates without cloning or consuming the map. Version 2.3.0 also added
-`HashMap::from`. The entry API is deliberately deferred; see
+`HashMap::from`. Version 2.4.0 added the entry idioms `get_or_insert` and
+`get_or_insert_with`; a borrowed `Entry` value is still deliberately deferred
+to v2.6, as recorded in
 [the entry RFC](../../rfcs/0002-hashmap-entry.md).
 
 Unlike `Vec`, the key type is restricted: it must be one of `i64`, `u64`,
@@ -136,6 +138,8 @@ Output:
 | `insert(key, value)` | `→ Option<V>` | moves both arguments into the map; returns the previous value for the key, if any |
 | `get(&key)` | `→ Option<&V>` | borrows the key argument; returns a shared reference to the stored value, no clone |
 | `get_mut(&key)` | `→ Option<&mut V>` | borrows the key argument; returns a mutable reference to the stored value; needs a mutable binding |
+| `get_or_insert(key, default)` | `→ &mut V` | moves the key and the default; inserts the default when the key is absent and returns a mutable reference to the stored value; the default is dropped when the key is already present |
+| `get_or_insert_with(key, f)` | `→ &mut V` | moves the key; `f` has type `fn() -> V`, is called only when the key is absent, and its result is inserted; returns a mutable reference to the stored value |
 | `get_with(key, f)` | `→ Option<U>` | copies the key argument; `f` has type `Fn(&V) -> U` and is called with a reference to the stored value |
 | `contains_key(key)` | `→ bool` | copies the key argument |
 | `remove(key)` | `→ Option<V>` | copies the key argument; moves the stored value out of the map |
@@ -244,6 +248,57 @@ Output:
 ```text
 Some(15)
 ```
+
+`get_or_insert` combines a lookup and an insertion. The key and the default
+are moved into the call. When the key is already present the stored value is
+returned and the default is dropped; when it is absent the default is inserted:
+
+```ls
+fn main() {
+    let mut totals: HashMap<String, i64> = HashMap::new();
+    *totals.get_or_insert(String::from("a"), 0) += 5;
+    *totals.get_or_insert(String::from("a"), 100) += 7;
+    println!("{:?}", totals.get(&String::from("a")));
+}
+```
+
+Output:
+```text
+Some(12)
+```
+
+`get_or_insert_with` computes the default lazily. Its second argument has the
+language's function-value type `fn() -> V` (the language has no generic methods),
+so a named function or a closure with that signature works, capturing or not.
+Closures capture by value: a capturing closure sees a snapshot of its captures
+taken when it was created, not the caller's live variables. The function is
+called only when the key is absent:
+
+```ls
+fn compute() -> i64 {
+    println!("computing");
+    return 4;
+}
+
+fn main() {
+    let mut cache: HashMap<String, i64> = HashMap::new();
+    *cache.get_or_insert_with(String::from("a"), compute) += 1;
+    *cache.get_or_insert_with(String::from("a"), compute) += 1;
+    println!("{:?}", cache.get(&String::from("a")));
+}
+```
+
+Output:
+```text
+computing
+Some(6)
+```
+
+Both methods return a mutable reference like `get_mut`, so the map stays
+borrowed until the last use of that reference; they need a mutable binding. An
+insertion may grow and rehash the table, so the implementation always looks the
+entry up again after inserting rather than holding a reference across the
+insertion. The returned reference comes from that fresh lookup.
 
 `get_with` copies the key argument and avoids cloning the value. It takes the key
 and a closure `Fn(&V) -> U` and returns the closure's result instead:
@@ -397,13 +452,13 @@ fn main() {
 Error:
 ```text
 error[E0277]: HashMap keys must be one of i64, u64, isize, usize, bool, char or String, found Vec<i64>
-  --> example-14.ls:2:18
+  --> example-16.ls:2:18
    |
  2 |     let mut map: HashMap<Vec<i64>, i64> = HashMap::new();
    |                  ^^^^^^^
    = note: only the listed key types are supported; use a struct field or a String key instead
 
-lsaca: example-14.ls: could not compile example-14.ls due to previous error(s)
+lsaca: example-16.ls: could not compile example-16.ls due to previous error(s)
 ```
 
 A `char` is a `Copy` scalar and a valid key type. Characters compare by
@@ -515,16 +570,19 @@ drop g
 one value without cloning it; `get_with` hands a reference to the stored value
 to a closure and returns the closure result.
 
-## Entry API
+## Entry idioms
 
-There is no `Entry` API in 2.3.0. The common operations are covered by
-`get`, `get_mut`, `get_with`, `contains_key`, `insert` and `remove`; an
-entry value would have to hold a mutable borrow of the map and a slot index
-that a later insertion could invalidate (the table rehashes on growth), and the
-representation does not expose stable slot addresses to lsaca code. The
-recommendation and the alternatives considered are recorded in
-[rfcs/0002-hashmap-entry.md](../../rfcs/0002-hashmap-entry.md); the API is
-deferred rather than implemented for 2.3.0.
+Version 2.4.0 adds the two entry idioms `get_or_insert` and
+`get_or_insert_with` described above. Together with `get`, `get_mut`,
+`get_with`, `contains_key`, `insert` and `remove`, they cover the common
+lookup-or-insert patterns without cloning a key or value on the hot path.
+
+There is still no borrowed `Entry` value in 2.4.0. Such a value would hold a
+mutable borrow of the map and a slot index that a later insertion could
+invalidate when the table grows and rehashes; the representation does not
+expose stable slot addresses to lsaca code. The recommendation, the alternatives
+considered, and the plan to revisit the borrowed form in v2.6 are recorded in
+[rfcs/0002-hashmap-entry.md](../../rfcs/0002-hashmap-entry.md).
 
 ## Iterating by value is not supported
 
@@ -546,22 +604,23 @@ Error:
 
 ```text
 error[E0277]: cannot iterate over a value of type HashMap<i64, i64>; for loops require a range, a Vec<T>, a type that implements Iterator<T>, or a borrowed collection (&Vec<T>, &mut Vec<T>, &[T], &mut [T] or &HashMap<K, V>)
-  --> example-17.ls:4:18
+  --> example-19.ls:4:18
    |
  4 |     for entry in scores {
    |                  ^^^^^^
    = note: iterate over a borrowed map: for (key, value) in &map
 
-lsaca: example-17.ls: could not compile example-17.ls due to previous error(s)
+lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
 ```
 
-## Known limitations in 2.3.0
+## Known limitations in 2.4.0
 
 * Key types are limited to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and
   `char`; user structs, enums and other types cannot be keys.
-* There is no entry API and no `insert_or_update`. `get_with` is the
-  non-cloning way to inspect a stored value; the entry RFC records the design
-  decision.
+* There is no borrowed `Entry` value and no `insert_or_update`.
+  `get_or_insert` and `get_or_insert_with` cover lookup-or-insert, and
+  `get_with` inspects a stored value through a closure; the entry RFC records
+  the design decision and defers borrowed entries to v2.6.
 * `iter()`, `keys()` and `values()` borrow the map; there is no mutable
   iteration over the stored values and no way to remove entries while
   iterating. A map cannot be mutated during a borrowed iteration.
@@ -598,8 +657,9 @@ See [Known limitations](limitations.md) for the full list.
 * `insert`, `remove`, `get_mut` and `clear` need a mutable binding.
 * `==` compares contents, ignoring insertion order; `{}` and `{:?}` print the
   entries in slot order.
-* There is no entry API and no iteration over a `HashMap` value by value;
-  borrow the map to iterate it.
+* There is no borrowed `Entry` value and no iteration over a `HashMap` value by
+  value; `get_or_insert` and `get_or_insert_with` cover lookup-or-insert, and
+  you must borrow the map to iterate it.
 
 ## What next
 
@@ -610,3 +670,4 @@ See [Known limitations](limitations.md) for the full list.
 * Generic types in general: [Generics](17-generics.md).
 * The `Vec` API: [Standard library](15-standard-library.md#vec).
 * Ownership and the move checker: [Ownership and moves](11-ownership-and-moves.md).
+

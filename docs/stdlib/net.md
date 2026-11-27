@@ -1,14 +1,72 @@
-# net: TCP sockets
+# net: TCP and UDP sockets
 
-**Status in 2.3.0.** Implemented in `stdlib/src/net.ls`. The module provides
-plain, blocking TCP over addresses as text: `bind` and `connect` take a
-`"host:port"` string. There is no TLS, no UDP, no DNS lookup API beyond the
-resolver built into `connect`, and no async I/O in 2.2.0.
+**Status in 2.4.0.** Implemented in `stdlib/src/net.ls`. The module provides
+plain, blocking TCP (since 2.0.0) and UDP (since 2.4.0), with addresses as text:
+`bind`, `connect`, `send_to` and `recv_from` take `"host:port"` strings. There is
+no TLS, no Unix-domain socket API, no dedicated DNS lookup API beyond the
+resolver used by the socket calls, and no asynchronous I/O.
 
 Failures are [`io::Error`](io.md) values, never panics. A refused connection, a
 reset peer, an address already in use and a timeout are reported with the
 matching `ErrorKind`: `ConnectionRefused`, `ConnectionReset`, `AddrInUse`,
 `TimedOut`, `WouldBlock`, and so on.
+
+## SocketAddr
+
+`SocketAddr` is a parsed IP address and port. It is a syntactic value: parsing
+does not perform a DNS lookup, and a host name is rejected because an address is
+not a name.
+
+```rust
+pub struct SocketAddr {
+    ip: String,
+    port: i64,
+}
+```
+
+| Method | Signature | Notes |
+| --- | --- | --- |
+| `SocketAddr::parse` | `(text: &str) -> Result<SocketAddr, Error>` | parses `IP:port`; IPv4 is `1.2.3.4:80`, IPv6 is bracketed as `[::1]:80`; surrounding whitespace is ignored; a host name is rejected |
+| `ip` | `(&self) -> String` | the IP address text, without brackets |
+| `port` | `(&self) -> i64` | the port number, `0` through `65535` |
+| `to_string` | `(&self) -> String` | formats the address; an IPv6 host is bracketed |
+| `display` | `(&self) -> String` | alias for `to_string` |
+
+An invalid address, an empty host or port, a port outside `0..=65535`, or a
+bracketed IPv6 address whose syntax is invalid produces `ErrorKind::InvalidInput`.
+The numeric address is not canonicalised: the parsed text is what `ip` returns.
+The socket methods still accept address strings; a `SocketAddr` is a separate
+value, not an overload of those methods.
+
+## UdpSocket
+
+```rust
+pub struct UdpSocket {
+    handle: i64,
+}
+```
+
+| Method | Signature | Notes |
+| --- | --- | --- |
+| `UdpSocket::bind` | `(address: &str) -> Result<UdpSocket, Error>` | binds a local address; a port of `0` asks for an ephemeral port |
+| `local_port` | `(&self) -> i64` | the local port the socket is bound to |
+| `handle` | `(&self) -> i64` | the raw runtime table index |
+| `send_to` | `(&self, bytes: &[u8], address: &str) -> Result<usize, Error>` | sends one datagram and returns the number of bytes sent |
+| `recv_from` | `(&mut self, max: i64) -> Result<Option<(Vec<u8>, String)>, Error>` | receives one datagram of at most `max` bytes, returning its payload and peer address |
+| `set_timeout` | `(&self, milliseconds: i64) -> Result<(), Error>` | sets the receive timeout; `0` disables it |
+| `close` | `(&mut self) -> Result<(), Error>` | closes the socket; closing an already closed socket is `Ok(())` |
+| `UdpSocket` `Drop` | - | closes the socket if it is still open |
+
+`bind` is the only constructor. It returns an error instead of panicking when
+the address cannot be bound, matching `TcpListener`. Each `send_to` produces one
+datagram; UDP does not add message boundaries beyond that. A received datagram
+larger than `max` is truncated to the buffer, and a negative `max` is
+`ErrorKind::InvalidInput`.
+
+When a timeout was set with `set_timeout` and no datagram arrives in time,
+`recv_from` returns `Ok(None)`; other receive failures are `Err`. The peer
+address is formatted as text (`1.2.3.4:80`, or `[::1]:80` for IPv6).
+`close` is idempotent, and dropping a socket closes it as well.
 
 ## TcpListener
 
@@ -73,12 +131,13 @@ stream.read(&mut buffer)?;
 stream.write(&buffer[0..count])?;
 ```
 
-## Limits in 2.3.0
+## Limits in 2.4.0
 
-The module is TCP only: no UDP, no Unix domain sockets, no TLS, no `SocketAddr`
-type, no DNS lookup API, no listener iterator and no async I/O. Addresses are
-strings resolved by the runtime. There is no `set_nonblocking` on sockets and no
-half-close inspection.
+The module has TCP and UDP only: no Unix-domain sockets, no TLS, no dedicated
+DNS lookup API, no listener iterator and no asynchronous I/O. There is no
+`set_nonblocking` and no multicast or broadcast control; the only socket option
+is the timeout. Addresses are strings resolved by the runtime, and UDP methods
+take peer addresses as strings rather than `SocketAddr` values.
 
 ## See also
 

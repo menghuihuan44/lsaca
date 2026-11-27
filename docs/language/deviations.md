@@ -59,11 +59,15 @@ release are listed in [Known limitations](limitations.md); the plan is in
    path dependencies. Modules are erased before code generation: the crate graph
    is resolved and flattened into one program, with no dynamic linking, no
    separate compilation and no runtime lookup. Imports are explicit and non-glob
-   (glob imports are rejected), visibility has three levels (private, `pub(crate)`
-   and `pub`) with no `pub(super)`/`pub(in path)`, and only the root crate has an
-   entry point. Packages use a strict `lsaca.toml` subset with path dependencies
-   only: no registry, git dependencies, workspaces, features or lockfile. See
-   [Modules](23-modules.md) and [Packages](24-packages.md).
+   (glob imports are rejected), and `use`/`pub use` may alias a module or an item.
+   Since 2.4.0 visibility has five forms: private, `pub(crate)`, `pub(super)`,
+   `pub(in path)` and `pub`. `pub(super)` is visible in the parent module and its
+   descendants; `pub(in path)` names an ancestor module, may start with `crate`,
+   `super` or `self`, and rejects a sibling or descendant path with `E0742`.
+   Only the root crate has an entry point. Packages use a strict `lsaca.toml`
+   subset with path dependencies only: no registry, git dependencies, workspaces,
+   features or lockfile. See [Modules](23-modules.md) and
+   [Packages](24-packages.md).
 4. **Generics are monomorphized and late-checked; dispatch is static unless you
    ask for a trait object.** Version 1.5 adds user-defined generics and traits,
    with deliberate limits: generic items are structs, enums, free functions,
@@ -117,46 +121,63 @@ release are listed in [Known limitations](limitations.md); the plan is in
    Version 2.2.0 adds the array type `[T; N]` with the literals `[1, 2, 3]`,
    `[value; N]` and `[]`, `usize` indexing and `.len()`/`.is_empty()`; an array
    is `Copy` when its element type is `Copy`, and `&array` coerces to `&[T]`.
-   There are no array patterns, no iteration over an array by value, and an
-   array length must be an integer literal or integer constant (`E0435`);
-   the length is limited to 1,048,576 elements. Slices are the unsized types
-   `[T]` and `str` from 2.0, which exist only behind `&` or `&mut`: `&[T]`,
+   Since 2.4.0 fixed-size array patterns (`[a, b, c]`, `[]`) match an array of
+   exactly that length (`E0308` otherwise), and slice patterns
+   (`[a, b, ..]`, `[.., y]`, `[first, .., last]`, `[..]`) match the slice behind
+   a `&[T]` or `&mut [T]`; a name `@` pattern binds the whole matched value
+   next to its sub-pattern. There is still no iteration over an array by value,
+   and an array length must be an integer literal or integer constant
+   (`E0435`); the length is limited to 1,048,576 elements. Slices are the
+   unsized types `[T]` and `str` from 2.0, which exist only behind `&` or
+   `&mut`: `&[T]`,
    `&mut [T]`, `&str` and `&mut str`. A slice expression (`&values[1..3]`)
    produces one, and `&Vec<T>`/`&String`/`&array` coerce to them; `[T]` and
    `str` methods live in the `std` crate. `Vec<T>` remains the growable
    sequence type, and tuples nest. See [Arrays](27-arrays.md) and
    [Slices and str](26-slices-and-str.md).
-10. **Restricted patterns.** No `@` bindings, no `ref` patterns, no slice and no
-    range patterns. String-literal and character-literal patterns are supported,
+10. **Restricted patterns.** Since 2.4.0, fixed-size array patterns
+    (`[a, b, c]`), slice patterns (`[first, .., last]`) and `@` bindings
+    (`whole @ [first, .., last]`) are supported; at most one `..` is allowed in
+    a slice pattern. There are still no `ref` patterns, no range patterns and
+    no `&` pattern. String-literal and character-literal patterns are supported,
     tuple struct and unit struct patterns were added in 2.1.0, or-patterns
     (`p | q`) and match guards are fully supported, and a reference scrutinee is
     matched with match ergonomics rather than a `&` pattern. See
     [Pattern matching](13-pattern-matching.md).
-11. **Loop labels exist; `break` values do not.** Since 2.2.0 loops can be
-    labelled (`'outer: loop`, `'outer: while`, `'outer: for`, and a label may
-    precede `while let`) and `break 'outer;`/`continue 'outer;` leave or
-    continue the named loop. Loops still have type `()`, `break value` is
-    rejected (`E0308`), and a label on anything but a loop is `E0001`. See
-    [Loop labels](28-loop-labels.md).
+11. **Loop labels exist, and `loop` can produce a value.** Since 2.2.0 loops
+    can be labelled (`'outer: loop`, `'outer: while`, `'outer: for`, and a label
+    may precede `while let`) and `break 'outer;`/`continue 'outer;` leave or
+    continue the named loop. Since 2.4.0 a `loop` expression has the type of the
+    values its `break` statements carry; a bare `break` has value `()`, and all
+    breaks must agree (`E0308`). A `break value` inside `while` or `for` is
+    `E0571`, a `continue` with a value is `E0308` (the language has no continue
+    values), and a label on anything but a loop is `E0001`. See
+    [Loop labels](28-loop-labels.md) and
+    [Control flow](08-statements-and-control-flow.md#loop).
 12. **A standard library crate with iterators and collections.** The 1.5
     release added lazy iterators and the builtin `HashMap<K, V>`; version 2.0
     moved the whole standard library into a normal `std` crate that is embedded
-    in the compiler (`stdlib/src/lib.ls`, parsed as `std/*.ls`). In 2.3.0 it
+    in the compiler (`stdlib/src/lib.ls`, parsed as `std/*.ls`). In 2.4.0 it
     covers `core` (`Option`, `Result`, `Iterator`), `string`, `char`, `fmt`,
     `math`, `vec`, `iter`, `collections` (`HashSet`, `BTreeSet`,
     `BTreeMap`, `VecDeque`, `BinaryHeap`), `io` (`File`, `Error`/`ErrorKind`,
     the `Read`/`Write`/`Seek`/`BufRead` traits, `BufReader` and `BufWriter`), `fs`, `net`
-    (plain TCP), `time`, `env`, `process` and `error` (the `Error` trait).
+    (TCP, plus `SocketAddr` and UDP since 2.4.0), `time`, `env`, `process`
+    (including `process::Command`) and `error` (the `Error` trait).
     Iterators provide `zip`, `chain`, `filter_map`, `take_while`, `skip_while`,
     `step_by`, `rev` and `flat_map` next to `map`, `filter`, `take`, `skip`
     and `enumerate`, with the terminals `collect`, `fold`, `count`, `sum`,
-    `product`, `any`, `all`, `find`, `position`, `last`, `nth`, `reduce`,
-    `inspect` and `for_each`. Since 2.3.0 `.iter()` **borrows** the vector and
+    `product`, `min`, `max`, `any`, `all`, `find`, `position`, `last`, `nth`,
+    `reduce`, `inspect` and `for_each`. Since 2.3.0 `.iter()` **borrows** the vector and
     yields `&T`, `.iter_mut()` yields `&mut T`, and `.into_iter()` is the
     consuming form. `HashMap` (keys are the integer types, `bool`, `char` and
     `String`) can be iterated with `for (key, value) in &map`, and its
     `iter()`, `keys()` and `values()` borrow instead of cloning; `HashMap::from`
-    builds a map from a vector of pairs. Formatting still
+    builds a map from a vector of pairs, and 2.4.0 adds the entry idioms
+    `get_or_insert` and `get_or_insert_with` (a borrowed `Entry` value is deferred
+    to v2.6 by [RFC 0002](../../rfcs/0002-hashmap-entry.md)). The other collection
+    types gain constructors and accessors in 2.4.0, listed in the
+    [standard library](15-standard-library.md#collections-beyond-hashmap). Formatting still
     has no named or indexed arguments and no integer bases. The `?` operator is
     supported for `Option` and `Result`. The 2.1.0 standard library adds
     `Option::or`, `Option::xor` and `Result::unwrap_err`. Version 2.3
@@ -165,14 +186,15 @@ release are listed in [Known limitations](limitations.md); the plan is in
     `is_none_or` and `and`, and `Result` gains `map_or`, `map_or_else`,
     `or`, `or_else`, `is_ok_and`, `is_err_and`, `inspect`,
     `inspect_err` and `unwrap_or_else`. `Option::unwrap_or_default` still
-    waits for the `Default` trait, which is planned with the other formatting
-    and utility protocols for v2.4. Text parameters of
+    waits for the `Default` protocol; [RFC 0003](../../rfcs/0003-derive-and-protocols.md)
+    fixes the protocol meanings and keeps them compiler-defined in 2.x, so there
+    is no user `Default` impl to wait for yet. Text parameters of
     the standard library take `&str` instead of an owned `String` (`env::var`
     is the one exception: `&str` in, `Result<String, VarError>` out;
     `io::Error::new`/`other` also keep taking an owned `String` message), while
     constructors such as `String::from` keep taking an owned `String`, and a
     string literal in a `&str` position is a static slice that does not
-    allocate. The design is fixed; which parts the 2.3.0 compiler implements is
+    allocate. The design is fixed; which parts the 2.4.0 compiler implements is
     recorded module by module in the [standard library
     reference](../stdlib/README.md). What exists is documented in
     [Standard library](15-standard-library.md),
@@ -189,7 +211,9 @@ release are listed in [Known limitations](limitations.md); the plan is in
     C is not exposed to the language. The `extern fn` declaration added in 2.0
     is not an FFI mechanism: it declares the compiler's own intrinsics, only the
     `std` crate may write one (user code is `E0001`), and it is not a
-    first-class value (`E0425`).
+    first-class value (`E0425`). The 2.x language is single-threaded by contract;
+    [RFC 0004](../../rfcs/0004-concurrency.md) records the v3.0 decision about
+    threads, `Arc` and `Send`/`Sync`.
 15. **Partial moves are all-or-nothing.** A `let` pattern that binds an owning
     value (`String`, `Vec`, `Rc`, `Box`, a move-only struct, ...) moves the whole
     initialiser: the bound fields move into the new bindings and the remaining
@@ -223,16 +247,21 @@ release are listed in [Known limitations](limitations.md); the plan is in
     one the program is `E0308` with a `From` note. There is no blanket
     `From<T> for T`, no `Into`, no `Try` trait and no `From<&str>` for `String`,
     so conversions are always explicit. See [From and ?](30-from-try.md).
-18. **`lsaca fmt` is conservative.** The formatter rewrites indentation (four
-    spaces, a dedent for leading closing delimiters, one extra level for a
-    leading `.` in a method chain), trailing whitespace, blank-line runs and
-    line endings (CRLF becomes LF), and guarantees exactly one final newline;
-    it never reflows or merges lines, never changes token spacing inside a
-    line, and formats one file at a time (it does not follow `mod`
-    declarations). A syntax error leaves the file untouched; `--check` reports
-    the files that would change (exit 1, `lsaca: would format <file>`) and
-    `--stdout` prints the result instead of rewriting. The transformation is
-    idempotent. See [Getting started](01-getting-started.md#formatting-source-files).
+18. **`lsaca fmt` is conservative but package-aware.** The formatter rewrites
+    indentation (four spaces, a dedent for leading closing delimiters, one extra
+    level for a leading `.` in a method chain), trailing whitespace, blank-line
+    runs and line endings (CRLF becomes LF), and guarantees exactly one final
+    newline; it never reflows or merges lines and never changes token spacing
+    inside a line. `lsaca fmt [PATH] [--check]` accepts a file or a directory. A
+    directory target — and no PATH inside a package — discovers the nearest
+    `lsaca.toml` and formats every `.ls` file under that package's `src`
+    directory, validating all modules before writing anything. `--check` lists
+    every unformatted file with a relative, forward-slash path and exits 1
+    without writing; on a single file it reports `lsaca: would format <file>`.
+    A syntax error leaves the file or package untouched. `--stdout` prints the
+    result for one file only and cannot be combined with a directory (usage
+    error, exit 2). The transformation is idempotent. See
+    [Getting started](01-getting-started.md#formatting-source-files).
 19. **Methods are not callable as associated functions.** A method exists only in
     method-call position: `value.method()`. Writing it in UFCS form, as
     `Type::method(&value)` or `Rc::strong_count(&handle)`, fails with `E0599`
@@ -241,3 +270,6 @@ release are listed in [Known limitations](limitations.md); the plan is in
     documented restriction with an explanatory diagnostic, not a confusing type
     error: genuine associated functions — `Rc::new(...)`, `String::from(...)` and
     any user `impl` function without `self` — do work with `Type::function(...)`.
+    Universal function-call syntax is not planned; protocol dispatch stays
+    compiler-defined in 2.x per
+    [RFC 0003](../../rfcs/0003-derive-and-protocols.md).

@@ -107,7 +107,7 @@ lifetime parameters that appear only in a return type: two elided input
 references with one borrowed return still produce
 `error[E0106]: missing lifetime specifier`.
 
-`'static` is **not** a supported field lifetime in 2.3.0. Every reference
+`'static` is **not** a supported field lifetime in 2.4.0. Every reference
 field must name a lifetime parameter that the type declares; a field such as
 `text: &'static str` is rejected with
 `error[E0498]: the 'static lifetime is not supported yet` and the note *use a
@@ -146,7 +146,7 @@ lifetimes are not compared for equality or subtyping, there are no outlives
 bounds, and variance is not checked, so some programs Rust accepts are rejected
 and lifetime mistakes are not all caught at compile time.
 
-## Known limitations in 2.3.0
+## Known limitations in 2.4.0
 
 * Lifetime support is limited to direct reference fields in user structs,
   tuple structs and enums. `Option<&T>`, tuple-typed fields and references in

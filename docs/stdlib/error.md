@@ -1,6 +1,6 @@
 # error: the Error trait
 
-**Status in 2.3.0.** Implemented. The trait below is defined in
+**Status in 2.4.0.** Implemented. The trait below is defined in
 `stdlib/src/error.ls`; it is the whole module. Trait objects are available, so
 `Box<dyn Error>` and `&dyn Error` can hold any implementation (see
 [Trait objects](../language/25-trait-objects.md)).
@@ -45,7 +45,7 @@ an error type implement `Display` or `Debug`. Code that needs a category as well
 as a message should use a concrete error type such as [`io::Error`](io.md), which
 carries an `ErrorKind` and a message and works without dynamic dispatch.
 
-## Limits in 2.3.0
+## Limits in 2.4.0
 
 `io::Error`, `ParseIntError` and `ParseFloatError` implement the trait, and the
 `?` operator converts an error through a user-written `impl From<...>` (see

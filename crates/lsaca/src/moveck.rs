@@ -288,9 +288,16 @@ impl<'a> FnChecker<'a> {
         match &pat.kind {
             HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => false,
             HPatKind::Bind { .. } => !self.program.is_copy(&pat.ty),
-            HPatKind::Tuple(parts) | HPatKind::Or(parts) => {
+            HPatKind::Tuple(parts) | HPatKind::Array(parts) | HPatKind::Or(parts) => {
                 parts.iter().any(|part| self.pattern_binds_owned(part))
             }
+            HPatKind::Slice { prefix, suffix, .. } => prefix
+                .iter()
+                .chain(suffix.iter())
+                .any(|part| self.pattern_binds_owned(part)),
+            HPatKind::At {
+                binding, pattern, ..
+            } => self.pattern_binds_owned(binding) || self.pattern_binds_owned(pattern),
             HPatKind::Struct { fields, .. } => fields
                 .iter()
                 .any(|(_, part)| self.pattern_binds_owned(part)),
@@ -330,10 +337,19 @@ impl<'a> FnChecker<'a> {
             HPatKind::Bind { c_name, .. } => {
                 self.state.moved.remove(c_name);
             }
-            HPatKind::Tuple(patterns) => {
+            HPatKind::Tuple(patterns) | HPatKind::Array(patterns) => {
                 for pattern in patterns {
                     self.bind_pat(pattern);
                 }
+            }
+            HPatKind::Slice { prefix, suffix, .. } => {
+                for pattern in prefix.iter().chain(suffix.iter()) {
+                    self.bind_pat(pattern);
+                }
+            }
+            HPatKind::At { binding, pattern } => {
+                self.bind_pat(binding);
+                self.bind_pat(pattern);
             }
             HPatKind::Struct { fields, .. } => {
                 for (_, pattern) in fields {
@@ -669,7 +685,10 @@ impl<'a> FnChecker<'a> {
                 self.walk_args(&call.args, Ctx::Borrow);
                 true
             }
-            HExprKind::Break { label } => {
+            HExprKind::Break { label, value } => {
+                if let Some(value) = value {
+                    self.walk_expr(value, Ctx::Consume);
+                }
                 self.record_loop_exit(true, label.as_deref());
                 false
             }
@@ -713,7 +732,7 @@ impl<'a> FnChecker<'a> {
             HExprKind::Local { .. } => {
                 self.walk_expr(capture, ctx);
             }
-            HExprKind::Break { label: _ } => {}
+            HExprKind::Break { label: _, value: _ } => {}
             _ => {
                 self.walk_expr(capture, Ctx::Borrow);
             }
@@ -4035,6 +4054,7 @@ mod hir_tests {
             Ty::unit(),
             HExprKind::Break {
                 label: label.map(str::to_string),
+                value: None,
             },
             sp(),
         )

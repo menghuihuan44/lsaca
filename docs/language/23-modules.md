@@ -372,6 +372,32 @@ Output:
 6
 ```
 
+An alias can also name a module, and a `pub use` alias re-exports the module
+under that name. This is the module-level form of the same rule; the alias is
+subject to the visibility of the `use` declaration:
+
+```ls
+mod shapes {
+    pub mod rect {
+        pub fn area(width: f64, height: f64) -> f64 {
+            width * height
+        }
+    }
+}
+
+pub use crate::shapes::rect as geometry;
+
+fn main() {
+    println!("{}", geometry::area(2.0, 3.0));
+}
+```
+
+Output:
+
+```text
+6
+```
+
 A `use` declaration may only narrow visibility, never widen it. Re-exporting a
 private item from a publicly reachable module is `E0364`; re-exporting a private
 module from the same position is `E0365`. When the module that contains the
@@ -397,18 +423,18 @@ Error:
 
 ```text
 error[E0364]: function 'hidden' is private, and cannot be re-exported
-  --> example-09.ls:7:23
+  --> example-10.ls:7:23
    |
  7 | pub use crate::inner::hidden;
    |                       ^^^^^^
 
 error[E0425]: cannot find function hidden in this scope
-   --> example-09.ls:10:20
+   --> example-10.ls:10:20
     |
  10 |     println!("{}", hidden());
     |                    ^^^^^^^^
 
-lsaca: example-09.ls: could not compile example-09.ls due to previous error(s)
+lsaca: example-10.ls: could not compile example-10.ls due to previous error(s)
 ```
 
 When the re-export really is wider than the module it names, the compiler
@@ -514,13 +540,13 @@ Error:
 
 ```text
 error[E0255]: the name 'add' is defined multiple times
-  --> example-12.ls:7:18
+  --> example-13.ls:7:18
    |
  7 | use crate::math::add;
    |                  ^^^
-   = note: example-12.ls:9:4: previous definition of 'add' here
+   = note: example-13.ls:9:4: previous definition of 'add' here
 
-lsaca: example-12.ls: could not compile example-12.ls due to previous error(s)
+lsaca: example-13.ls: could not compile example-13.ls due to previous error(s)
 ```
 
 A glob import is rejected by the resolver:
@@ -560,12 +586,14 @@ lsaca: main.ls: could not compile main.ls due to previous error(s)
 
 ## Visibility
 
-Every named item can carry a visibility. Version 2.2.0 has three levels:
+Every named item can carry a visibility. Version 2.4.0 has five forms:
 
 | Written | Visible from |
 | --- | --- |
 | nothing (private) | The defining module and its descendants |
 | `pub(crate)` | Every module of the same crate, never another crate |
+| `pub(super)` | The parent module and its descendants |
+| `pub(in path)` | The named ancestor module and its descendants |
 | `pub` | Everywhere, including dependency crates |
 
 The visibility of a path's first segment matters: resolving `a::b` requires `a`
@@ -573,13 +601,55 @@ to be visible from the module doing the lookup, and then `b` must be visible fro
 the same place. Private items are still reachable downwards: a module can use
 the private items of its own descendants.
 
-`pub` and `pub(crate)` are accepted before any item: `fn`, `struct`, `enum`,
+These visibility forms are accepted before any item: `fn`, `struct`, `enum`,
 `trait`, `const`, `type`, `mod` and the methods and associated functions inside
-`impl` blocks. Other restricted forms are not implemented: `pub(super)` and
-`pub(in path)` are rejected by the parser. Struct fields have their own
-visibility and default to private, so an item can be visible without its fields
-being visible; an enum variant follows the visibility of its enum, and the fields
-of tuple variants are as public as the enum.
+`impl` blocks. Struct fields have their own visibility and default to private,
+so an item can be visible without its fields being visible; an enum variant
+follows the visibility of its enum, and the fields of tuple variants are as
+public as the enum.
+
+`pub(super)` means the parent of the module that contains the declaration, and
+is visible throughout that parent module and all of its descendants (including
+the declaring module). `pub(in path)` takes a path to an ancestor module and is
+visible inside that module and its descendants. The path is resolved relative to
+the module that contains the declaration; it may be a single module name or a
+`::`-separated path, and its first segment may be `crate`, `super` or `self`.
+The path must name an ancestor: a path to a sibling or a descendant is `E0742`,
+and a path that does not resolve at all is `E0433`.
+
+```ls
+mod outer {
+    pub mod inner {
+        pub(super) fn from_parent() -> i64 {
+            7
+        }
+
+        pub(in crate::outer) fn from_outer() -> i64 {
+            8
+        }
+    }
+
+    pub fn call() -> i64 {
+        inner::from_parent() + inner::from_outer()
+    }
+}
+
+fn main() {
+    println!("{}", outer::call());
+}
+```
+
+Output:
+
+```text
+15
+```
+
+A restricted visibility can only narrow what the item's module already exposes;
+it never makes a private module public. Visibility checking happens at every
+path segment, so `outer::inner::from_parent()` is still rejected from `main`:
+the function is visible only to `outer` and its descendants, not to the crate
+root.
 
 A private field cannot be read from another module:
 
@@ -813,9 +883,10 @@ The codes introduced by this chapter:
 | `E0583` | A module file was not found, could not be read, or is not valid UTF-8 |
 | `E0761` | Both `name.ls` and `name/mod.ls` exist for one module |
 | `E0428` | The same name is defined multiple times in one module or crate |
-| `E0001` | General misuse: circular module files, nesting beyond 256 levels, rejected visibility forms, package errors |
+| `E0001` | General misuse: circular module files, nesting beyond 256 levels, package errors |
 | `E0432` | An unresolved import path, including glob imports |
-| `E0433` | A multi-segment path whose first module cannot be resolved, including `super` at the crate root |
+| `E0433` | A multi-segment path whose first module cannot be resolved, including an unknown `pub(in path)` ancestor and `super` at the crate root |
+| `E0742` | A restricted-visibility path names a module that is not an ancestor of the declaring module |
 | `E0425` | An unresolved value or function name |
 | `E0412` | An unresolved type name |
 | `E0252` | A name imported more than once in one module |
@@ -863,11 +934,12 @@ build. The build cache compensates: its key hashes the complete generated C, the
 runtime sources, the compiler path and the build mode, so an unchanged program is
 reused as a whole and editing any file in the graph rebuilds it.
 
-## Known limitations in 2.2.0
+## Known limitations in 2.4.0
 
 * Glob imports (`use path::*;`) parse but are rejected by the resolver.
-* Only private, `pub(crate)` and `pub` exist: `pub(super)` and `pub(in path)` are
-  rejected by the parser.
+* `pub(super)` and `pub(in path)` only grant visibility inside an ancestor
+  module: a sibling or descendant path is `E0742`. The path is relative to the
+  declaring module, so a path that works from another module may need rewriting.
 * A module file is found only by the `name.ls`/`name/mod.ls` rule: there are no
   path attributes, no conditional compilation and no directory scanning.
 * Circular module files are rejected; the tree of `mod` declarations must be
@@ -890,7 +962,9 @@ reused as a whole and editing any file in the graph rebuilds it.
   import alias, a dependency package name, or a prelude name.
 * `use` imports one name per leaf, with groups, aliases and `pub use` re-exports;
   glob imports are rejected.
-* Visibility is private, `pub(crate)` or `pub`; fields have their own visibility.
+* Visibility is private, `pub(crate)`, `pub(super)`, `pub(in path)` or `pub`;
+  fields have their own visibility. `pub(super)` and `pub(in path)` must name an
+  ancestor.
 * Diagnostics render with real file names and positions across the whole crate
   graph.
 * Modules are erased before code generation: one program, one C project, no run
@@ -902,3 +976,4 @@ reused as a whole and editing any file in the graph rebuilds it.
 * The structure of a crate and its item kinds: [Program structure](02-program-structure.md).
 * The memory model with ownership and ORC: [Memory model](05-memory-model.md).
 * What is planned next: [Roadmap](16-roadmap.md).
+

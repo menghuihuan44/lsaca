@@ -535,18 +535,35 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Whether the current tokens begin an item declaration, including a
-    /// visibility prefix (`pub` or `pub(crate)`).
+    /// Whether the current tokens begin an item declaration, including any
+    /// visibility prefix such as `pub`, `pub(crate)`, `pub(super)` or
+    /// `pub(in path)`.
     fn is_item_start(&self) -> bool {
         let mut offset = 0usize;
         if matches!(self.kind(), TokenKind::KwPub) {
             offset = 1;
-            // pub(crate) puts three more tokens before the item keyword.
-            if matches!(self.peek_kind_at(1), Some(TokenKind::LParen))
-                && matches!(self.peek_kind_at(2), Some(TokenKind::KwCrate))
-                && matches!(self.peek_kind_at(3), Some(TokenKind::RParen))
-            {
-                offset = 4;
+            // Skip a parenthesized visibility restriction to find the item
+            // keyword that follows it. Recovery must recognize items behind
+            // `pub(in path)` just like items behind `pub`.
+            if matches!(self.peek_kind_at(1), Some(TokenKind::LParen)) {
+                let mut depth = 0usize;
+                let mut index = 1usize;
+                while let Some(kind) = self.peek_kind_at(index) {
+                    match kind {
+                        TokenKind::LParen => depth += 1,
+                        TokenKind::RParen => {
+                            if depth > 0 {
+                                depth = depth.saturating_sub(1);
+                            }
+                            if depth == 0 {
+                                offset = index + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
             }
         }
         match self.tokens.get(self.pos.saturating_add(offset)) {
@@ -692,11 +709,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a visibility modifier: `pub`, `pub(crate)` or nothing.
+    /// Parse a visibility modifier: `pub`, `pub(crate)`, `pub(super)`,
+    /// `pub(in path)` or nothing.
     ///
-    /// The design contract defers every other restricted form (`pub(super)`,
-    /// `pub(self)`, `pub(in path)`); they are rejected here with E0001 so that
-    /// the declaration after them still parses.
+    /// Other restricted forms such as `pub(self)` or `pub(foo)` are rejected
+    /// here with E0001 so that the declaration after them still parses.
     fn parse_visibility(&mut self) -> Visibility {
         if self.eat(TokenKind::KwPub).is_none() {
             return Visibility::Private;
@@ -709,17 +726,62 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RParen, "')' after pub(crate)");
             return Visibility::Crate;
         }
+        if self.eat(TokenKind::KwSuper).is_some() {
+            self.expect(TokenKind::RParen, "')' after pub(super)");
+            return Visibility::Super;
+        }
+        if self.eat(TokenKind::KwIn).is_some() {
+            if let Some(path) = self.parse_visibility_path() {
+                self.expect(TokenKind::RParen, "')' after pub(in path)");
+                return Visibility::In(path);
+            }
+            // The path is malformed; its diagnostic has been reported. Skip
+            // the rest of the parenthesized form so the item still parses.
+            self.skip_restricted_visibility();
+            return Visibility::Private;
+        }
         let span = self.span();
         let found = self.peek_kind().describe();
         self.error_coded(
             E_SYNTAX,
             format!(
-                "restricted visibility is not supported; use 'pub' or 'pub(crate)', found {}",
+                "unsupported visibility; use 'pub', 'pub(crate)', 'pub(super)' or 'pub(in path)', found {}",
                 found
             ),
             span,
         );
         // Skip the parenthesized form so the declaration after it still parses.
+        self.skip_restricted_visibility();
+        Visibility::Private
+    }
+
+    /// Parse the path inside `pub(in path)`. The first segment is `crate`,
+    /// `self`, `super` or an identifier; later segments are identifiers.
+    fn parse_visibility_path(&mut self) -> Option<Vec<String>> {
+        let first = match self.peek_kind() {
+            TokenKind::Ident(name) => name,
+            TokenKind::KwCrate => "crate".to_string(),
+            TokenKind::KwSelf => "self".to_string(),
+            TokenKind::KwSuper => "super".to_string(),
+            _ => {
+                let span = self.span();
+                let found = self.peek_kind().describe();
+                self.error(format!("expected a path after 'in', found {}", found), span);
+                return None;
+            }
+        };
+        self.bump();
+        let mut segments = vec![first];
+        while self.eat(TokenKind::ColonColon).is_some() {
+            let (segment, _span) = self.expect_ident("path segment in pub(in path)");
+            segments.push(segment);
+        }
+        Some(segments)
+    }
+
+    /// Skip the remainder of a parenthesized visibility restriction after its
+    /// opening parenthesis has been consumed.
+    fn skip_restricted_visibility(&mut self) {
         let mut depth = 1usize;
         while depth > 0 && !self.at_eof() {
             if self.at(TokenKind::LParen) {
@@ -732,7 +794,6 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
         }
-        Visibility::Private
     }
 
     /// Parse a module declaration: `mod name;` (external file module) or
@@ -2145,12 +2206,26 @@ impl<'a> Parser<'a> {
             TokenKind::KwMut => {
                 self.bump();
                 let (name, name_span) = self.expect_ident("binding name");
-                Pattern {
-                    kind: PatternKind::Binding {
-                        name,
-                        mutable: true,
-                    },
-                    span: start.join(name_span),
+                if self.eat(TokenKind::At).is_some() {
+                    let inner = self.parse_pattern_atomic();
+                    let span = start.join(inner.span);
+                    Pattern {
+                        kind: PatternKind::At {
+                            name,
+                            name_span,
+                            mutable: true,
+                            pattern: Box::new(inner),
+                        },
+                        span,
+                    }
+                } else {
+                    Pattern {
+                        kind: PatternKind::Binding {
+                            name,
+                            mutable: true,
+                        },
+                        span: start.join(name_span),
+                    }
                 }
             }
             TokenKind::KwTrue => {
@@ -2216,7 +2291,27 @@ impl<'a> Parser<'a> {
                 self.parse_pattern()
             }
             TokenKind::LParen => self.parse_tuple_pattern(),
-            TokenKind::Ident(_) | TokenKind::KwSelfTy | TokenKind::KwCrate | TokenKind::KwSuper => {
+            TokenKind::LBracket => self.parse_array_or_slice_pattern(),
+            TokenKind::Ident(_) => {
+                if matches!(self.peek_kind_at(1), Some(TokenKind::At)) {
+                    let (name, name_span) = self.expect_ident("binding name");
+                    self.bump(); // '@'
+                    let inner = self.parse_pattern_atomic();
+                    let span = start.join(inner.span);
+                    Pattern {
+                        kind: PatternKind::At {
+                            name,
+                            name_span,
+                            mutable: false,
+                            pattern: Box::new(inner),
+                        },
+                        span,
+                    }
+                } else {
+                    self.parse_path_pattern()
+                }
+            }
+            TokenKind::KwSelfTy | TokenKind::KwCrate | TokenKind::KwSuper => {
                 self.parse_path_pattern()
             }
             _ => {
@@ -2308,6 +2403,76 @@ impl<'a> Parser<'a> {
         Pattern {
             kind: PatternKind::Tuple(elems),
             span: lp.span.join(rp),
+        }
+    }
+
+    /// Parse an array or slice pattern: `[a, b]`, `[a, b, ..]`, `[.., y]`,
+    /// `[first, .., last]` or `[..]`.
+    ///
+    /// A pattern without `..` is a fixed-size array pattern; `..` is what
+    /// makes it a slice pattern and may appear at most once.
+    fn parse_array_or_slice_pattern(&mut self) -> Pattern {
+        let lb = self.bump();
+        let mut prefix = Vec::new();
+        let mut suffix = Vec::new();
+        let mut rest = false;
+        loop {
+            if self.at(TokenKind::RBracket) || self.at_eof() {
+                break;
+            }
+            if self.at(TokenKind::DotDot) {
+                let dot = self.bump();
+                if rest {
+                    self.error_coded(
+                        E_SYNTAX,
+                        "at most one '..' is allowed in an array or slice pattern",
+                        dot.span,
+                    );
+                } else {
+                    rest = true;
+                }
+                if self.eat(TokenKind::Comma).is_some() {
+                    continue;
+                }
+                if self.at(TokenKind::RBracket) {
+                    break;
+                }
+                let span = self.span();
+                self.error(
+                    "expected ',' or ']' after '..' in an array or slice pattern",
+                    span,
+                );
+                continue;
+            }
+            let before = self.pos;
+            let pattern = self.parse_pattern();
+            if rest {
+                suffix.push(pattern);
+            } else {
+                prefix.push(pattern);
+            }
+            self.ensure_progress(before);
+            if self.eat(TokenKind::Comma).is_some() {
+                continue;
+            }
+            break;
+        }
+        let rb = self
+            .expect(TokenKind::RBracket, "']' in array or slice pattern")
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.prev_span());
+        let kind = if rest {
+            PatternKind::Slice {
+                prefix,
+                suffix,
+                rest,
+            }
+        } else {
+            PatternKind::Array(prefix)
+        };
+        Pattern {
+            kind,
+            span: lb.span.join(rb),
         }
     }
 
@@ -3102,11 +3267,30 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                let span = match &label {
-                    Some(label) => token.span.join(label.name_span),
+                let mut end = match &label {
+                    Some(label) => label.name_span,
                     None => token.span,
                 };
-                Expr::new(ExprKind::Continue { label }, span)
+                // `continue <expr>` is not supported: values leave a loop through
+                // `break`, not `continue`. Report the mistake but parse the
+                // expression so following statements are not misparsed. A value
+                // on the next line belongs to that following statement.
+                if self.starts_expression()
+                    && self.file.line_index(self.file.local_span(token.span).start)
+                        == self
+                            .file
+                            .line_index(self.file.local_span(self.span()).start)
+                {
+                    let value_span = self.span();
+                    self.error_coded(
+                        "E0308",
+                        "continue with a value is not supported; use break with a value",
+                        value_span,
+                    );
+                    let value = self.parse_expr();
+                    end = value.span;
+                }
+                Expr::new(ExprKind::Continue { label }, token.span.join(end))
             }
             TokenKind::Lifetime(_) => self.parse_labeled_loop_expr(),
             TokenKind::KwReturn => {
@@ -4073,6 +4257,22 @@ impl<'a> AstNode<'a> {
                     for pat in pats {
                         stack.push((AstNode::Pattern(pat), depth));
                     }
+                }
+                PatternKind::Array(pats) => {
+                    for pat in pats {
+                        stack.push((AstNode::Pattern(pat), depth));
+                    }
+                }
+                PatternKind::Slice { prefix, suffix, .. } => {
+                    for pat in prefix {
+                        stack.push((AstNode::Pattern(pat), depth));
+                    }
+                    for pat in suffix {
+                        stack.push((AstNode::Pattern(pat), depth));
+                    }
+                }
+                PatternKind::At { pattern, .. } => {
+                    stack.push((AstNode::Pattern(pattern), depth));
                 }
                 PatternKind::Path { path, args } => {
                     push_path_generics(stack, path, depth);
@@ -5944,17 +6144,68 @@ impl Point {
     }
 
     #[test]
-    fn rejects_restricted_visibility_but_keeps_parsing() {
+    fn parses_restricted_visibility() {
+        let source = "pub(super) fn f() {}\npub(in crate::a) struct S { x: i64 }\npub(in super::m) fn g() {}\npub(in self::m) fn h() {}\npub(crate) fn c() {}\npub fn p() {}\n";
+        let program = parse_ok(source);
+        assert_eq!(program.items.len(), 6);
+        match &program.items[0] {
+            Item::Fn(function) => {
+                assert_eq!(function.name, "f");
+                assert_eq!(function.vis, Visibility::Super);
+            }
+            other => panic!("expected a function, got {:?}", other),
+        }
+        match &program.items[1] {
+            Item::Struct(item) => {
+                assert_eq!(item.name, "S");
+                assert_eq!(
+                    item.vis,
+                    Visibility::In(vec!["crate".to_string(), "a".to_string()])
+                );
+            }
+            other => panic!("expected a struct, got {:?}", other),
+        }
+        match &program.items[2] {
+            Item::Fn(function) => {
+                assert_eq!(
+                    function.vis,
+                    Visibility::In(vec!["super".to_string(), "m".to_string()])
+                );
+            }
+            other => panic!("expected a function, got {:?}", other),
+        }
+        match &program.items[3] {
+            Item::Fn(function) => {
+                assert_eq!(
+                    function.vis,
+                    Visibility::In(vec!["self".to_string(), "m".to_string()])
+                );
+            }
+            other => panic!("expected a function, got {:?}", other),
+        }
+        match &program.items[4] {
+            Item::Fn(function) => assert_eq!(function.vis, Visibility::Crate),
+            other => panic!("expected a function, got {:?}", other),
+        }
+        match &program.items[5] {
+            Item::Fn(function) => assert_eq!(function.vis, Visibility::Public),
+            other => panic!("expected a function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_visibility_but_keeps_parsing() {
         let (program, diagnostics) = parse_source(
-            "pub(super) fn f() {}\npub(in crate::a) struct S { x: i64 }\nfn after() {}",
+            "pub(self) fn a() {}\npub(foo) struct B { x: i64 }\npub(in) fn c() {}\npub(in ::x) fn d() {}\nfn after() {}",
         );
         let messages = messages(&diagnostics);
         assert_eq!(
             messages
                 .iter()
-                .filter(|message| message.contains("restricted visibility is not supported"))
+                .filter(|message| message.contains("unsupported visibility")
+                    || message.contains("expected a path after 'in'"))
                 .count(),
-            2,
+            4,
             "unexpected messages: {:?}",
             messages
         );
@@ -5963,13 +6214,14 @@ impl Point {
                 .iter()
                 .any(|diagnostic| diagnostic.code == Some(E_SYNTAX))
         );
-        assert_eq!(program.items.len(), 3);
-        match &program.items[0] {
-            Item::Fn(function) => {
-                assert_eq!(function.name, "f");
-                assert_eq!(function.vis, Visibility::Private);
-            }
-            other => panic!("expected a function, got {:?}", other),
+        assert_eq!(program.items.len(), 5);
+        for item in program.items.iter().take(4) {
+            let vis = match item {
+                Item::Fn(function) => &function.vis,
+                Item::Struct(item) => &item.vis,
+                other => panic!("expected a function or struct, got {:?}", other),
+            };
+            assert_eq!(*vis, Visibility::Private);
         }
         fn_named(&program, "after");
 
@@ -6037,7 +6289,7 @@ impl Point {
 
     #[test]
     fn parses_use_declarations() {
-        let source = "use first;\nuse second as alias;\nuse a::b;\nuse a::b as c;\nuse a::{b, c as d, e::f};\nuse nested::{inner::{x, y}, z,};\nuse glob::*;\nuse crate::mine;\nuse self::local;\nuse super::parent;\npub use reexport::thing;\n";
+        let source = "use first;\nuse second as alias;\nuse a::b;\nuse a::b as c;\nuse a::{b, c as d, e::f};\nuse nested::{inner::{x, y}, z,};\nuse glob::*;\nuse crate::mine;\nuse self::local;\nuse super::parent;\npub use reexport::thing as renamed;\n";
         let program = parse_ok(source);
         assert_eq!(program.items.len(), 11);
         assert_eq!(use_at(&program, 0).vis, Visibility::Private);
@@ -6103,7 +6355,13 @@ impl Point {
         assert_eq!(reexport.vis, Visibility::Public);
         let (segment, rest) = tree_path(&reexport.tree);
         assert_eq!(segment, "reexport");
-        assert_eq!(tree_name(rest), "thing");
+        match rest {
+            UseTree::Alias { name, alias, .. } => {
+                assert_eq!(name, "thing");
+                assert_eq!(alias, "renamed");
+            }
+            other => panic!("expected an alias use tree, got {:?}", other),
+        }
     }
 
     #[test]
@@ -6719,6 +6977,172 @@ impl Point {
                 assert!(matches!(&match_expr.arms[6].pat.kind, PatternKind::Wild));
             }
             other => panic!("expected a match expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_array_and_slice_patterns() {
+        let source = r#"fn main() {
+    match xs {
+        [a, b] => 0,
+        [a, b, ..] => 1,
+        [.., y] => 2,
+        [first, .., last] => 3,
+        [..] => 4,
+        [] => 5,
+        _ => 6,
+    }
+}"#;
+        let program = parse_ok(source);
+        match &main_tail(&program).kind {
+            ExprKind::Match(match_expr) => {
+                assert_eq!(match_expr.arms.len(), 7);
+                match &match_expr.arms[0].pat.kind {
+                    PatternKind::Array(elements) => assert_eq!(elements.len(), 2),
+                    other => panic!("expected an array pattern, got {:?}", other),
+                }
+                match &match_expr.arms[1].pat.kind {
+                    PatternKind::Slice {
+                        prefix,
+                        suffix,
+                        rest,
+                    } => {
+                        assert_eq!(prefix.len(), 2);
+                        assert!(suffix.is_empty());
+                        assert!(*rest);
+                    }
+                    other => panic!("expected a slice pattern, got {:?}", other),
+                }
+                match &match_expr.arms[2].pat.kind {
+                    PatternKind::Slice {
+                        prefix,
+                        suffix,
+                        rest,
+                    } => {
+                        assert!(prefix.is_empty());
+                        assert_eq!(suffix.len(), 1);
+                        assert!(*rest);
+                    }
+                    other => panic!("expected a slice pattern, got {:?}", other),
+                }
+                match &match_expr.arms[3].pat.kind {
+                    PatternKind::Slice { prefix, suffix, .. } => {
+                        assert_eq!(prefix.len(), 1);
+                        assert_eq!(suffix.len(), 1);
+                    }
+                    other => panic!("expected a slice pattern, got {:?}", other),
+                }
+                match &match_expr.arms[4].pat.kind {
+                    PatternKind::Slice {
+                        prefix,
+                        suffix,
+                        rest,
+                    } => {
+                        assert!(prefix.is_empty());
+                        assert!(suffix.is_empty());
+                        assert!(*rest);
+                    }
+                    other => panic!("expected a slice pattern, got {:?}", other),
+                }
+                match &match_expr.arms[5].pat.kind {
+                    PatternKind::Array(elements) => assert!(elements.is_empty()),
+                    other => panic!("expected an array pattern, got {:?}", other),
+                }
+            }
+            other => panic!("expected a match expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reports_multiple_rest_patterns_but_keeps_parsing() {
+        let (program, diagnostics) =
+            parse_source("fn main() { match xs { [a, .., b, ..] => 0, _ => 1, } }");
+        let messages = messages(&diagnostics);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("at most one '..'")),
+            "unexpected messages: {:?}",
+            messages
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some(E_SYNTAX))
+        );
+        match &main_tail(&program).kind {
+            ExprKind::Match(match_expr) => assert_eq!(match_expr.arms.len(), 2),
+            other => panic!("expected a match expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_at_patterns() {
+        let source = r#"fn main() {
+    match n {
+        x @ 1 => x,
+        mut y @ 2 => y,
+    }
+}"#;
+        let program = parse_ok(source);
+        match &main_tail(&program).kind {
+            ExprKind::Match(match_expr) => {
+                assert_eq!(match_expr.arms.len(), 2);
+                match &match_expr.arms[0].pat.kind {
+                    PatternKind::At {
+                        name,
+                        mutable,
+                        pattern,
+                        ..
+                    } => {
+                        assert_eq!(name, "x");
+                        assert!(!*mutable);
+                        assert!(matches!(
+                            &pattern.kind,
+                            PatternKind::Lit(Lit::Int { value: 1, .. })
+                        ));
+                    }
+                    other => panic!("expected an @ pattern, got {:?}", other),
+                }
+                match &match_expr.arms[1].pat.kind {
+                    PatternKind::At {
+                        name,
+                        mutable,
+                        pattern,
+                        ..
+                    } => {
+                        assert_eq!(name, "y");
+                        assert!(*mutable);
+                        assert!(matches!(
+                            &pattern.kind,
+                            PatternKind::Lit(Lit::Int { value: 2, .. })
+                        ));
+                    }
+                    other => panic!("expected an @ pattern, got {:?}", other),
+                }
+            }
+            other => panic!("expected a match expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn array_patterns_parse_in_every_pattern_position() {
+        let source = r#"fn main() {
+    let [a, b] = pair;
+    for [x, y] in rows {}
+    if let [p, ..] = slice {}
+    while let [q, ..] = slice {}
+    let f = |[m, n]| m;
+    match t { [r, s] => 0, _ => 1 }
+}"#;
+        let program = parse_ok(source);
+        let body = fn_body(main_fn(&program));
+        match &body.stmts[0] {
+            Stmt::Let(statement) => match &statement.pat.kind {
+                PatternKind::Array(elements) => assert_eq!(elements.len(), 2),
+                other => panic!("expected an array let pattern, got {:?}", other),
+            },
+            other => panic!("expected a let statement, got {:?}", other),
         }
     }
 
@@ -8343,6 +8767,59 @@ fn make<'a>(x: &'a i64) -> Parser<'a> { x }
             },
             other => panic!("expected a for statement, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn rejects_continue_with_value_but_keeps_parsing() {
+        let source = r#"fn f() {
+    loop {
+        continue 1;
+    }
+}
+fn g() {
+    'a: while cond {
+        continue 'a;
+    }
+}
+fn h() {
+    loop {
+        continue
+        1;
+    }
+}
+"#;
+        let (program, diagnostics) = parse_source(source);
+        let messages = messages(&diagnostics);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| {
+                    message.as_str()
+                        == "continue with a value is not supported; use break with a value"
+                })
+                .count(),
+            1,
+            "unexpected messages: {:?}",
+            messages
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0308"))
+        );
+        let body = fn_body(fn_named(&program, "f"));
+        let expr = body.tail.as_deref().expect("expected a loop expression");
+        match &expr.kind {
+            ExprKind::Loop { body, .. } => match body.stmts.first() {
+                Some(Stmt::Expr(inner)) => {
+                    assert!(matches!(inner.kind, ExprKind::Continue { .. }));
+                }
+                other => panic!("expected a continue statement, got {:?}", other),
+            },
+            other => panic!("expected a loop, got {:?}", other),
+        }
+        fn_named(&program, "g");
+        fn_named(&program, "h");
     }
 
     #[test]

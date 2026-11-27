@@ -3,24 +3,24 @@
 The `std::collections` module groups the containers that are not built into the
 language: `HashMap` (available since 1.5 and migrated to the `std` crate in
 2.0.0) and the ordered and specialized containers `HashSet`, `BTreeSet`,
-`BTreeMap`, `VecDeque` and `BinaryHeap`. All of them are available in 2.3.0.
+`BTreeMap`, `VecDeque` and `BinaryHeap`. All of them are available in 2.4.0.
 
 ## Containers
 
-| Container | Page | Status in 2.3.0 | Iteration order | Key or element types |
+| Container | Page | Status in 2.4.0 | Iteration order | Key or element types |
 | --- | --- | --- | --- | --- |
-| `HashMap<K, V>` | [hash_map](hash-map.md) | API migrated from 1.7; borrowed `get`/`get_mut` in 2.2.0 and borrowed iteration plus `from` in 2.3.0 | internal slot order, not insertion order | `i64`, `u64`, `isize`, `usize`, `bool`, `char`, `String` keys |
-| `HashSet<T>` | [hash_set](hash-set.md) | implemented; `from` added in 2.3.0 | insertion order, deterministic, read with `elements()` / `to_vec()` | same keys as `HashMap` |
-| `BTreeSet<T>` | [btree_set](btree-set.md) | implemented | ascending key order, read with `elements()` | the integer types, `char`, `String` |
-| `BTreeMap<K, V>` | [btree_map](btree-map.md) | implemented | ascending key order, read with `keys()` / `values()` | same keys as `BTreeSet` |
-| `VecDeque<T>` | [deque](deque.md) | implemented | front to back, read with `elements()` | any value type |
-| `BinaryHeap<T>` | [binary_heap](binary-heap.md) | implemented | largest to smallest, read with `elements()` | `i64`, `u64`, `f64`, `String` |
+| `HashMap<K, V>` | [hash_map](hash-map.md) | API migrated from 1.7; borrowed `get`/`get_mut` in 2.2.0, borrowed iteration plus `from` in 2.3.0, `get_or_insert`/`get_or_insert_with` in 2.4.0 | internal slot order, not insertion order | `i64`, `u64`, `isize`, `usize`, `bool`, `char`, `String` keys |
+| `HashSet<T>` | [hash_set](hash-set.md) | implemented; `from` in 2.3.0, `extend` in 2.4.0 | insertion order, deterministic, read with `elements()` / `to_vec()` | same keys as `HashMap` |
+| `BTreeSet<T>` | [btree_set](btree-set.md) | implemented; `from`/`to_vec` in 2.4.0 | ascending key order, read with `elements()` / `to_vec()` | the integer types, `char`, `String` |
+| `BTreeMap<K, V>` | [btree_map](btree-map.md) | implemented; `get_mut`/`first_key`/`last_key`/`from`/`to_vec` in 2.4.0 | ascending key order, read with `keys()` / `values()` / `to_vec()` | same keys as `BTreeSet` |
+| `VecDeque<T>` | [deque](deque.md) | implemented; `with_capacity`/`from`/`get_mut`/`front`/`back`/`to_vec` in 2.4.0 | front to back, read with `elements()` / `to_vec()` | any value type |
+| `BinaryHeap<T>` | [binary_heap](binary-heap.md) | implemented; `from`/`to_vec` in 2.4.0 | internal heap order, not sorted; `pop` yields largest first | `i64`, `u64`, `f64`, `String` |
 
 "API migrated from 1.7" means the surface is the one described in
 [`HashMap`](../../language/20-hashmap.md); the implementation moved into the
 `std` crate on top of compiler intrinsics, so programs do not change.
 "Implemented" means the container is written in lsaca in
-`stdlib/src/collections.ls` and has been exercised against the 2.3.0 compiler.
+`stdlib/src/collections.ls` and has been exercised against the 2.4.0 compiler.
 Since 2.3.0 a `HashMap` can be read with `for (key, value) in &map` or with
 borrowed `iter()`/`keys()`/`values()`; the other containers still expose only
 the accessors named in the iteration-order column, which return a `Vec`.
@@ -36,9 +36,10 @@ The containers share a few design rules that matter to programs:
 * Iteration order is part of the documented API and is deterministic: the
   ordered containers keep a sorted `Vec` and scan it with linear comparisons,
   the insertion-ordered set keeps its keys in a `Vec` alongside a `HashMap`, the
-  double-ended queue keeps its values in a `Vec` ordered from front to back, and
-  the binary heap keeps its values in a `Vec` sorted from largest to smallest.
-* Lengths and positions are `usize` in 2.3.0, like every other size in the
+  double-ended queue keeps its values in a `Vec` ordered from front to back. The
+  binary heap is the exception: its iteration order is the internal heap layout,
+  which is not sorted; `pop` returns values from largest to smallest.
+* Lengths and positions are `usize` in 2.4.0, like every other size in the
   standard library: `len()`, `VecDeque::get` and the other index parameters are
   `usize`.
 * Since 2.2.0 `HashMap::get` and `get_mut` borrow the key (`&K`) and return
@@ -46,18 +47,22 @@ The containers share a few design rules that matter to programs:
   `contains_key` and `remove` still take the key by value.
 * Set operations `union`, `intersection`, `difference` and `subset` are provided
   by `HashSet`; `BTreeSet` does not have them yet.
+* Version 2.4.0 fills out the constructors and accessors: `HashSet::extend`,
+  `BTreeSet::from`/`to_vec`, `BTreeMap::from`/`get_mut`/`first_key`/`last_key`/
+  `to_vec`, `VecDeque::with_capacity`/`from`/`get_mut`/`front`/`back`/`to_vec`,
+  and `BinaryHeap::from`/`to_vec`. The pages above list each signature.
 * `HashMap` keeps the restrictions it had in 1.7: a fixed set of key types. Note that the key types are still `i64`, `u64`,
   `isize`, `usize`, `bool`, `char` and `String`; the narrower integer types,
   including the default `i32`, are not hashable keys.
 
 ## Planned for a later release
 
-All six containers are available. Not implemented in 2.3.0 and planned for a
+All six containers are available. Not implemented in 2.4.0 and planned for a
 later release: a borrowing iterator or `for` loop over `HashSet`, `BTreeSet`,
 `BTreeMap`, `VecDeque` and `BinaryHeap` (use the `elements` / `to_vec` /
-`keys` / `values` accessors for now), a ring-buffer layout for `VecDeque`, a
-heap-array layout for `BinaryHeap`, and set algebra for `BTreeSet`. There is no linked list, no `BTree` cursor API, no array map and no
-concurrent container.
+`keys` / `values` accessors for now), a ring-buffer layout for `VecDeque`, and
+set algebra for `BTreeSet`. There is no linked list, no `BTree` cursor API, no
+array map and no concurrent container.
 
 ## See also
 

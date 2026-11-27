@@ -49,6 +49,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  RUST_TOOLCHAIN: "1.100.0"
 
 jobs:
   fmt:
@@ -59,8 +60,9 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -91,8 +93,9 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
@@ -141,7 +144,9 @@ jobs:
           "C:\msys64\ucrt64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
@@ -216,7 +221,9 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -336,7 +343,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc libc6-dev
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -415,7 +424,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc cmake ninja-build
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -501,7 +512,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -547,7 +560,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc libc6-dev
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -593,7 +608,9 @@ jobs:
       # The documented version and help text checks execute the real compiler,
       # so this job builds the release CLI before checking prose claims.
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
         with:

@@ -2,7 +2,7 @@
 
 Every expression in lsaca has a statically known type, checked before any C is
 generated. This page lists the complete type language, explains each builtin
-type, and describes inference and conversions. It describes lsaca 2.3.0, where
+type, and describes inference and conversions. It describes lsaca 2.4.0, where
 unannotated integer literals are `i32` by default, number literals accept
 Rust-style type suffixes, and lengths and indices are `usize`.
 

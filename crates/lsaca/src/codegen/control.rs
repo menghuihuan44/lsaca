@@ -184,6 +184,20 @@ impl<'a> Gen<'a> {
                     self.predeclare_pattern(part);
                 }
             }
+            HPatKind::Array(parts) => {
+                for part in parts {
+                    self.predeclare_pattern(part);
+                }
+            }
+            HPatKind::Slice { prefix, suffix, .. } => {
+                for part in prefix.iter().chain(suffix.iter()) {
+                    self.predeclare_pattern(part);
+                }
+            }
+            HPatKind::At { binding, pattern } => {
+                self.predeclare_pattern(binding);
+                self.predeclare_pattern(pattern);
+            }
             HPatKind::Struct { fields, .. } => {
                 for (_, part) in fields {
                     self.predeclare_pattern(part);
@@ -284,6 +298,62 @@ impl<'a> Gen<'a> {
                     let sub = format!("({}).{}", source, types::positional_field(index));
                     self.bind_pattern_mode(part, &sub, ref_mode, move_bindings);
                 }
+            }
+            HPatKind::Array(parts) => {
+                for (index, part) in parts.iter().enumerate() {
+                    let sub = format!("({}).data[{}]", source, index);
+                    self.bind_pattern_mode(part, &sub, ref_mode, move_bindings);
+                }
+            }
+            HPatKind::Slice { prefix, suffix, .. } => {
+                let total = prefix.len() + suffix.len();
+                // A slice is always viewed through a reference, even when the
+                // reference itself is represented by value (a fat slice). Its
+                // elements are therefore borrowed: an ergonomic binding takes
+                // the address of the selected element instead of its value.
+                let element_ref = ref_mode || pat.ty.is_slice();
+                if let Some(len) = slice_array_len(pat) {
+                    for (index, part) in prefix.iter().enumerate().take(len) {
+                        let sub = format!("({}).data[{}]", source, index);
+                        self.bind_pattern_mode(part, &sub, element_ref, move_bindings);
+                    }
+                    if total <= len {
+                        for (offset, part) in suffix.iter().enumerate() {
+                            let sub = format!("({}).data[{}]", source, len - suffix.len() + offset);
+                            self.bind_pattern_mode(part, &sub, element_ref, move_bindings);
+                        }
+                    }
+                } else {
+                    for (index, part) in prefix.iter().enumerate() {
+                        let sub = format!("({}).data[{}]", source, index);
+                        self.bind_pattern_mode(part, &sub, true, move_bindings);
+                    }
+                    for (offset, part) in suffix.iter().enumerate() {
+                        let sub = format!(
+                            "({}).data[({}).len - {} + {}]",
+                            source,
+                            source,
+                            suffix.len(),
+                            offset
+                        );
+                        self.bind_pattern_mode(part, &sub, true, move_bindings);
+                    }
+                }
+            }
+            HPatKind::At { binding, pattern } => {
+                self.bind_pattern_mode(binding, source, ref_mode, move_bindings);
+                // A consuming binding steals the whole value: read the
+                // sub-pattern out of the binding instead of the zeroed source.
+                let nested_source = match (&binding.kind, ref_mode, move_bindings) {
+                    (HPatKind::Bind { c_name, .. }, false, true)
+                        if !self.is_trivial_copy(&binding.ty)
+                            && self.zero_release_is_inert(&binding.ty) =>
+                    {
+                        c_name.clone()
+                    }
+                    _ => source.to_string(),
+                };
+                self.bind_pattern_mode(pattern, &nested_source, ref_mode, move_bindings);
             }
             HPatKind::Struct {
                 struct_id, fields, ..
@@ -386,6 +456,16 @@ impl<'a> Gen<'a> {
             HPatKind::Tuple(parts) => parts
                 .iter()
                 .any(|part| self.pattern_moves_drop_payload(part)),
+            HPatKind::Array(parts) => parts
+                .iter()
+                .any(|part| self.pattern_moves_drop_payload(part)),
+            HPatKind::Slice { prefix, suffix, .. } => prefix
+                .iter()
+                .chain(suffix.iter())
+                .any(|part| self.pattern_moves_drop_payload(part)),
+            HPatKind::At { binding, pattern } => {
+                self.pattern_moves_drop_payload(binding) || self.pattern_moves_drop_payload(pattern)
+            }
             HPatKind::Struct { fields, .. } => fields
                 .iter()
                 .any(|(_, part)| self.pattern_moves_drop_payload(part)),
@@ -430,6 +510,14 @@ impl<'a> Gen<'a> {
             HPatKind::Bind { .. } => !self.is_trivial_copy(&pat.ty),
             HPatKind::Tuple(parts) | HPatKind::Or(parts) => {
                 parts.iter().any(|part| self.pattern_binds_owned(part))
+            }
+            HPatKind::Array(parts) => parts.iter().any(|part| self.pattern_binds_owned(part)),
+            HPatKind::Slice { prefix, suffix, .. } => prefix
+                .iter()
+                .chain(suffix.iter())
+                .any(|part| self.pattern_binds_owned(part)),
+            HPatKind::At { binding, pattern } => {
+                self.pattern_binds_owned(binding) || self.pattern_binds_owned(pattern)
             }
             HPatKind::Struct { fields, .. } => fields
                 .iter()
@@ -514,6 +602,75 @@ impl<'a> Gen<'a> {
                     let sub = format!("({}).{}", source, types::positional_field(index));
                     self.bind_pattern_consume(part, &sub);
                 }
+            }
+            HPatKind::Array(parts) => {
+                for (index, part) in parts.iter().enumerate() {
+                    let sub = format!("({}).data[{}]", source, index);
+                    self.bind_pattern_consume(part, &sub);
+                }
+            }
+            HPatKind::Slice { prefix, suffix, .. } => {
+                let total = prefix.len() + suffix.len();
+                if let Some(len) = slice_array_len(pat) {
+                    // An array-slice pattern destructures an owned array. Its
+                    // elements are moved out exactly like the fixed Array arm;
+                    // the elements the pattern does not name are moved into
+                    // temporaries so they are still dropped exactly once.
+                    for (index, part) in prefix.iter().enumerate().take(len) {
+                        let sub = format!("({}).data[{}]", source, index);
+                        self.bind_pattern_consume(part, &sub);
+                    }
+                    let bound = if total <= len {
+                        for (offset, part) in suffix.iter().enumerate() {
+                            let sub = format!("({}).data[{}]", source, len - suffix.len() + offset);
+                            self.bind_pattern_consume(part, &sub);
+                        }
+                        len - suffix.len()
+                    } else {
+                        // The type checker rejects an impossible pattern. Keep
+                        // code generation total and drop every unbound element.
+                        len
+                    };
+                    if let Some(elem) = pat.ty.sequence_element().cloned()
+                        && !self.is_trivial_copy(&elem)
+                    {
+                        for index in prefix.len().min(len)..bound {
+                            let sub = format!("({}).data[{}]", source, index);
+                            self.move_place_into_temp(&elem, &sub);
+                        }
+                    }
+                } else {
+                    // A slice pattern never moves out of the slice: its
+                    // elements are borrowed, so the bindings are references to
+                    // the selected elements.
+                    for (index, part) in prefix.iter().enumerate() {
+                        let sub = format!("({}).data[{}]", source, index);
+                        self.bind_pattern_mode(part, &sub, true, false);
+                    }
+                    for (offset, part) in suffix.iter().enumerate() {
+                        let sub = format!(
+                            "({}).data[({}).len - {} + {}]",
+                            source,
+                            source,
+                            suffix.len(),
+                            offset
+                        );
+                        self.bind_pattern_mode(part, &sub, true, false);
+                    }
+                }
+            }
+            HPatKind::At { binding, pattern } => {
+                self.bind_pattern_consume(binding, source);
+                let nested_source = match &binding.kind {
+                    HPatKind::Bind { c_name, .. } if !self.is_trivial_copy(&binding.ty) => {
+                        c_name.clone()
+                    }
+                    _ => source.to_string(),
+                };
+                // The whole value is already owned by the binding, so only
+                // sub-pattern bindings move out of it; wildcards and literals
+                // must leave the value in place for the binding to drop.
+                self.bind_pattern_mode(pattern, &nested_source, false, true);
             }
             HPatKind::Struct {
                 struct_id, fields, ..
@@ -738,6 +895,46 @@ impl<'a> Gen<'a> {
                     let sub = format!("({}).{}", source, types::positional_field(index));
                     self.bind_pattern_borrow(part, &sub);
                 }
+            }
+            HPatKind::Array(parts) => {
+                for (index, part) in parts.iter().enumerate() {
+                    let sub = format!("({}).data[{}]", source, index);
+                    self.bind_pattern_borrow(part, &sub);
+                }
+            }
+            HPatKind::Slice { prefix, suffix, .. } => {
+                let total = prefix.len() + suffix.len();
+                if let Some(len) = slice_array_len(pat) {
+                    for (index, part) in prefix.iter().enumerate().take(len) {
+                        let sub = format!("({}).data[{}]", source, index);
+                        self.bind_pattern_borrow(part, &sub);
+                    }
+                    if total <= len {
+                        for (offset, part) in suffix.iter().enumerate() {
+                            let sub = format!("({}).data[{}]", source, len - suffix.len() + offset);
+                            self.bind_pattern_borrow(part, &sub);
+                        }
+                    }
+                } else {
+                    for (index, part) in prefix.iter().enumerate() {
+                        let sub = format!("({}).data[{}]", source, index);
+                        self.bind_pattern_mode(part, &sub, true, false);
+                    }
+                    for (offset, part) in suffix.iter().enumerate() {
+                        let sub = format!(
+                            "({}).data[({}).len - {} + {}]",
+                            source,
+                            source,
+                            suffix.len(),
+                            offset
+                        );
+                        self.bind_pattern_mode(part, &sub, true, false);
+                    }
+                }
+            }
+            HPatKind::At { binding, pattern } => {
+                self.bind_pattern_borrow(binding, source);
+                self.bind_pattern_borrow(pattern, source);
             }
             HPatKind::Struct {
                 struct_id, fields, ..
@@ -1023,6 +1220,61 @@ impl<'a> Gen<'a> {
                     self.gen_match_tests(part, &sub, matched);
                 }
             }
+            HPatKind::Array(parts) => {
+                // The array type fixes the length, so the type checker has
+                // already guaranteed that the pattern and the value agree;
+                // only the element tests remain.
+                for (index, part) in parts.iter().enumerate() {
+                    let sub = format!("({}).data[{}]", source, index);
+                    self.gen_match_tests(part, &sub, matched);
+                }
+            }
+            HPatKind::Slice {
+                prefix,
+                suffix,
+                rest,
+            } => {
+                let total = prefix.len() + suffix.len();
+                if let Some(len) = slice_array_len(pat) {
+                    // An array has a static length and no len member: type
+                    // checking has already proved that the bracket pattern fits
+                    // the array, so only the element tests remain.
+                    for (index, part) in prefix.iter().enumerate().take(len) {
+                        let sub = format!("({}).data[{}]", source, index);
+                        self.gen_match_tests(part, &sub, matched);
+                    }
+                    if total <= len {
+                        for (offset, part) in suffix.iter().enumerate() {
+                            let sub = format!("({}).data[{}]", source, len - suffix.len() + offset);
+                            self.gen_match_tests(part, &sub, matched);
+                        }
+                    }
+                } else {
+                    // A rest pattern with no named parts, [..], is irrefutable.
+                    if !(*rest && total == 0) {
+                        let comparison = if *rest { "<" } else { "!=" };
+                        self.w.line(format!(
+                            "if (({}).len {} (size_t){}) {{ {} = false; }}",
+                            source, comparison, total, matched
+                        ));
+                    }
+                    for (index, part) in prefix.iter().enumerate() {
+                        let sub = format!("({}).data[{}]", source, index);
+                        self.gen_match_tests(part, &sub, matched);
+                    }
+                    for (offset, part) in suffix.iter().enumerate() {
+                        let sub = format!(
+                            "({}).data[({}).len - {} + {}]",
+                            source,
+                            source,
+                            suffix.len(),
+                            offset
+                        );
+                        self.gen_match_tests(part, &sub, matched);
+                    }
+                }
+            }
+            HPatKind::At { pattern, .. } => self.gen_match_tests(pattern, source, matched),
             HPatKind::Struct {
                 struct_id, fields, ..
             } => {
@@ -1208,6 +1460,11 @@ impl<'a> Gen<'a> {
             continue_label: continue_label.clone(),
             label: label.map(str::to_string),
             body_frame: self.frames.len(),
+            result: if ty.is_unit() {
+                None
+            } else {
+                Some(target.to_string())
+            },
             used_break: false,
             used_continue: false,
         });
@@ -1251,6 +1508,11 @@ impl<'a> Gen<'a> {
             continue_label: continue_label.clone(),
             label: label.map(str::to_string),
             body_frame: self.frames.len(),
+            result: if ty.is_unit() {
+                None
+            } else {
+                Some(target.to_string())
+            },
             used_break: false,
             used_continue: false,
         });
@@ -1323,6 +1585,11 @@ impl<'a> Gen<'a> {
             continue_label: continue_label.clone(),
             label: label.map(str::to_string),
             body_frame: self.frames.len(),
+            result: if ty.is_unit() {
+                None
+            } else {
+                Some(target.to_string())
+            },
             used_break: false,
             used_continue: false,
         });
@@ -1390,6 +1657,11 @@ impl<'a> Gen<'a> {
             continue_label: continue_label.clone(),
             label: label.map(str::to_string),
             body_frame: self.frames.len(),
+            result: if ty.is_unit() {
+                None
+            } else {
+                Some(target.to_string())
+            },
             used_break: false,
             used_continue: false,
         });
@@ -1500,6 +1772,11 @@ impl<'a> Gen<'a> {
             continue_label: continue_label.clone(),
             label: label.map(str::to_string),
             body_frame: self.frames.len(),
+            result: if ty.is_unit() {
+                None
+            } else {
+                Some(target.to_string())
+            },
             used_break: false,
             used_continue: false,
         });
@@ -1606,6 +1883,16 @@ impl<'a> Gen<'a> {
             let zero = self.raw_zero_expr(&pat.ty);
             self.w.line(format!("{} = {};", source, zero));
             self.set_live(&name, true);
+        } else if matches!(&pat.kind, HPatKind::Array(_) | HPatKind::At { .. })
+            || (matches!(&pat.kind, HPatKind::Slice { .. }) && pat.ty.is_array())
+        {
+            // Structural array, array-slice and at-patterns move their non-Copy
+            // payloads out of the owned element; what remains is zeroed and
+            // released.
+            self.bind_pattern_consume(pat, source);
+            self.emit_release(&pat.ty, source);
+            let zero = self.raw_zero_expr(&pat.ty);
+            self.w.line(format!("{} = {};", source, zero));
         } else {
             self.bind_pattern(pat, source);
             self.emit_release(&pat.ty, source);
@@ -1650,13 +1937,37 @@ impl<'a> Gen<'a> {
         ))
     }
 
-    pub(crate) fn gen_break(&mut self, label: Option<&str>) {
+    pub(crate) fn gen_break(&mut self, label: Option<&str>, value: Option<&HExpr>) {
         let Some((index, break_label, _continue_label, body_frame)) = self.jump_target(label)
         else {
             self.block_terminated = true;
             return;
         };
         self.loops[index].used_break = true;
+        let result = self.loops[index].result.clone();
+        match (result.as_deref(), value) {
+            (Some(result), Some(value)) => {
+                let ty = value.ty.clone();
+                let temp = self.gen_owned_move(value);
+                // The loop slot starts zeroed, but releasing it here keeps
+                // the transfer correct even when an enclosing construct has
+                // already made the slot live.
+                if !self.is_trivial_copy(&ty) {
+                    self.emit_release(&ty, result);
+                }
+                self.w.line(format!("{} = {};", result, temp));
+                self.mark_moved(&temp);
+            }
+            (None, Some(value)) => {
+                // The type checker requires a value-less break only for unit
+                // loops; release a stray payload instead of leaking it.
+                let ty = value.ty.clone();
+                let temp = self.gen_owned_move(value);
+                self.emit_release(&ty, &temp);
+                self.mark_moved(&temp);
+            }
+            _ => {}
+        }
         let frame_count = self.frames.len();
         let mut index = frame_count;
         while index > body_frame {
@@ -1706,6 +2017,15 @@ impl<'a> Gen<'a> {
     }
 }
 
+/// The static element count of an array-slice pattern, or None when the
+/// pattern matches a runtime-length slice.
+fn slice_array_len(pat: &HPat) -> Option<usize> {
+    match &pat.ty {
+        Ty::Array(_, len) => Some(*len),
+        _ => None,
+    }
+}
+
 /// Whether `pat` binds at least one local variable.
 ///
 /// A pattern that binds nothing (for example `_` or `(_, _)`) still evaluates
@@ -1716,6 +2036,13 @@ fn pattern_binds_any(pat: &HPat) -> bool {
         HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => false,
         HPatKind::Bind { .. } => true,
         HPatKind::Tuple(parts) | HPatKind::Or(parts) => parts.iter().any(pattern_binds_any),
+        HPatKind::Array(parts) => parts.iter().any(pattern_binds_any),
+        HPatKind::Slice { prefix, suffix, .. } => {
+            prefix.iter().chain(suffix.iter()).any(pattern_binds_any)
+        }
+        HPatKind::At { binding, pattern } => {
+            pattern_binds_any(binding) || pattern_binds_any(pattern)
+        }
         HPatKind::Struct { fields, .. } => fields.iter().any(|(_, part)| pattern_binds_any(part)),
         HPatKind::Enum { args, .. } => args.iter().any(pattern_binds_any),
         HPatKind::OptionSome(inner) | HPatKind::ResultOk(inner) | HPatKind::ResultErr(inner) => {

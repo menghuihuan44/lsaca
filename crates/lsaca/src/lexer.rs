@@ -103,6 +103,8 @@ pub enum TokenKind {
     Bang,
     /// Question mark: the postfix try operator.
     Question,
+    /// At sign: the binding operator in `name @ pattern`.
+    At,
     Underscore,
     /// Shift left: <<
     Shl,
@@ -240,6 +242,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Caret => write!(f, "^"),
             TokenKind::Bang => write!(f, "!"),
             TokenKind::Question => write!(f, "?"),
+            TokenKind::At => write!(f, "@"),
             TokenKind::Underscore => write!(f, "_"),
             TokenKind::Shl => write!(f, "<<"),
             TokenKind::Shr => write!(f, ">>"),
@@ -1263,6 +1266,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             '?' => Question,
+            '@' => At,
             _ => {
                 let end = self.pos;
                 let message = if ch.is_control() {
@@ -2058,7 +2062,6 @@ mod tests {
             ("let x = #;", "#"),
             ("let x = $;", "$"),
             ("let x = \\;", "\\"),
-            ("let x = @;", "@"),
             ("let x = \u{60};", "\u{60}"),
             ("let x = ~;", "~"),
         ] {

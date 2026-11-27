@@ -1490,13 +1490,25 @@ impl<'a> FnChecker<'a> {
                 }
             }
             HPatKind::Wild | HPatKind::Lit(_) | HPatKind::OptionNone => {}
-            HPatKind::Tuple(elements) => {
+            HPatKind::Tuple(elements) | HPatKind::Array(elements) => {
                 for (index, element) in elements.iter().enumerate() {
                     let path = [index as u32];
                     let child = base.map(|base| base.project(&path));
                     let projected = Self::carried_projection(carried, &path);
                     self.declare_pattern(element, child.as_ref(), &projected);
                 }
+            }
+            HPatKind::Slice { prefix, suffix, .. } => {
+                // Slice elements have no statically known index because of the
+                // optional rest, but every binding still borrows through the
+                // same container reference. Keep the base provenance.
+                for element in prefix.iter().chain(suffix.iter()) {
+                    self.declare_pattern(element, base, carried);
+                }
+            }
+            HPatKind::At { binding, pattern } => {
+                self.declare_pattern(binding, base, carried);
+                self.declare_pattern(pattern, base, carried);
             }
             HPatKind::Enum { variant, args, .. } => {
                 for (index, element) in args.iter().enumerate() {
@@ -2082,7 +2094,12 @@ impl<'a> FnChecker<'a> {
     fn walk_expr(&mut self, expr: &HExpr) {
         match &expr.kind {
             HExprKind::Lit(_) | HExprKind::ConstRef { .. } | HExprKind::FnRef { .. } => {}
-            HExprKind::OptionNone | HExprKind::Break { .. } | HExprKind::Continue { .. } => {}
+            HExprKind::OptionNone | HExprKind::Continue { .. } => {}
+            HExprKind::Break { value, .. } => {
+                if let Some(value) = value {
+                    self.walk_consumed(value);
+                }
+            }
             HExprKind::DynCoerce { value, .. } => {
                 // Appendix B contract, mirrored from the move checker:
                 // * Box<T> -> Box<dyn Trait> moves the box handle, and with it

@@ -1,0 +1,4 @@
+Little tests grow large systems.
+One quick test at a time beats three slow tests at night, and one calm review beats ten hasty commits.
+Numbers 42 and 7 stay words too, but 3.14 splits into 3 and 14.
+Types, patterns, and careful names keep future readers happy.

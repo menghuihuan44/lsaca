@@ -176,9 +176,13 @@ fn scan_expr(expr: &HExpr, escaped: &mut HashSet<usize>) {
         | HExprKind::Local { .. }
         | HExprKind::Capture { .. }
         | HExprKind::ConstRef { .. }
-        | HExprKind::Break { .. }
         | HExprKind::Continue { .. }
         | HExprKind::OptionNone => {}
+        HExprKind::Break { value, .. } => {
+            if let Some(value) = value {
+                scan_expr(value, escaped);
+            }
+        }
         HExprKind::FnRef { fn_id } => {
             escaped.insert(*fn_id);
         }

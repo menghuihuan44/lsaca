@@ -104,6 +104,22 @@ impl<'a> Checker<'a> {
             PatternKind::Tuple(pats) => {
                 self.check_tuple_pattern(pats, &expected, pat.span, overrides)
             }
+            PatternKind::Array(pats) => {
+                self.check_array_pattern(pats, &expected, pat.span, overrides)
+            }
+            PatternKind::Slice {
+                prefix,
+                suffix,
+                rest,
+            } => self.check_slice_pattern(prefix, suffix, *rest, &expected, pat.span, overrides),
+            PatternKind::At {
+                name,
+                name_span,
+                mutable,
+                pattern,
+            } => self.check_at_pattern(
+                name, *mutable, pattern, &expected, *name_span, pat.span, overrides,
+            ),
             PatternKind::Struct {
                 path,
                 fields,
@@ -387,6 +403,215 @@ impl<'a> Checker<'a> {
             .map(|(pat, ty)| self.check_pattern_inner(pat, ty, overrides))
             .collect();
         TPat::new(expected, TPatKind::Tuple(children), span)
+    }
+
+    fn check_array_pattern(
+        &mut self,
+        pats: &[Pattern],
+        expected: &ITy,
+        span: Span,
+        overrides: Option<&HashMap<String, BindingInfo>>,
+    ) -> TPat {
+        // The parser cannot distinguish [a, b] as an array pattern from
+        // [a, b] as a fixed-length slice pattern; the expected type decides.
+        // A no-rest bracket pattern meeting a slice is a refutable slice
+        // pattern of known prefix length.
+        if let ITy::Slice(elem) = self.infer.resolve(expected) {
+            let elem_ty = (*elem).clone();
+            let children: Vec<TPat> = pats
+                .iter()
+                .map(|pat| self.check_pattern_inner(pat, &elem_ty, overrides))
+                .collect();
+            return TPat::new(
+                ITy::slice(elem_ty),
+                TPatKind::Slice {
+                    prefix: children,
+                    suffix: Vec::new(),
+                    rest: false,
+                },
+                span,
+            );
+        }
+        let (expected, elem_ty) = match self.infer.resolve(expected) {
+            ITy::Array(elem, len) => {
+                if len != pats.len() {
+                    self.error_code(
+                        format!("pattern expects {} element(s), found {}", len, pats.len()),
+                        span,
+                        "E0308",
+                    );
+                }
+                let elem_ty = (*elem).clone();
+                (ITy::Array(elem, len), elem_ty)
+            }
+            ITy::Var(_) => {
+                let elem = self.infer.fresh_var();
+                let array_ty = ITy::array(elem.clone(), pats.len());
+                if self.infer.unify(expected, &array_ty).is_err() {
+                    let expected_before = self.infer.resolve(expected);
+                    self.report_mismatch(&expected_before, &array_ty, span);
+                }
+                (array_ty, elem)
+            }
+            resolved => {
+                let elem = self.infer.fresh_var();
+                let found = ITy::array(elem.clone(), pats.len());
+                self.report_mismatch(&resolved, &found, span);
+                (found, elem)
+            }
+        };
+        let children: Vec<TPat> = pats
+            .iter()
+            .map(|pat| self.check_pattern_inner(pat, &elem_ty, overrides))
+            .collect();
+        TPat::new(expected, TPatKind::Array(children), span)
+    }
+
+    fn check_slice_pattern(
+        &mut self,
+        prefix: &[Pattern],
+        suffix: &[Pattern],
+        rest: bool,
+        expected: &ITy,
+        span: Span,
+        overrides: Option<&HashMap<String, BindingInfo>>,
+    ) -> TPat {
+        let mut expected = self.infer.resolve(expected);
+        let elem_ty = match &expected {
+            ITy::Slice(elem) => (**elem).clone(),
+            ITy::Array(elem, len) => {
+                let total = prefix.len() + suffix.len();
+                let length_ok = total <= *len && (rest || total == *len);
+                if !length_ok {
+                    self.error_code(
+                        format!("pattern expects {} element(s), found {}", len, total),
+                        span,
+                        "E0308",
+                    );
+                }
+                (**elem).clone()
+            }
+            ITy::Var(_) => {
+                let elem = self.infer.fresh_var();
+                let slice_ty = ITy::slice(elem.clone());
+                if self.infer.unify(&expected, &slice_ty).is_err() {
+                    let expected_before = self.infer.resolve(&expected);
+                    self.report_mismatch(&expected_before, &slice_ty, span);
+                }
+                expected = slice_ty;
+                elem
+            }
+            _ => {
+                let elem = self.infer.fresh_var();
+                let found = ITy::slice(elem.clone());
+                self.report_mismatch(&expected, &found, span);
+                expected = found;
+                elem
+            }
+        };
+        let prefix: Vec<TPat> = prefix
+            .iter()
+            .map(|pat| self.check_pattern_inner(pat, &elem_ty, overrides))
+            .collect();
+        let suffix: Vec<TPat> = suffix
+            .iter()
+            .map(|pat| self.check_pattern_inner(pat, &elem_ty, overrides))
+            .collect();
+        TPat::new(
+            expected,
+            TPatKind::Slice {
+                prefix,
+                suffix,
+                rest,
+            },
+            span,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_at_pattern(
+        &mut self,
+        name: &str,
+        mutable: bool,
+        pattern: &Pattern,
+        expected: &ITy,
+        name_span: Span,
+        span: Span,
+        overrides: Option<&HashMap<String, BindingInfo>>,
+    ) -> TPat {
+        // `name @ pattern` binds the whole matched value; that binding is not a
+        // move out of the value, so it must not trip the E0509 check that the
+        // enclosing compound pattern installed. The nested pattern keeps its
+        // own Drop context when it destructures fields.
+        let drop_guard = self.pattern_drop_hook_stack.pop();
+        let binding = self.check_binding_pattern(name, mutable, expected, name_span, overrides);
+        if let Some(guard) = drop_guard {
+            self.pattern_drop_hook_stack.push(guard);
+        }
+        let inner = self.check_pattern_inner(pattern, expected, overrides);
+        // Binding the whole value and moving a non-Copy part out of that same
+        // value is a partial move: the whole binding would be used while one
+        // of its parts has been moved away. Ref-mode bindings (match ergonomics)
+        // and Copy parts are fine, and a type with its own Drop hook is already
+        // diagnosed as E0509 by the binding check above.
+        let whole_ty = self.infer.resolve(&binding.ty);
+        let whole_by_value = !matches!(whole_ty, ITy::Ref { .. });
+        let whole_non_copy = !self.is_copy_ty(&whole_ty);
+        let moves_part = self.pattern_moves_owned(&inner);
+        if whole_by_value && whole_non_copy && moves_part && !self.type_implements_drop(&whole_ty) {
+            let diag = Diagnostic::error(
+                format!(
+                    "cannot bind the whole value and move a non-Copy part out of it in the same pattern: {}",
+                    name
+                ),
+                name_span,
+            )
+            .with_code("E0382")
+            .with_span_label(name_span)
+            .with_note(
+                "bind the whole value through a reference, or bind only Copy parts alongside it"
+                    .to_string(),
+            );
+            self.diagnostics.push(diag);
+        }
+        TPat::new(
+            expected.clone(),
+            TPatKind::At {
+                binding: Box::new(binding),
+                pattern: Box::new(inner),
+            },
+            span,
+        )
+    }
+
+    /// Whether a checked pattern moves at least one non-Copy value out of the
+    /// matched place by value. A binding under match ergonomics has a reference
+    /// type and therefore does not move anything.
+    fn pattern_moves_owned(&mut self, pat: &TPat) -> bool {
+        match &pat.kind {
+            TPatKind::Wild | TPatKind::Lit(_) | TPatKind::OptionNone => false,
+            TPatKind::Bind { .. } => {
+                let ty = self.infer.resolve(&pat.ty);
+                !matches!(ty, ITy::Ref { .. }) && !self.is_copy_ty(&ty)
+            }
+            TPatKind::Tuple(parts) | TPatKind::Array(parts) | TPatKind::Or(parts) => {
+                parts.iter().any(|part| self.pattern_moves_owned(part))
+            }
+            TPatKind::Slice { prefix, suffix, .. } => prefix
+                .iter()
+                .chain(suffix.iter())
+                .any(|part| self.pattern_moves_owned(part)),
+            TPatKind::At { binding, pattern } => {
+                self.pattern_moves_owned(binding) || self.pattern_moves_owned(pattern)
+            }
+            TPatKind::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, part)| self.pattern_moves_owned(part)),
+            TPatKind::Enum { args, .. } => args.iter().any(|arg| self.pattern_moves_owned(arg)),
+            TPatKind::OptionSome(inner)
+            | TPatKind::ResultOk(inner)
+            | TPatKind::ResultErr(inner) => self.pattern_moves_owned(inner),
+        }
     }
 
     fn check_struct_pattern(
@@ -1112,10 +1337,19 @@ fn collect_bindings(pat: &TPat, out: &mut HashMap<String, BindingInfo>) {
                 mutable: *mutable,
             });
         }
-        TPatKind::Tuple(pats) => {
+        TPatKind::Tuple(pats) | TPatKind::Array(pats) => {
             for pat in pats {
                 collect_bindings(pat, out);
             }
+        }
+        TPatKind::Slice { prefix, suffix, .. } => {
+            for pat in prefix.iter().chain(suffix.iter()) {
+                collect_bindings(pat, out);
+            }
+        }
+        TPatKind::At { binding, pattern } => {
+            collect_bindings(binding, out);
+            collect_bindings(pattern, out);
         }
         TPatKind::Struct { fields, .. } => {
             for (_, pat) in fields {

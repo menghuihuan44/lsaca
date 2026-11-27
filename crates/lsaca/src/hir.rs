@@ -689,8 +689,11 @@ pub enum HExprKind {
     /// A statement-like macro (print, println, panic, assert, ...).
     Macro(HMacroCall),
     /// Break out of the innermost loop, or of the loop named by label.
+    /// `value` is the loop's result when the loop expression is used as a
+    /// value; loops whose breaks carry no value have type `()`.
     Break {
         label: Option<String>,
+        value: Option<Box<HExpr>>,
     },
     /// Skip to the next iteration of the innermost loop, or of the loop named
     /// by label.
@@ -1169,6 +1172,23 @@ pub enum HPatKind {
     },
     Lit(HLit),
     Tuple(Vec<HPat>),
+    /// Fixed-size array pattern; the length is the value's array length.
+    Array(Vec<HPat>),
+    /// Slice pattern over a slice reference. `prefix` binds from the front and
+    /// `suffix` from the back; the unmatched middle has no binding. `rest`
+    /// distinguishes an exact-length pattern (`[a, b]`) from one that allows
+    /// extra elements (`[a, b, ..]`).
+    Slice {
+        prefix: Vec<HPat>,
+        suffix: Vec<HPat>,
+        rest: bool,
+    },
+    /// `name @ pattern`: `binding` is a Bind pattern for the whole value and
+    /// `pattern` is matched against the same value.
+    At {
+        binding: Box<HPat>,
+        pattern: Box<HPat>,
+    },
     Struct {
         struct_id: StructId,
         /// Field index and sub-pattern, in source order.

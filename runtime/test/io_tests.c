@@ -246,6 +246,43 @@ static bool path_equals(const LsString* path, const char* expected) {
     return equal;
 }
 
+static int64_t io_net_udp_bind(const char* address) {
+    LsString* text = ls_str_cstr(address);
+    int64_t handle = ls_net_udp_bind(text);
+
+    ls_release(text);
+    return handle;
+}
+
+static int64_t io_net_udp_send_to(int64_t handle, const char* bytes,
+                                  int64_t length, const char* address) {
+    LsString* text = ls_str_cstr(address);
+    int64_t result = ls_net_udp_send_to(handle, bytes, length, text);
+
+    ls_release(text);
+    return result;
+}
+
+static int64_t io_net_udp_recv_from(int64_t handle, void* buffer,
+                                    int64_t capacity, LsString** out_address) {
+    return ls_net_udp_recv_from(handle, buffer, capacity, out_address);
+}
+
+static void argv_push_text(LsVec_String* argv, const char* text) {
+    LsString* value = ls_str_cstr(text);
+
+    ls_vec_string_push(argv, value);
+    ls_release(value);
+}
+
+static bool text_contains(const LsString* text, const char* needle) {
+    LsString* expected = ls_str_cstr(needle);
+    bool contains = text != NULL && ls_str_contains(text, expected);
+
+    ls_release(expected);
+    return contains;
+}
+
 static char scratch[1024];
 static char file_a[1200];
 static char file_b[1200];
@@ -831,6 +868,174 @@ int main(int argc, char** argv) {
             CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
             CHECK_I64(ls_io_close(spare), 0);
         }
+    }
+
+    /* --- UDP loopback --------------------------------------------------- */
+    {
+        int64_t udp = io_net_udp_bind("127.0.0.1:0");
+        int64_t udp_port;
+        LsString* expected_peer = NULL;
+        LsString* peer = NULL;
+
+        CHECK(udp >= 0);
+        if (udp >= 0) {
+            udp_port = ls_net_local_port(udp);
+            CHECK(udp_port > 0);
+            CHECK(udp_port <= 65535);
+            (void)snprintf(address, sizeof address, "127.0.0.1:%d",
+                           (int)udp_port);
+            expected_peer = ls_str_cstr(address);
+            CHECK_I64(ls_net_set_timeout(udp, 5000), 0);
+            CHECK_I64(io_net_udp_send_to(udp, "ping", 4, address), 4);
+            memset(buffer, 0, sizeof buffer);
+            CHECK_I64(io_net_udp_recv_from(udp, buffer,
+                                           (int64_t)sizeof buffer, &peer),
+                      4);
+            CHECK(memcmp(buffer, "ping", 4) == 0);
+            CHECK(peer != NULL);
+            if (peer != NULL) {
+                CHECK(ls_str_eq(peer, expected_peer));
+                ls_release(peer);
+                peer = NULL;
+            }
+            CHECK_I64(io_net_udp_send_to(udp, "", 0, address), 0);
+            CHECK_I64(io_net_udp_recv_from(udp, buffer,
+                                           (int64_t)sizeof buffer, &peer),
+                      0);
+            CHECK(peer != NULL);
+            if (peer != NULL) {
+                CHECK(ls_str_eq(peer, expected_peer));
+                ls_release(peer);
+                peer = NULL;
+            }
+            CHECK_I64(io_net_udp_send_to(udp, "x", -1, address), -1);
+            CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+            CHECK_I64(ls_net_set_timeout(udp, 100), 0);
+            CHECK_I64(io_net_udp_recv_from(udp, buffer,
+                                           (int64_t)sizeof buffer, &peer),
+                      -1);
+#if defined(_WIN32)
+            CHECK_ERROR(LS_IO_ERROR_TIMED_OUT);
+#else
+            CHECK_ERROR(LS_IO_ERROR_WOULD_BLOCK);
+#endif
+            CHECK(peer == NULL);
+            if (expected_peer != NULL) {
+                ls_release(expected_peer);
+                expected_peer = NULL;
+            }
+            CHECK_I64(ls_io_close(udp), 0);
+            CHECK_I64(ls_io_close(udp), -1);
+            CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+        }
+        if (expected_peer != NULL) {
+            ls_release(expected_peer);
+        }
+        CHECK_I64(io_net_udp_bind("no port here"), -1);
+        CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+        CHECK_I64(io_net_udp_bind("127.0.0.1:70000"), -1);
+        CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+        peer = NULL;
+        CHECK_I64(io_net_udp_recv_from(987654, buffer, 8, &peer), -1);
+        CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+        CHECK(peer == NULL);
+        CHECK_I64(ls_net_set_timeout(987654, 1000), -1);
+        CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+    }
+
+    /* --- process spawn -------------------------------------------------- */
+    {
+        LsVec_String arguments = ls_vec_string_new();
+        LsString* captured_stdout = NULL;
+        LsString* captured_stderr = NULL;
+        LsString* empty_dir = ls_str_cstr("");
+        int64_t process_exit = -1;
+
+#if defined(_WIN32)
+        argv_push_text(&arguments, "cmd.exe");
+        argv_push_text(&arguments, "/C");
+        argv_push_text(&arguments, "echo");
+        argv_push_text(&arguments, "hello");
+#else
+        argv_push_text(&arguments, "/bin/echo");
+        argv_push_text(&arguments, "hello");
+#endif
+        CHECK_I64(ls_proc_output(&arguments, empty_dir, &process_exit,
+                                 &captured_stdout, &captured_stderr),
+                  0);
+        CHECK_I64(process_exit, 0);
+        CHECK(text_contains(captured_stdout, "hello"));
+        CHECK(captured_stderr != NULL && ls_str_len(captured_stderr) == 0);
+        if (captured_stdout != NULL) {
+            ls_release(captured_stdout);
+            captured_stdout = NULL;
+        }
+        if (captured_stderr != NULL) {
+            ls_release(captured_stderr);
+            captured_stderr = NULL;
+        }
+        ls_vec_string_free(&arguments);
+
+        arguments = ls_vec_string_new();
+#if defined(_WIN32)
+        argv_push_text(&arguments, "cmd.exe");
+        argv_push_text(&arguments, "/C");
+        argv_push_text(&arguments, "echo");
+        argv_push_text(&arguments, "oops");
+        argv_push_text(&arguments, "1>&2");
+#else
+        argv_push_text(&arguments, "/bin/sh");
+        argv_push_text(&arguments, "-c");
+        argv_push_text(&arguments, "echo oops >&2");
+#endif
+        CHECK_I64(ls_proc_output(&arguments, NULL, &process_exit,
+                                 &captured_stdout, &captured_stderr),
+                  0);
+        CHECK_I64(process_exit, 0);
+        CHECK(captured_stdout != NULL && ls_str_len(captured_stdout) == 0);
+        CHECK(text_contains(captured_stderr, "oops"));
+        if (captured_stdout != NULL) {
+            ls_release(captured_stdout);
+            captured_stdout = NULL;
+        }
+        if (captured_stderr != NULL) {
+            ls_release(captured_stderr);
+            captured_stderr = NULL;
+        }
+        ls_vec_string_free(&arguments);
+
+        arguments = ls_vec_string_new();
+#if defined(_WIN32)
+        argv_push_text(&arguments, "cmd.exe");
+        argv_push_text(&arguments, "/C");
+        argv_push_text(&arguments, "exit");
+        argv_push_text(&arguments, "7");
+#else
+        argv_push_text(&arguments, "/bin/sh");
+        argv_push_text(&arguments, "-c");
+        argv_push_text(&arguments, "exit 7");
+#endif
+        CHECK_I64(ls_proc_status(&arguments, NULL, &process_exit), 0);
+        CHECK_I64(process_exit, 7);
+        CHECK_I64(ls_proc_status(&arguments, NULL, NULL), -1);
+        CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+        CHECK_I64(ls_proc_output(&arguments, NULL, &process_exit, NULL,
+                                 NULL),
+                  -1);
+        CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+        ls_vec_string_free(&arguments);
+
+        arguments = ls_vec_string_new();
+        argv_push_text(&arguments, "lsaca-program-that-does-not-exist");
+        CHECK_I64(ls_proc_status(&arguments, NULL, &process_exit), -1);
+        CHECK_ERROR(LS_IO_ERROR_NOT_FOUND);
+        ls_vec_string_free(&arguments);
+
+        arguments = ls_vec_string_new();
+        CHECK_I64(ls_proc_status(&arguments, NULL, &process_exit), -1);
+        CHECK_ERROR(LS_IO_ERROR_INVALID_INPUT);
+        ls_vec_string_free(&arguments);
+        ls_release(empty_dir);
     }
 
     /* --- cleanup -------------------------------------------------------- */

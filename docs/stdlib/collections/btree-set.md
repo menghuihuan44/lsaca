@@ -1,6 +1,7 @@
 # btree_set: BTreeSet<T>
 
-**Status in 2.3.0.** Implemented in `stdlib/src/collections.ls`.
+**Status in 2.4.0.** Implemented in `stdlib/src/collections.ls`. Version 2.4.0
+adds `from` and `to_vec`.
 
 `BTreeSet<T>` is the ordered set: it stores its elements in a sorted `Vec<T>`
 and finds them by scanning the vector in order. Reading the set is in ascending
@@ -13,6 +14,7 @@ not a tree; the name is kept for familiarity.)
 | Method | Signature | Meaning |
 | --- | --- | --- |
 | `new` | `() -> BTreeSet<T>` | an empty set |
+| `from` | `(Vec<T>) -> BTreeSet<T>` | builds a set from values; duplicates collapse (2.4.0) |
 | `insert` | `(&mut self, T) -> bool` | adds a value; reports whether it was newly added |
 | `contains` | `(&self, T) -> bool` | whether the set holds a value; the argument is moved or copied |
 | `remove` | `(&mut self, T) -> bool` | removes a value; reports whether it was present |
@@ -20,6 +22,7 @@ not a tree; the name is kept for familiarity.)
 | `is_empty` | `(&self) -> bool` | whether the set is empty |
 | `clear` | `(&mut self)` | removes every value |
 | `elements` | `(&self) -> Vec<T>` | the values in ascending order |
+| `to_vec` | `(&self) -> Vec<T>` | the same vector as `elements`, in ascending order (2.4.0) |
 | `first` | `(&self) -> Option<T>` | the smallest value, or `None` |
 | `last` | `(&self) -> Option<T>` | the largest value, or `None` |
 
@@ -37,7 +40,7 @@ not a tree; the name is kept for familiarity.)
   search is not used yet.
 * Lengths are `usize` since 2.1.0.
 
-## Limitations in 2.3.0
+## Limitations in 2.4.0
 
 There is no `for` loop over a `BTreeSet` yet: read the values with `elements()`.
 Set algebra (`union`, `intersection`, `difference`, `subset`) exists only on

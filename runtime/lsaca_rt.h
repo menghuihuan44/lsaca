@@ -941,6 +941,18 @@ int64_t ls_net_set_timeout(int64_t handle, int64_t milliseconds);
 /* Shut down part of the connection: 0 = read, 1 = write, 2 = both. */
 int64_t ls_net_shutdown(int64_t handle, int32_t how);
 
+/* UDP networking. Addresses use the same "host:port" form as TCP. A bind with
+ * port 0 chooses an ephemeral port (see ls_net_local_port). send_to returns the
+ * number of bytes sent or -1. recv_from returns the datagram length (0 is a
+ * valid empty datagram), stores the peer address as a fresh owned "host:port"
+ * string through out_address when it is not NULL, and returns -1 on error or
+ * timeout. The receive buffer must be non-NULL when capacity is positive. */
+int64_t ls_net_udp_bind(const LsString* address);
+int64_t ls_net_udp_send_to(int64_t handle, const void* bytes, int64_t length,
+                           const LsString* address);
+int64_t ls_net_udp_recv_from(int64_t handle, void* buffer, int64_t capacity,
+                             LsString** out_address);
+
 /* Wall clock and monotonic time, sleep and calendar breakdown. */
 int64_t ls_time_now_ms(void);
 int64_t ls_time_monotonic_ns(void);
@@ -962,6 +974,18 @@ int64_t ls_time_utc_parts(int64_t unix_ms, int32_t* year, int32_t* month,
 LsString* ls_env_var(const LsString* name);
 LsVec_String* ls_env_vars(void);
 LsVec_String* ls_proc_args(void);
+
+/* Run a program with an exact argument vector (argv[0] is the program; no
+ * shell is involved). current_dir is NULL or an empty string to inherit the
+ * parent's working directory. status inherits the parent's standard streams;
+ * output captures both streams through pipes and returns fresh owned strings
+ * (invalid UTF-8 is replaced with '?'). Both return 0 on success and -1 with
+ * the per-thread I/O error on failure. */
+int64_t ls_proc_status(const LsVec_String* argv, const LsString* current_dir,
+                       int64_t* exit_code);
+int64_t ls_proc_output(const LsVec_String* argv, const LsString* current_dir,
+                       int64_t* exit_code, LsString** out_stdout,
+                       LsString** out_stderr);
 
 /* ====================================================================== */
 /* Math helpers                                                           */

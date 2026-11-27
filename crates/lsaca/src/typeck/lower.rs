@@ -650,8 +650,9 @@ impl<'a> Checker<'a> {
                     expr: Box::new(slice),
                 }
             }
-            TExprKind::Break { label } => HExprKind::Break {
+            TExprKind::Break { label, value } => HExprKind::Break {
                 label: label.clone(),
+                value: value.as_ref().map(|value| Box::new(self.lower_expr(value))),
             },
             TExprKind::Continue { label } => HExprKind::Continue {
                 label: label.clone(),
@@ -729,6 +730,22 @@ impl<'a> Checker<'a> {
             TPatKind::Tuple(elems) => {
                 HPatKind::Tuple(elems.iter().map(|elem| self.lower_pat(elem)).collect())
             }
+            TPatKind::Array(elems) => {
+                HPatKind::Array(elems.iter().map(|elem| self.lower_pat(elem)).collect())
+            }
+            TPatKind::Slice {
+                prefix,
+                suffix,
+                rest,
+            } => HPatKind::Slice {
+                prefix: prefix.iter().map(|elem| self.lower_pat(elem)).collect(),
+                suffix: suffix.iter().map(|elem| self.lower_pat(elem)).collect(),
+                rest: *rest,
+            },
+            TPatKind::At { binding, pattern } => HPatKind::At {
+                binding: Box::new(self.lower_pat(binding)),
+                pattern: Box::new(self.lower_pat(pattern)),
+            },
             TPatKind::Struct {
                 struct_id,
                 fields,

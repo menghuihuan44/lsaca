@@ -10,6 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 use lsaca::codegen::CodegenOptions;
 use lsaca::diag::Diagnostics;
 use lsaca::driver::{self, BuildOptions, Frontend, LoadError};
+use lsaca::package;
 use lsaca::span::{SourceFile, SourceMap};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -279,13 +280,14 @@ fn command_check(args: &[String]) -> CliResult {
 
 /// Parsed command line options for 'lsaca fmt'.
 struct FmtOptions {
-    file: PathBuf,
+    /// File or directory to format; the current directory when absent.
+    target: PathBuf,
     check: bool,
     stdout: bool,
 }
 
 fn parse_fmt_options(args: &[String]) -> Result<FmtOptions, Cli> {
-    let mut file: Option<PathBuf> = None;
+    let mut target: Option<PathBuf> = None;
     let mut check = false;
     let mut stdout = false;
     for arg in args {
@@ -300,57 +302,62 @@ fn parse_fmt_options(args: &[String]) -> Result<FmtOptions, Cli> {
                 )));
             }
             other => {
-                if file.is_some() {
+                if target.is_some() {
                     return Err(Cli::Usage(format!(
-                        "unexpected argument '{}': 'lsaca fmt' takes one file",
+                        "unexpected argument '{}': 'lsaca fmt' takes one file or directory",
                         other
                     )));
                 }
-                file = Some(PathBuf::from(other));
+                target = Some(PathBuf::from(other));
             }
         }
     }
-    let Some(file) = file else {
-        return Err(Cli::Usage("'lsaca fmt' needs a file to format".to_string()));
-    };
     if check && stdout {
         return Err(Cli::Usage(
             "'lsaca fmt' accepts either --check or --stdout, not both".to_string(),
         ));
     }
     Ok(FmtOptions {
-        file,
+        target: target.unwrap_or_else(|| PathBuf::from(".")),
         check,
         stdout,
     })
 }
 
-/// Rewrite a source file with canonical indentation.
+/// Format one source file, or every module of the package containing the target.
 ///
-/// The file is only touched when it parses cleanly: a syntax error leaves the
+/// A file is only rewritten when it parses cleanly: a syntax error leaves the
 /// original bytes untouched and reports the usual diagnostics. With --check the
-/// command reports whether the file would change and exits with 1 in that case;
-/// with --stdout the formatted text goes to standard output instead of the file.
+/// command reports which files would change and exits with 1 in that case;
+/// with --stdout the formatted text goes to standard output instead of the
+/// file (single-file mode only).
+///
+/// When the target is a directory, the nearest lsaca.toml is discovered and
+/// every .ls file under that package's src directory is formatted. All modules
+/// are validated before anything is written, so a broken module never leaves a
+/// package half formatted.
 fn command_fmt(args: &[String]) -> CliResult {
     let options = parse_fmt_options(args)?;
-    let source = fs::read_to_string(&options.file).map_err(|error| {
-        Cli::Failure(format!(
-            "failed to read {}: {}",
-            options.file.display(),
-            error
-        ))
-    })?;
-    let file = SourceFile::new(options.file.display().to_string(), source.clone());
-    let (tokens, mut diagnostics) = lsaca::lexer::tokenize_file(&file);
-    let (_, parse_diagnostics) = lsaca::parser::parse(&tokens, &file);
-    diagnostics.extend(parse_diagnostics);
-    if diagnostics.has_errors() {
-        eprint!("{}", diagnostics.render(&file));
-        return Err(Cli::Failure(format!(
-            "{}: could not be formatted due to previous error(s)",
-            options.file.display()
-        )));
+    let is_directory = fs::metadata(&options.target)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    if is_directory {
+        if options.stdout {
+            return Err(Cli::Usage(
+                "'--stdout' formats a single file; a directory formats a whole package".to_string(),
+            ));
+        }
+        return format_package(&options);
     }
+    format_single_file(&options)
+}
+
+/// Format a single file given on the command line.
+fn format_single_file(options: &FmtOptions) -> CliResult {
+    let path = &options.target;
+    let source = fs::read_to_string(path)
+        .map_err(|error| Cli::Failure(format!("failed to read {}: {}", path.display(), error)))?;
+    validate_source(path, &source)?;
     let formatted = lsaca::fmt::format_source(&source);
     if options.stdout {
         print!("{}", formatted);
@@ -360,19 +367,130 @@ fn command_fmt(args: &[String]) -> CliResult {
         return Ok(0);
     }
     if options.check {
-        eprintln!("lsaca: would format {}", options.file.display());
+        eprintln!("lsaca: would format {}", path.display());
         return Ok(1);
     }
-    fs::write(&options.file, formatted.as_bytes()).map_err(|error| {
-        Cli::Failure(format!(
-            "failed to write {}: {}",
-            options.file.display(),
-            error
-        ))
-    })?;
+    fs::write(path, formatted.as_bytes())
+        .map_err(|error| Cli::Failure(format!("failed to write {}: {}", path.display(), error)))?;
     Ok(0)
 }
 
+/// Format every module of the package containing the fmt target directory.
+fn format_package(options: &FmtOptions) -> CliResult {
+    let Some(manifest) = package::discover_manifest(&options.target)? else {
+        return Err(Cli::Usage(format!(
+            "'lsaca fmt' needs a file or a directory inside a package: no lsaca.toml found in {} or its ancestors",
+            options.target.display()
+        )));
+    };
+    let package_dir = manifest
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let source_root = package_dir.join("src");
+    let mut files = Vec::new();
+    collect_source_files(&source_root, &mut files)?;
+    files.sort();
+    if files.is_empty() {
+        return Err(Cli::Failure(format!(
+            "no .ls source files found under {}",
+            display_relative(&source_root)
+        )));
+    }
+    // Validate every module before touching any file, so a syntax error never
+    // leaves the package partially formatted.
+    let mut invalid = false;
+    for path in &files {
+        let source = fs::read_to_string(path).map_err(|error| {
+            Cli::Failure(format!("failed to read {}: {}", path.display(), error))
+        })?;
+        if validate_source(path, &source).is_err() {
+            invalid = true;
+        }
+    }
+    if invalid {
+        return Err(Cli::Failure(format!(
+            "{}: could not be formatted due to previous error(s)",
+            display_relative(&package_dir)
+        )));
+    }
+    let mut changed: Vec<(PathBuf, String)> = Vec::new();
+    for path in &files {
+        let source = fs::read_to_string(path).map_err(|error| {
+            Cli::Failure(format!("failed to read {}: {}", path.display(), error))
+        })?;
+        let formatted = lsaca::fmt::format_source(&source);
+        if formatted != source {
+            changed.push((path.clone(), formatted));
+        }
+    }
+    if options.check {
+        for (path, _) in &changed {
+            eprintln!("lsaca: would format {}", display_relative(path));
+        }
+        return Ok(if changed.is_empty() { 0 } else { 1 });
+    }
+    for (path, text) in &changed {
+        fs::write(path, text.as_bytes()).map_err(|error| {
+            Cli::Failure(format!("failed to write {}: {}", path.display(), error))
+        })?;
+    }
+    let noun = if changed.len() == 1 { "file" } else { "files" };
+    eprintln!(
+        "lsaca: formatted {} {} in {}",
+        changed.len(),
+        noun,
+        display_relative(&package_dir)
+    );
+    Ok(0)
+}
+
+/// Check that a source file lexes and parses before it is reformatted.
+fn validate_source(path: &Path, source: &str) -> Result<(), Cli> {
+    let file = SourceFile::new(path.display().to_string(), source.to_string());
+    let (tokens, mut diagnostics) = lsaca::lexer::tokenize_file(&file);
+    let (_, parse_diagnostics) = lsaca::parser::parse(&tokens, &file);
+    diagnostics.extend(parse_diagnostics);
+    if diagnostics.has_errors() {
+        eprint!("{}", diagnostics.render(&file));
+        return Err(Cli::Failure(format!(
+            "{}: could not be formatted due to previous error(s)",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Collect .ls files below a directory in a deterministic order.
+fn collect_source_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), Cli> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(Cli::from(error)),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        paths.push(entry.map_err(Cli::from)?.path());
+    }
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            collect_source_files(&path, files)?;
+        } else if path.extension().is_some_and(|extension| extension == "ls") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Path shown in fmt messages: relative to the current directory when
+/// possible and always with forward slashes.
+fn display_relative(path: &Path) -> String {
+    let relative = env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(&cwd).ok().map(Path::to_path_buf))
+        .unwrap_or_else(|| path.to_path_buf());
+    relative.to_string_lossy().replace('\\', "/")
+}
 /// Create a new binary package: lsaca.toml plus src/main.ls.
 fn command_new(args: &[String]) -> CliResult {
     let mut destination: Option<PathBuf> = None;
@@ -659,7 +777,7 @@ COMMANDS:
     build [FILE.ls]              compile and build a native executable
     emit-c [FILE.ls]             write the generated C project only
     check [FILE.ls]              run the front end and report diagnostics
-    fmt <FILE.ls> [--check]      rewrite a source file with canonical indentation
+    fmt [FILE.ls|DIR] [--check]  format one file or every module of a package
     new <DIR>                    create a new binary package
     version                      print the compiler version
     help                         print this help
@@ -668,6 +786,9 @@ When no FILE.ls is given, run/build/emit-c/check operate on the package whose
 lsaca.toml is the nearest one walking up from the current directory. Package
 dependencies declared in [dependencies] with a path are compiled together.
 
+'lsaca fmt' formats a single file, or - when given a directory (or no path at
+all inside a package) - every module file under that package's src directory.
+
 OPTIONS:
     -r, --release                build with optimizations and wrapping arithmetic
     -o, --out-dir <DIR>          output directory for 'build' and 'emit-c'
@@ -675,6 +796,7 @@ OPTIONS:
         --keep                   print the temporary build tree location
         --cmake                  build via the generated CMake project instead
                                  of the built-in direct C compiler back end
+        --stdout                 (fmt) print the formatted file instead of writing it
     -h, --help                   print this help
 
 EXIT CODES:

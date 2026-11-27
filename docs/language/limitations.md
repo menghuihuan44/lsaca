@@ -20,7 +20,7 @@ later release.
 | Formatting | Width, fill and alignment apply to a user struct/enum as a whole, but the `+`/`0` flags and precision are rejected for them (`E0001`); character precision and the `+`/`0` flags are also rejected; no named or indexed arguments | Format fields individually, or apply width/fill/alignment to the whole value |
 | Numbers | `pow` is float-only; no integer exponentiation builtin | Convert to `f64` or write a loop |
 | Generic `parse` | `parse::<T>()` accepts only `i64` and `f64` as the target type in the current release; any other numeric target is `E0107` | Use `parse_i64()`/`parse_f64()`; for another integer type parse an `i64` and cast |
-| Patterns | No `@`/`ref`/slice/range patterns, and a reference pattern like `let &x = r` is rejected | Match a reference scrutinee directly: the ergonomic bindings are references, so read and write through `*binding` |
+| Patterns | Since 2.4.0 fixed-size array patterns, slice patterns and `@` bindings are accepted; there are still no `ref`, range or `&` patterns, and a slice pattern has at most one `..` | Match a reference scrutinee directly: the ergonomic bindings are references, so read and write through `*binding` |
 | Reference storage | Since 2.2.0 a struct, enum or tuple struct field may hold a direct `&'a T`/`&'a mut T`; `Option<&T>`, tuple-typed fields, `Vec`/`HashMap` elements, `Result` payloads, `Box` payloads, array elements and closure captures still reject references (`E0498`) | Keep references in locals, parameters, return values and the supported aggregates |
 | Mutable references | `&mut` to a user struct/enum containing a heap field is rejected (`E0498`); mutable references to scalars, `Copy` aggregates, `char`, `String`, `Vec<T>`, `Rc<T>` and `Box<T>` work | Take `&T` or restructure the code |
 | Method receivers | A by-value `self` method cannot return a reference (`E0106`), and a `&self` method can only return shared references (`E0596`) | Return shared references from `&self` methods, mutable references from `&mut self` methods, and owned values from by-value methods |
@@ -41,26 +41,26 @@ later release.
 | Trait objects | `dyn Trait` values exist only behind `Box`, `Rc`, `&` or `&mut` (bare `dyn Trait` is `E0001`); the trait must be object-safe (`E0038`: every method `&self`/`&mut self`, no generics, no associated items, no `Self` outside the receiver); there is no upcasting between trait objects; `Box<dyn Trait>` has no `get`/`set` (`E0001`) and `==`/`<` are `E0369`; a non-object-safe trait still works for generic/static dispatch | Make the trait object-safe, or use generic bounds when the concrete type is known |
 | Trait shape | No associated functions, generic methods, supertraits, associated types or constants; default method bodies are supported since 2.0; `impl Trait for Type` only for user structs and enums (a builtin target is `E0118`, except in the `std` crate) | Implement every required method explicitly; use generic bounds for the rest |
 | Slices and `str` | `[T]` and `str` are unsized and exist only behind `&`/`&mut` (`E0001` otherwise); slice indices are `usize`, so an `i32`/`i64` index is a type error (`E0308`) — cast with `as`; user crates cannot write `impl [T]` or `impl str` (`E0118`) | Use `Vec<T>`/`String` for storage and take `&[T]`/`&str` parameters for borrowing |
-| Arrays | `[T; N]` values have a fixed length; there are no array patterns, no by-value iteration (`E0277`; iterate the indices), an array length must be an integer literal or integer constant (`E0435`), the length is capped at 1,048,576, and `&mut array` does not coerce to `&mut [T]` | Index with `0..array.len()`, borrow as `&array` for `&[T]`, and use `Vec<T>` when the length changes |
-| Loop labels | Labels are supported on `loop`, `while`, `for` and before `while let`; a label on another statement is `E0001`, a missing `:` is `E0001`, an undeclared label is `E0426`, and `break 'label value` is `E0308` | Use `break 'outer;` without a value and carry the result in a variable |
+| Arrays | `[T; N]` values have a fixed length; since 2.4.0 a fixed-size array pattern must match the length exactly (`E0308`), and there is still no by-value iteration (`E0277`; iterate the indices). An array length must be an integer literal or integer constant (`E0435`), the length is capped at 1,048,576, and `&mut array` does not coerce to `&mut [T]` | Index with `0..array.len()`, borrow as `&array` for `&[T]`, and use `Vec<T>` when the length changes |
+| Loop labels | Labels are supported on `loop`, `while`, `for` and before `while let`; a label on another statement is `E0001`, a missing `:` is `E0001`, an undeclared label is `E0426`. Since 2.4.0 a `loop` can carry a value out of `break`; a value in a `while`/`for` break is `E0571` and a value on `continue` is `E0308` | Use `break value` from a `loop` when a result is needed; otherwise keep `break` bare |
 | Lifetimes | Reference fields require a declared lifetime (`E0106`) and the field lifetime must be a named parameter — a `'static` field is `E0498` ("the 'static lifetime is not supported yet"); lifetime arguments are checked (`E0261`); checking is conservative: no variance, no outlives relations and no equality check between named lifetimes; a `&self` method cannot return a mutable borrow (`E0596`) | Keep reference fields few, declare a named lifetime parameter for each, and return owned values when the relations get complicated |
 | `From` conversions | `?` converts through a user `impl From<Found> for Expected`; there is no blanket `From<T> for T`, no `Into`, no `Try` and no `From<&str> for String`; `Error::source` has a default body and nothing calls it automatically | Write the `impl From` for each error pair you rely on |
-| Formatter | `lsaca fmt` only normalises indentation, trailing whitespace, blank-line runs and line endings; it does not reflow lines, merge lines, change token spacing, follow modules or format a whole crate, and a file with a syntax error is left untouched | Run `lsaca fmt` per file; keep hand-written line breaks |
+| Formatter | `lsaca fmt` normalises indentation, trailing whitespace, blank-line runs and line endings. It does not reflow or merge lines and does not change token spacing inside a line; `--stdout` works on a single file only, and a file or package with a syntax error is left untouched | Format a package directory (it discovers `lsaca.toml`) or a file; keep hand-written line breaks |
 | Integer types | There are no `i128`/`u128` types, and their literal suffixes are rejected while lexing; an unsuffixed integer literal is `i32`, so a value outside that range needs a suffix or an annotation (a suffixed literal that does not fit its type is `E0080`) | Write `1i64` or annotate the binding; use `i64`/`u64` for very large values |
 | Extern functions | `extern fn` declarations are accepted only in the `std` crate (user code is `E0001`) and are not first-class values (`E0425`) | Call the public `std` function or method instead |
-| Standard library status | The `std` crate is implemented module by module in the current release; the [standard library reference](../stdlib/README.md) marks every page *implemented* or *planned*. Remaining gaps in the current release: `net` is plain TCP without TLS, UDP, DNS or `SocketAddr`; `time` has the clocks, `Duration`, `Instant` and `SystemTime` but no time-zone database; there is no `Command`, `Ordering` or `FromUtf8Error`; `parse::<T>()` accepts only `i64` and `f64` targets in the current release; a few `str`/`Vec` helpers are still planned, and the `From` conversions used by `?` cover only the pairs the library defines. `use std::…` imports work, while qualified type names in type position do not resolve (`E0412`) and trait paths in `impl` blocks are rejected (`E0001`, import the trait instead) | Read the module page for what exists in the current release; OS failures return a `Result` and never panic |
+| Standard library status | The `std` crate is implemented module by module in the current release; the [standard library reference](../stdlib/README.md) marks every page *implemented* or *planned*. Remaining gaps in 2.4.0: `net` has TCP and UDP but no TLS, Unix-domain sockets, dedicated DNS lookup API or nonblocking mode; `time` has the clocks, `Duration`, `Instant` and `SystemTime` but no time-zone database; there is no `Ordering` or `FromUtf8Error`; `parse::<T>()` accepts only `i64` and `f64` targets; a few `str`/`Vec` helpers are still planned, and the `From` conversions used by `?` cover only the pairs the library defines. `std::process` has `args`, `exit` and `Command`; `std::net` has `SocketAddr` and `UdpSocket`. `use std::…` imports work, while qualified type names in type position do not resolve (`E0412`) and trait paths in `impl` blocks are rejected (`E0001`, import the trait instead) | Read the module page for what exists in the current release; OS failures return a `Result` and never panic |
 | Generic shapes | No `where` clauses, associated types, const generics, default type parameters, specialization or generic type aliases/constants | Write bounds inline; name the concrete types |
 | Generic checking | Generic bodies are late-checked once per instantiation; a never-used instantiation is never checked and its errors never appear; instantiating more than 128 levels deep is `E0275` | Instantiate the types you rely on; watch the recursion limit |
 | Monomorphization | Each instantiation is its own checked function and C function; generic code is not shared between instantiations | Keep the number of instantiations small |
 | Compiler scaling | Type checking one very large function is superlinear in its statement count: about 5,000 `let` statements take 1.1 s, 10,000 take 4.5 s, 20,000 take 17 s and 50,000 do not finish within a minute; a 100,000-element `vec![…]` literal is similarly slow | Split huge functions into helpers and build large vectors with a loop |
 | Expression nesting | The parser accepts at most 128 levels of nested expressions, types and patterns. Deeper code is rejected with `E0001` "this code is nested too deeply" (the compiler runs its recursive passes on a large stack so accepted programs cannot overflow it). Ordinary code is unaffected: 100-term arithmetic chains, 100 chained method calls and flat literals of 8,000 or more elements all compile | Split pathological machine-generated code into smaller statements or helpers |
 | Iterators | Since 2.3.0 `.iter()` borrows and yields `&T`, `.iter_mut()` yields `&mut T` and `.into_iter()` consumes; `rev` and `flat_map` exist, `size_hint` does not (and is not planned); `collect` needs a known `Vec<T>` target type (`E0282`) and cannot collect borrowed items such as `Vec<&T>` (`E0498`); `sum` and `product` accept `i32`, `i64`, `usize` and `f64` items (`E0277` for any other item type) | Use the provided adapters; map borrowed items to owned values before `collect`, `sum` or `product` |
-| HashMap | Keys are limited to the integer types, `bool`, `String` and `char`; there is no entry API (see [RFC 0002](../../rfcs/0002-hashmap-entry.md)); `HashMap::from(Vec<(K, V)>)` builds a map, with the last duplicate key winning; `iter()`, `keys()` and `values()` borrow the map and do not clone; printed order is slot order (deterministic for a given sequence of operations, but not insertion order and not guaranteed) | Iterate with `for (key, value) in &map`; use `get_with` when the value must be borrowed in a closure |
+| HashMap | Keys are limited to the integer types, `bool`, `String` and `char`; 2.4.0 adds the `get_or_insert` and `get_or_insert_with` idioms, but there is still no borrowed `Entry` value (see [RFC 0002](../../rfcs/0002-hashmap-entry.md)); `HashMap::from(Vec<(K, V)>)` builds a map, with the last duplicate key winning; `iter()`, `keys()` and `values()` borrow the map and do not clone; printed order is slot order (deterministic for a given sequence of operations, but not insertion order and not guaranteed) | Iterate with `for (key, value) in &map`; use `get_or_insert_with` when the value must be computed lazily |
 | HashMap hashing | The hash is deterministic and non-cryptographic; it is not designed to resist adversarial inputs | Do not expose a map directly to untrusted keys |
 | Module files | A module is found only by the `name.ls` / `name/mod.ls` rule: no path attributes, no conditional compilation, no directory scan and no include mechanism; a module file must be valid UTF-8 (`E0583` otherwise) | Keep the conventional layout; rename or move files instead of annotating them |
 | Module cycles | The tree of `mod` declarations must be acyclic: circular module files are `E0001` | Move shared items down into a module that does not depend back |
 | Glob imports | `use path::*;` parses but the resolver rejects it (`E0432`) | List the names, use a group `{ … }`, or re-export with `pub use` |
-| Restricted visibility | `pub(super)` and `pub(in path)` are rejected (`E0001`); the only levels are private, `pub(crate)` and `pub` | Use `pub(crate)` or restructure the module tree |
+| Restricted visibility | `pub(super)` and `pub(in path)` exist since 2.4.0, but `pub(in path)` must name an ancestor module: a sibling or descendant path is `E0742` and an unresolved path is `E0433` | Point `pub(in …)` at an ancestor, or use `pub(crate)`/private visibility |
 | Package dependencies | Path dependencies only: `util = { path = "../util" }`; no registry, git, version resolution, workspace, features or lockfile, and dependency versions are metadata | Keep dependencies as sibling directories in the repository |
 | Package layout | A package is a binary (`src/main.ls`) or a library (`src/lib.ls`); a library-only package can only be `check`ed (run, build and emit-c need `src/main.ls`), a binary root without `fn main` fails `check` with `E0601`, and a package that has both files is rejected with `E0001` | Split libraries and binaries into separate packages |
 | Manifest subset | `lsaca.toml` is a strict line-oriented TOML subset: only `[package]` and `[dependencies]`, double-quoted strings and one inline `{ path = … }` per dependency; any other key or section is `E0001` | Keep manifests minimal |
@@ -77,29 +77,45 @@ The roadmap items that are still open:
 * full lifetime relations (variance, outlives, named-lifetime equality) and
   generic lifetime bounds;
 * `&'static` reference fields: a field lifetime must be a named parameter;
-* values out of `break`/`continue`;
+* values out of a `while`/`for` break or from `continue` (a `loop` break
+  value is supported since 2.4.0);
+* `ref`, range and `&` patterns (array, slice and `@` patterns are supported
+  since 2.4.0);
 * `where` clauses, associated types, supertraits, generic methods, associated
   functions and const generics;
-* operator traits, `derive` attributes, the `Display`/`Debug`/`Default`/`Ord`/
-  `Hash` protocols, associated types on traits and `impl Trait`;
+* operator traits, `derive` attributes, user `Display`/`Debug`/`Default`/`Ord`/
+  `Hash` impls, associated types on traits and `impl Trait` — protocols are
+  compiler-defined in 2.x per [RFC 0003](../../rfcs/0003-derive-and-protocols.md);
 * iterator `size_hint` (not planned);
-* glob imports, restricted visibility (`pub(super)`, `pub(in path)`) and module
-  aliases;
+* glob imports and a borrowed `HashMap` `Entry` value (deferred to v2.6 by
+  [RFC 0002](../../rfcs/0002-hashmap-entry.md));
 * registry dependencies, git dependencies, workspaces, features, lockfiles and
   Cargo compatibility;
 * user-defined macros and attributes;
-* threads;
+* threads (2.x is single-threaded by contract; see
+  [RFC 0004](../../rfcs/0004-concurrency.md));
 * separate compilation and per-crate incremental compilation;
 * a language server (LSP).
 
 The order of work and the frozen release contracts are maintained in
-[ROADMAP.md](../../ROADMAP.md); the v2.3 release targets:
+[ROADMAP.md](../../ROADMAP.md); the v2.4 release contract adds:
 
-* **v2.3** — delivered: borrowed iteration, `Vec::iter_mut`, `HashMap`
-  iteration, I/O streams, `PathBuf`/`Path`, Unicode character classification,
-  the missing combinators and partial moves (recorded in the delivered list
-  below). Later releases track references in aggregates, full lifetimes,
-  unsafe/FFI and threads.
+* fixed-size array, slice and `@` patterns in every pattern position, and
+  break values on `loop`;
+* `pub(super)`, `pub(in path)` and module aliases;
+* `HashMap` entry idioms, constructors/accessors on the other collection
+  types, the `min`/`max` iterator terminals, `process::Command` and
+  `SocketAddr`/`UdpSocket`;
+* formatter package mode;
+* the protocol and concurrency boundaries recorded in
+  [RFC 0003](../../rfcs/0003-derive-and-protocols.md) and
+  [RFC 0004](../../rfcs/0004-concurrency.md).
+
+The v2.3 release delivered borrowed iteration, `Vec::iter_mut`, `HashMap`
+iteration, I/O streams, `PathBuf`/`Path`, Unicode character classification,
+the missing combinators and partial moves (recorded in the delivered list
+below). Later releases track references in aggregates, full lifetimes,
+unsafe/FFI and threads.
 
 Items already delivered, intentionally no longer on the list:
 
@@ -192,4 +208,18 @@ Items already delivered, intentionally no longer on the list:
   borrowing iterators — **delivered in 2.3.0**.
 * partial moves in destructuring `let` patterns: binding an owning value moves
   the aggregate instead of deep-copying it, and the unbound fields are dropped —
-  **delivered in 2.3.0**.
+  **delivered in 2.3.0**;
+* fixed-size array, slice and `@` patterns — **delivered in 2.4.0**;
+* `break value` from a `loop`, with `E0571` for a value in a `while`/`for`
+  break and `E0308` for a value on `continue` — **delivered in 2.4.0**;
+* `pub(super)`, `pub(in path)` restricted visibility and module aliases —
+  **delivered in 2.4.0**;
+* `HashMap::get_or_insert`/`get_or_insert_with` and the new collection
+  constructors/accessors — **delivered in 2.4.0**;
+* the `min`/`max` iterator terminals — **delivered in 2.4.0**;
+* `process::Command` and `net::SocketAddr`/`UdpSocket` — **delivered in 2.4.0**;
+* `lsaca fmt` package mode with `--check` over a file or directory —
+  **delivered in 2.4.0**;
+* the compiler-defined protocol and single-threaded concurrency boundaries —
+  recorded in [RFC 0003](../../rfcs/0003-derive-and-protocols.md) and
+  [RFC 0004](../../rfcs/0004-concurrency.md) for 2.x.

@@ -52,6 +52,15 @@ pub extern fn __map_keys<K, V>(table: &HashMap<K, V>) -> Vec<K>;
 pub extern fn __map_get_ref<K, V>(table: &HashMap<K, V>, key: K) -> Option<&V>;
 pub extern fn __map_get_mut<K, V>(table: &mut HashMap<K, V>, key: K) -> Option<&mut V>;
 
+// Entry idioms (2.4): a borrowed Entry value is deferred to v2.6 (RFC 0002),
+// so these methods take the key by value and return a mutable reference to the
+// stored value. The language has no generic methods, so the lazy form takes a
+// function value (fn() -> V) rather than a generic F: Fn() -> V; ordinary
+// closures and function names both have this type. The value is computed only
+// when the key is absent. Insert may grow and rehash the table, so every path
+// looks the key up again after a possible insert and never holds a reference
+// across insert.
+
 impl<K, V> HashMap<K, V> {
     pub fn new() -> HashMap<K, V> {
         return __map_new::<K, V>();
@@ -81,6 +90,35 @@ impl<K, V> HashMap<K, V> {
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         let lookup_key: K = key.clone();
         return __map_get_mut(self, lookup_key);
+    }
+
+    /// Returns a mutable reference to the value stored for `key`, inserting
+    /// `default` when the key is absent (2.4 entry idiom). The key is cloned
+    /// for the lookup and for a possible insert; the reference is looked up
+    /// again after the insert because growing the table rehashes it.
+    pub fn get_or_insert(&mut self, key: K, default: V) -> &mut V {
+        if self.contains_key(key.clone()) {
+            return self.get_mut(&key).unwrap();
+        }
+        self.insert(key.clone(), default);
+        return self.get_mut(&key).unwrap();
+    }
+
+    /// Returns a mutable reference to the value stored for `key`, inserting
+    /// the result of `f` when the key is absent (2.4 entry idiom).
+    ///
+    /// `f` is called only on the absent path. The language has no generic
+    /// methods, so the parameter type is the language's function value type
+    /// `fn() -> V`; ordinary closures and named functions both have that type.
+    /// The reference is looked up again after the insert because growing the
+    /// table rehashes it.
+    pub fn get_or_insert_with(&mut self, key: K, f: fn() -> V) -> &mut V {
+        if self.contains_key(key.clone()) {
+            return self.get_mut(&key).unwrap();
+        }
+        let value: V = f();
+        self.insert(key.clone(), value);
+        return self.get_mut(&key).unwrap();
     }
 
     pub fn clear(&mut self) {

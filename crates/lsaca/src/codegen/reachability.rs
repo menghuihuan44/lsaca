@@ -240,9 +240,13 @@ fn scan_expr(expr: &HExpr, marks: &mut Marks) {
         | HExprKind::Local { .. }
         | HExprKind::Capture { .. }
         | HExprKind::ConstRef { .. }
-        | HExprKind::Break { .. }
         | HExprKind::Continue { .. }
         | HExprKind::OptionNone => {}
+        HExprKind::Break { value, .. } => {
+            if let Some(value) = value {
+                scan_expr(value, marks);
+            }
+        }
         HExprKind::FnRef { fn_id } => {
             marks.fns.insert(*fn_id);
         }

@@ -9,10 +9,11 @@
 //! turn into a call of a function that does not exist.
 
 use super::emit::Gen;
+use super::types::positional_field;
 use super::util;
 use crate::hir::{HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HExpr, HExprKind, HFn};
 use crate::span::Span;
-use crate::types::Ty;
+use crate::types::{IntTy, Ty};
 
 impl<'a> Gen<'a> {
     /// Expand a call of the intrinsic function `item` into `target`.
@@ -83,6 +84,11 @@ impl<'a> Gen<'a> {
         if self.try_gen_slice_intrinsic(name, args, ty, target, span) {
             return;
         }
+        // v2.4 system surface: UDP and process spawning extend the frozen
+        // Phase C runtime ABI. They live here because phase_c.rs is frozen.
+        if self.try_gen_system_intrinsic(name, args, ty, target, span) {
+            return;
+        }
         // Phase C maps every operating-system intrinsic onto an existing
         // runtime function; the table is disjoint from the builtin names.
         if self.try_gen_phase_c_intrinsic(name, args, ty, target, span) {
@@ -102,6 +108,210 @@ impl<'a> Gen<'a> {
             return;
         }
         util::internal_error(format!("no codegen emitter for intrinsic `{}`", full_name));
+    }
+
+    /// v2.4: emit the UDP and process intrinsic calls added on top of the
+    /// frozen Phase C table. Returns false for every other name so the Phase C
+    /// and builtin tables below still see it.
+    fn try_gen_system_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[HExpr],
+        ty: &Ty,
+        target: &str,
+        _span: Span,
+    ) -> bool {
+        let bare = name.strip_prefix("__").unwrap_or(name);
+        match bare {
+            "net_udp_bind" => {
+                require_i64(name, ty);
+                let address = system_text(self, name, args, 0);
+                self.line(format!("{} = ls_net_udp_bind({});", target, address));
+            }
+            "net_udp_send_to" => {
+                require_i64(name, ty);
+                let handle = system_int(self, name, args, 0);
+                let (data, len) = system_buffer(self, name, args, 1);
+                let address = system_text(self, name, args, 2);
+                self.line(format!(
+                    "{} = ls_net_udp_send_to({}, (const void*)({}), {}, {});",
+                    target, handle, data, len, address
+                ));
+            }
+            "net_udp_recv_from" => {
+                require_tuple(name, ty, &[Ty::i64(), Ty::String]);
+                let handle = system_int(self, name, args, 0);
+                let (data, len) = system_buffer(self, name, args, 1);
+                let peer = self.new_plain_of("LsString*", "udp_peer");
+                let count = self.new_plain_of("int64_t", "udp_count");
+                self.line(format!(
+                    "{} = ls_net_udp_recv_from({}, (void*)({}), {}, &{});",
+                    count, handle, data, len, peer
+                ));
+                let zero = self.raw_zero_expr(ty);
+                self.line(format!("{} = {};", target, zero));
+                self.line(format!(
+                    "{}.{} = (int64_t)({});",
+                    target,
+                    positional_field(0),
+                    count
+                ));
+                self.line(format!("{}.{} = {};", target, positional_field(1), peer));
+            }
+            "proc_status" => {
+                require_tuple(name, ty, &[Ty::i64(), Ty::i64()]);
+                let argv = system_vec_string(self, name, args, 0);
+                let directory = system_text(self, name, args, 1);
+                let status = self.new_plain_of("int64_t", "proc_status");
+                let exit_code = self.new_plain_of("int64_t", "proc_exit");
+                self.line(format!(
+                    "{} = ls_proc_status({}, {}, &{});",
+                    status, argv, directory, exit_code
+                ));
+                let zero = self.raw_zero_expr(ty);
+                self.line(format!("{} = {};", target, zero));
+                self.line(format!(
+                    "{}.{} = (int64_t)({});",
+                    target,
+                    positional_field(0),
+                    status
+                ));
+                self.line(format!(
+                    "{}.{} = (int64_t)({});",
+                    target,
+                    positional_field(1),
+                    exit_code
+                ));
+            }
+            "proc_output" => {
+                require_tuple(name, ty, &[Ty::i64(), Ty::i64(), Ty::String, Ty::String]);
+                let argv = system_vec_string(self, name, args, 0);
+                let directory = system_text(self, name, args, 1);
+                let status = self.new_plain_of("int64_t", "proc_status");
+                let exit_code = self.new_plain_of("int64_t", "proc_exit");
+                let stdout = self.new_plain_of("LsString*", "proc_stdout");
+                let stderr = self.new_plain_of("LsString*", "proc_stderr");
+                self.line(format!(
+                    "{} = ls_proc_output({}, {}, &{}, &{}, &{});",
+                    status, argv, directory, exit_code, stdout, stderr
+                ));
+                let zero = self.raw_zero_expr(ty);
+                self.line(format!("{} = {};", target, zero));
+                self.line(format!(
+                    "{}.{} = (int64_t)({});",
+                    target,
+                    positional_field(0),
+                    status
+                ));
+                self.line(format!(
+                    "{}.{} = (int64_t)({});",
+                    target,
+                    positional_field(1),
+                    exit_code
+                ));
+                self.line(format!("{}.{} = {};", target, positional_field(2), stdout));
+                self.line(format!("{}.{} = {};", target, positional_field(3), stderr));
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// The argument at `index` of a system intrinsic.
+fn system_argument<'e>(name: &str, args: &'e [HExpr], index: usize) -> &'e HExpr {
+    match args.get(index) {
+        Some(argument) => argument,
+        None => util::internal_error(format!(
+            "intrinsic {} is called without argument {}",
+            name, index
+        )),
+    }
+}
+
+/// Borrow a text argument as a `const LsString*`.
+fn system_text(emitter: &mut Gen<'_>, name: &str, args: &[HExpr], index: usize) -> String {
+    let argument = system_argument(name, args, index);
+    let context = format!("intrinsic {}", name);
+    emitter.string_text_argument(argument, &context)
+}
+
+/// Evaluate an integer argument.
+fn system_int(emitter: &mut Gen<'_>, name: &str, args: &[HExpr], index: usize) -> String {
+    let argument = system_argument(name, args, index);
+    let value = emitter.gen_borrowed(argument);
+    format!("(int64_t)({})", value)
+}
+
+/// The data pointer and length of a borrowed byte slice argument.
+fn system_buffer(
+    emitter: &mut Gen<'_>,
+    name: &str,
+    args: &[HExpr],
+    index: usize,
+) -> (String, String) {
+    let argument = system_argument(name, args, index);
+    if !is_byte_slice_reference(&argument.ty) {
+        util::internal_error(format!(
+            "intrinsic {} expects a borrowed byte slice argument",
+            name
+        ));
+    }
+    let fat = emitter.gen_borrowed(argument);
+    (
+        format!("({}).data", fat),
+        format!("(int64_t)(({}).len)", fat),
+    )
+}
+
+/// Borrow a `&Vec<String>` argument as a `const LsVec_String*`.
+fn system_vec_string(emitter: &mut Gen<'_>, name: &str, args: &[HExpr], index: usize) -> String {
+    let argument = system_argument(name, args, index);
+    let is_vec = match &argument.ty {
+        Ty::Vec(element) => **element == Ty::String,
+        Ty::Ref { inner, .. } => match &**inner {
+            Ty::Vec(element) => **element == Ty::String,
+            _ => false,
+        },
+        _ => false,
+    };
+    if !is_vec {
+        util::internal_error(format!("intrinsic {} expects a Vec<String> argument", name));
+    }
+    let value = emitter.gen_borrowed(argument);
+    format!("(const LsVec_String*)({})", value)
+}
+
+/// True when the type is a borrowed byte slice (a frozen buffer view).
+fn is_byte_slice_reference(ty: &Ty) -> bool {
+    match ty {
+        Ty::Ref { inner, .. } => match &**inner {
+            Ty::Slice(element) => matches!(**element, Ty::Int(IntTy::U8)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn require_i64(name: &str, ty: &Ty) {
+    if !matches!(ty, Ty::Int(IntTy::I64)) {
+        util::internal_error(format!(
+            "intrinsic {} must produce i64, found {:?}",
+            name, ty
+        ));
+    }
+}
+
+fn require_tuple(name: &str, ty: &Ty, expected: &[Ty]) {
+    let matches = match ty {
+        Ty::Tuple(fields) => fields == expected,
+        _ => false,
+    };
+    if !matches {
+        util::internal_error(format!(
+            "intrinsic {} must produce a tuple of {:?}, found {:?}",
+            name, expected, ty
+        ));
     }
 }
 

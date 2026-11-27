@@ -672,6 +672,78 @@ pub fn __lsaca_it_product_f64<I: Iterator<f64>>(iter: I) -> f64 {
     return total;
 }
 
+// v2.4 adds the remaining product item types. The checker selects one of
+// these helpers by the iterator's item type, exactly like sum().
+
+pub fn __lsaca_it_product_u32<I: Iterator<u32>>(iter: I) -> u32 {
+    let mut source = iter;
+    let mut total: u32 = 1;
+    for item in source { total = total * item; }
+    return total;
+}
+
+pub fn __lsaca_it_product_u64<I: Iterator<u64>>(iter: I) -> u64 {
+    let mut source = iter;
+    let mut total: u64 = 1;
+    for item in source { total = total * item; }
+    return total;
+}
+
+pub fn __lsaca_it_product_isize<I: Iterator<isize>>(iter: I) -> isize {
+    let mut source = iter;
+    let mut total: isize = 1;
+    for item in source { total = total * item; }
+    return total;
+}
+
+pub fn __lsaca_it_product_f32<I: Iterator<f32>>(iter: I) -> f32 {
+    let mut source = iter;
+    let mut total: f32 = 1.0;
+    for item in source { total = total * item; }
+    return total;
+}
+
+// min()/max(): numeric terminals over the same item types as product().
+// min keeps the first occurrence of the smallest value; max keeps the last
+// occurrence of the largest value, matching Rust's Iterator::min/max.
+// The checker rejects every other item type with E0277.
+
+pub fn __lsaca_it_min<T, I: Iterator<T>>(iter: I) -> Option<T> {
+    let mut source = iter;
+    let mut best: Option<T> = None;
+    for item in source {
+        match best {
+            Some(current) => {
+                if item < current {
+                    best = Some(item);
+                } else {
+                    best = Some(current);
+                }
+            }
+            None => { best = Some(item); }
+        }
+    }
+    return best;
+}
+
+pub fn __lsaca_it_max<T, I: Iterator<T>>(iter: I) -> Option<T> {
+    let mut source = iter;
+    let mut best: Option<T> = None;
+    for item in source {
+        match best {
+            Some(current) => {
+                if !(item < current) {
+                    best = Some(item);
+                } else {
+                    best = Some(current);
+                }
+            }
+            None => { best = Some(item); }
+        }
+    }
+    return best;
+}
+
 // any(pred): true as soon as one item satisfies pred; consumes the rest only
 // up to that point. The iterator is released when the function returns.
 

@@ -140,16 +140,22 @@ impl BuiltinTypeKind {
     }
 }
 
+/// Where a visibility restriction lets names be seen. Public means visible
+/// everywhere; Module(id) means visible in that module and its descendants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisibilityTarget {
+    Public,
+    Module(ModuleId),
+}
+
 /// A name binding in a module scope.
 #[derive(Clone, Debug)]
 pub struct Binding {
     pub def: DefRef,
     pub span: Span,
-    /// Module that introduced the binding (the importing module for aliases).
-    pub scope: ModuleId,
     /// Module that defines the item (field privacy and C names use this one).
     pub module: ModuleId,
-    pub vis: Visibility,
+    pub vis: VisibilityTarget,
     pub imported: bool,
 }
 
@@ -158,8 +164,7 @@ pub struct Binding {
 pub struct ModuleBinding {
     pub module: ModuleId,
     pub span: Span,
-    pub scope: ModuleId,
-    pub vis: Visibility,
+    pub vis: VisibilityTarget,
     pub imported: bool,
 }
 
@@ -169,7 +174,7 @@ pub struct ModuleInfo {
     pub name: String,
     pub parent: Option<ModuleId>,
     pub crate_id: usize,
-    pub vis: Visibility,
+    pub vis: VisibilityTarget,
     /// User program or embedded standard library.
     pub origin: DefOrigin,
     pub span: Span,
@@ -234,7 +239,13 @@ impl<'a> Checker<'a> {
         let crate_id = self.crate_roots.len();
         self.crate_names.push(name.to_string());
         self.crate_is_dependency.push(is_dependency);
-        let module = self.add_module(None, name, Span::empty(0), Visibility::Public, crate_id);
+        let module = self.add_module(
+            None,
+            name,
+            Span::empty(0),
+            VisibilityTarget::Public,
+            crate_id,
+        );
         self.modules[module].origin = origin;
         self.modules[module].prefix = root_prefix;
         self.crate_roots.push(module);
@@ -252,7 +263,7 @@ impl<'a> Checker<'a> {
         parent: Option<ModuleId>,
         name: &str,
         name_span: Span,
-        vis: Visibility,
+        vis: VisibilityTarget,
         crate_id: usize,
     ) -> ModuleId {
         let (path, prefix) = match parent {
@@ -312,13 +323,13 @@ impl<'a> Checker<'a> {
             return module;
         }
         let crate_id = self.modules[parent].crate_id;
-        let module = self.add_module(Some(parent), name, name_span, vis, crate_id);
+        let target = self.resolve_visibility_target(parent, &vis, name_span);
+        let module = self.add_module(Some(parent), name, name_span, target, crate_id);
         self.modules[parent].span = span;
         let binding = ModuleBinding {
             module,
             span: name_span,
-            scope: parent,
-            vis,
+            vis: target,
             imported: false,
         };
         self.modules[parent]
@@ -363,17 +374,150 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub fn visibility_allows(&self, vis: Visibility, defined: ModuleId, from: ModuleId) -> bool {
+    fn crate_root_of(&self, module: ModuleId) -> ModuleId {
+        self.crate_roots[self.modules[module].crate_id]
+    }
+
+    /// Resolve a declared visibility to the module subtree it exposes.
+    ///
+    /// This is the quiet form used after declarations have been validated.
+    /// Unknown paths fall back to the declaring module, which is the most
+    /// restrictive target and keeps later checks safe.
+    pub fn visibility_target(&self, defined: ModuleId, vis: &Visibility) -> VisibilityTarget {
         match vis {
-            Visibility::Public => true,
-            Visibility::Crate => self.modules[defined].crate_id == self.modules[from].crate_id,
-            Visibility::Private => self.module_is_descendant(from, defined),
+            Visibility::Public => VisibilityTarget::Public,
+            Visibility::Private => VisibilityTarget::Module(defined),
+            Visibility::Crate => VisibilityTarget::Module(self.crate_root_of(defined)),
+            Visibility::Super => match self.modules[defined].parent {
+                Some(parent) => VisibilityTarget::Module(parent),
+                None => VisibilityTarget::Module(defined),
+            },
+            Visibility::In(path) => match self.resolve_visibility_path(defined, path) {
+                Some(module) => VisibilityTarget::Module(module),
+                None => VisibilityTarget::Module(defined),
+            },
+        }
+    }
+
+    fn resolve_visibility_path(&self, defined: ModuleId, path: &[String]) -> Option<ModuleId> {
+        let mut current = defined;
+        let mut index = 0;
+        match path.first().map(String::as_str) {
+            Some("crate") => {
+                current = self.crate_root_of(defined);
+                index = 1;
+            }
+            Some("self") => index = 1,
+            Some("super") => {
+                while path.get(index).map(String::as_str) == Some("super") {
+                    current = self.modules[current].parent?;
+                    index += 1;
+                }
+            }
+            _ => return None,
+        }
+        while let Some(segment) = path.get(index) {
+            let binding = self.modules[current].modules.get(segment)?;
+            current = binding.module;
+            index += 1;
+        }
+        Some(current)
+    }
+
+    /// Validate a restricted visibility and resolve its target.
+    ///
+    /// pub(super) at a crate root and pub(in ...) paths that do not name an
+    /// ancestor are rejected with E0742; unresolvable paths use E0433.
+    pub fn resolve_visibility_target(
+        &mut self,
+        defined: ModuleId,
+        vis: &Visibility,
+        span: Span,
+    ) -> VisibilityTarget {
+        match vis {
+            Visibility::Super => match self.modules[defined].parent {
+                Some(parent) => VisibilityTarget::Module(parent),
+                None => {
+                    self.error_code(
+                        "visibility restriction is not an ancestor of the item".to_string(),
+                        span,
+                        "E0742",
+                    );
+                    VisibilityTarget::Module(defined)
+                }
+            },
+            Visibility::In(path) => {
+                let target = match path.first().map(String::as_str) {
+                    Some("crate") | Some("self") | Some("super") => {
+                        self.resolve_visibility_path(defined, path)
+                    }
+                    _ => None,
+                };
+                let Some(target) = target else {
+                    self.error_code(
+                        "failed to resolve visibility path; use crate, self or super".to_string(),
+                        span,
+                        "E0433",
+                    );
+                    return VisibilityTarget::Module(defined);
+                };
+                if !self.module_is_descendant(defined, target) {
+                    self.error_code(
+                        "visibility restriction is not an ancestor of the item".to_string(),
+                        span,
+                        "E0742",
+                    );
+                    return VisibilityTarget::Module(defined);
+                }
+                VisibilityTarget::Module(target)
+            }
+            _ => self.visibility_target(defined, vis),
+        }
+    }
+
+    /// Whether names restricted to target are visible from from.
+    pub fn visibility_allows(&self, target: VisibilityTarget, from: ModuleId) -> bool {
+        match target {
+            VisibilityTarget::Public => true,
+            VisibilityTarget::Module(module) => self.module_is_descendant(from, module),
+        }
+    }
+
+    pub fn visibility_allows_decl(
+        &self,
+        vis: &Visibility,
+        defined: ModuleId,
+        from: ModuleId,
+    ) -> bool {
+        self.visibility_allows(self.visibility_target(defined, vis), from)
+    }
+
+    /// True when narrower exposes at most the modules wider exposes.
+    fn target_narrower_or_equal(
+        &self,
+        narrower: VisibilityTarget,
+        wider: VisibilityTarget,
+    ) -> bool {
+        match wider {
+            VisibilityTarget::Public => true,
+            VisibilityTarget::Module(wider_module) => match narrower {
+                VisibilityTarget::Public => false,
+                VisibilityTarget::Module(module) => self.module_is_descendant(module, wider_module),
+            },
+        }
+    }
+
+    fn narrower_target(&self, left: VisibilityTarget, right: VisibilityTarget) -> VisibilityTarget {
+        if self.target_narrower_or_equal(left, right) {
+            left
+        } else {
+            right
         }
     }
 
     /// Report E0603 when a binding is not visible from the current module.
     pub fn check_binding_visible(&mut self, binding: &Binding, span: Span) -> bool {
-        if self.visibility_allows(binding.vis, binding.scope, self.privacy_module()) {
+        if self.visibility_allows(binding.vis, self.privacy_module()) {
             return true;
         }
         let kind = binding.def.kind_name();
@@ -386,7 +530,7 @@ impl<'a> Checker<'a> {
 
     /// Report E0603 when a module binding is not visible from the current module.
     pub fn check_module_visible(&mut self, binding: &ModuleBinding, span: Span) -> bool {
-        if self.visibility_allows(binding.vis, binding.scope, self.privacy_module()) {
+        if self.visibility_allows(binding.vis, self.privacy_module()) {
             return true;
         }
         let name = self.modules[binding.module].name.clone();
@@ -420,10 +564,10 @@ impl<'a> Checker<'a> {
         span: Span,
         vis: Visibility,
     ) -> Option<Span> {
+        let vis = self.resolve_visibility_target(module, &vis, span);
         let binding = Binding {
             def,
             span,
-            scope: module,
             module,
             vis,
             imported: false,
@@ -443,10 +587,10 @@ impl<'a> Checker<'a> {
         span: Span,
         vis: Visibility,
     ) -> Option<Span> {
+        let vis = self.resolve_visibility_target(module, &vis, span);
         let binding = Binding {
             def,
             span,
-            scope: module,
             module,
             vis,
             imported: false,
@@ -494,9 +638,8 @@ impl<'a> Checker<'a> {
         if prelude == self.current_module {
             return None;
         }
-        self.lookup_type_in(prelude, name).filter(|binding| {
-            self.visibility_allows(binding.vis, binding.scope, self.current_module)
-        })
+        self.lookup_type_in(prelude, name)
+            .filter(|binding| self.visibility_allows(binding.vis, self.current_module))
     }
 
     fn lookup_prelude_value(&self, name: &str) -> Option<Binding> {
@@ -504,9 +647,8 @@ impl<'a> Checker<'a> {
         if prelude == self.current_module {
             return None;
         }
-        self.lookup_value_in(prelude, name).filter(|binding| {
-            self.visibility_allows(binding.vis, binding.scope, self.current_module)
-        })
+        self.lookup_value_in(prelude, name)
+            .filter(|binding| self.visibility_allows(binding.vis, self.current_module))
     }
 
     fn lookup_prelude_module(&self, name: &str) -> Option<ModuleBinding> {
@@ -514,9 +656,8 @@ impl<'a> Checker<'a> {
         if prelude == self.current_module {
             return None;
         }
-        self.lookup_module_in(prelude, name).filter(|binding| {
-            self.visibility_allows(binding.vis, binding.scope, self.current_module)
-        })
+        self.lookup_module_in(prelude, name)
+            .filter(|binding| self.visibility_allows(binding.vis, self.current_module))
     }
 
     pub fn lookup_struct(&self, name: &str) -> Option<usize> {
@@ -733,13 +874,12 @@ impl<'a> Checker<'a> {
     /// its descendants, and `pub(crate)` fields from the whole defining crate.
     pub fn field_visible(&self, struct_id: usize, index: usize) -> bool {
         let info = &self.structs[struct_id];
-        let declared = info
+        let target = info
             .decl_fields
             .get(index)
-            .map(|field| field.vis)
-            .unwrap_or(Visibility::Public);
-        let defined = info.module;
-        self.visibility_allows(declared, defined, self.privacy_module())
+            .map(|field| self.visibility_target(info.module, &field.vis))
+            .unwrap_or(VisibilityTarget::Public);
+        self.visibility_allows(target, self.privacy_module())
     }
 
     /// Resolve the first `prefix_len` segments of `path` as module steps.
@@ -845,19 +985,19 @@ impl<'a> Checker<'a> {
 
     /// Effective visibility of an item declared with `vis` in `module`: the
     /// declared visibility narrowed by every enclosing module.
-    pub fn effective_visibility(&self, module: ModuleId, vis: Visibility) -> Visibility {
-        let mut effective = vis;
+    pub fn effective_visibility(&self, module: ModuleId, vis: &Visibility) -> VisibilityTarget {
+        let mut effective = self.visibility_target(module, vis);
         let mut current = Some(module);
         while let Some(id) = current {
-            effective = min_visibility(effective, self.modules[id].vis);
+            effective = self.narrower_target(effective, self.modules[id].vis);
             current = self.modules[id].parent;
         }
         effective
     }
 
     /// Effective visibility of the name introduced by a `use` declaration.
-    fn import_visibility(&self, leaf: &ImportLeaf) -> Visibility {
-        self.effective_visibility(leaf.module, leaf.vis)
+    fn import_visibility(&self, leaf: &ImportLeaf) -> VisibilityTarget {
+        self.effective_visibility(leaf.module, &leaf.vis)
     }
 
     /// Report E0364 when a re-export is wider than the item it imports.
@@ -866,10 +1006,15 @@ impl<'a> Checker<'a> {
     /// private or `pub(crate)` item to the outside world. Returns true when
     /// the import was rejected.
     fn rejects_widening_item_import(&mut self, leaf: &ImportLeaf, binding: &Binding) -> bool {
+        // A private `use` does not re-export: it only appears in the importing
+        // module and its descendants, so the access check below reports E0603.
+        if matches!(leaf.vis, Visibility::Private) {
+            return false;
+        }
         // `pub use` of a public item stays legal even when the module that
         // declares it is private (the facade pattern); only the item's own
         // visibility caps the re-export.
-        if visibility_rank(self.import_visibility(leaf)) <= visibility_rank(binding.vis) {
+        if self.target_narrower_or_equal(self.import_visibility(leaf), binding.vis) {
             return false;
         }
         let kind = binding.def.kind_name();
@@ -890,7 +1035,10 @@ impl<'a> Checker<'a> {
         leaf: &ImportLeaf,
         binding: &ModuleBinding,
     ) -> bool {
-        if visibility_rank(self.import_visibility(leaf)) <= visibility_rank(binding.vis) {
+        if matches!(leaf.vis, Visibility::Private) {
+            return false;
+        }
+        if self.target_narrower_or_equal(self.import_visibility(leaf), binding.vis) {
             return false;
         }
         self.error_code(
@@ -909,13 +1057,13 @@ impl<'a> Checker<'a> {
     /// Flatten one use declaration into leaves stored in pending_imports.
     pub fn collect_use_decl(&mut self, module: ModuleId, decl: &UseDecl) {
         let mut prefix = Vec::new();
-        self.flatten_use_tree(module, decl.vis, &mut prefix, &decl.tree);
+        self.flatten_use_tree(module, &decl.vis, &mut prefix, &decl.tree);
     }
 
     fn flatten_use_tree(
         &mut self,
         module: ModuleId,
-        vis: Visibility,
+        vis: &Visibility,
         prefix: &mut Vec<(String, Span)>,
         tree: &UseTree,
     ) {
@@ -923,7 +1071,7 @@ impl<'a> Checker<'a> {
             UseTree::Name { name, name_span } => {
                 self.pending_imports.push(ImportLeaf {
                     module,
-                    vis,
+                    vis: vis.clone(),
                     prefix: prefix.clone(),
                     name: name.clone(),
                     name_span: *name_span,
@@ -939,7 +1087,7 @@ impl<'a> Checker<'a> {
             } => {
                 self.pending_imports.push(ImportLeaf {
                     module,
-                    vis,
+                    vis: vis.clone(),
                     prefix: prefix.clone(),
                     name: name.clone(),
                     name_span: *name_span,
@@ -1035,7 +1183,7 @@ impl<'a> Checker<'a> {
             }
             other => {
                 if let Some(binding) = self.lookup_module_in(leaf.module, other) {
-                    if !self.visibility_allows(binding.vis, binding.scope, leaf.module) {
+                    if !self.visibility_allows(binding.vis, leaf.module) {
                         return Ok(None);
                     }
                     current = binding.module;
@@ -1053,7 +1201,7 @@ impl<'a> Checker<'a> {
             let Some(binding) = self.lookup_module_in(current, name) else {
                 return Ok(None);
             };
-            if !self.visibility_allows(binding.vis, binding.scope, leaf.module) {
+            if !self.visibility_allows(binding.vis, leaf.module) {
                 return Ok(None);
             }
             current = binding.module;
@@ -1070,7 +1218,7 @@ impl<'a> Checker<'a> {
                 if self.rejects_widening_module_import(leaf, &binding) {
                     return ImportOutcome::Done;
                 }
-                if !self.visibility_allows(binding.vis, binding.scope, module) {
+                if !self.visibility_allows(binding.vis, module) {
                     self.error_code(
                         format!("module '{}' is private", leaf.name),
                         leaf.name_span,
@@ -1114,7 +1262,7 @@ impl<'a> Checker<'a> {
             if self.rejects_widening_module_import(leaf, &binding) {
                 return ImportOutcome::Done;
             }
-            if !self.visibility_allows(binding.vis, binding.scope, leaf.module) {
+            if !self.visibility_allows(binding.vis, leaf.module) {
                 self.error_code(
                     format!("module '{}' is private", leaf.name),
                     leaf.name_span,
@@ -1133,7 +1281,7 @@ impl<'a> Checker<'a> {
         if self.rejects_widening_item_import(leaf, &binding) {
             return ImportOutcome::Done;
         }
-        if !self.visibility_allows(binding.vis, binding.scope, leaf.module) {
+        if !self.visibility_allows(binding.vis, leaf.module) {
             self.error_code(
                 format!("{} '{}' is private", binding.def.kind_name(), leaf.name),
                 leaf.name_span,
@@ -1146,7 +1294,7 @@ impl<'a> Checker<'a> {
 
     fn bind_module_import(&mut self, leaf: &ImportLeaf, binding: &ModuleBinding) -> ImportOutcome {
         let name = leaf.alias.clone().unwrap_or_else(|| leaf.name.clone());
-        let effective = min_visibility(leaf.vis, binding.vis);
+        let effective = self.narrower_target(self.import_visibility(leaf), binding.vis);
         let module = leaf.module;
         if let Some(previous) = self.modules[module].modules.get(&name) {
             let was_import = previous.imported;
@@ -1165,7 +1313,6 @@ impl<'a> Checker<'a> {
             ModuleBinding {
                 module: binding.module,
                 span: leaf.span,
-                scope: module,
                 vis: effective,
                 imported: true,
             },
@@ -1175,7 +1322,7 @@ impl<'a> Checker<'a> {
 
     fn bind_import_item(&mut self, leaf: &ImportLeaf, binding: &Binding) -> ImportOutcome {
         let name = leaf.alias.clone().unwrap_or_else(|| leaf.name.clone());
-        let effective = min_visibility(leaf.vis, binding.vis);
+        let effective = self.narrower_target(self.import_visibility(leaf), binding.vis);
         let module = leaf.module;
         let imported = binding.def.is_type_namespace();
         if imported {
@@ -1195,7 +1342,6 @@ impl<'a> Checker<'a> {
                 Binding {
                     def: binding.def,
                     span: leaf.span,
-                    scope: module,
                     module: binding.module,
                     vis: effective,
                     imported: true,
@@ -1213,7 +1359,6 @@ impl<'a> Checker<'a> {
                 Binding {
                     def: binding.def,
                     span: leaf.span,
-                    scope: module,
                     module: binding.module,
                     vis: effective,
                     imported: true,
@@ -1249,24 +1394,6 @@ impl<'a> Checker<'a> {
                 .with_label(previous, format!("previous definition of '{}' here", name)),
             );
         }
-    }
-}
-
-/// Numeric rank of a visibility; larger is more visible.
-pub(crate) fn visibility_rank(vis: Visibility) -> u8 {
-    match vis {
-        Visibility::Private => 0,
-        Visibility::Crate => 1,
-        Visibility::Public => 2,
-    }
-}
-
-/// Effective visibility of an imported name: the more restrictive of the two.
-fn min_visibility(left: Visibility, right: Visibility) -> Visibility {
-    if visibility_rank(left) <= visibility_rank(right) {
-        left
-    } else {
-        right
     }
 }
 

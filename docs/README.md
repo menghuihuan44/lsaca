@@ -30,17 +30,17 @@ rejected with `E0498`), the `From`/`?`
 conversion path with the `Error` trait's `source` method, and the `lsaca fmt`
 source formatter. The
 [standard library reference](stdlib/README.md) documents the library module by
-module, and marks each module and API as implemented in 2.2.0 or planned for a
-later release.
+module, and marks each module and API with the release that added it or as planned
+for a later release.
 
-This documentation set is the reference for the language as of version 2.3.0.
+This documentation set is the reference for the language as of version 2.4.0.
 It is split into short pages, one per topic, so you can read it linearly
 from [Getting started](language/01-getting-started.md) or jump straight to the
 part you need. Every runnable example on these pages has been executed with the
 compiler of the release it documents and shows its real output, including the
 multi-file and package examples; all runnable examples, including those in the
-standard-library reference, are part of the 2.3.0 verification gate and are
-executed against the 2.3.0 compiler.
+standard-library reference, are part of the 2.4.0 verification gate and are
+executed against the 2.4.0 compiler.
 
 ## Why lsaca?
 
@@ -59,9 +59,10 @@ executed against the 2.3.0 compiler.
   tuple/unit structs and `mut` parameters, and completed the Rust-shaped
   standard library. `Copy` and `Clone` are derived for you, and 2.2.0 adds
   arrays, labelled loops and the small set of lifetime annotations needed to
-  store direct references in structs, tuple structs and enums. Version 2.3.0 follows
-  Rust's defaults for integers (`i32`), lengths and indices (`usize`), borrowed
-  text (`&str`) and array semantics more closely than any earlier release.
+  store direct references in structs, tuple structs and enums. Version 2.4.0 keeps
+  following Rust's defaults for integers (`i32`), lengths and indices (`usize`),
+  borrowed text (`&str`) and array semantics, and completes the pattern,
+  control-flow and system-interface surface described in its release notes.
 * **Memory safety without a tracing garbage collector.** Values are managed by
   **ORC**: automatic reference counting plus a trial-deletion (Bacon-Rajan)
   cycle collector. Ownership decides when a value can be moved and when
@@ -216,27 +217,27 @@ The library is documented module by module in the
 language-level behaviour that is not a module (formatting macros, panics, exit
 codes).
 
-| Module | Page | Status in 2.3.0 |
+| Module | Page | Status in 2.4.0 |
 | --- | --- | --- |
 | `std::core` (Option, Result, Iterator) | [core](stdlib/core.md) | migrated from 1.7; the 2.1.0 Option/Result combinators implemented; 2.3.0 completes the `Option`/`Result` combinator surface; the `From` trait lives in the library root |
 | `std::string` | [string](stdlib/string.md) | `&str` text API, `String` forwarding, `parse` with typed errors and the new `str` methods implemented |
 | `std::char` | [char](stdlib/char.md) | ASCII classification methods implemented; 2.3.0 adds Unicode 16.0.0 classification and case mapping |
 | `std::vec` | [vec](stdlib/vec.md) | migrated; `sort`, `truncate`/`swap`/`contains`, `as_slice` and `as_mut_slice` implemented; borrowed access with `get_mut`, `first_mut` and `last_mut` added in 2.2.0; 2.3.0 adds `iter`, `iter_mut` and `into_iter` |
-| `std::iter` | [iter](stdlib/iter.md) | `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by` and the new terminals implemented; 2.3.0 adds borrowed iteration, mutable borrowing iterators (`iter_mut`/`VecIterMut`), `into_iter`, `rev` and `flat_map` |
+| `std::iter` | [iter](stdlib/iter.md) | `zip`, `chain`, `filter_map`, `take_while`, `skip_while`, `step_by` and the new terminals implemented; 2.3.0 adds borrowed iteration, mutable borrowing iterators (`iter_mut`/`VecIterMut`), `into_iter`, `rev` and `flat_map`; 2.4.0 adds `min`/`max` and widens `product` |
 | `std::fmt` | [fmt](stdlib/fmt.md) | compiler-implemented |
 | `std::math` | [math](stdlib/math.md) | migrated plus the 16 `f64` constants; `abs`/`min`/`max` remain compiler builtins |
-| `std::collections` | [collections](stdlib/collections/README.md) | `HashMap` migrated with borrowed `get`/`get_mut` lookups added in 2.2.0; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented |
+| `std::collections` | [collections](stdlib/collections/README.md) | `HashMap` migrated with borrowed `get`/`get_mut` lookups added in 2.2.0; `HashSet`, `BTreeSet`, `BTreeMap`, `VecDeque` and `BinaryHeap` implemented; 2.4.0 adds the entry helpers and fills out constructors and accessors |
 | `std::io` | [io](stdlib/io.md) | error types, file and stream handles with integer `read`/`write`/`seek` implemented; 2.3.0 adds the `Read`/`Write`/`Seek`/`BufRead` traits, `BufReader`, `BufWriter` and `File::read_to_string`; the `io::Result<T>` alias is not implemented |
 | `std::fs` | [fs](stdlib/fs.md) | `&str` path API, directory and metadata API, `FileType` and integer-sized metadata implemented; 2.3.0 adds `Path`, `PathBuf`, `read_dir_entries`, `DirEntry` and `ReadDir` |
-| `std::net` | [net](stdlib/net.md) | implemented (plain TCP, `Shutdown` added) |
+| `std::net` | [net](stdlib/net.md) | TCP implemented (plain, no TLS); `Shutdown` added; 2.4.0 adds `SocketAddr` and blocking `UdpSocket` |
 | `std::time` | [time](stdlib/time.md) | `Duration`, `Instant`, `SystemTime`, `unix_epoch()` and `sleep` added |
 | `std::env` | [env](stdlib/env.md) | implemented; `var` returns `Result<String, VarError>` |
-| `std::process` | [process](stdlib/process.md) | `args` and `exit` implemented |
+| `std::process` | [process](stdlib/process.md) | `args` and `exit` implemented; 2.4.0 adds `Command`, `ExitStatus` and `Output` |
 | `std::error` | [error](stdlib/error.md) | the `Error` trait implemented, with `Error::source` added in 2.2.0 and `io::Error` and the parse errors as implementors; the `From` conversions that `?` uses came with 2.2.0 |
 
-The status column records what version 2.3.0 provides; where a module is only
+The status column records what version 2.4.0 provides; where a module is only
 partly implemented, its page separates the implemented API from the API that is
-not implemented in 2.3.0 and planned for a later release. Entries marked *planned*
+not implemented in 2.4.0 and planned for a later release. Entries marked *planned*
 are documented from the design rather than from runnable behaviour.
 
 ### Reference

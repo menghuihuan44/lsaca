@@ -73,6 +73,12 @@ pub use iter::__lsaca_it_product_i32;
 pub use iter::__lsaca_it_product_i64;
 pub use iter::__lsaca_it_product_usize;
 pub use iter::__lsaca_it_product_f64;
+pub use iter::__lsaca_it_product_u32;
+pub use iter::__lsaca_it_product_u64;
+pub use iter::__lsaca_it_product_isize;
+pub use iter::__lsaca_it_product_f32;
+pub use iter::__lsaca_it_min;
+pub use iter::__lsaca_it_max;
 
 
 // v2.3 borrowing iterators, slice iterators, HashMap iteration, rev, flat_map.

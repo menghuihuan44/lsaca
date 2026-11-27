@@ -122,6 +122,38 @@ Output:
 2
 ```
 
+## Breaking with a value
+
+Since 2.4.0 a labelled `loop` can carry a value out of a nested loop. The value
+is written after the label, `break 'name value;`, and becomes the result of
+that loop expression. A label on a `while` or `for` loop does not change the
+rule that those loops have type `()`: a value on their `break` is `E0571`.
+`continue value;` is always rejected with `E0308` and a note that the language
+has no continue values.
+
+```ls
+fn main() {
+    let mut n = 0;
+    let result = 'search: loop {
+        n += 1;
+        if n == 4 {
+            break 'search n * 10;
+        }
+    };
+    println!("{}", result);
+}
+```
+
+Output:
+
+```text
+40
+```
+
+The same rules apply to unlabelled loops: `break value` gives the innermost
+`loop` that value's type, and every `break` that leaves the loop must agree on
+the type. See [Statements and control flow](08-statements-and-control-flow.md#loop).
+
 ## Label errors
 
 An unknown label is reported as
@@ -129,14 +161,14 @@ An unknown label is reported as
 directly before a loop: putting it before a statement such as `let` is
 `error[E0001]: a loop label can only precede 'loop', 'while' or 'for', found let`,
 and a missing colon is
-`error[E0001]: expected ':' after a loop label`. A `break` that carries a
-value is still rejected, even with a label:
-`error[E0308]: break with a value is not supported; loops have type ()`.
+`error[E0001]: expected ':' after a loop label`. A value on a `break` that
+targets a `while` or `for` loop is `E0571`, even when the loop is labelled;
+`continue value;` is `E0308`.
 
-## Known limitations in 2.2.0
+## Known limitations in 2.4.0
 
-* `break 'label value;` is not supported; `break` has type `()` and values from
-  loops remain unsupported.
+* A value on `break` is only meaningful for `loop`; `while` and `for` still have
+  type `()`, and `break value` in them is `E0571`.
 * Labels are only allowed on `loop`, `while`, `while let` and `for`; there are
   no labeled blocks and no labeled `match` or `if`.
 * The label must be written directly before the loop keyword. A colon is
@@ -150,7 +182,8 @@ value is still rejected, even with a label:
   `break` or `continue` targets the innermost loop.
 * Reused names resolve to the innermost loop with that name.
 * Unknown labels are `E0426`; a misplaced or malformed label is `E0001`.
-* Break values remain unsupported in 2.2.0.
+* `break 'name value;` makes a labelled `loop` produce that value; `while` and
+  `for` keep type `()`, and `continue value;` is rejected.
 
 ## What next
 

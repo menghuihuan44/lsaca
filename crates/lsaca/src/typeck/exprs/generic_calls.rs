@@ -531,7 +531,14 @@ impl<'a> Checker<'a> {
         let (env, checked, ok) =
             self.infer_callable_args(&def.generics, &def.decl.params, args, span, def.module);
         let Some(type_args) = self.resolve_open_type_args(&def.generics, &env, span) else {
-            return TExpr::new(ITy::Never, TExprKind::Break { label: None }, span);
+            return TExpr::new(
+                ITy::Never,
+                TExprKind::Break {
+                    label: None,
+                    value: None,
+                },
+                span,
+            );
         };
         let fn_id = match self.concrete_call_args(&type_args) {
             Some(concrete) => self.instantiate_generic_fn(def_id, concrete, span),
@@ -544,12 +551,26 @@ impl<'a> Checker<'a> {
                     span,
                     "E0283",
                 );
-                return TExpr::new(ITy::Never, TExprKind::Break { label: None }, span);
+                return TExpr::new(
+                    ITy::Never,
+                    TExprKind::Break {
+                        label: None,
+                        value: None,
+                    },
+                    span,
+                );
             }
         };
         match fn_id {
             Some(fn_id) => self.finish_generic_call(fn_id, None, checked, ok, span, hint),
-            None => TExpr::new(ITy::Never, TExprKind::Break { label: None }, span),
+            None => TExpr::new(
+                ITy::Never,
+                TExprKind::Break {
+                    label: None,
+                    value: None,
+                },
+                span,
+            ),
         }
     }
 
@@ -651,7 +672,14 @@ impl<'a> Checker<'a> {
         let (env, checked, ok) =
             self.infer_callable_args(&info.generics, &gfn.decl.params, args, span, info.module);
         let Some(impl_args) = self.resolve_open_type_args(&info.generics, &env, span) else {
-            return TExpr::new(ITy::Never, TExprKind::Break { label: None }, span);
+            return TExpr::new(
+                ITy::Never,
+                TExprKind::Break {
+                    label: None,
+                    value: None,
+                },
+                span,
+            );
         };
         let fn_id = match self.concrete_call_args(&impl_args) {
             Some(concrete) => {
@@ -667,12 +695,26 @@ impl<'a> Checker<'a> {
                     span,
                     "E0283",
                 );
-                return TExpr::new(ITy::Never, TExprKind::Break { label: None }, span);
+                return TExpr::new(
+                    ITy::Never,
+                    TExprKind::Break {
+                        label: None,
+                        value: None,
+                    },
+                    span,
+                );
             }
         };
         match fn_id {
             Some(fn_id) => self.finish_generic_call(fn_id, None, checked, ok, span, hint),
-            None => TExpr::new(ITy::Never, TExprKind::Break { label: None }, span),
+            None => TExpr::new(
+                ITy::Never,
+                TExprKind::Break {
+                    label: None,
+                    value: None,
+                },
+                span,
+            ),
         }
     }
 

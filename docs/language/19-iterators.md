@@ -4,7 +4,7 @@ Version 1.5.0 added the `Iterator<T>` trait and a lazy adapter pipeline over
 it. Iterators are ordinary values: an adapter returns a generic struct that
 stores its input and the closures it needs, and nothing runs until a terminal
 operation or a `for` loop asks for the next item. The trait and the adapter
-functions themselves are written in lsaca. In 2.3.0 they live in the `std`
+functions themselves are written in lsaca. Since 2.3.0 they live in the `std`
 crate (`std::iter`, `stdlib/src/iter.ls`), whose root re-exports the prelude
 names, but a program only uses the public surface described here.
 
@@ -13,7 +13,8 @@ The iterator surface grew over several releases. Version 2.1 added `zip`,
 with the `position`, `last`, `nth`, `reduce`, `product`, `inspect` and
 `for_each` terminal operations. Version 2.3 added borrowed iteration
 (`iter`, `iter_mut`, `into_iter`), iteration over slices, `rev` and
-`flat_map` (see [iter](../stdlib/iter.md)).
+`flat_map`. Version 2.4.0 adds the `min` and `max` terminals and widens
+`product` to the same eight numeric item types (see [iter](../stdlib/iter.md)).
 
 The trait is small:
 
@@ -361,7 +362,8 @@ Terminal operations consume the iterator and produce a value.
 | `fold(init, f)` | `U` | `T` | `f` has type `Fn(U, T) -> U`; `init` fixes `U` and is passed as the first argument of the first call. |
 | `count()` | `usize` | any | Number of remaining items. |
 | `sum()` | `T` | `i32`, `i64`, `usize` or `f64` | Only those item types; anything else is `E0277`. A borrowed iterator has item type `&T`, so use `.map(|value| *value)` or `.into_iter()` before `sum`. An unannotated integer vector has `i32` items. |
-| `product()` | `T` | `i32`, `i64`, `usize` or `f64` | Numeric product of the remaining items; same item types as `sum`. |
+| `product()` | `T` | `i32`, `i64`, `u32`, `u64`, `isize`, `usize`, `f32` or `f64` | Numeric product of the remaining items; the item type must be one of those eight. |
+| `min()` / `max()` | `Option<T>` | same eight numeric types | Smallest / largest remaining item; `None` when empty. `min` keeps the first smallest item, `max` the last largest, matching Rust. Added in 2.4.0. |
 | `any(p)` / `all(p)` | `bool` | `T` | `p` has type `Fn(&T) -> bool`; short-circuiting. Over `.iter()` the predicate receives `&&T`. |
 | `find(p)` | `Option<T>` | `T` | Returns the first item for which `p` is true; `p` has type `Fn(&T) -> bool`. |
 | `position(p)` | `Option<usize>` | `T` | Zero-based index of the first item for which `p` is true; `p` has type `Fn(T) -> bool`. |
@@ -489,6 +491,29 @@ Output:
 3.75
 true true
 Some(12)
+```
+
+`min` and `max` return the smallest and largest numeric items. They need the
+same owned numeric item types as `product`, return `None` for an empty
+iterator, and compare with the item type's ordering:
+
+```ls
+fn main() {
+    let values: Vec<i64> = vec![4, 9, 2, 7, 2];
+    let smallest = values.iter().map(|value| *value).min();
+    let largest = values.iter().map(|value| *value).max();
+    println!("{:?} {:?}", smallest, largest);
+
+    let empty: Vec<i64> = Vec::new();
+    let none: Option<i64> = empty.into_iter().min();
+    println!("{:?}", none);
+}
+```
+
+Output:
+```text
+Some(2) Some(9)
+None
 ```
 
 ## `for` loops over iterators
@@ -638,7 +663,7 @@ vector shown.
 
 ## What is not provided
 
-The 2.3 iterator pipeline is still deliberately small. It has no:
+The 2.4 iterator pipeline is still deliberately small. It has no:
 
 * `size_hint` or exact-size hints; a collection cannot reserve from an
   iterator;
@@ -652,13 +677,14 @@ The 2.3 iterator pipeline is still deliberately small. It has no:
 * `HashSet` iteration beyond `HashSet::from` and `elements()` (which returns
   an owned `Vec<K>`).
 
-## Known limitations in 2.3.0
+## Known limitations in 2.4.0
 
 * `collect` needs a known result type; a bare `collect()` without an
   annotation or turbofish is `E0282`.
-* `sum` and `product` support `i32`, `i64`, `usize` and `f64` items only;
-  other item types are `E0277`. Borrowed items must be mapped to owned values
-  first.
+* `sum` supports `i32`, `i64`, `usize` and `f64` items; `product`,
+  `min` and `max` support `i32`, `i64`, `u32`, `u64`, `isize`, `usize`,
+  `f32` and `f64` items. Other item types are `E0277`. Borrowed items must be
+  mapped to owned values first.
 * The predicates of `filter`, `take_while`, `skip_while`, `any`, `all` and
   `find` receive `&T`, as does the `inspect` closure; `map`, `filter_map`,
   `position`, `reduce` and `for_each` receive `T` by value (and `fold` folds
@@ -690,8 +716,8 @@ See [Known limitations](limitations.md) for the full list.
   `flat_map` are lazy and chainable; `enumerate` turns the item type into
   `(usize, T)`, and `count` and `position` return `usize`.
 * Terminal operations are `collect`, `fold`, `count`, `sum`, `product`,
-  `any`, `all`, `find`, `position`, `last`, `nth`, `reduce`, `inspect` and
-  `for_each`.
+  `min`, `max`, `any`, `all`, `find`, `position`, `last`, `nth`, `reduce`,
+  `inspect` and `for_each`.
 * `for` loops consume any concrete `Iterator<T>`; user structs and enums can
   implement the trait.
 * Closures capture by value (see [Closures](14-closures.md)), and iterator

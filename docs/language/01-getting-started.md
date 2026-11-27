@@ -340,7 +340,8 @@ runtime defines.
 
 `lsaca` takes one command. The compile commands `run`, `build`, `emit-c` and
 `check` take an optional `FILE.ls`; with no file they operate on the nearest
-package. `fmt` takes exactly one file:
+package. `fmt` takes an optional file or directory; with no path it works on the
+nearest package.
 
 | Command | Description |
 | --- | --- |
@@ -348,7 +349,7 @@ package. `fmt` takes exactly one file:
 | `lsaca build [FILE.ls]` | Compile and build a native executable in the output directory (default: next to the source). |
 | `lsaca emit-c [FILE.ls]` | Write the generated C project only; do not compile or link it. |
 | `lsaca check [FILE.ls]` | Run the front end only: module loading, lexing, parsing, name resolution and type checking. Fast; useful in editors and CI. |
-| `lsaca fmt <FILE.ls> [--check] [--stdout]` | Rewrite one source file with canonical indentation and whitespace, or report whether it would change (`--check`) or print the result (`--stdout`). See [Formatting source files](#formatting-source-files). |
+| `lsaca fmt [PATH] [--check] [--stdout]` | Rewrite one source file with canonical indentation and whitespace, or format every `.ls` module of a package when `PATH` is a directory (or omitted inside a package). `--check` reports files that would change; `--stdout` prints one file. See [Formatting source files](#formatting-source-files). |
 | `lsaca new <DIR>` | Create a new binary package in `DIR`: an `lsaca.toml` manifest and a hello-world `src/main.ls`. |
 | `lsaca version` | Print the compiler version. |
 | `lsaca help` | Print the help text. |
@@ -372,10 +373,10 @@ package but finds no manifest exits with code `2` and
 `lsaca: no lsaca.toml found in this directory or any parent directory`;
 `lsaca new` is the only command that always needs an explicit directory.
 
-The complete help text of version 2.2.0:
+The complete help text of version 2.4.0:
 
 ```console
-lsaca 2.2.0 - a small statically typed language with an ORC memory model
+lsaca 2.4.0 - a small statically typed language with an ORC memory model
 
 USAGE:
     lsaca <COMMAND> [OPTIONS] [FILE.ls]
@@ -385,7 +386,7 @@ COMMANDS:
     build [FILE.ls]              compile and build a native executable
     emit-c [FILE.ls]             write the generated C project only
     check [FILE.ls]              run the front end and report diagnostics
-    fmt <FILE.ls> [--check]      rewrite a source file with canonical indentation
+    fmt [FILE.ls|DIR] [--check]  format one file or every module of a package
     new <DIR>                    create a new binary package
     version                      print the compiler version
     help                         print this help
@@ -394,6 +395,9 @@ When no FILE.ls is given, run/build/emit-c/check operate on the package whose
 lsaca.toml is the nearest one walking up from the current directory. Package
 dependencies declared in [dependencies] with a path are compiled together.
 
+'lsaca fmt' formats a single file, or - when given a directory (or no path at
+all inside a package) - every module file under that package's src directory.
+
 OPTIONS:
     -r, --release                build with optimizations and wrapping arithmetic
     -o, --out-dir <DIR>          output directory for 'build' and 'emit-c'
@@ -401,6 +405,7 @@ OPTIONS:
         --keep                   print the temporary build tree location
         --cmake                  build via the generated CMake project instead
                                  of the built-in direct C compiler back end
+        --stdout                 (fmt) print the formatted file instead of writing it
     -h, --help                   print this help
 
 EXIT CODES:
@@ -426,7 +431,7 @@ directory and no other options.
 
 ### Formatting source files
 
-`lsaca fmt` rewrites one source file with a canonical layout. It is deliberately
+`lsaca fmt` rewrites source files with a canonical layout. It is deliberately
 conservative: it normalizes indentation and whitespace, but never reflows tokens,
 merges or splits lines, or changes the spaces *inside* an expression.
 
@@ -466,17 +471,44 @@ fn main() {
 Note that `x=1` keeps its token spacing: the formatter only aligns lines and
 their indentation.
 
+#### One file or a whole package
+
+The optional `PATH` selects the mode:
+
+* **Single-file mode.** If `PATH` names a file, only that file is formatted.
+  This is the mode to use for an editor save hook. `--stdout` is available
+  here: it prints the formatted source to standard output and leaves the file
+  untouched.
+* **Package mode.** If `PATH` names a directory, or is omitted, `lsaca fmt`
+  searches that directory and its ancestors for the nearest `lsaca.toml` and
+  formats every `.ls` file under the package's `src` directory, in sorted
+  path order. Every module is validated before anything is written, so a syntax
+  error in one file leaves the whole package untouched and the command exits
+  with code `1` and `<package>: could not be formatted due to previous error(s)`.
+  After a successful write it prints
+  `lsaca: formatted N file(s) in <relative-package-dir>`.
+
+Package mode needs a package: if no `lsaca.toml` is found, the command is a
+usage error (exit code `2`) and reports
+`'lsaca fmt' needs a file or a directory inside a package: no lsaca.toml found in <target> or its ancestors`.
+An empty package (no `.ls` files under `src`) is a failure (exit code `1`)
+with `no .ls source files found under <src>`.
+
 Two flags control what happens:
 
-* `--check` writes nothing. If the file would change it prints
-  `lsaca: would format <file>` to stderr and exits with code `1`; a file that is
-  already canonical exits with `0`.
+* `--check` writes nothing. In single-file mode it prints
+  `lsaca: would format <file>` to stderr and exits with code `1` when the file
+  would change; an already canonical file exits with `0`. In package mode it
+  prints one `lsaca: would format <relative-path>` line per unformatted file,
+  with forward-slash relative paths, and exits with code `1` if the list is not
+  empty.
 * `--stdout` prints the formatted source to standard output and leaves the file
-  untouched.
+  untouched. It is single-file only: combining it with a directory, or with
+  `--check`, is a usage error (exit code `2`).
 
-`lsaca fmt` works on a single file: it does not follow `mod` declarations, and
-it needs an explicit file (`lsaca fmt` with no file exits with code `2`). The
-formatter is part of the compiler binary, so no separate tool is installed.
+`--check` and `--stdout` cannot be combined. The formatter is part of the
+compiler binary, so no separate tool is installed.
+
 
 ## Exit codes
 

@@ -2509,12 +2509,22 @@ fn rejects_loop_label_before_a_statement() {
 }
 
 #[test]
-fn rejects_break_with_a_value() {
+fn rejects_a_value_in_a_while_break() {
     expect_v22_rejected(
-        "v22-break-value",
-        "fn main() {\n    loop {\n        break 1;\n    }\n}\n",
+        "v24-break-value-while",
+        "fn main() {\n    while true {\n        break 1;\n    }\n}\n",
+        "E0571",
+        Some("while"),
+    );
+}
+
+#[test]
+fn rejects_continue_with_a_value() {
+    expect_v22_rejected(
+        "v24-continue-value",
+        "fn main() {\n    loop {\n        continue 1;\n    }\n}\n",
         "E0308",
-        Some("break with a value is not supported"),
+        Some("continue with a value"),
     );
 }
 

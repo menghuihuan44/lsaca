@@ -1,6 +1,6 @@
-# Real programs: json, markdown and lisp
+# Real programs: json, markdown, lisp and wordstats
 
-`examples/programs/` contains three small but complete lsaca programs. Each one is
+`examples/programs/` contains four small but complete lsaca programs. Each one is
 deterministic: with no arguments it runs an embedded input and prints a fixed result; with
 one argument (a file path) it runs the same code over that file instead. Each program has a
 single-file C17 counterpart that implements the same algorithms and prints byte-identical
@@ -11,6 +11,7 @@ stdout, so the pair is useful as a cross-language smoke test as well as a langua
 | JSON parser and canonical serializer | [json.ls](json.ls) | 792 | [json.c](json.c) | 1138 |
 | Markdown (subset) to HTML converter | [markdown.ls](markdown.ls) | 366 | [markdown.c](markdown.c) | 544 |
 | Tiny Lisp interpreter | [lisp.ls](lisp.ls) | 729 | [lisp.c](lisp.c) | 1344 |
+| Word statistics report | [wordstats.ls](wordstats.ls) | 177 | [wordstats.c](wordstats.c) | 334 |
 
 The C counterparts are plain C17 with no dependencies (link `-lm`; on Windows the programs
 switch stdout to binary mode so `\n` is not translated to `\r\n`).
@@ -24,6 +25,8 @@ $ lsaca run examples/programs/markdown.ls
 $ lsaca run examples/programs/markdown.ls -- examples/programs/data/sample.md
 $ lsaca run examples/programs/lisp.ls
 $ lsaca run examples/programs/lisp.ls -- examples/programs/data/sample.lisp
+$ lsaca run examples/programs/wordstats.ls
+$ lsaca run examples/programs/wordstats.ls -- examples/programs/data/sample.txt
 ```
 
 Build and run the C counterparts:
@@ -32,6 +35,7 @@ Build and run the C counterparts:
 $ gcc -std=c17 -O2 -Wall -Wextra -Werror examples/programs/json.c -lm -o json_c
 $ gcc -std=c17 -O2 -Wall -Wextra -Werror examples/programs/markdown.c -lm -o markdown_c
 $ gcc -std=c17 -O2 -Wall -Wextra -Werror examples/programs/lisp.c -lm -o lisp_c
+$ gcc -std=c17 -O2 -Wall -Wextra -Werror examples/programs/wordstats.c -o wordstats_c
 $ ./json_c
 $ ./json_c examples/programs/data/sample.json
 ```
@@ -192,6 +196,43 @@ values printed: 8
 
 ```
 
+## wordstats.ls
+
+A word-frequency report over embedded text or a file. It tokenizes runs of ASCII letters and
+digits, lowercases them, and prints the line and byte counts, the number of words, unique
+words and total word bytes, the average and longest word, the five most frequent words
+(count descending, then lexicographic) and a length histogram. The report order never depends
+on hash-map slot order, so the output is deterministic.
+
+Expected stdout with no arguments (261 bytes):
+
+```text
+word statistics
+lines: 6
+long lines: 4
+bytes: 273
+words: 51
+unique words: 34
+average word length: 4
+longest word: iterators (9)
+top words:
+  the 7
+  dog 4
+  fox 3
+  lazy 3
+  a 2
+histogram:
+  1-2: 6
+  3-4: 28
+  5-6: 9
+  7-8: 6
+  9-10: 2
+  11+: 0
+word bytes: 212
+```
+
+File mode appends `file: <path>` and the same report for `data/sample.txt`.
+
 ## Data fixtures
 
 | file | bytes | used by |
@@ -199,6 +240,7 @@ values printed: 8
 | [data/sample.json](data/sample.json) | 175 | `json.ls -- data/sample.json` |
 | [data/sample.md](data/sample.md) | 819 | `markdown.ls -- data/sample.md` |
 | [data/sample.lisp](data/sample.lisp) | 504 | `lisp.ls -- data/sample.lisp` |
+| [data/sample.txt](data/sample.txt) | 262 | `wordstats.ls -- data/sample.txt` |
 
 ## Verification
 
@@ -213,9 +255,11 @@ Every mode below was run through both implementations and compared byte for byte
 | markdown | `data/sample.md` | 2261 | `228c63c5e255b612ffc0abab60c8f91e2481a60d4c88dce2ee4e23e06d8faf73` |
 | lisp | no arguments | 351 | `0cd802d14a61707147f8cd5d46ca4c64fcb10b2318a4d2571253ebee2084b20f` |
 | lisp | `data/sample.lisp` | 464 | `730d5070bf812ff171474aaca7c5df98d0612d4a5eb8e6d2094684a6a927e2cb` |
+| wordstats | no arguments | 261 | `7cfa47b26a1f600707ab234ad468809af8a6f8da1306a4cd6a29c00e27021d93` |
+| wordstats | `data/sample.txt` | 527 | `498b74868e29dd39859dd3792be0e2e71c73522c2e61cb37619f4ce8654db8a3` |
 
 Hashes are SHA-256 of the CRLF-normalized stdout. The `Real example programs` CI job
-re-checks all six invocations against both implementations with
+re-checks all eight invocations against both implementations with
 `scripts/real_programs.py`.
 
 Notes:

@@ -675,6 +675,11 @@ fn emit_fused_pipeline(
             _ => None,
         },
         body_frame: generator.frames.len(),
+        result: if ty.is_unit() {
+            None
+        } else {
+            Some(target.to_string())
+        },
         used_break: false,
         used_continue: false,
     });

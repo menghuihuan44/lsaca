@@ -858,6 +858,97 @@ fn main() {
         );
     }
 
+    #[test]
+    fn loop_break_values_type_the_loop() {
+        expect_ok(
+            r#"fn main() {
+    let mut n = 0;
+    let found = loop {
+        n = n + 1;
+        if n == 3 { break n * 7; }
+    };
+    let mut base = 4;
+    let nested = 'outer: loop {
+        let mut inner = 0;
+        loop {
+            inner = inner + 1;
+            if inner == 2 { break 'outer base + inner; }
+            if inner > 5 { break; }
+        }
+    };
+    println!("{} {}", found, nested);
+}"#,
+        );
+    }
+
+    #[test]
+    fn labelled_loop_results_unify_with_every_break_value() {
+        expect_ok(
+            r#"fn main() {
+    let result = 'outer: loop {
+        if true { break 'outer 1i64; }
+        break 'outer 2i64;
+    };
+    println!("{}", result);
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let result = loop {
+        if true { break 1i64; }
+        break "text";
+    };
+    println!("{}", result);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "mismatched types"));
+    }
+
+    #[test]
+    fn breaks_with_values_in_while_or_for_report_e0571() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    while true { break 1; }
+    for value in 0..3 { break value; }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0571"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "break with value from a while loop"
+        ));
+        assert!(has_message(
+            &diagnostics,
+            "break with value from a for loop"
+        ));
+    }
+
+    #[test]
+    fn break_outside_a_loop_or_to_an_unknown_label_reports_errors() {
+        let diagnostics = expect_errors(r#"fn main() { break; }"#);
+        assert!(
+            has_code(&diagnostics, "E0268"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = expect_errors(r#"fn main() { loop { break 'missing; } }"#);
+        assert!(
+            has_code(&diagnostics, "E0426"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "missing"));
+    }
+
     // -----------------------------------------------------------------
     // Patterns and exhaustiveness
     // -----------------------------------------------------------------
@@ -979,6 +1070,372 @@ fn main() {
         let diagnostics = expect_errors(r#"fn main() { let Some(value) = Some(1); }"#);
         assert!(has_code(&diagnostics, "E0005"));
         assert!(has_message(&diagnostics, "refutable pattern"));
+    }
+
+    #[test]
+    fn array_patterns_require_the_exact_length_and_unify_elements() {
+        expect_ok(
+            r#"fn main() {
+    let pair: [i64; 2] = [1, 2];
+    let [a, b] = pair;
+    let total = match pair {
+        [x, y] => x + y,
+    };
+    println!("{} {} {}", a, b, total);
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let pair: [i64; 2] = [1, 2];
+    let [a, b, c] = pair;
+    println!("{}", a + b + c);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "pattern expects 2 element(s), found 3"
+        ));
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let pair: [i64; 2] = [1, 2];
+    match pair {
+        [true, _] => println!("yes"),
+        _ => println!("no"),
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn slice_patterns_match_through_references_with_ergonomic_bindings() {
+        expect_ok(
+            r#"fn classify(values: &[i64]) -> i64 {
+    match values {
+        [] => 0,
+        [first, ..] => *first,
+        _ => -1,
+    }
+}
+fn main() {
+    let values = [7i64, 8];
+    println!("{}", classify(&values[..]));
+}"#,
+        );
+        // The slice iterator calls the slice methods declared by the full
+        // standard library, so this one needs the embedded stdlib rather than
+        // the iterator-only prelude used by the other cases.
+        let checked = check_source_with_embedded_stdlib(
+            r#"fn total(values: &[i64]) -> i64 {
+    let [..] = values;
+    let mut sum = 0;
+    for value in values { sum = sum + *value; }
+    sum
+}
+fn main() { println!("{}", total(&[1i64, 2])); }"#,
+        );
+        assert!(
+            checked.is_ok(),
+            "{:?}",
+            checked.as_ref().err().map(messages)
+        );
+        let diagnostics = expect_errors(
+            r#"fn take(values: &[i64]) -> i64 {
+    let [first, ..] = values;
+    *first
+}
+fn main() { println!("{}", take(&[1i64, 2])); }"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0005"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(&diagnostics, "refutable pattern"));
+    }
+
+    #[test]
+    fn slice_matches_partition_the_open_length_domain() {
+        // The documented describe() shape: each fixed length and the open
+        // tail are covered, so no wildcard arm is needed.
+        expect_ok(
+            r#"fn describe(values: &[i64]) -> i64 {
+    match values {
+        [] => 0,
+        [only] => *only,
+        [first, .., last] => *first + *last,
+    }
+}
+fn main() { println!("{}", describe(&[1i64, 2, 3])); }"#,
+        );
+        expect_ok(
+            r#"fn classify(values: &[i64]) -> i64 {
+    match values {
+        [] => 0,
+        [first, ..] => *first,
+    }
+}
+fn main() { println!("{}", classify(&[1i64])); }"#,
+        );
+        expect_ok(
+            r#"fn classify(values: &[i64]) -> i64 {
+    match values {
+        [..] => 1,
+    }
+}
+fn main() { println!("{}", classify(&[1i64])); }"#,
+        );
+        // Fixed lengths 0 and 1 are covered, but every longer slice is not:
+        // the tail witness is an open slice pattern, never an integer.
+        let diagnostics = expect_errors(
+            r#"fn classify(values: &[i64]) -> i64 {
+    match values {
+        [] => 0,
+        [only] => *only,
+    }
+}
+fn main() { println!("{}", classify(&[1i64])); }"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0004"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "[0, ..]"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            !has_message(&diagnostics, "patterns: 0 not covered"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        // Covering 0..=2 still leaves the tail class open.
+        let diagnostics = expect_errors(
+            r#"fn classify(values: &[i64]) -> i64 {
+    match values {
+        [] => 0,
+        [only] => *only,
+        [first, second] => *first + *second,
+    }
+}
+fn main() { println!("{}", classify(&[1i64])); }"#,
+        );
+        assert!(
+            has_message(&diagnostics, "[0, ..]"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        // A rest pattern that only binds Some values still misses None at
+        // every length it applies to.
+        let diagnostics = expect_errors(
+            r#"fn classify(values: &[Option<i64>]) -> i64 {
+    match values {
+        [] => 0,
+        [Some(first), ..] => *first,
+    }
+}
+fn main() { println!("{}", classify(&[Some(1i64)])); }"#,
+        );
+        assert!(
+            has_message(&diagnostics, "None"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        // An arm fully covered by [..] is unreachable.
+        let diagnostics = analyze(
+            r#"fn classify(values: &[i64]) -> i64 {
+    match values {
+        [..] => 0,
+        [_, ..] => 1,
+    }
+}
+fn main() { println!("{}", classify(&[1i64])); }"#,
+        );
+        let unreachable = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message == "unreachable pattern")
+            .count();
+        assert_eq!(unreachable, 1, "{:?}", messages(&diagnostics));
+    }
+
+    #[test]
+    fn no_rest_bracket_patterns_match_slices_as_exact_lengths() {
+        expect_ok(
+            r#"fn classify(values: &[i64]) -> i64 {
+    match values {
+        [] => 0,
+        [only] => *only,
+        [first, .., last] => *first + *last,
+        _ => -1,
+    }
+}
+fn main() {
+    let values = [1i64, 2, 3];
+    println!("{}", classify(&values[..]));
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn take(values: &[i64]) {
+    let [only] = values;
+    println!("{}", *only);
+}
+fn main() { take(&[1i64]); }"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0005"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn slice_patterns_with_rest_match_fixed_arrays_by_value() {
+        expect_ok(
+            r#"fn main() {
+    let values: [i64; 3] = [1, 2, 3];
+    let [head, ..] = values;
+    let [first, .., last] = values;
+    let middle = match values {
+        [a, .., c] => a + c,
+    };
+    println!("{} {} {} {}", head, first, last, middle);
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let values: [i64; 2] = [1, 2];
+    let [a, b, c, ..] = values;
+    println!("{} {} {}", a, b, c);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0308"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(has_message(
+            &diagnostics,
+            "pattern expects 2 element(s), found 3"
+        ));
+    }
+
+    #[test]
+    fn array_match_witnesses_render_elements() {
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let pair = [true, false];
+    match pair {
+        [true, true] => println!("both"),
+        [false, true] => println!("mixed"),
+        [true, false] => println!("mixed"),
+    }
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0004"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "[false, false]"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn at_patterns_bind_the_whole_value_and_its_parts() {
+        expect_ok(
+            r#"fn main() {
+    let pair @ [a, b] = [1i64, 2];
+    println!("{} {} {}", pair[0], a, b);
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"fn main() {
+    let pair @ [pair, b] = [1i64, 2];
+    println!("{} {}", pair, b);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0416"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn at_binding_a_non_copy_value_and_moving_a_part_reports_e0382() {
+        let diagnostics = expect_errors(
+            r#"struct Pair { first: String, second: String }
+fn main() {
+    let pair = Pair { first: String::from("a"), second: String::from("b") };
+    let whole @ Pair { first, .. } = pair;
+    println!("{} {}", first, whole.second.len());
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0382"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "move a non-Copy part out of it"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+
+        // Match ergonomics make both bindings references, so nothing moves.
+        expect_ok(
+            r#"struct Pair { first: String, second: String }
+fn total(pair: &Pair) -> usize {
+    match pair {
+        whole @ Pair { first, .. } => first.len() + whole.second.len(),
+    }
+}
+fn main() {
+    let pair = Pair { first: String::from("a"), second: String::from("b") };
+    println!("{}", total(&pair));
+}"#,
+        );
+    }
+
+    #[test]
+    fn at_binding_of_a_drop_value_is_allowed_but_moving_its_fields_is_not() {
+        expect_ok(
+            r#"struct Guard { value: i64 }
+impl Drop for Guard { fn drop(&mut self) { } }
+fn main() {
+    let guard = Guard { value: 1 };
+    let whole @ _ = guard;
+    println!("{}", whole.value);
+}"#,
+        );
+        let diagnostics = expect_errors(
+            r#"struct Payload { text: String }
+impl Drop for Payload { fn drop(&mut self) { } }
+fn main() {
+    let payload = Payload { text: String::from("x") };
+    let whole @ Payload { text } = payload;
+    println!("{} {}", whole.text, text);
+}"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0509"),
+            "{:?}",
+            messages(&diagnostics)
+        );
     }
 
     #[test]
@@ -6465,6 +6922,143 @@ fn main() { println!("{}", inner::value()); }
         );
         assert!(
             has_code(&diagnostics, "E0365"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn restricted_visibility_resolves_super_and_in_paths() {
+        expect_ok(
+            r#"
+mod outer {
+    pub mod inner {
+        pub(super) fn scoped() -> i64 { 3 }
+        pub(in crate::outer) fn deep_value() -> i64 { 4 }
+        pub fn call() -> i64 { scoped() + deep_value() }
+    }
+    pub fn call_inner() -> i64 { inner::call() + inner::scoped() + inner::deep_value() }
+}
+fn main() { println!("{}", outer::call_inner()); }
+"#,
+        );
+        let diagnostics = expect_errors(
+            r#"
+mod outer {
+    pub mod inner {
+        pub(super) fn scoped() -> i64 { 3 }
+        pub(in crate::outer) fn deep_value() -> i64 { 4 }
+    }
+}
+fn main() { println!("{}", outer::inner::scoped() + outer::inner::deep_value()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0603"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn restricted_visibility_paths_report_e0433_or_e0742() {
+        let diagnostics = expect_errors(
+            r#"
+mod holder {
+    pub(in crate::missing) fn value() -> i64 { 1 }
+}
+fn main() { }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0433"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            has_message(&diagnostics, "failed to resolve visibility path"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = expect_errors(
+            r#"
+mod holder {
+    pub mod branch { pub fn marker() -> i64 { 2 } }
+    pub(in crate::holder::branch) fn value() -> i64 { 1 }
+}
+fn main() { }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0742"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+        let diagnostics = expect_errors(
+            r#"pub(super) fn value() -> i64 { 1 }
+fn main() { }"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0742"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn pub_in_self_items_stay_private_to_their_module() {
+        expect_ok(
+            r#"
+mod holder {
+    pub(in self) fn value() -> i64 { 1 }
+    pub fn call() -> i64 { value() }
+}
+fn main() { println!("{}", holder::call()); }
+"#,
+        );
+        let diagnostics = expect_errors(
+            r#"
+mod holder {
+    pub(in self) fn value() -> i64 { 1 }
+}
+fn main() { println!("{}", holder::value()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0603"),
+            "{:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn reexports_can_narrow_visibility_and_module_aliases_carry_it() {
+        expect_ok(
+            r#"
+mod helper { pub fn public_item() -> i64 { 1 } }
+pub(crate) use helper::public_item;
+mod outer {
+    pub mod inner { pub fn value() -> i64 { 2 } }
+    pub(super) use self::inner as alias;
+    pub fn call() -> i64 { alias::value() }
+}
+fn main() {
+    println!("{} {}", public_item(), outer::call());
+    println!("{}", outer::alias::value());
+}
+"#,
+        );
+        let diagnostics = expect_errors(
+            r#"
+mod outer {
+    pub mod inner { pub(super) fn scoped() -> i64 { 1 } }
+}
+pub use outer::inner::scoped;
+fn main() { println!("{}", scoped()); }
+"#,
+        );
+        assert!(
+            has_code(&diagnostics, "E0364"),
             "{:?}",
             messages(&diagnostics)
         );

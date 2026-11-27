@@ -62,12 +62,33 @@ impl<'a> Checker<'a> {
                 VarKind::General => return,
             }
         }
+        if let ITy::Slice(elem) = &ty {
+            let elem = (**elem).clone();
+            let max_total = arms
+                .iter()
+                .map(|arm| self.slice_pattern_max_total(&arm.pat))
+                .max()
+                .unwrap_or(0);
+            // Slice patterns describe an open family of lengths. Partitioning
+            // it into 0..=max_total plus an unbounded tail keeps the analysis
+            // exact for real matches without letting a pathological pattern
+            // set enumerate an unreasonable number of classes.
+            if max_total <= 256 {
+                self.check_slice_match_exhaustive(&elem, arms, span, max_total);
+                return;
+            }
+        }
+        self.check_match_exhaustive_rows(&ty, arms, span);
+    }
+
+    /// Exhaustiveness for matches whose patterns have a fixed arity.
+    fn check_match_exhaustive_rows(&mut self, ty: &ITy, arms: &[super::tree::TArm], span: Span) {
         let mut matrix: Vec<Vec<EPat>> = Vec::new();
         for arm in arms {
             let rows = self.expand_pattern(&arm.pat);
             let mut useful = false;
             for row in &rows {
-                if self.is_useful(&matrix, std::slice::from_ref(row), &[ty.clone()]) {
+                if self.is_useful(&matrix, std::slice::from_ref(row), std::slice::from_ref(ty)) {
                     useful = true;
                     break;
                 }
@@ -91,25 +112,183 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        if self.is_useful(&matrix, &[EPat::Wild], &[ty.clone()]) {
-            let rendered = match self.find_witness(&matrix, &[ty.clone()]) {
+        if self.is_useful(&matrix, &[EPat::Wild], std::slice::from_ref(ty)) {
+            let rendered = match self.find_witness(&matrix, std::slice::from_ref(ty)) {
                 Some(witness) => match witness.first() {
-                    Some(epat) => self.render_witness(&ty, epat),
+                    Some(epat) => self.render_witness(ty, epat),
                     None => "_".to_string(),
                 },
                 None => "_".to_string(),
             };
-            let diag = crate::diag::Diagnostic::error(
-                format!("non-exhaustive patterns: {} not covered", rendered),
-                span,
-            )
-            .with_code("E0004")
-            .with_span_label(span)
-            .with_note(
-                "match must be exhaustive; add a wildcard arm or cover the missing patterns"
-                    .to_string(),
-            );
-            self.diagnostics.push(diag);
+            self.report_non_exhaustive(rendered, span);
+        }
+    }
+
+    /// Exhaustiveness for slice types, one concrete length class at a time.
+    fn check_slice_match_exhaustive(
+        &mut self,
+        elem: &ITy,
+        arms: &[super::tree::TArm],
+        span: Span,
+        max_total: usize,
+    ) {
+        // Classes 0..=max_total are concrete lengths. The final class stands
+        // for every longer length: no-rest patterns never apply there and
+        // every rest pattern does, so the representative max_total + 1 has
+        // exactly the same coverage shape as the whole tail.
+        let tail_len = max_total + 1;
+        let lengths: Vec<usize> = (0..=max_total).chain(std::iter::once(tail_len)).collect();
+        let types: Vec<Vec<ITy>> = lengths
+            .iter()
+            .map(|length| vec![elem.clone(); *length])
+            .collect();
+        let mut matrices: Vec<Vec<Vec<EPat>>> = vec![Vec::new(); lengths.len()];
+        for arm in arms {
+            let mut useful = false;
+            for (index, length) in lengths.iter().enumerate() {
+                let rows = self.expand_slice_rows(&arm.pat, *length);
+                if rows
+                    .iter()
+                    .any(|row| self.is_useful(&matrices[index], row, &types[index]))
+                {
+                    useful = true;
+                    break;
+                }
+            }
+            let synthetic =
+                matches!(arm.pat.kind, TPatKind::Wild) && arm.pat.span.start == arm.pat.span.end;
+            if !useful && !synthetic {
+                self.warning_code(
+                    "unreachable pattern".to_string(),
+                    arm.pat.span,
+                    "unreachable_patterns",
+                );
+            }
+            if arm.guard.is_none() {
+                for (index, length) in lengths.iter().enumerate() {
+                    for row in self.expand_slice_rows(&arm.pat, *length) {
+                        matrices[index].push(row);
+                    }
+                }
+            }
+        }
+        for (index, length) in lengths.iter().enumerate() {
+            let query = vec![EPat::Wild; *length];
+            if !self.is_useful(&matrices[index], &query, &types[index]) {
+                continue;
+            }
+            let witness = self
+                .find_witness(&matrices[index], &types[index])
+                .unwrap_or_else(|| query.clone());
+            let rendered = if *length == tail_len {
+                self.render_rest_slice_witness(elem, &witness)
+            } else {
+                self.render_exact_slice_witness(elem, &witness)
+            };
+            self.report_non_exhaustive(rendered, span);
+            return;
+        }
+    }
+
+    fn report_non_exhaustive(&mut self, rendered: String, span: Span) {
+        let diag = crate::diag::Diagnostic::error(
+            format!("non-exhaustive patterns: {} not covered", rendered),
+            span,
+        )
+        .with_code("E0004")
+        .with_span_label(span)
+        .with_note(
+            "match must be exhaustive; add a wildcard arm or cover the missing patterns"
+                .to_string(),
+        );
+        self.diagnostics.push(diag);
+    }
+
+    /// The largest fixed prefix-plus-suffix width among the top-level slice
+    /// patterns of an arm. Or-patterns and At bindings are transparent.
+    fn slice_pattern_max_total(&self, pat: &TPat) -> usize {
+        match &pat.kind {
+            TPatKind::Slice { prefix, suffix, .. } => prefix.len() + suffix.len(),
+            TPatKind::Or(alternatives) => alternatives
+                .iter()
+                .map(|alternative| self.slice_pattern_max_total(alternative))
+                .max()
+                .unwrap_or(0),
+            TPatKind::At { pattern, .. } => self.slice_pattern_max_total(pattern),
+            _ => 0,
+        }
+    }
+
+    /// Expand one arm's slice pattern for a concrete length class. A no-rest
+    /// pattern applies only at its exact width; a rest pattern applies at
+    /// every width at least as large as its fixed prefix and suffix.
+    fn expand_slice_rows(&self, pat: &TPat, length: usize) -> Vec<Vec<EPat>> {
+        match &pat.kind {
+            TPatKind::Wild | TPatKind::Bind { .. } => {
+                vec![vec![EPat::Wild; length]]
+            }
+            TPatKind::Or(alternatives) => {
+                let mut rows = Vec::new();
+                for alternative in alternatives {
+                    rows.extend(self.expand_slice_rows(alternative, length));
+                }
+                rows
+            }
+            TPatKind::At { pattern, .. } => self.expand_slice_rows(pattern, length),
+            TPatKind::Slice {
+                prefix,
+                suffix,
+                rest,
+            } => {
+                let total = prefix.len() + suffix.len();
+                let applies = if *rest {
+                    length >= total
+                } else {
+                    length == total
+                };
+                if !applies {
+                    return Vec::new();
+                }
+                let mut children: Vec<Vec<EPat>> = vec![vec![EPat::Wild]; length];
+                for (index, child) in prefix.iter().enumerate() {
+                    children[index] = self.expand_pattern(child);
+                }
+                let start = length - suffix.len();
+                for (offset, child) in suffix.iter().enumerate() {
+                    children[start + offset] = self.expand_pattern(child);
+                }
+                product(&children)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn render_exact_slice_witness(&self, elem: &ITy, row: &[EPat]) -> String {
+        let parts: Vec<String> = row
+            .iter()
+            .map(|epat| self.render_witness(elem, epat))
+            .collect();
+        format!("[{}]", parts.join(", "))
+    }
+
+    /// A tail-class witness is an open pattern: the middle stands for every
+    /// unconstrained length beyond the rendered prefix and suffix.
+    fn render_rest_slice_witness(&self, elem: &ITy, row: &[EPat]) -> String {
+        let Some(first) = row.first() else {
+            return "[..]".to_string();
+        };
+        let first = self.render_witness(elem, first);
+        if row.len() == 1 {
+            return format!("[{}, ..]", first);
+        }
+        match row.last() {
+            // A wildcard suffix adds no information: the open middle already
+            // covers it. Keep the witness compact.
+            Some(EPat::Wild) | None => format!("[{}, ..]", first),
+            Some(last) => {
+                let last = self.render_witness(elem, last);
+                format!("[{}, .., {}]", first, last)
+            }
         }
     }
 
@@ -118,7 +297,28 @@ impl<'a> Checker<'a> {
         match &pat.kind {
             TPatKind::Wild | TPatKind::Bind { .. } => true,
             TPatKind::Lit(_) => false,
-            TPatKind::Tuple(pats) => pats.iter().all(|pat| self.pattern_irrefutable(pat)),
+            TPatKind::Tuple(pats) | TPatKind::Array(pats) => {
+                pats.iter().all(|pat| self.pattern_irrefutable(pat))
+            }
+            TPatKind::Slice {
+                prefix,
+                suffix,
+                rest,
+            } => {
+                let children_irrefutable = prefix
+                    .iter()
+                    .chain(suffix.iter())
+                    .all(|pat| self.pattern_irrefutable(pat));
+                if !children_irrefutable {
+                    return false;
+                }
+                let total = prefix.len() + suffix.len();
+                match self.infer.resolve(&pat.ty) {
+                    ITy::Array(_, len) => total <= len && (*rest || total == len),
+                    _ => *rest && prefix.is_empty() && suffix.is_empty(),
+                }
+            }
+            TPatKind::At { pattern, .. } => self.pattern_irrefutable(pattern),
             TPatKind::Struct { fields, .. } => {
                 fields.iter().all(|(_, pat)| self.pattern_irrefutable(pat))
             }
@@ -144,7 +344,7 @@ impl<'a> Checker<'a> {
                 out
             }
             TPatKind::Lit(lit) => vec![bool_or_lit_epat(lit)],
-            TPatKind::Tuple(pats) => {
+            TPatKind::Tuple(pats) | TPatKind::Array(pats) => {
                 let children: Vec<Vec<EPat>> =
                     pats.iter().map(|pat| self.expand_pattern(pat)).collect();
                 product(&children)
@@ -152,6 +352,40 @@ impl<'a> Checker<'a> {
                     .map(|row| EPat::Ctor(0, row))
                     .collect()
             }
+            TPatKind::Slice {
+                prefix,
+                suffix,
+                rest,
+            } => {
+                if let ITy::Array(_, len) = self.infer.resolve(&pat.ty) {
+                    let total = prefix.len() + suffix.len();
+                    if total <= len && (*rest || total == len) {
+                        let mut children: Vec<Vec<EPat>> = vec![vec![EPat::Wild]; len];
+                        for (index, child) in prefix.iter().enumerate() {
+                            children[index] = self.expand_pattern(child);
+                        }
+                        let start = len - suffix.len();
+                        for (offset, child) in suffix.iter().enumerate() {
+                            children[start + offset] = self.expand_pattern(child);
+                        }
+                        return product(&children)
+                            .into_iter()
+                            .map(|row| EPat::Ctor(0, row))
+                            .collect();
+                    }
+                    vec![EPat::Ctor(usize::MAX, Vec::new())]
+                } else if *rest && prefix.is_empty() && suffix.is_empty() {
+                    vec![EPat::Wild]
+                } else {
+                    // A slice pattern with a known prefix/suffix only covers
+                    // slices of those lengths, so it never contributes to
+                    // exhaustiveness over the open domain of slice lengths.
+                    // The marker keeps the arm useful for redundancy analysis
+                    // without claiming any coverage of the wildcard domain.
+                    vec![EPat::Ctor(usize::MAX, Vec::new())]
+                }
+            }
+            TPatKind::At { pattern, .. } => self.expand_pattern(pattern),
             TPatKind::Struct {
                 struct_id, fields, ..
             } => {
@@ -202,7 +436,7 @@ impl<'a> Checker<'a> {
             ITy::Enum(id) => Some((0..self.variant_count(*id)).collect()),
             ITy::Option(_) => Some(vec![0, 1]),
             ITy::Result(_, _) => Some(vec![0, 1]),
-            ITy::Tuple(_) => Some(vec![0]),
+            ITy::Tuple(_) | ITy::Array(_, _) => Some(vec![0]),
             ITy::Struct(_) => Some(vec![0]),
             _ => None,
         }
@@ -228,6 +462,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ITy::Tuple(elems) => elems.clone(),
+            ITy::Array(elem, len) => vec![(**elem).clone(); *len],
             ITy::Struct(id) => self
                 .struct_fields(*id)
                 .into_iter()
@@ -432,6 +667,10 @@ impl<'a> Checker<'a> {
                     } else {
                         format!("Err({})", self.render_child(&ty, *ctor, 0, args))
                     }
+                }
+                ITy::Array(elem, len) => {
+                    let elems = vec![(**elem).clone(); *len];
+                    format!("[{}]", self.render_children(&elems, args))
                 }
                 ITy::Tuple(elems) => {
                     if elems.is_empty() {

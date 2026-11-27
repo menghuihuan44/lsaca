@@ -454,7 +454,7 @@ measured on the reference machine; those tables are generated from
 benchmarks/results/latest.md, and the page explains how to reproduce them. The recorded
 run used the `official` build mode (the normal `lsaca build -r` path, not the fallback);
 its JSON also contains every individual run, the compiler SHA-256 prefix and the
-repository commit, so a saved result is self-describing. The published 2.3.0 run was recorded on 2026-11-27T09:03:48+08:00 with lsaca 2.3.0 (compiler SHA-256 prefix f34f18a60e737d8e, repository commit 2634ef8); latest.json and latest.md hold that run, and a frozen copy is kept in benchmarks/results/archive/v2.3/. The 2.2.0 baseline run (recorded 2026-11-07T17:21:34+08:00, compiler SHA-256 prefix 1c74d15ecf9a1b49, commit 97280dd) remains in benchmarks/results/archive/v2.2/. Frozen references are
+repository commit, so a saved result is self-describing. The published 2.4.0 run was recorded on 2026-11-27T21:38:17+08:00 with lsaca 2.4.0 (compiler SHA-256 prefix 22d8552ea533c629, repository commit 3841c2e); latest.json and latest.md hold that run, and a frozen copy is kept in benchmarks/results/archive/v2.4/. The 2.3.0 run (recorded 2026-11-27T09:03:48+08:00, compiler SHA-256 prefix f34f18a60e737d8e, commit 2634ef8) is the previous baseline in benchmarks/results/archive/v2.3/. The 2.2.0 baseline run (recorded 2026-11-07T17:21:34+08:00, compiler SHA-256 prefix 1c74d15ecf9a1b49, commit 97280dd) remains in benchmarks/results/archive/v2.2/. Frozen references are
 kept for before/after comparisons: the published 2.1.0 run in
 benchmarks/results/archive/v2.1/ (recorded 2026-11-06T18:46:10+08:00, compiler SHA-256
 prefix 90fca3bbe4e3ec5e, commit 151a9c2), the published 2.0.0 run in
