@@ -31,7 +31,7 @@ not keep its referent alive on its own, and the compiler only accepts a borrow w
 owner provably outlives its last use. Most lifetimes are inferred: a borrow ends at the last point where the reference is
 used, and the checker is conservative inside a single expression (two mutable borrows
 there are rejected even when Rust would accept them; see
-[Known limitations](#known-limitations-in-240)). Since 2.2.0 an explicit
+[Known limitations](#known-limitations-in-250)). Since 2.2.0 an explicit
 `'a` is needed only on reference fields and on functions whose elided signature
 cannot say which input is borrowed. Since 1.4 the ownership
 and move checks (E0382, E0507, E0505) run alongside the reference checks, so moving a
@@ -1477,7 +1477,7 @@ reference is permitted only where the compiler can prove the referent stays aliv
 Errors without a code (parser level): `reference patterns are not supported; match a
 reference scrutinee directly, bindings become references`.
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 Version 1.3.0 introduced references, 1.4.0 added ownership and moves on top of
 them, and 1.5.0 added `==` between references. The current restrictions are:

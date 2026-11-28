@@ -33,14 +33,14 @@ source formatter. The
 module, and marks each module and API with the release that added it or as planned
 for a later release.
 
-This documentation set is the reference for the language as of version 2.4.0.
+This documentation set is the reference for the language as of version 2.5.0.
 It is split into short pages, one per topic, so you can read it linearly
 from [Getting started](language/01-getting-started.md) or jump straight to the
 part you need. Every runnable example on these pages has been executed with the
 compiler of the release it documents and shows its real output, including the
 multi-file and package examples; all runnable examples, including those in the
-standard-library reference, are part of the 2.4.0 verification gate and are
-executed against the 2.4.0 compiler.
+standard-library reference, are part of the 2.5.0 verification gate and are
+executed against the 2.5.0 compiler.
 
 ## Why lsaca?
 
@@ -59,10 +59,10 @@ executed against the 2.4.0 compiler.
   tuple/unit structs and `mut` parameters, and completed the Rust-shaped
   standard library. `Copy` and `Clone` are derived for you, and 2.2.0 adds
   arrays, labelled loops and the small set of lifetime annotations needed to
-  store direct references in structs, tuple structs and enums. Version 2.4.0 keeps
-  following Rust's defaults for integers (`i32`), lengths and indices (`usize`),
-  borrowed text (`&str`) and array semantics, and completes the pattern,
-  control-flow and system-interface surface described in its release notes.
+  store direct references in structs, tuple structs and enums. The current release
+  still follows Rust's defaults for integers (`i32`), lengths and indices (`usize`),
+  borrowed text (`&str`) and array semantics; 2.5 adds the controlled-unsafe and
+  C FFI surface described in [Unsafe code and C FFI](language/32-unsafe-and-ffi.md).
 * **Memory safety without a tracing garbage collector.** Values are managed by
   **ORC**: automatic reference counting plus a trial-deletion (Bacon-Rajan)
   cycle collector. Ownership decides when a value can be moved and when
@@ -72,8 +72,8 @@ executed against the 2.4.0 compiler.
   Trait>` still moves a concrete value and a `Rc<dyn Trait>` still refcounts one.
 * **A small, complete language.** A program is one crate: a root file plus the
   modules it declares, compiled as one unit, or a package of crates. The items
-  are `fn`, `struct`, `enum`, `impl`, `trait`, `const`, `type`, `mod` and
-  `use`; the standard library is a crate whose root is the prelude: `String`,
+  are `fn`, `struct`, `enum`, `union`, an `extern "C"` block, `impl`, `trait`,
+  `const`, `type`, `mod` and `use`; the standard library is a crate whose root is the prelude: `String`,
   `Vec<T>`, `HashMap<K, V>`, `Option<T>`, `Result<T, E>`, `Rc<T>`, `Box<T>`
   and the lazy iterator adapters, plus the module APIs documented in the
   [standard library reference](stdlib/README.md). Version 1.2 added the postfix
@@ -208,6 +208,7 @@ reference material and the example programs.
 | [29 Lifetimes](language/29-lifetimes.md) | Lightweight lifetime annotations for reference fields in structs, enums, tuples and `Option`, `impl<'a>` blocks, elision rules, `'static` and where references may not be stored. |
 | [30 From and ?](language/30-from-try.md) | The `From` trait, how `?` converts error types through `From`, and the `Error` trait with its `source` default method. |
 | [31 Error codes](language/31-error-codes.md) | The complete index of compiler diagnostic codes (`E0xxx`), what each one means and the compiler phase that raises it. |
+| [32 Unsafe code and C FFI](language/32-unsafe-and-ffi.md) | The `unsafe` safety contract, raw pointers, `extern "C"` declarations, `repr(C)` structs and unions, `CString`/`CStr`/`MaybeUninit`, the ORC invariants and the FFI-safe type table. |
 
 ### Standard library
 
@@ -217,9 +218,13 @@ The library is documented module by module in the
 language-level behaviour that is not a module (formatting macros, panics, exit
 codes).
 
-| Module | Page | Status in 2.4.0 |
+| Module | Page | Status |
 | --- | --- | --- |
 | `std::core` (Option, Result, Iterator) | [core](stdlib/core.md) | migrated from 1.7; the 2.1.0 Option/Result combinators implemented; 2.3.0 completes the `Option`/`Result` combinator surface; the `From` trait lives in the library root |
+| `std::mem` | [mem](stdlib/mem.md) | `MaybeUninit<T>` for uninitialized storage and C out parameters; added in 2.5.0 |
+| `std::ptr` | [ptr](stdlib/ptr.md) | raw pointers `*const T`/`*mut T`, `null`/`null_mut`, `is_null`, `addr` and unsafe `add`/`sub`; added in 2.5.0 |
+| `std::cstring` | [cstring](stdlib/cstring.md) | owning NUL-terminated `CString` for passing lsaca text to C; added in 2.5.0 |
+| `std::cstr` | [cstr](stdlib/cstr.md) | borrowed NUL-terminated `CStr` views and checked UTF-8 conversion; added in 2.5.0 |
 | `std::string` | [string](stdlib/string.md) | `&str` text API, `String` forwarding, `parse` with typed errors and the new `str` methods implemented |
 | `std::char` | [char](stdlib/char.md) | ASCII classification methods implemented; 2.3.0 adds Unicode 16.0.0 classification and case mapping |
 | `std::vec` | [vec](stdlib/vec.md) | migrated; `sort`, `truncate`/`swap`/`contains`, `as_slice` and `as_mut_slice` implemented; borrowed access with `get_mut`, `first_mut` and `last_mut` added in 2.2.0; 2.3.0 adds `iter`, `iter_mut` and `into_iter` |
@@ -235,10 +240,10 @@ codes).
 | `std::process` | [process](stdlib/process.md) | `args` and `exit` implemented; 2.4.0 adds `Command`, `ExitStatus` and `Output` |
 | `std::error` | [error](stdlib/error.md) | the `Error` trait implemented, with `Error::source` added in 2.2.0 and `io::Error` and the parse errors as implementors; the `From` conversions that `?` uses came with 2.2.0 |
 
-The status column records what version 2.4.0 provides; where a module is only
-partly implemented, its page separates the implemented API from the API that is
-not implemented in 2.4.0 and planned for a later release. Entries marked *planned*
-are documented from the design rather than from runnable behaviour.
+The status column records what the current release provides; where a module is
+only partly implemented, its page separates the implemented API from the API
+that is not implemented yet and planned for a later release. Entries marked
+*planned* are documented from the design rather than from runnable behaviour.
 
 ### Reference
 

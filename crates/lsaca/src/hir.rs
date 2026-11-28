@@ -22,6 +22,7 @@ use crate::types::{FloatTy, IntTy, SelfKind, Ty};
 
 pub type StructId = usize;
 pub type EnumId = usize;
+pub type UnionId = usize;
 pub type FnId = usize;
 pub type TraitObjectId = usize;
 pub type VtableId = usize;
@@ -33,6 +34,8 @@ pub struct Program {
     pub name: String,
     pub structs: Vec<HStruct>,
     pub enums: Vec<HEnum>,
+    /// Union declarations, indexed by Ty::Union.
+    pub unions: Vec<HUnion>,
     pub fns: Vec<HFn>,
     pub consts: Vec<HConst>,
     pub closures: Vec<HClosure>,
@@ -111,6 +114,19 @@ impl Program {
                     format!("&{}", self.type_name(inner))
                 }
             }
+            Ty::Ptr { mutable, inner } => {
+                if *mutable {
+                    format!("*mut {}", self.type_name(inner))
+                } else {
+                    format!("*const {}", self.type_name(inner))
+                }
+            }
+            Ty::MaybeUninit(inner) => format!("MaybeUninit<{}>", self.type_name(inner)),
+            Ty::Union(id) => self
+                .unions
+                .get(*id)
+                .map(|item| user_type_name(&item.name))
+                .unwrap_or_else(|| format!("union#{}", id)),
             Ty::Slice(elem) => format!("[{}]", self.type_name(elem)),
             Ty::Str => "str".to_string(),
             Ty::Dyn(id) => match self.trait_objects.get(*id) {
@@ -223,6 +239,9 @@ impl Program {
             | Ty::Int(_)
             | Ty::Float(_)
             | Ty::Ref { .. }
+            | Ty::Ptr { .. }
+            | Ty::MaybeUninit(_)
+            | Ty::Union(_)
             | Ty::Slice(_)
             | Ty::Str
             | Ty::Dyn(_) => true,
@@ -324,11 +343,46 @@ impl Program {
             | Ty::Rc(_)
             | Ty::Fn(_, _)
             | Ty::Ref { .. }
+            | Ty::Ptr { .. }
+            | Ty::MaybeUninit(_)
+            | Ty::Union(_)
             | Ty::Slice(_)
             | Ty::Str
             | Ty::Dyn(_) => false,
         }
     }
+}
+
+/// The foreign function ABI of an extern block. Only the C ABI exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternAbi {
+    /// The platform C ABI, written extern "C".
+    C,
+}
+
+impl ExternAbi {
+    /// The spelling used in diagnostics and generated C.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExternAbi::C => "C",
+        }
+    }
+}
+
+/// A user union declaration with C layout.
+///
+/// Every field starts at offset 0; the C representation is a struct with one
+/// member per field, so the C compiler chooses the largest size and alignment.
+#[derive(Debug, Clone)]
+pub struct HUnion {
+    /// Display name of the union, as written in the source.
+    pub name: String,
+    /// Unique C identifier of the union type (for example LsUnion_Value or
+    /// lsaca_union_Value).
+    pub c_name: String,
+    /// The fields in declaration order.
+    pub fields: Vec<HField>,
+    pub span: Span,
 }
 
 /// A user struct with named fields.
@@ -420,6 +474,12 @@ pub struct HFn {
     /// generator emits calls to them through its intrinsic emitter table
     /// instead of emitting a C function definition.
     pub intrinsic: bool,
+    /// The foreign ABI for functions declared in an extern block. Extern
+    /// functions have no body of their own: the generator emits a prototype
+    /// and calls the platform symbol directly. None for ordinary lsaca code.
+    pub extern_abi: Option<ExternAbi>,
+    /// True for unsafe fn declarations. Calls require an unsafe context.
+    pub is_unsafe: bool,
     pub body: HBlock,
     pub span: Span,
 }
@@ -652,6 +712,14 @@ pub enum HExprKind {
         /// Field index and value, in source order.
         fields: Vec<(usize, HExpr)>,
     },
+    /// A union literal: exactly one field is initialized, the others are
+    /// uninitialized. Constructing a union value requires an unsafe context.
+    UnionLit {
+        union_id: UnionId,
+        /// Field index, indexing HUnion::fields.
+        field: usize,
+        value: Box<HExpr>,
+    },
     Tuple(Vec<HExpr>),
     VecLit {
         elems: Vec<HExpr>,
@@ -741,7 +809,17 @@ pub enum HExprKind {
 /// HIR tables; the code generator mangles them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HFieldRef {
-    Struct { struct_id: StructId, index: usize },
+    Struct {
+        struct_id: StructId,
+        index: usize,
+    },
+    /// A union field read or write. Every union field starts at offset 0, so
+    /// the index only selects the C member name; reading or writing a union
+    /// field requires an unsafe context.
+    Union {
+        union_id: UnionId,
+        index: usize,
+    },
     Tuple(usize),
 }
 

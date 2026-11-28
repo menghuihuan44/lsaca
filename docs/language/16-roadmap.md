@@ -47,6 +47,31 @@ terminals, `process::Command`, UDP sockets and crate-wide formatting. The
   by contract and leaves the concurrency model to v3.0. UFCS stays `E0599`
   (deviation 19).
 
+The 2.5 release adds controlled unsafety and C FFI. It is additive for
+accepted code except for two new keywords: `unsafe` and `union` can no longer be
+used as identifiers, so a program that named a variable, function or type
+`unsafe` or `union` must rename it; the parser reports this as a syntax error.
+The language is pre-1.0, so there is no deprecation window. The 2.5 additions
+are:
+
+* **New syntax.** `unsafe { … }` blocks, `unsafe fn`, raw pointer types
+  `*const T`/`*mut T`, pointer casts, `extern "C" { … }` blocks,
+  `#[repr(C)]` on a struct and `union` declarations with C layout.
+* **New library surface.** `std::ptr` (`null`, `null_mut`, `is_null`, `addr`,
+  unsafe `add`/`sub`), `std::cstring` (`CString`), `std::cstr` (`CStr`) and
+  `std::mem` (`MaybeUninit<T>`); `String::as_ptr` and `Vec::as_ptr`/
+  `as_mut_ptr` expose their buffers to C.
+* **A new permission boundary.** Reading or writing through a raw pointer,
+  calling an `extern "C"` function, `assume_init`, `CStr::from_ptr`,
+  `CString::from_raw` and union access require an unsafe context (`E0133`).
+  Only the C ABI is supported; there are no function pointers, callbacks,
+  variadics or `#[link]`.
+* **Safety contract and ORC invariants.** Managed values never cross the FFI
+  boundary, raw pointers never own and counts are never manipulated by hand.
+  The full contract and the FFI-safe type table are in
+  [Unsafe code and C FFI](32-unsafe-and-ffi.md); the design rationale is in
+  [RFC 0005](../../rfcs/0005-controlled-unsafe-and-ffi.md).
+
 The 2.2 changes remain when upgrading from 2.1 or earlier:
 
 * **New syntax.** Array types `[T; N]` and literals, array repeat literals
@@ -128,6 +153,10 @@ release and compared with C, Rust, Python and Node; see
 * Labelled loops: [Loop labels](28-loop-labels.md).
 * Reference fields and lifetimes: [Lifetimes](29-lifetimes.md).
 * Error conversion with `From` and `?`: [From and ?](30-from-try.md).
+* Unsafe code, raw pointers and C FFI: [Unsafe code and C
+  FFI](32-unsafe-and-ffi.md).
+* The C-FFI design rationale: [RFC 0005: controlled unsafe and
+  FFI](../../rfcs/0005-controlled-unsafe-and-ffi.md).
 * The standard library modules: [Standard library
   reference](../stdlib/README.md).
 * Why protocols and formatting traits stay compiler-defined:

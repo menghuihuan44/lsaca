@@ -540,14 +540,43 @@ impl<'a> Parser<'a> {
     /// `pub(in path)`.
     fn is_item_start(&self) -> bool {
         let mut offset = 0usize;
-        if matches!(self.kind(), TokenKind::KwPub) {
-            offset = 1;
+        // Skip any attribute groups, such as `#[repr(C)]`, so that recovery
+        // recognizes an item written behind an attribute as an item start.
+        while matches!(self.peek_kind_at(offset), Some(TokenKind::Hash)) {
+            if !matches!(
+                self.peek_kind_at(offset.saturating_add(1)),
+                Some(TokenKind::LBracket)
+            ) {
+                break;
+            }
+            offset = offset.saturating_add(2);
+            let mut depth = 0usize;
+            loop {
+                match self.peek_kind_at(offset) {
+                    Some(TokenKind::LBracket) => {
+                        depth = depth.saturating_add(1);
+                        offset = offset.saturating_add(1);
+                    }
+                    Some(TokenKind::RBracket) => {
+                        offset = offset.saturating_add(1);
+                        if depth == 0 {
+                            break;
+                        }
+                        depth = depth.saturating_sub(1);
+                    }
+                    Some(_) => offset = offset.saturating_add(1),
+                    None => return false,
+                }
+            }
+        }
+        if matches!(self.peek_kind_at(offset), Some(TokenKind::KwPub)) {
+            offset = offset.saturating_add(1);
             // Skip a parenthesized visibility restriction to find the item
             // keyword that follows it. Recovery must recognize items behind
             // `pub(in path)` just like items behind `pub`.
-            if matches!(self.peek_kind_at(1), Some(TokenKind::LParen)) {
+            if matches!(self.peek_kind_at(offset), Some(TokenKind::LParen)) {
                 let mut depth = 0usize;
-                let mut index = 1usize;
+                let mut index = offset;
                 while let Some(kind) = self.peek_kind_at(index) {
                     match kind {
                         TokenKind::LParen => depth += 1,
@@ -567,19 +596,26 @@ impl<'a> Parser<'a> {
             }
         }
         match self.tokens.get(self.pos.saturating_add(offset)) {
-            Some(token) => matches!(
-                token.kind,
+            Some(token) => match token.kind {
+                // `unsafe` starts an item only as `unsafe fn`; an
+                // `unsafe { ... }` block is a statement, not an item.
+                TokenKind::KwUnsafe => matches!(
+                    self.peek_kind_at(offset.saturating_add(1)),
+                    Some(TokenKind::KwFn)
+                ),
                 TokenKind::KwFn
-                    | TokenKind::KwStruct
-                    | TokenKind::KwEnum
-                    | TokenKind::KwImpl
-                    | TokenKind::KwConst
-                    | TokenKind::KwType
-                    | TokenKind::KwTrait
-                    | TokenKind::KwMod
-                    | TokenKind::KwUse
-                    | TokenKind::KwExtern
-            ),
+                | TokenKind::KwStruct
+                | TokenKind::KwUnion
+                | TokenKind::KwEnum
+                | TokenKind::KwImpl
+                | TokenKind::KwConst
+                | TokenKind::KwType
+                | TokenKind::KwTrait
+                | TokenKind::KwMod
+                | TokenKind::KwUse
+                | TokenKind::KwExtern => true,
+                _ => false,
+            },
             None => false,
         }
     }
@@ -595,6 +631,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::KwLoop
                 | TokenKind::KwWhile
                 | TokenKind::KwFor
+                | TokenKind::KwUnsafe
                 | TokenKind::LBrace
                 | TokenKind::Lifetime(_)
         )
@@ -616,6 +653,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::KwWhile
                 | TokenKind::KwFor
                 | TokenKind::KwMove
+                | TokenKind::KwUnsafe
                 | TokenKind::KwSelf
                 | TokenKind::KwSelfTy
                 | TokenKind::KwCrate
@@ -671,11 +709,42 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> Option<Item> {
+        let attributes = self.parse_attributes();
         let vis = self.parse_visibility();
-        match self.peek_kind() {
+        let item = match self.peek_kind() {
             TokenKind::KwFn => Some(Item::Fn(self.parse_fn_decl(None, vis, false))),
-            TokenKind::KwExtern => Some(Item::Fn(self.parse_extern_fn(vis))),
-            TokenKind::KwStruct => Some(Item::Struct(self.parse_struct_decl(vis))),
+            TokenKind::KwUnsafe => {
+                let unsafe_token = self.bump();
+                if self.at(TokenKind::KwUnsafe) {
+                    let duplicate = self.bump();
+                    self.error_coded(
+                        E_SYNTAX,
+                        "duplicate 'unsafe' qualifier; write 'unsafe' only once",
+                        unsafe_token.span.join(duplicate.span),
+                    );
+                }
+                if self.at(TokenKind::KwFn) {
+                    let mut decl = self.parse_fn_decl(None, vis, false);
+                    decl.is_unsafe = true;
+                    decl.span = unsafe_token.span.join(decl.span);
+                    Some(Item::Fn(decl))
+                } else {
+                    let found = self.peek_kind().describe();
+                    let span = self.span();
+                    self.error_coded(
+                        E_SYNTAX,
+                        format!("expected 'fn' after 'unsafe', found {}", found),
+                        unsafe_token.span.join(span),
+                    );
+                    self.synchronize_item();
+                    None
+                }
+            }
+            TokenKind::KwExtern => Some(self.parse_extern_item(vis)),
+            TokenKind::KwStruct => {
+                Some(Item::Struct(self.parse_struct_decl(vis, attributes.repr_c)))
+            }
+            TokenKind::KwUnion => Some(Item::Union(self.parse_union_decl(vis))),
             TokenKind::KwEnum => Some(Item::Enum(self.parse_enum_decl(vis))),
             TokenKind::KwImpl => Some(Item::Impl(self.parse_impl_block())),
             TokenKind::KwConst => Some(Item::Const(self.parse_const_decl(vis))),
@@ -695,7 +764,7 @@ impl<'a> Parser<'a> {
                 let span = self.span();
                 self.error(
                     format!(
-                        "expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found {}",
+                        "expected an item (fn, struct, union, enum, impl, const, type, trait, mod, use, extern or unsafe fn), found {}",
                         found
                     ),
                     span,
@@ -705,6 +774,139 @@ impl<'a> Parser<'a> {
                 }
                 self.synchronize_item();
                 None
+            }
+        };
+        // #[repr(C)] is meaningful on a struct and is also accepted, as a
+        // no-op, on a union. Report it on any other item after the item has
+        // been parsed so that the declaration itself is still available to
+        // later passes.
+        if attributes.repr_c
+            && item.is_some()
+            && !matches!(item, Some(Item::Struct(_) | Item::Union(_)))
+        {
+            let span = attributes.repr_span.unwrap_or_else(|| self.prev_span());
+            self.error_coded(
+                "E0771",
+                "attribute 'repr(C)' is only supported on struct and union declarations",
+                span,
+            );
+        }
+        item
+    }
+
+    /// Parse any leading item attributes and return the facts the parser
+    /// understands. v2.5 accepts only `#[repr(C)]`: it matters on a struct and
+    /// is accepted as a no-op on a union.
+    fn parse_attributes(&mut self) -> ItemAttributes {
+        let mut attributes = ItemAttributes::default();
+        while self.at(TokenKind::Hash) {
+            let hash = self.bump();
+            if self.eat(TokenKind::LBracket).is_none() {
+                let span = self.span();
+                self.error_coded(
+                    E_SYNTAX,
+                    "expected '[' after '#' in an attribute",
+                    hash.span.join(span),
+                );
+                break;
+            }
+            let mut accepted_repr_at = None;
+            if matches!(self.kind(), TokenKind::Ident(name) if name == "repr") {
+                self.bump();
+                if self.eat(TokenKind::LParen).is_some() {
+                    let mut valid_c = false;
+                    if matches!(self.kind(), TokenKind::Ident(name) if name == "C") {
+                        let c_token = self.bump();
+                        if self.at(TokenKind::RParen) {
+                            valid_c = true;
+                            accepted_repr_at = Some(hash.span.join(c_token.span));
+                        }
+                    }
+                    if !valid_c {
+                        let span = hash.span.join(self.span());
+                        self.error_coded(
+                            "E0771",
+                            "unsupported repr attribute; only #[repr(C)] is supported",
+                            span,
+                        );
+                    }
+                    // Skip the rest of the argument list, including nested
+                    // parentheses, so a rejected repr does not derail the item.
+                    let mut depth = 0usize;
+                    while !self.at_eof() {
+                        match self.kind() {
+                            TokenKind::LParen => {
+                                depth = depth.saturating_add(1);
+                                self.bump();
+                            }
+                            TokenKind::RParen => {
+                                if depth == 0 {
+                                    self.bump();
+                                    break;
+                                }
+                                depth = depth.saturating_sub(1);
+                                self.bump();
+                            }
+                            TokenKind::RBracket => break,
+                            _ => {
+                                self.bump();
+                            }
+                        }
+                    }
+                } else {
+                    let span = hash.span.join(self.span());
+                    self.error_coded(
+                        "E0771",
+                        "unsupported repr attribute; only #[repr(C)] is supported",
+                        span,
+                    );
+                }
+            } else {
+                let span = hash.span.join(self.span());
+                self.error_coded(
+                    E_SYNTAX,
+                    "unsupported attribute; only #[repr(C)] on struct and union declarations is supported",
+                    span,
+                );
+                self.skip_attribute_contents();
+            }
+            if let Some(rb) = self.eat(TokenKind::RBracket) {
+                if let Some(start) = accepted_repr_at {
+                    attributes.repr_c = true;
+                    attributes.repr_span = Some(start.join(rb.span));
+                }
+            } else {
+                let span = self.span();
+                self.error_coded(
+                    E_SYNTAX,
+                    "expected ']' to close the attribute",
+                    hash.span.join(span),
+                );
+            }
+        }
+        attributes
+    }
+
+    /// Skip the contents of a rejected attribute up to, but not including, the
+    /// closing `]`. Nested bracket groups are balanced.
+    fn skip_attribute_contents(&mut self) {
+        let mut depth = 0usize;
+        while !self.at_eof() {
+            match self.kind() {
+                TokenKind::LBracket => {
+                    depth = depth.saturating_add(1);
+                    self.bump();
+                }
+                TokenKind::RBracket => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth = depth.saturating_sub(1);
+                    self.bump();
+                }
+                _ => {
+                    self.bump();
+                }
             }
         }
     }
@@ -1066,6 +1268,7 @@ impl<'a> Parser<'a> {
             ret,
             body,
             is_extern,
+            is_unsafe: false,
             self_kind,
             span: start.join(end),
         }
@@ -1086,10 +1289,13 @@ impl<'a> Parser<'a> {
         if !self.at(TokenKind::KwFn) {
             let span = self.span();
             let found = self.peek_kind().describe();
-            self.error(
-                format!("expected 'fn' after 'extern', found {}", found),
-                span,
-            );
+            let message = if self.at(TokenKind::KwUnsafe) {
+                "extern function declarations are implicitly unsafe to call; remove the 'unsafe' keyword"
+                    .to_string()
+            } else {
+                format!("expected 'fn' after 'extern', found {}", found)
+            };
+            self.error_coded(E_SYNTAX, message, span);
             self.synchronize_item();
             let end = self.prev_span();
             return FnDecl {
@@ -1101,6 +1307,7 @@ impl<'a> Parser<'a> {
                 ret: None,
                 body: None,
                 is_extern: true,
+                is_unsafe: false,
                 self_kind: None,
                 span: extern_span.join(end),
             };
@@ -1233,7 +1440,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_struct_decl(&mut self, vis: Visibility) -> StructDecl {
+    fn parse_struct_decl(&mut self, vis: Visibility, repr_c: bool) -> StructDecl {
         let struct_token = self.expect(TokenKind::KwStruct, "struct");
         let start = struct_token
             .map(|token| token.span)
@@ -1250,7 +1457,248 @@ impl<'a> Parser<'a> {
             name_span,
             vis,
             generics,
+            repr_c,
             kind,
+            span: start.join(end),
+        }
+    }
+
+    /// Parse an `extern "ABI" { fn ...; }` block. The ABI string is kept as
+    /// written; the type checker accepts only `"C"` in v2.5. Each function is
+    /// a bodyless declaration and may carry its own visibility.
+    fn parse_extern_item(&mut self, vis: Visibility) -> Item {
+        match self.peek_kind_at(1) {
+            Some(TokenKind::Str(_)) => Item::ExternBlock(self.parse_extern_block(vis)),
+            Some(TokenKind::KwFn) => Item::Fn(self.parse_extern_fn(vis)),
+            _ => {
+                // Keep the specific "expected 'fn' after 'extern'" diagnostic
+                // for non-block forms that used to be rejected there, while
+                // still allowing any string literal ABI to reach type checking.
+                Item::Fn(self.parse_extern_fn(vis))
+            }
+        }
+    }
+
+    fn parse_extern_block(&mut self, vis: Visibility) -> ExternBlock {
+        let extern_token = self.expect(TokenKind::KwExtern, "'extern'");
+        let start = extern_token
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.span());
+        let (abi, abi_span) = match self.kind() {
+            TokenKind::Str(abi) => {
+                let abi = abi.clone();
+                let span = self.span();
+                self.bump();
+                (abi, span)
+            }
+            _ => {
+                let span = self.span();
+                self.error("expected a string literal ABI after 'extern'", span);
+                (String::new(), span)
+            }
+        };
+        let mut fns = Vec::new();
+        if self
+            .expect(TokenKind::LBrace, "'{' after extern ABI")
+            .is_some()
+        {
+            loop {
+                if self.at(TokenKind::RBrace) || self.at_eof() {
+                    break;
+                }
+                let before = self.pos;
+                if self.eat(TokenKind::Semi).is_some() {
+                    continue;
+                }
+                let fn_vis = self.parse_visibility();
+                if self.at(TokenKind::KwUnsafe) {
+                    let span = self.span();
+                    self.error_coded(
+                        E_SYNTAX,
+                        "extern declarations are implicitly unsafe to call; remove the 'unsafe' keyword",
+                        span,
+                    );
+                    while self.at(TokenKind::KwUnsafe) {
+                        self.bump();
+                    }
+                }
+                if !self.at(TokenKind::KwFn) {
+                    let found = self.peek_kind().describe();
+                    let span = self.span();
+                    self.error_coded(
+                        E_SYNTAX,
+                        format!("expected 'fn' in extern block, found {}", found),
+                        span,
+                    );
+                    self.synchronize_item();
+                    self.ensure_progress(before);
+                    continue;
+                }
+                fns.push(self.parse_extern_block_fn(fn_vis));
+                self.ensure_progress(before);
+            }
+        }
+        let end = self
+            .expect(TokenKind::RBrace, "'}' to close extern block")
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.prev_span());
+        ExternBlock {
+            abi,
+            abi_span,
+            vis,
+            fns,
+            span: start.join(end),
+        }
+    }
+
+    /// Parse one bodyless function declaration inside an `extern` block.
+    /// Generics and receivers are rejected here because the C ABI cannot carry
+    /// either, but parsing continues so one error does not hide the rest.
+    fn parse_extern_block_fn(&mut self, vis: Visibility) -> FnDecl {
+        let fn_token = self.expect(TokenKind::KwFn, "fn");
+        let start = fn_token
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.span());
+        let (name, name_span) = self.expect_ident("extern function name");
+        if self.at(TokenKind::Lt) {
+            let span = self.span();
+            self.error_coded(
+                E_SYNTAX,
+                "extern function declarations cannot have generic parameters; remove the type parameters",
+                span,
+            );
+            let _ = self.parse_generic_params();
+        }
+        let params = self.parse_extern_block_params();
+        let ret = if self.eat(TokenKind::Arrow).is_some() {
+            Some(self.parse_type())
+        } else {
+            None
+        };
+        let body = self.parse_extern_fn_terminator();
+        let end = self.prev_span();
+        FnDecl {
+            name,
+            name_span,
+            vis,
+            generics: Vec::new(),
+            params,
+            ret,
+            body,
+            is_extern: true,
+            is_unsafe: false,
+            self_kind: None,
+            span: start.join(end),
+        }
+    }
+
+    /// Parse the parameter list of an extern-block function, rejecting a
+    /// receiver with a precise diagnostic instead of treating it as a normal
+    /// parameter.
+    fn parse_extern_block_params(&mut self) -> Vec<Param> {
+        let mut params = Vec::new();
+        self.expect(TokenKind::LParen, "'('");
+        let mut first = true;
+        loop {
+            if self.at(TokenKind::RParen) || self.at_eof() {
+                break;
+            }
+            let before = self.pos;
+            let receiver_ahead = first
+                && (self.at(TokenKind::KwSelf)
+                    || self.receiver_reference_ahead()
+                    || (self.at(TokenKind::KwMut)
+                        && matches!(self.peek_kind_at(1), Some(TokenKind::KwSelf))));
+            if receiver_ahead {
+                let start = self.span();
+                self.eat(TokenKind::KwMut);
+                self.eat(TokenKind::Amp);
+                self.eat(TokenKind::KwMut);
+                self.expect(TokenKind::KwSelf, "'self'");
+                if self.eat(TokenKind::Colon).is_some() {
+                    let _ = self.parse_type();
+                }
+                self.error_coded(
+                    E_SYNTAX,
+                    "extern function declarations cannot have a receiver",
+                    start.join(self.prev_span()),
+                );
+            } else {
+                params.push(self.parse_param());
+            }
+            first = false;
+            self.ensure_progress(before);
+            if self.eat(TokenKind::Comma).is_some() {
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::RParen, "')' after extern function parameters");
+        params
+    }
+
+    /// Parse a `union` declaration. Only named fields are supported: a union
+    /// has no tuple or unit forms in v2.5.
+    fn parse_union_decl(&mut self, vis: Visibility) -> UnionDecl {
+        let union_token = self.expect(TokenKind::KwUnion, "union");
+        let start = union_token
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.span());
+        let (name, name_span) = self.expect_ident("union name");
+        if self.at(TokenKind::Lt) {
+            let span = self.span();
+            self.error_coded(
+                E_SYNTAX,
+                "unions cannot be generic; remove the type parameters",
+                span,
+            );
+            let _ = self.parse_generic_params();
+        }
+        let mut fields = Vec::new();
+        let end = if self.eat(TokenKind::LBrace).is_some() {
+            loop {
+                if self.at(TokenKind::RBrace) || self.at_eof() {
+                    break;
+                }
+                let before = self.pos;
+                let field_vis = self.parse_visibility();
+                let (field_name, field_span) = self.expect_ident("field name");
+                self.expect(TokenKind::Colon, "':' after field name");
+                let ty = self.parse_type();
+                fields.push(FieldDef {
+                    name: field_name,
+                    name_span: field_span,
+                    vis: field_vis,
+                    ty,
+                });
+                self.ensure_progress(before);
+                if self.eat(TokenKind::Comma).is_some() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(TokenKind::RBrace, "'}' after union fields")
+                .map(|token| token.span)
+                .unwrap_or_else(|| self.prev_span())
+        } else {
+            let found = self.peek_kind().describe();
+            let span = self.span();
+            self.error_coded(
+                E_SYNTAX,
+                format!(
+                    "union declarations must have named fields; expected '{{', found {}",
+                    found
+                ),
+                span,
+            );
+            self.synchronize_item();
+            self.prev_span()
+        };
+        UnionDecl {
+            name,
+            name_span,
+            vis,
+            fields,
             span: start.join(end),
         }
     }
@@ -1423,22 +1871,51 @@ impl<'a> Parser<'a> {
             }
             let before = self.pos;
             let method_vis = self.parse_visibility();
+            let unsafe_token = self.eat(TokenKind::KwUnsafe);
+            if unsafe_token.is_some() && self.at(TokenKind::KwUnsafe) {
+                let duplicate = self.bump();
+                let span = unsafe_token
+                    .as_ref()
+                    .map(|token| token.span)
+                    .unwrap_or(duplicate.span);
+                self.error_coded(
+                    E_SYNTAX,
+                    "duplicate 'unsafe' qualifier; write 'unsafe' only once",
+                    span.join(duplicate.span),
+                );
+            }
             if self.at(TokenKind::KwFn) {
-                fns.push(self.parse_fn_decl(Some(&ty), method_vis, false));
+                let mut decl = self.parse_fn_decl(Some(&ty), method_vis, false);
+                if let Some(token) = unsafe_token {
+                    decl.is_unsafe = true;
+                    decl.span = token.span.join(decl.span);
+                }
+                fns.push(decl);
             } else {
                 let span = self.span();
-                self.error(
-                    if !matches!(method_vis, Visibility::Private) {
-                        "expected a function after pub in impl block"
-                    } else {
-                        "expected a function in impl block"
-                    },
-                    span,
-                );
+                if unsafe_token.is_some() {
+                    let found = self.peek_kind().describe();
+                    self.error_coded(
+                        E_SYNTAX,
+                        format!("expected 'fn' after 'unsafe', found {}", found),
+                        span,
+                    );
+                } else {
+                    self.error_coded(
+                        E_SYNTAX,
+                        if !matches!(method_vis, Visibility::Private) {
+                            "expected a function after pub in impl block"
+                        } else {
+                            "expected a function in impl block"
+                        },
+                        span,
+                    );
+                }
                 while !self.at_eof()
                     && !self.at(TokenKind::RBrace)
                     && !self.at(TokenKind::KwFn)
                     && !self.at(TokenKind::KwPub)
+                    && !self.at(TokenKind::KwUnsafe)
                 {
                     self.bump();
                 }
@@ -1611,6 +2088,17 @@ impl<'a> Parser<'a> {
             // A written visibility before a trait method is accepted and
             // ignored: trait methods are public through the implementing type.
             let _ = self.parse_visibility();
+            if self.at(TokenKind::KwUnsafe) {
+                let span = self.span();
+                self.error_coded(
+                    E_SYNTAX,
+                    "unsafe trait methods are not supported in v2.5; use an unsafe block in the method body",
+                    span,
+                );
+                while self.at(TokenKind::KwUnsafe) {
+                    self.bump();
+                }
+            }
             if self.at(TokenKind::KwFn) {
                 methods.push(self.parse_trait_method());
             } else {
@@ -1846,6 +2334,31 @@ impl<'a> Parser<'a> {
             let span = self.span();
             self.bump();
             return TypeExpr::Lifetime(Lifetime { name, span });
+        }
+        // Raw pointer types: `*const T` and `*mut T`. The pointee is parsed
+        // as a full type, so `*const [u8]` and `*const *mut T` work.
+        if self.at(TokenKind::Star) {
+            let star = self.bump();
+            let mutable = if self.eat(TokenKind::KwMut).is_some() {
+                true
+            } else if self.eat(TokenKind::KwConst).is_some() {
+                false
+            } else {
+                let span = star.span.join(self.span());
+                self.error_coded(
+                    E_SYNTAX,
+                    "expected 'const' or 'mut' after '*' in a raw pointer type",
+                    span,
+                );
+                false
+            };
+            let inner = self.parse_type();
+            let span = star.span.join(inner.span());
+            return TypeExpr::Ptr {
+                mutable,
+                inner: Box::new(inner),
+                span,
+            };
         }
         // Reference types: &T, &mut T, &'a T and &'a mut T. The lexer scans a
         // written '&&' as a single AmpAmp token; it is two nested shared
@@ -3233,6 +3746,21 @@ impl<'a> Parser<'a> {
                 let span = block.span;
                 Expr::new(ExprKind::Block(block), span)
             }
+            TokenKind::KwUnsafe => {
+                self.bump();
+                if self.at(TokenKind::LBrace) {
+                    let block = self.parse_block();
+                    Expr::new(ExprKind::Unsafe(block), start.join(self.prev_span()))
+                } else {
+                    let found = self.peek_kind().describe();
+                    self.error_coded(
+                        E_SYNTAX,
+                        format!("expected '{{' after 'unsafe', found {}", found),
+                        start,
+                    );
+                    self.error_expr()
+                }
+            }
             TokenKind::KwIf => self.parse_if_expr(),
             TokenKind::KwMatch => self.parse_match_expr(),
             TokenKind::KwLoop => self.parse_loop_expr(None),
@@ -3968,6 +4496,15 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The item attributes the parser understands in v2.5. Only the presence of
+/// `#[repr(C)]` matters to later passes; all other attributes are rejected
+/// where they are parsed.
+#[derive(Default)]
+struct ItemAttributes {
+    repr_c: bool,
+    repr_span: Option<Span>,
+}
+
 /// One node of the iterative AST depth validation run by
 /// [Parser::check_ast_depth] at the end of parsing. The walk is driven by an
 /// explicit stack, so validating the tree does not itself recurse and cannot
@@ -4062,6 +4599,16 @@ impl<'a> AstNode<'a> {
                 Item::Mod(decl) => {
                     for item in &decl.items {
                         stack.push((AstNode::Item(item), depth));
+                    }
+                }
+                Item::Union(decl) => {
+                    for field in &decl.fields {
+                        stack.push((AstNode::Type(&field.ty), depth));
+                    }
+                }
+                Item::ExternBlock(decl) => {
+                    for decl in &decl.fns {
+                        stack.push((AstNode::Fn(decl), depth));
                     }
                 }
                 // Use declarations contribute no recursive AST children: they
@@ -4178,6 +4725,7 @@ impl<'a> AstNode<'a> {
                     }
                 }
                 ExprKind::Block(block) => stack.push((AstNode::Block(block), depth)),
+                ExprKind::Unsafe(block) => stack.push((AstNode::Block(block), depth)),
                 ExprKind::Loop { body, .. } => stack.push((AstNode::Block(body), depth)),
                 ExprKind::While { cond, body, .. } => {
                     stack.push((AstNode::Expr(cond), depth));
@@ -4310,6 +4858,7 @@ impl<'a> AstNode<'a> {
                     stack.push((AstNode::Type(ret), depth));
                 }
                 TypeExpr::Ref { inner, .. } => stack.push((AstNode::Type(inner), depth)),
+                TypeExpr::Ptr { inner, .. } => stack.push((AstNode::Type(inner), depth)),
                 TypeExpr::Dyn(trait_ref) => {
                     for arg in &trait_ref.args {
                         stack.push((AstNode::Type(arg), depth));
@@ -4385,6 +4934,7 @@ fn is_block_like(expr: &Expr) -> bool {
             | ExprKind::While { .. }
             | ExprKind::For { .. }
             | ExprKind::Block(_)
+            | ExprKind::Unsafe(_)
     )
 }
 
@@ -9044,5 +9594,464 @@ fn make<'a, T>(value: &'a T) -> Pair<'a, T> { Pair { first: value, second: *valu
                 "expected a range diagnostic for {source:?}"
             );
         }
+    }
+
+    #[test]
+    fn parses_repr_c_structs_and_unions() {
+        let source = r#"
+#[repr(C)]
+pub struct Header {
+    tag: i64,
+    payload: *mut u8,
+}
+
+#[repr(C)]
+pub union Value {
+    pub integer: i64,
+    float: f64,
+}
+"#;
+        let program = parse_ok(source);
+        assert_eq!(program.items.len(), 2);
+
+        let header = match &program.items[0] {
+            Item::Struct(decl) => decl,
+            other => panic!("expected a struct, got {:?}", other),
+        };
+        assert_eq!(header.name, "Header");
+        assert!(header.repr_c);
+        assert!(matches!(&header.vis, Visibility::Public));
+        match &header.kind {
+            StructKind::Named(fields) => {
+                assert_eq!(fields.len(), 2);
+                match &fields[1].ty {
+                    TypeExpr::Ptr {
+                        mutable: true,
+                        inner,
+                        ..
+                    } => match inner.as_ref() {
+                        TypeExpr::Path { name, .. } => assert_eq!(name, "u8"),
+                        other => panic!("expected a u8 pointee, got {:?}", other),
+                    },
+                    other => panic!("expected *mut u8, got {:?}", other),
+                }
+            }
+            other => panic!("expected named struct fields, got {:?}", other),
+        }
+
+        let value = match &program.items[1] {
+            Item::Union(decl) => decl,
+            other => panic!("expected a union, got {:?}", other),
+        };
+        assert_eq!(value.name, "Value");
+        assert!(matches!(&value.vis, Visibility::Public));
+        assert_eq!(value.fields.len(), 2);
+        assert_eq!(value.fields[0].name, "integer");
+        assert_eq!(value.fields[1].name, "float");
+        assert!(matches!(&value.fields[0].vis, Visibility::Public));
+        assert!(matches!(&value.fields[1].vis, Visibility::Private));
+    }
+
+    #[test]
+    fn rejects_repr_c_on_other_items() {
+        let (program, diagnostics) = parse_source("#[repr(C)]\nenum Kind { A }");
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("only supported on struct and union")),
+            "expected a misplaced repr diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0771"))
+        );
+        assert!(matches!(&program.items[0], Item::Enum(_)));
+    }
+
+    #[test]
+    fn rejects_unsupported_attributes_and_repr_arguments() {
+        let (program, diagnostics) = parse_source("#[derive(Clone)]\nstruct S { x: i64 }");
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("unsupported attribute; only #[repr(C)]")),
+            "expected an unsupported attribute diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+        assert!(matches!(&program.items[0], Item::Struct(_)));
+
+        for source in [
+            "#[repr(packed)]\nstruct S { x: i64 }",
+            "#[repr(C, packed)]\nstruct S { x: i64 }",
+            "#[repr]\nstruct S { x: i64 }",
+        ] {
+            let (program, diagnostics) = parse_source(source);
+            assert!(
+                messages(&diagnostics)
+                    .iter()
+                    .any(|message| message.contains("unsupported repr attribute")),
+                "expected an unsupported repr diagnostic for {source:?}, got {:?}",
+                messages(&diagnostics)
+            );
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == Some("E0771")),
+                "expected E0771 for {source:?}"
+            );
+            // The declaration after a rejected attribute is still parsed.
+            assert!(matches!(&program.items[0], Item::Struct(_)));
+        }
+    }
+
+    #[test]
+    fn parses_unsafe_impl_methods() {
+        let source = r#"
+impl Widget {
+    pub unsafe fn from_ptr(pointer: *const u8) -> Widget { Widget {} }
+    unsafe fn read(&self) -> i64 { unsafe { 0 } }
+    pub fn safe(&self) -> i64 { 0 }
+}
+"#;
+        let program = parse_ok(source);
+        let Item::Impl(block) = &program.items[0] else {
+            panic!("expected an impl block, got {:?}", program.items[0]);
+        };
+        assert_eq!(block.fns.len(), 3);
+        assert!(block.fns[0].is_unsafe);
+        assert!(matches!(block.fns[0].vis, Visibility::Public));
+        assert!(block.fns[1].is_unsafe);
+        assert!(matches!(block.fns[1].vis, Visibility::Private));
+        assert!(!block.fns[2].is_unsafe);
+    }
+
+    #[test]
+    fn rejects_misplaced_unsafe_qualifiers_with_e0001() {
+        for (source, expected) in [
+            ("unsafe unsafe fn f() {}", "duplicate 'unsafe'"),
+            (
+                "impl S { pub unsafe unsafe fn f(&self) {} }",
+                "duplicate 'unsafe'",
+            ),
+            (
+                "extern \"C\" { pub unsafe fn f(); }",
+                "extern declarations are implicitly unsafe",
+            ),
+            (
+                "extern unsafe fn f();",
+                "extern function declarations are implicitly unsafe",
+            ),
+            (
+                "trait T { unsafe fn f(&self); }",
+                "unsafe trait methods are not supported",
+            ),
+        ] {
+            let (_program, diagnostics) = parse_source(source);
+            assert!(
+                messages(&diagnostics)
+                    .iter()
+                    .any(|message| message.contains(expected)),
+                "expected {expected:?} for {source:?}, got {:?}",
+                messages(&diagnostics)
+            );
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == Some("E0001")),
+                "expected an E0001 diagnostic for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_unsafe_functions_and_unsafe_blocks() {
+        let source = r#"
+pub unsafe fn read(pointer: *const i64) -> i64 {
+    unsafe { *pointer }
+}
+
+fn main() {
+    unsafe { 1; }
+    let value = unsafe { 2 };
+    value
+}
+"#;
+        let program = parse_ok(source);
+
+        let read = fn_named(&program, "read");
+        assert!(read.is_unsafe);
+        assert!(!read.is_extern);
+        assert!(read.body.is_some());
+        match &read.params[0].ty {
+            TypeExpr::Ptr {
+                mutable: false,
+                inner,
+                ..
+            } => match inner.as_ref() {
+                TypeExpr::Path { name, .. } => assert_eq!(name, "i64"),
+                other => panic!("expected an i64 pointee, got {:?}", other),
+            },
+            other => panic!("expected *const i64, got {:?}", other),
+        }
+        match &fn_body(read)
+            .tail
+            .as_deref()
+            .expect("expected an unsafe tail expression")
+            .kind
+        {
+            ExprKind::Unsafe(block) => assert!(block.tail.is_some()),
+            other => panic!("expected an unsafe block, got {:?}", other),
+        }
+
+        let main = main_fn(&program);
+        assert!(!main.is_unsafe);
+        let stmts = fn_body(main).stmts.as_slice();
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Expr(Expr {
+                kind: ExprKind::Unsafe(_),
+                ..
+            })
+        ));
+        assert!(matches!(&let_init(&stmts[1]).kind, ExprKind::Unsafe(_)));
+    }
+
+    #[test]
+    fn parses_raw_pointer_types_in_every_type_position() {
+        let source = r#"
+struct Holder {
+    pointer: *mut i64,
+}
+
+fn take(pointer: *mut i64, const_pointer: *const *const u8) -> *const i64 {
+    pointer
+}
+
+fn main() {
+    let pointer: *mut i64 = 0;
+    pointer;
+}
+"#;
+        let program = parse_ok(source);
+
+        let holder = match &program.items[0] {
+            Item::Struct(decl) => decl,
+            other => panic!("expected a struct, got {:?}", other),
+        };
+        let fields = match &holder.kind {
+            StructKind::Named(fields) => fields,
+            other => panic!("expected named fields, got {:?}", other),
+        };
+        assert!(matches!(&fields[0].ty, TypeExpr::Ptr { mutable: true, .. }));
+
+        let take = fn_named(&program, "take");
+        assert!(matches!(
+            &take.params[0].ty,
+            TypeExpr::Ptr { mutable: true, .. }
+        ));
+        match &take.params[1].ty {
+            TypeExpr::Ptr {
+                mutable: false,
+                inner,
+                ..
+            } => assert!(matches!(
+                inner.as_ref(),
+                TypeExpr::Ptr { mutable: false, .. }
+            )),
+            other => panic!("expected *const *const u8, got {:?}", other),
+        }
+        match &take.ret {
+            Some(TypeExpr::Ptr {
+                mutable: false,
+                inner,
+                ..
+            }) => match inner.as_ref() {
+                TypeExpr::Path { name, .. } => assert_eq!(name, "i64"),
+                other => panic!("expected an i64 pointee, got {:?}", other),
+            },
+            other => panic!("expected a *const i64 return type, got {:?}", other),
+        }
+
+        match &main_stmts(&program)[0] {
+            Stmt::Let(statement) => match &statement.ty {
+                Some(TypeExpr::Ptr { mutable: true, .. }) => {}
+                other => panic!("expected a *mut i64 binding type, got {:?}", other),
+            },
+            other => panic!("expected a let statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_extern_c_blocks() {
+        let source = r#"
+extern "C" {
+    pub fn abs(input: i32) -> i32;
+    fn malloc(size: i64) -> *mut u8;
+}
+"#;
+        let program = parse_ok(source);
+        assert_eq!(program.items.len(), 1);
+
+        let block = match &program.items[0] {
+            Item::ExternBlock(block) => block,
+            other => panic!("expected an extern block, got {:?}", other),
+        };
+        assert_eq!(block.abi, "C");
+        assert!(matches!(&block.vis, Visibility::Private));
+        assert_eq!(block.fns.len(), 2);
+        let abi_at = source.find("\"C\"").expect("ABI literal");
+        assert_eq!(block.abi_span.start as usize, abi_at);
+
+        let abs = &block.fns[0];
+        assert_eq!(abs.name, "abs");
+        assert!(matches!(&abs.vis, Visibility::Public));
+        assert!(abs.is_extern);
+        assert!(!abs.is_unsafe);
+        assert!(abs.body.is_none());
+        assert_eq!(abs.params.len(), 1);
+        assert_eq!(abs.params[0].name, "input");
+
+        let malloc = &block.fns[1];
+        assert_eq!(malloc.name, "malloc");
+        assert!(matches!(&malloc.vis, Visibility::Private));
+        assert!(matches!(
+            &malloc.ret,
+            Some(TypeExpr::Ptr { mutable: true, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_extern_block_members() {
+        let source = r#"
+extern "C" {
+    fn with_body() {}
+    fn generic<T>(value: T);
+    fn method(&self);
+    struct NotAFunction;
+}
+"#;
+        let (program, diagnostics) = parse_source(source);
+        let messages = messages(&diagnostics);
+        for expected in [
+            "extern functions have no body",
+            "cannot have generic parameters",
+            "cannot have a receiver",
+            "expected 'fn' in extern block",
+        ] {
+            assert!(
+                messages.iter().any(|message| message.contains(expected)),
+                "expected {expected:?}, got {:?}",
+                messages
+            );
+        }
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == Some("E0001"))
+        );
+
+        let block = match &program.items[0] {
+            Item::ExternBlock(block) => block,
+            other => panic!("expected an extern block, got {:?}", other),
+        };
+        assert_eq!(block.fns.len(), 3);
+        assert!(block.fns[0].body.is_none());
+        assert!(block.fns[1].generics.is_empty());
+        assert!(block.fns[2].params.is_empty());
+    }
+
+    #[test]
+    fn keeps_unknown_extern_abi_for_type_checking() {
+        let program = parse_ok("extern \"system\" {\n    fn beep();\n}");
+        let block = match &program.items[0] {
+            Item::ExternBlock(block) => block,
+            other => panic!("expected an extern block, got {:?}", other),
+        };
+        assert_eq!(block.abi, "system");
+        assert_eq!(block.fns.len(), 1);
+    }
+
+    #[test]
+    fn rejects_union_generics_and_non_named_forms() {
+        for source in ["union Bad(i64);", "union Empty;"] {
+            let (_, diagnostics) = parse_source(source);
+            assert!(
+                messages(&diagnostics)
+                    .iter()
+                    .any(|message| message.contains("union declarations must have named fields")),
+                "expected a union field-shape diagnostic for {source:?}, got {:?}",
+                messages(&diagnostics)
+            );
+        }
+
+        let (_, diagnostics) = parse_source("union Generic<T> { value: T }");
+        assert!(
+            messages(&diagnostics)
+                .iter()
+                .any(|message| message.contains("unions cannot be generic")),
+            "expected a union generic diagnostic, got {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn recovers_after_misplaced_attributes_and_unsafe() {
+        let source = r#"
+#[repr(C)]
+fn misplaced() {}
+
+unsafe struct NotAFunction;
+
+#[derive(Clone)]
+struct StillParsed { value: i64 }
+"#;
+        let (program, diagnostics) = parse_source(source);
+        let messages = messages(&diagnostics);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("expected 'fn' after 'unsafe'")),
+            "expected an unsafe item diagnostic, got {:?}",
+            messages
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("only supported on struct and union")),
+            "expected a misplaced repr diagnostic, got {:?}",
+            messages
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("unsupported attribute")),
+            "expected an unsupported attribute diagnostic, got {:?}",
+            messages
+        );
+        assert!(
+            program
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Fn(function) if function.name == "misplaced"))
+        );
+        assert!(
+            program
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Struct(decl) if decl.name == "StillParsed"))
+        );
+        assert!(
+            program
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Struct(decl) if decl.name == "NotAFunction"))
+        );
     }
 }

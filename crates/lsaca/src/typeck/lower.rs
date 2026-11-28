@@ -19,6 +19,7 @@ impl<'a> Checker<'a> {
         self.validate_literal_checks();
         let structs = self.lower_structs();
         let enums = self.lower_enums();
+        let unions = self.lower_unions();
         let fns = self.lower_fns();
         let consts = self.lower_consts();
         let closures = self.lower_closures();
@@ -34,6 +35,7 @@ impl<'a> Checker<'a> {
             name,
             structs,
             enums,
+            unions,
             fns,
             consts,
             closures,
@@ -204,6 +206,28 @@ impl<'a> Checker<'a> {
         out
     }
 
+    fn lower_unions(&mut self) -> Vec<HUnion> {
+        let mut out = Vec::new();
+        for id in 0..self.unions.len() {
+            self.ensure_union_fields(id);
+            let info = self.unions[id].clone();
+            let mut fields = Vec::new();
+            for field in &info.fields {
+                fields.push(HField {
+                    name: field.name.clone(),
+                    ty: self.finalize_ty(&field.ty, field.name_span),
+                });
+            }
+            out.push(HUnion {
+                name: info.name.clone(),
+                c_name: info.c_name.clone(),
+                fields,
+                span: info.span,
+            });
+        }
+        out
+    }
+
     fn lower_fns(&mut self) -> Vec<HFn> {
         let mut out = Vec::new();
         for id in 0..self.fns.len() {
@@ -244,7 +268,9 @@ impl<'a> Checker<'a> {
                 ret,
                 self_kind: info.self_kind,
                 body,
-                intrinsic: info.decl.is_extern,
+                intrinsic: info.decl.is_extern && info.extern_abi.is_none(),
+                extern_abi: info.extern_abi,
+                is_unsafe: info.is_unsafe,
                 span: info.span,
             });
         }
@@ -544,6 +570,15 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|(index, value)| (*index, self.lower_expr(value)))
                     .collect(),
+            },
+            TExprKind::UnionLit {
+                union_id,
+                field,
+                value,
+            } => HExprKind::UnionLit {
+                union_id: *union_id,
+                field: *field,
+                value: Box::new(self.lower_expr(value)),
             },
             TExprKind::Tuple(elems) => {
                 HExprKind::Tuple(elems.iter().map(|elem| self.lower_expr(elem)).collect())

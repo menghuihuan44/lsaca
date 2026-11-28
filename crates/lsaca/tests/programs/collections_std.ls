@@ -7,10 +7,10 @@ fn main() {
     let mut other: HashSet<i64> = HashSet::new();
     other.insert(3i64);
     other.insert(4i64);
-    let union = set.union(&other);
+    let merged = set.union_with(&other);
     let intersection = set.intersection(&other);
     let difference = other.difference(&set);
-    println!("{} {} {}", union.len(), union.contains(4i64), union.contains(9i64));
+    println!("{} {} {}", merged.len(), merged.contains(4i64), merged.contains(9i64));
     println!("{} {} {}", intersection.len(), intersection.contains(3i64), intersection.contains(2i64));
     println!("{} {} {}", difference.len(), difference.contains(4i64), difference.contains(3i64));
     let mut ordered: BTreeSet<String> = BTreeSet::new();

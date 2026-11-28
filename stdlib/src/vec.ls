@@ -37,6 +37,12 @@ pub extern fn __vec_get<T>(v: &Vec<T>, index: i64) -> Option<T>;
 pub extern fn __vec_extend<T>(v: &mut Vec<T>, other: Vec<T>);
 pub extern fn __vec_reverse<T>(v: &mut Vec<T>);
 
+// v2.5 raw-buffer ownership transfer for CString. into_raw_parts moves the
+// buffer out without freeing it; from_raw_parts rebuilds an owning Vec. The
+// caller must pass back the same data pointer, length and capacity.
+pub extern fn __vec_into_raw_parts<T>(value: Vec<T>) -> (*mut T, usize, usize);
+pub extern fn __vec_from_raw_parts<T>(ptr: *mut T, len: usize, cap: usize) -> Vec<T>;
+
 // v2.2 Phase C borrowed-view intrinsic: returns a mutable reference to the
 // element at `index`, or None when the index is out of bounds. The reference
 // points into the vector's storage, so the receiver borrow stays live while the
@@ -199,6 +205,27 @@ impl<T> Vec<T> {
 
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         return __vec_as_mut_slice(self);
+    }
+
+    /// Pointer to the first element. Empty vectors return a null pointer. The
+    /// pointer is valid while the Vec is alive and its storage is not moved.
+    pub fn as_ptr(&self) -> *const T {
+        let slice: &[T] = self.as_slice();
+        if slice.len() == 0 {
+            return 0 as *const T;
+        }
+        return &slice[0] as *const T;
+    }
+
+    /// Mutable pointer to the first element. Empty vectors return a null
+    /// pointer. The pointer is valid while the Vec is alive and its storage is
+    /// not moved.
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        let slice: &mut [T] = self.as_mut_slice();
+        if slice.len() == 0 {
+            return 0 as *mut T;
+        }
+        return &mut slice[0] as *mut T;
     }
 }
 

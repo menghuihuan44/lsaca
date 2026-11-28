@@ -67,6 +67,10 @@ pub enum TokenKind {
     KwUse,
     KwExtern,
     KwDyn,
+    /// Unsafe block or function: the controlled escape hatch.
+    KwUnsafe,
+    /// Union declaration: a C-layout overlay of fields.
+    KwUnion,
     // Punctuation
     LParen,
     RParen,
@@ -105,6 +109,8 @@ pub enum TokenKind {
     Question,
     /// At sign: the binding operator in `name @ pattern`.
     At,
+    /// Number sign: starts an item attribute such as `#[repr(C)]`.
+    Hash,
     Underscore,
     /// Shift left: <<
     Shl,
@@ -208,12 +214,15 @@ impl std::fmt::Display for TokenKind {
             TokenKind::KwUse => write!(f, "use"),
             TokenKind::KwExtern => write!(f, "extern"),
             TokenKind::KwDyn => write!(f, "dyn"),
+            TokenKind::KwUnsafe => write!(f, "unsafe"),
+            TokenKind::KwUnion => write!(f, "union"),
             TokenKind::LParen => write!(f, "("),
             TokenKind::RParen => write!(f, ")"),
             TokenKind::LBrace => write!(f, "{{"),
             TokenKind::RBrace => write!(f, "}}"),
             TokenKind::LBracket => write!(f, "["),
             TokenKind::RBracket => write!(f, "]"),
+            TokenKind::Hash => write!(f, "#"),
             TokenKind::Comma => write!(f, ","),
             TokenKind::Semi => write!(f, ";"),
             TokenKind::Colon => write!(f, ":"),
@@ -527,6 +536,8 @@ impl<'a> Lexer<'a> {
             "use" => TokenKind::KwUse,
             "extern" => TokenKind::KwExtern,
             "dyn" => TokenKind::KwDyn,
+            "unsafe" => TokenKind::KwUnsafe,
+            "union" => TokenKind::KwUnion,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Ident(text.to_string()),
         };
@@ -1267,6 +1278,7 @@ impl<'a> Lexer<'a> {
             }
             '?' => Question,
             '@' => At,
+            '#' => Hash,
             _ => {
                 let end = self.pos;
                 let message = if ch.is_control() {
@@ -1431,7 +1443,7 @@ mod tests {
     fn identifiers_and_keywords() {
         let source = "fn let mut const struct enum impl type if else match while loop for in \
                       return break continue true false as self Self pub move trait \
-                      crate mod super use extern dyn";
+                      crate mod super use extern dyn unsafe union";
         let expected = vec![
             TokenKind::KwFn,
             TokenKind::KwLet,
@@ -1465,6 +1477,8 @@ mod tests {
             TokenKind::KwUse,
             TokenKind::KwExtern,
             TokenKind::KwDyn,
+            TokenKind::KwUnsafe,
+            TokenKind::KwUnion,
             TokenKind::Eof,
         ];
         assert_eq!(kinds(source), expected);
@@ -1523,7 +1537,7 @@ mod tests {
 
     #[test]
     fn tokenize_file_shifts_diagnostic_spans() {
-        let file = SourceFile::with_base("main.ls", "let x = #;", 50);
+        let file = SourceFile::with_base("main.ls", "let x = $;", 50);
         let (tokens, diagnostics) = tokenize_file(&file);
         assert_eq!(
             tokens.last().map(|token| token.kind.clone()),
@@ -1536,7 +1550,7 @@ mod tests {
         let diagnostics = diagnostics.into_vec();
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, Some("E0001"));
-        // '#' is at local offset 8, so its global span is 58..59.
+        // '$' is at local offset 8, so its global span is 58..59.
         assert_eq!(diagnostics[0].span, Span::new(58, 59));
     }
 
@@ -2057,9 +2071,28 @@ mod tests {
     }
 
     #[test]
+    fn hash_is_an_attribute_token() {
+        use TokenKind::*;
+        assert_eq!(kinds("#"), vec![Hash, Eof]);
+        assert!(errors("#").is_empty());
+        assert_eq!(
+            kinds("#[repr(C)]"),
+            vec![
+                Hash,
+                LBracket,
+                Ident("repr".to_string()),
+                LParen,
+                Ident("C".to_string()),
+                RParen,
+                RBracket,
+                Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn unexpected_characters_are_reported_and_skipped() {
         for (source, needle) in [
-            ("let x = #;", "#"),
             ("let x = $;", "$"),
             ("let x = \\;", "\\"),
             ("let x = \u{60};", "\u{60}"),
@@ -2258,7 +2291,7 @@ mod tests {
 
     #[test]
     fn diagnostic_codes_are_stable() {
-        let diagnostics = tokenize("let x = #;").1;
+        let diagnostics = tokenize("let x = $;").1;
         let codes: Vec<&str> = diagnostics
             .iter()
             .filter_map(|diagnostic| diagnostic.code)

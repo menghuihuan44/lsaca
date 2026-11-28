@@ -586,7 +586,7 @@ lsaca: main.ls: could not compile main.ls due to previous error(s)
 
 ## Visibility
 
-Every named item can carry a visibility. Version 2.4.0 has five forms:
+Every named item can carry a visibility. The current release has five forms:
 
 | Written | Visible from |
 | --- | --- |
@@ -934,7 +934,7 @@ build. The build cache compensates: its key hashes the complete generated C, the
 runtime sources, the compiler path and the build mode, so an unchanged program is
 reused as a whole and editing any file in the graph rebuilds it.
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 * Glob imports (`use path::*;`) parse but are rejected by the resolver.
 * `pub(super)` and `pub(in path)` only grant visibility inside an ancestor

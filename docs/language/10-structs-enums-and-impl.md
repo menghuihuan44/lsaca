@@ -177,19 +177,19 @@ error: expected ';' after let statement, found identifier base
  8 |     let shifted = Point { x: 3, ..base };
    |                                   ^^^^
 
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found ;
+error: expected an item (fn, struct, union, enum, impl, const, type, trait, mod, use, extern or unsafe fn), found ;
   --> example-06.ls:8:41
    |
  8 |     let shifted = Point { x: 3, ..base };
    |                                         ^
 
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found identifier println
+error: expected an item (fn, struct, union, enum, impl, const, type, trait, mod, use, extern or unsafe fn), found identifier println
   --> example-06.ls:9:5
    |
  9 |     println!("{}", shifted.x);
    |     ^^^^^^^
 
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found }
+error: expected an item (fn, struct, union, enum, impl, const, type, trait, mod, use, extern or unsafe fn), found }
    --> example-06.ls:10:1
     |
  10 | }
@@ -257,6 +257,49 @@ error[E0596]: cannot assign to immutable value: the binding has not been declare
 
 lsaca: example-08.ls: could not compile example-08.ls due to previous error(s)
 ```
+
+## C layout and unions
+
+A struct is laid out for the compiler by default; when the exact byte layout
+matters at a C boundary, declare it with the one supported attribute:
+
+```text
+#[repr(C)]
+struct DivT {
+    quotient: i32,
+    remainder: i32,
+}
+```
+
+`#[repr(C)]` is accepted only on a struct (on a union it is a readability
+no-op, because a union already has C layout) and selects the C rules: fields are
+placed in declaration order with the C compiler's alignment and padding, and
+`size_of`/`align_of` match what the C compiler produces for the equivalent
+struct. A struct without the attribute has an unspecified layout and must not be
+passed across the FFI boundary. A `repr(C)` struct is FFI-safe only when every
+field is itself FFI-safe; a managed field is legal in the type but makes it
+ineligible for an `extern "C"` signature (`E0770`). See [Unsafe code and C
+FFI](32-unsafe-and-ffi.md#reprc-structs).
+
+A `union` declares a C-layout overlay: every field starts at offset 0, and the
+size and alignment are the maximum over the fields. It is a separate item kind
+from `struct`:
+
+```text
+union Number {
+    integer: i64,
+    float: f64,
+}
+```
+
+A union has no generics, methods, `Drop` implementation, destructuring patterns,
+generated `==` or formatting. Its fields must be FFI-safe scalar types, raw
+pointers, `repr(C)` structs or other unions; a managed field is `E0772`, and
+using a union in one of the forbidden ways is `E0773`. Constructing a union,
+reading a field and writing a field all require an unsafe context, because the
+compiler cannot know which field is active. Unions pass by value across the C
+boundary. The complete rules are in [Unsafe code and C
+FFI](32-unsafe-and-ffi.md#unions).
 
 ## Enums
 
@@ -892,3 +935,5 @@ true false
 * Reference receivers, match ergonomics and borrowing rules:
   [References and borrowing](12-references-and-borrowing.md).
 * Structs and enums as type expressions: [Types](04-types.md).
+* `#[repr(C)]` layout, unions and the FFI boundary: [Unsafe code and C
+  FFI](32-unsafe-and-ffi.md).

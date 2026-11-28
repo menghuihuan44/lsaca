@@ -37,9 +37,10 @@ Every lsaca value is represented in one of three ways:
 
 1. **Copy values** are stored directly and copied bit by bit: the scalar types
    `bool`, `char`, all integer and float types (including `isize`/`usize` since
-   2.0), `()`, and references (`&T`, `&mut T`). Since 2.0 the Copy family also
-   includes the two-word *fat* references `&[T]`, `&mut [T]`, `&str`,
-   `&mut str`, `&dyn Trait` and `&mut dyn Trait`.
+   2.0), `()`, references (`&T`, `&mut T`) and, since 2.5.0, raw pointers
+   (`*const T`, `*mut T`). Since 2.0 the Copy family also includes the two-word
+   *fat* references `&[T]`, `&mut [T]`, `&str`, `&mut str`, `&dyn Trait` and
+   `&mut dyn Trait`.
    Copying a value of these types is always allowed and never invalidates the
    original.
 2. **Move-only values** are owned values with a heap payload or drop glue:
@@ -783,6 +784,25 @@ Output:
 
 See [References and borrowing](12-references-and-borrowing.md) for the rules.
 
+## Raw pointers: addresses outside ORC
+
+A raw pointer (`*const T` or `*mut T`) is a plain address, not an owned value
+and not a reference. It is `Copy` and carries no lifetime, so copying it never
+runs a retain or release and the ORC runtime never traces it. A raw pointer does
+not keep anything alive and does not free anything when it is dropped; the owner
+of the storage — a local, a `Box`, a `Vec`, or the C library — remains
+responsible for the lifetime.
+
+This is exactly why unsafe code is a boundary: the borrow checker can validate a
+reference, but it cannot validate an address obtained from C, from an integer
+cast, or from `std::ptr::null`. The programmer promises that the pointee is
+live, aligned, initialized and valid for the requested access, and that no
+aliasing rule is broken. The ORC invariants are equally strict: never call
+`retain`/`release` by hand, never forge a reference count, and never let a
+managed value cross the FFI boundary — pass a raw pointer to plain storage and
+convert it back on the managed side. The complete contract is in
+[Unsafe code and C FFI](32-unsafe-and-ffi.md).
+
 ## Summary
 
 * A value has one owner. Copy values are copied implicitly; every other owned
@@ -809,6 +829,9 @@ See [References and borrowing](12-references-and-borrowing.md) for the rules.
   references) are non-owning pointers: borrowing never changes a reference count
   and never keeps a value alive; the borrow checker enforces aliasing and
   rejects moves of borrowed values.
+* Raw pointers are `Copy` addresses outside ORC: no retain/release, no
+  tracing, no ownership and no lifetime; dereferencing, writing and offsetting
+  them requires unsafe code, and the programmer owns the validity contract.
 * Unsized types (`dyn Trait`, `[T]`, `str`) exist only behind a pointer:
   `Box<dyn Trait>` and `Rc<dyn Trait>` own the concrete payload through a
   vtable, while `&dyn Trait`, `&[T]` and `&str` (and their `mut` forms)

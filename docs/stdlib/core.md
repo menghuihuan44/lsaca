@@ -1,6 +1,6 @@
 # core: Option, Result and Iterator
 
-**Status in 2.4.0.** `Option`, `Result` and `Iterator` live in `stdlib/src/core.ls`
+**Status in 2.5.0.** `Option`, `Result` and `Iterator` live in `stdlib/src/core.ls`
 (`std::core`) and are re-exported unqualified, so existing programs keep working.
 The 2.1.0 additions are the `Option::or` and `Option::xor` combinators and the
 `usize` counts in the iterator surface; 2.2.0 adds the `From` trait used by the

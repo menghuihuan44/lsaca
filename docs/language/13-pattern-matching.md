@@ -4,7 +4,7 @@
 patterns from top to bottom, and evaluates the expression of the first pattern
 that matches. It is an expression, so a `match` can be bound, returned or used
 inside another expression. Except where noted under
-[known limitations](#known-limitations-in-240), matching is exhaustive and checked.
+[known limitations](#known-limitations-in-250), matching is exhaustive and checked.
 
 ```ls
 fn describe(n: i64) -> String {
@@ -32,7 +32,7 @@ the same type, and the whole `match` has that type.
 
 ## Patterns
 
-The pattern forms available in 2.4.0 are:
+The pattern forms available in the current release are:
 
 | Pattern | Example | Matches |
 | --- | --- | --- |
@@ -1071,11 +1071,11 @@ Output:
 wildcard first
 ```
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 Or-patterns, match guards and string-literal patterns are fully supported;
 2.1.0 added tuple struct and unit struct patterns, and 2.4.0 adds array, slice
-and `@` patterns. The pattern restrictions that remain in 2.4.0 are:
+and `@` patterns. The pattern restrictions that remain in the current release are:
 
 * **Guards only in `match`** — `if let` and `while let` take a pattern but no
   guard; nest an `if` inside the body instead.

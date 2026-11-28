@@ -19,6 +19,12 @@ use crate::hir::HFieldRef;
 use crate::span::Span;
 use crate::types::{FloatTy, IntTy};
 
+/// The type named by a struct-style literal path: either a struct or a union.
+pub(super) enum LiteralTarget {
+    Struct(usize),
+    Union(usize),
+}
+
 impl<'a> Checker<'a> {
     /// Check one expression, using the hint as the expected type where that
     /// helps local inference.
@@ -55,6 +61,16 @@ impl<'a> Checker<'a> {
             ExprKind::If(if_expr) => self.check_if(if_expr, hint),
             ExprKind::Match(match_expr) => self.check_match(match_expr, hint),
             ExprKind::Block(block) => self.check_block_expr(block, hint, span),
+            ExprKind::Unsafe(block) => {
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.unsafe_depth += 1;
+                }
+                let checked = self.check_block_expr(block, hint, span);
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.unsafe_depth -= 1;
+                }
+                checked
+            }
             ExprKind::Loop { label, body } => self.check_loop(label.as_ref(), body, span),
             ExprKind::While { label, cond, body } => {
                 self.check_while(label.as_ref(), cond, body, span)
@@ -1364,15 +1380,29 @@ impl<'a> Checker<'a> {
         span: Span,
         hint: Option<&ITy>,
     ) -> TExpr {
-        let struct_id = match self.resolve_struct_path(path, hint) {
-            Some(struct_id) => struct_id,
+        match self.resolve_literal_path(path, hint) {
+            Some(LiteralTarget::Struct(struct_id)) => {
+                self.check_struct_literal(struct_id, fields, span, hint)
+            }
+            Some(LiteralTarget::Union(union_id)) => {
+                self.check_union_literal(union_id, fields, span, hint)
+            }
             None => {
                 for field in fields {
                     let _ = self.check_expr(&field.value, None);
                 }
-                return self.never_expr(span);
+                self.never_expr(span)
             }
-        };
+        }
+    }
+
+    fn check_struct_literal(
+        &mut self,
+        struct_id: usize,
+        fields: &[ast::FieldInit],
+        span: Span,
+        hint: Option<&ITy>,
+    ) -> TExpr {
         self.ensure_struct_fields(struct_id);
         let struct_fields = self.struct_fields(struct_id);
         let struct_name = self.struct_name(struct_id);
@@ -1447,12 +1477,72 @@ impl<'a> Checker<'a> {
         )
     }
 
-    /// Resolve the path of a struct literal to a struct id.
-    pub fn resolve_struct_path(
+    fn check_union_literal(
+        &mut self,
+        union_id: usize,
+        fields: &[ast::FieldInit],
+        span: Span,
+        hint: Option<&ITy>,
+    ) -> TExpr {
+        self.ensure_union_fields(union_id);
+        let union_fields = self.union_fields(union_id);
+        let union_name = self.union_name(union_id);
+        self.require_unsafe(span, format!("constructing union {}", union_name));
+        if fields.len() != 1 {
+            self.error_code(
+                format!(
+                    "union {} must initialize exactly one field in a literal",
+                    union_name
+                ),
+                span,
+                "E0063",
+            );
+            for field in fields {
+                let _ = self.check_expr(&field.value, None);
+            }
+            return self.never_expr(span);
+        }
+        let field = &fields[0];
+        let index = union_fields
+            .iter()
+            .position(|(name, _, _)| *name == field.name);
+        let Some(index) = index else {
+            let candidates: Vec<&str> = union_fields
+                .iter()
+                .map(|(name, _, _)| name.as_str())
+                .collect();
+            let suggestion = super::items::closest_name(&field.name, &candidates);
+            self.error_suggest(
+                format!("union {} has no field named {}", union_name, field.name),
+                suggestion,
+                field.name_span,
+                "E0560",
+            );
+            let _ = self.check_expr(&field.value, None);
+            return self.never_expr(span);
+        };
+        let expected = union_fields[index].2.clone();
+        let value = self.check_expr(&field.value, Some(&expected));
+        let value = self.coerce_to(value, &expected, field.value.span);
+        let ty = ITy::Union(union_id);
+        self.apply_hint(&ty, hint);
+        TExpr::new(
+            ty,
+            TExprKind::UnionLit {
+                union_id,
+                field: index,
+                value: Box::new(value),
+            },
+            span,
+        )
+    }
+
+    /// Resolve the path of a struct or union literal.
+    pub fn resolve_literal_path(
         &mut self,
         path: &ast::PathExpr,
         hint: Option<&ITy>,
-    ) -> Option<usize> {
+    ) -> Option<LiteralTarget> {
         let span = path.span;
         if path.segments.len() > 1 {
             // Uniform path resolution: the leading segments may name a module.
@@ -1465,7 +1555,7 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                     return self.with_resolved_module(module, |checker| {
-                        checker.resolve_struct_path_named(&name, &explicit, hint, span)
+                        checker.resolve_literal_path_named(&name, &explicit, hint, span)
                     });
                 }
                 Some((module, consumed)) => {
@@ -1485,23 +1575,23 @@ impl<'a> Checker<'a> {
         }
         let name = path.segments[0].name.clone();
         let explicit = path.segments[0].generics.clone();
-        self.resolve_struct_path_named(&name, &explicit, hint, span)
+        self.resolve_literal_path_named(&name, &explicit, hint, span)
     }
 
-    /// Resolve a struct literal path whose type name is already isolated.
-    fn resolve_struct_path_named(
+    /// Resolve a struct or union literal path whose type name is already isolated.
+    fn resolve_literal_path_named(
         &mut self,
         name: &str,
         explicit: &[ast::TypeExpr],
         hint: Option<&ITy>,
         span: Span,
-    ) -> Option<usize> {
+    ) -> Option<LiteralTarget> {
         if name == "Self" {
             // Generic impl methods keep the concrete self type in the generic
             // environment, so consult that before the concrete methods map.
             if let Some(self_ty) = self.current_self_ty() {
                 match self_ty {
-                    ITy::Struct(struct_id) => return Some(struct_id),
+                    ITy::Struct(struct_id) => return Some(LiteralTarget::Struct(struct_id)),
                     ITy::Enum(_) => {
                         self.error_code(
                             "expected a struct literal, found an enum".to_string(),
@@ -1514,7 +1604,7 @@ impl<'a> Checker<'a> {
                 }
             }
             return match self.current_self_key() {
-                Some(TypeKey::Struct(id)) => Some(id),
+                Some(TypeKey::Struct(id)) => Some(LiteralTarget::Struct(id)),
                 Some(TypeKey::Enum(_)) => {
                     self.error_code(
                         "expected a struct literal, found an enum".to_string(),
@@ -1542,7 +1632,7 @@ impl<'a> Checker<'a> {
                 self.hinted_instance_of(name, hint)
             };
             return match instance {
-                Some(ITy::Struct(struct_id)) => Some(struct_id),
+                Some(ITy::Struct(struct_id)) => Some(LiteralTarget::Struct(struct_id)),
                 Some(ITy::Enum(_)) => {
                     self.error_code(
                         format!("expected a struct literal, found enum {}", name),
@@ -1558,7 +1648,10 @@ impl<'a> Checker<'a> {
             };
         }
         if let Some(id) = self.lookup_struct(name) {
-            return Some(id);
+            return Some(LiteralTarget::Struct(id));
+        }
+        if let Some(id) = self.lookup_union(name) {
+            return Some(LiteralTarget::Union(id));
         }
         if self.lookup_enum(name).is_some() {
             self.error_code(
@@ -1570,7 +1663,7 @@ impl<'a> Checker<'a> {
         }
         let suggestion = self.suggest_type_name(name);
         self.error_suggest(
-            format!("cannot find struct {} in this scope", name),
+            format!("cannot find struct or union {} in this scope", name),
             suggestion,
             span,
             "E0412",
@@ -1623,6 +1716,38 @@ impl<'a> Checker<'a> {
                 let struct_name = self.struct_name(id);
                 self.error_suggest(
                     format!("no field {} on type {}", name, struct_name),
+                    suggestion,
+                    span,
+                    "E0609",
+                );
+                self.never_expr(span)
+            }
+            ITy::Union(union_id) => {
+                let union_id = *union_id;
+                self.ensure_union_fields(union_id);
+                let fields = self.union_fields(union_id);
+                let union_name = self.union_name(union_id);
+                if let Some(index) = fields.iter().position(|(field, _, _)| field == name) {
+                    self.require_unsafe(
+                        span,
+                        format!("accessing field {} of union {}", name, union_name),
+                    );
+                    let field_ty = fields[index].2.clone();
+                    self.apply_hint(&field_ty, hint);
+                    return TExpr::new(
+                        field_ty,
+                        TExprKind::Field {
+                            base: Box::new(base_expr),
+                            field: HFieldRef::Union { union_id, index },
+                        },
+                        span,
+                    );
+                }
+                let candidates: Vec<&str> =
+                    fields.iter().map(|(field, _, _)| field.as_str()).collect();
+                let suggestion = super::items::closest_name(name, &candidates);
+                self.error_suggest(
+                    format!("no field {} on union {}", name, union_name),
                     suggestion,
                     span,
                     "E0609",
@@ -1925,7 +2050,13 @@ impl<'a> Checker<'a> {
                     || matches!(self.infer.resolve(&base.ty), ITy::Ref { mutable: true, .. })
             }
             TExprKind::Deref { expr } => {
-                matches!(self.infer.resolve(&expr.ty), ITy::Ref { mutable: true, .. })
+                // A *mut T place may be written inside an unsafe context even
+                // when the pointer binding itself is immutable: the mutability
+                // that matters is the pointer type, not the local variable.
+                matches!(
+                    self.infer.resolve(&expr.ty),
+                    ITy::Ref { mutable: true, .. } | ITy::Ptr { mutable: true, .. }
+                )
             }
             _ => false,
         }

@@ -1,0 +1,9 @@
+strlen 5
+strcmp equal true
+strcmp less true
+memcmp equal true
+memcmp less true
+cstr 5 alpha
+null true
+missing null true
+path non-null true

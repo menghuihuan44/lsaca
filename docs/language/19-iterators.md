@@ -677,7 +677,7 @@ The 2.4 iterator pipeline is still deliberately small. It has no:
 * `HashSet` iteration beyond `HashSet::from` and `elements()` (which returns
   an owned `Vec<K>`).
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 * `collect` needs a known result type; a bare `collect()` without an
   annotation or turbofish is `E0282`.

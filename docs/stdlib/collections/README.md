@@ -3,11 +3,11 @@
 The `std::collections` module groups the containers that are not built into the
 language: `HashMap` (available since 1.5 and migrated to the `std` crate in
 2.0.0) and the ordered and specialized containers `HashSet`, `BTreeSet`,
-`BTreeMap`, `VecDeque` and `BinaryHeap`. All of them are available in 2.4.0.
+`BTreeMap`, `VecDeque` and `BinaryHeap`. All of them are available in the current release.
 
 ## Containers
 
-| Container | Page | Status in 2.4.0 | Iteration order | Key or element types |
+| Container | Page | Status in 2.5.0 | Iteration order | Key or element types |
 | --- | --- | --- | --- | --- |
 | `HashMap<K, V>` | [hash_map](hash-map.md) | API migrated from 1.7; borrowed `get`/`get_mut` in 2.2.0, borrowed iteration plus `from` in 2.3.0, `get_or_insert`/`get_or_insert_with` in 2.4.0 | internal slot order, not insertion order | `i64`, `u64`, `isize`, `usize`, `bool`, `char`, `String` keys |
 | `HashSet<T>` | [hash_set](hash-set.md) | implemented; `from` in 2.3.0, `extend` in 2.4.0 | insertion order, deterministic, read with `elements()` / `to_vec()` | same keys as `HashMap` |
@@ -39,14 +39,15 @@ The containers share a few design rules that matter to programs:
   double-ended queue keeps its values in a `Vec` ordered from front to back. The
   binary heap is the exception: its iteration order is the internal heap layout,
   which is not sorted; `pop` returns values from largest to smallest.
-* Lengths and positions are `usize` in 2.4.0, like every other size in the
+* Lengths and positions are `usize` in the current release, like every other size in the
   standard library: `len()`, `VecDeque::get` and the other index parameters are
   `usize`.
 * Since 2.2.0 `HashMap::get` and `get_mut` borrow the key (`&K`) and return
   `Option<&V>` / `Option<&mut V>` instead of cloning the value; `get_with`,
   `contains_key` and `remove` still take the key by value.
-* Set operations `union`, `intersection`, `difference` and `subset` are provided
-  by `HashSet`; `BTreeSet` does not have them yet.
+* Set operations `union_with` (named `union` before version 2.5.0, when `union`
+  became a keyword), `intersection`, `difference` and `subset` are provided by
+  `HashSet`; `BTreeSet` does not have them yet.
 * Version 2.4.0 fills out the constructors and accessors: `HashSet::extend`,
   `BTreeSet::from`/`to_vec`, `BTreeMap::from`/`get_mut`/`first_key`/`last_key`/
   `to_vec`, `VecDeque::with_capacity`/`from`/`get_mut`/`front`/`back`/`to_vec`,
@@ -57,7 +58,7 @@ The containers share a few design rules that matter to programs:
 
 ## Planned for a later release
 
-All six containers are available. Not implemented in 2.4.0 and planned for a
+All six containers are available. Not implemented in the current release and planned for a
 later release: a borrowing iterator or `for` loop over `HashSet`, `BTreeSet`,
 `BTreeMap`, `VecDeque` and `BinaryHeap` (use the `elements` / `to_vec` /
 `keys` / `values` accessors for now), a ring-buffer layout for `VecDeque`, and

@@ -27,10 +27,10 @@ Whitespace is insignificant outside literals and comments. The parser processes
 each file from beginning to end. An empty file is a syntactically valid crate
 root, but a binary crate must contain `fn main` (see below).
 
-## The nine item kinds
+## The eleven item kinds
 
 A module — the crate root or any `mod` body — contains a sequence of **items**.
-There are exactly nine kinds:
+There are exactly eleven kinds:
 
 | Item | Keyword | Purpose |
 | --- | --- | --- |
@@ -43,11 +43,15 @@ There are exactly nine kinds:
 | Type alias | `type` | A new name for an existing type. |
 | Module | `mod` | A nested module: `mod name;` loads a file, `mod name { … }` declares it inline. Added in 1.7.0. |
 | Import | `use` | Import names from a module or a dependency crate into the current module. Added in 1.7.0. |
+| Union | `union` | A C-layout overlay whose fields all start at offset 0. Added in 2.5.0; see [Unsafe code and C FFI](32-unsafe-and-ffi.md#unions). |
+| Extern block | `extern "C"` | Declarations of C functions with no bodies. Added in 2.5.0; see [Unsafe code and C FFI](32-unsafe-and-ffi.md#extern-c-declarations). |
 
 A function item may also be an `extern fn` declaration: it has parameters and a
 return type but no body, and only the `std` crate may declare one (user crates
 get error `E0001`). Extern declarations are the standard library's interface to
-compiler intrinsics; see [Functions](09-functions.md#extern-functions).
+compiler intrinsics. Since 2.5.0 any crate can instead use an `extern "C"`
+block to declare real C functions; the two forms are distinct (see
+[Functions](09-functions.md#extern-functions)).
 
 Items may also appear **inside a block** — inside a function body, an `if`
 branch, a loop body, and so on. Such nested items are scoped to the block that
@@ -57,11 +61,13 @@ Anything else at the top level is a syntax error: expressions, `let` statements,
 `if`, `match`, `return` and so on only exist inside function bodies. There is no
 top-level executable code and no initializer hook.
 
-`pub` and `pub(crate)` control visibility and are enforced across modules and
-crates; the default is private. Inside one module every item sees every other
-item, so visibility only starts to matter when a `mod`, a dependency crate or a
-`use` import is involved. See [Modules](23-modules.md#visibility) for the
-visibility rules, along with the `use` and `mod` syntax.
+Visibility is `pub`, `pub(crate)`, `pub(super)`, `pub(in path)` or private (the
+default), enforced across modules and crates. Inside one module every item sees
+every other item, so visibility only starts to matter when a `mod`, a dependency
+crate or a `use` import is involved. See [Modules](23-modules.md#visibility) for
+the visibility rules, along with the `use` and `mod` syntax. Attributes are
+limited to `#[repr(C)]` on a struct or union declaration (chapter
+[32](32-unsafe-and-ffi.md#reprc-structs)).
 
 ## Order does not matter
 
@@ -136,7 +142,7 @@ area(circle 2) = 12.566
 height = 12 m
 ```
 
-The example uses seven of the nine item kinds, and the `impl` block appears before the
+The example uses seven of the eleven item kinds, and the `impl` block appears before the
 `Point` definition is complete textually — item order does not matter. Note the
 restriction on constants: the type of a `const` must be a scalar type or
 `String`, and the initializer must be a constant expression. A struct-typed
@@ -335,7 +341,7 @@ fn main() {
 
 Error:
 ```text
-error: expected an item (fn, struct, enum, impl, const, type, trait, mod, use or extern fn), found let
+error: expected an item (fn, struct, union, enum, impl, const, type, trait, mod, use, extern or unsafe fn), found let
   --> example-07.ls:1:1
    |
  1 | let answer = 42;
@@ -409,26 +415,31 @@ circle 2
 
 The parser also accepts a `pub` prefix before an `impl` block and on a trait
 method, but neither carries a visibility: impl blocks are not nameable, and trait
-methods are always public. Other restricted forms are rejected: `pub(super)` and `pub(in path)` produce
-error `E0001` ("restricted visibility is not supported; use `pub` or
-`pub(crate)`, found …"). See [Modules](23-modules.md#visibility) for the
-visibility matrix and [Packages](24-packages.md#using-a-dependency) for
-visibility across crate boundaries.
+methods are always public. `pub(super)` and `pub(in path)` are full visibility
+forms since 2.4.0 (the named path must be an ancestor module); see
+[Modules](23-modules.md#visibility) for the visibility matrix and
+[Packages](24-packages.md#using-a-dependency) for visibility across crate
+boundaries.
 
 ## The complete grammar
 
-The grammar below is the authoritative EBNF of the 2.2.0 parser. Optional parts
-are written with `[...]`, repetitions with `*` and `+`, and alternatives with
-`|`. It is reproduced here for reference; the individual pages explain each
-construct in detail.
+The grammar below is the authoritative EBNF of the current parser.
+Optional parts are written with `[...]`, repetitions with `*` and `+`, and
+alternatives with `|`. It is reproduced here for reference; the individual
+pages explain each construct in detail.
 
 ```ebnf
 program      = item* EOF ;
-item         = fnItem | externFnItem | structItem | enumItem | implItem | traitItem | constItem
-             | typeItem | modItem | useItem ;
-vis          = [ "pub" | "pub" "(" "crate" ")" ] ;
-fnItem       = vis "fn" IDENT genericParams? "(" params? ")" ( "->" type )? block ;
+item         = fnItem | externFnItem | externBlockItem | structItem | unionItem
+             | enumItem | implItem | traitItem | constItem | typeItem | modItem
+             | useItem ;
+vis          = [ "pub" | "pub" "(" "crate" ")" | "pub" "(" "super" ")"
+             | "pub" "(" "self" ")" | "pub" "(" "in" path ")" ] ;
+attribute    = "#" "[" "repr" "(" "C" ")" "]" ;
+fnItem       = vis [ "unsafe" ] "fn" IDENT genericParams? "(" params? ")" ( "->" type )? block ;
 externFnItem = vis "extern" "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
+externBlockItem = vis "extern" STRING "{" externDecl* "}" ;
+externDecl   = vis "fn" IDENT "(" params? ")" ( "->" type )? ";" ;
 genericParams= "<" genericParam ( "," genericParam )* ","? ">" ;
 genericParam = lifetimeParam | IDENT ( ":" bound ( "+" bound )* )? ;
 lifetimeParam= LIFETIME ;
@@ -436,7 +447,8 @@ bound        = callableBound | pathType ;
 callableBound= "Fn" "(" typeArgs? ")" ( "->" type )? ;
 params       = param ( "," param )* ","? ;
 param        = "self" | "&" "self" | "&" "mut" "self" | "mut"? IDENT ":" type ;
-structItem   = vis "struct" IDENT genericParams? ( "{" fieldDefs? "}" | tupleTypes? ";" ) ;
+structItem   = vis attribute? "struct" IDENT genericParams? ( "{" fieldDefs? "}" | tupleTypes? ";" ) ;
+unionItem    = vis attribute? "union" IDENT "{" fieldDefs? "}" ;
 fieldDefs    = fieldDef ( "," fieldDef )* ","? ;
 fieldDef     = [ "pub" ] IDENT ":" type ;
 tupleTypes   = type ( "," type )* ","? ;
@@ -485,8 +497,8 @@ primary      = INT | FLOAT | CHAR | STRING | "true" | "false"
              | "(" ")" | "(" expr ")" | tupleExpr
              | path | structLiteral | vecExpr | macroCall
              | ifExpr | matchExpr | loopExpr | whileExpr | forExpr | block
-             | closure | "break" label? expr? | "continue" label? | "return" expr?
-             | arrayExpr ;
+             | "unsafe" block | closure | "break" label? expr?
+             | "continue" label? | "return" expr? | arrayExpr ;
 path         = pathIdent ( ( "::" pathIdent ) | ( "::" "<" typeArgs ">" ) )* ;
 pathIdent    = IDENT | "self" | "Self" ;
 tupleExpr    = "(" expr "," ")" | "(" expr ( "," expr )+ ","? ")" ;
@@ -509,17 +521,20 @@ closureParam = primaryPattern ( ":" type )? ;
 
 pattern      = orPattern ;
 orPattern    = primaryPattern ( "|" primaryPattern )* ;
-primaryPattern = "_" | "mut"? IDENT
+primaryPattern = "_" | "mut"? IDENT [ "@" primaryPattern ]
              | "true" | "false" | CHAR | INT | FLOAT | STRING | "-" ( INT | FLOAT )
              | "(" ")" | "(" pattern ")" | tuplePattern
              | path ( "(" patternList? ")" )?
-             | path "{" ( fieldPat ( "," fieldPat )* ( "," ".." )? ","? | ".." )? "}" ;
+             | path "{" ( fieldPat ( "," fieldPat )* ( "," ".." )? ","? | ".." )? "}"
+             | arrayPattern ;
+arrayPattern = "[" ( pattern ( "," pattern )* ( "," ".." ( "," pattern )* )? ","? | ".." ( "," pattern )* ","? )? "]" ;
 patternList  = pattern ( "," pattern )* ","? ;
 tuplePattern = "(" pattern "," ")" | "(" pattern ( "," pattern )+ ","? ")" ;
 fieldPat     = IDENT ( ":" pattern )? ;
 
-type         = refType | pathType | tupleType | fnType | dynType | sliceType | arrayType ;
+type         = refType | ptrType | pathType | tupleType | fnType | dynType | sliceType | arrayType ;
 refType      = "&" LIFETIME? [ "mut" ] type ;
+ptrType      = "*" ( "const" | "mut" ) type ;
 pathType     = typeIdent ( "::" typeIdent )* ( "::" "<" typeArgs ">" | "<" typeArgs ">" )? ;
 typeIdent    = IDENT | "Self" ;
 tupleType    = "(" ")" | "(" type ")" | "(" type "," ")" | "(" type ( "," type )* ","? ")" ;
@@ -534,8 +549,9 @@ typeArg      = type | LIFETIME ;
 A few productions deserve a warning because the parser is more permissive than
 the type checker: `methodCall` parses `::<...>` (turbofish) after the method
 name, but the type checker rejects generic methods (traits have no generic
-methods in 2.2.0); and `break expr` / `return expr` parse even where a value
-cannot be carried. `CHAR` is a character literal such as `'a'` or `'\u{4F60}'`;
+methods in the current release); and `break expr` parses even in a `while` or
+`for` loop, where the type checker then rejects the value with `E0571`. `CHAR`
+is a character literal such as `'a'` or `'\u{4F60}'`;
 it is accepted wherever a literal expression or a literal pattern is accepted.
 
 Or-patterns (`orPattern`) and match guards (the optional `if` in `matchArm`) are
@@ -719,10 +735,12 @@ parameters; the grammar above carries their productions.
   `'static` is always valid. See [Lifetimes](29-lifetimes.md).
 
 `break` with a value (`break 'outer 5;`) still parses — the grammar keeps
-`break expr?` — but the type checker rejects it with `E0308`, and loops still
-have type `()` (see
+`break expr?`. Since 2.4.0 the value is meaningful: a `loop` expression takes
+the type of its `break` values, a bare `break` contributes `()`, a value in a
+`break` inside `while` or `for` is error `E0571`, and a value after `continue`
+is error `E0308` (see
 [Statements and control flow](08-statements-and-control-flow.md#break-and-continue)).
-The nine item kinds are unchanged.
+The eleven item kinds are unchanged.
 
 ### `Self` in expression position
 
@@ -787,10 +805,10 @@ current module. See [Modules](23-modules.md#imports-with-use).
 
 ### Visibility
 
-Every item and every struct field is private by default; `pub` and `pub(crate)`
-widen the visibility. `pub` on an `impl` block or a trait method is accepted and
-ignored. `pub(super)` and `pub(in path)` are rejected with `E0001`. See
-[Modules](23-modules.md#visibility).
+Every item and every struct field is private by default; `pub`, `pub(crate)`,
+`pub(super)` and `pub(in path)` widen the visibility, and the path in
+`pub(in path)` must name an ancestor module. `pub` on an `impl` block or a trait
+method is accepted and ignored. See [Modules](23-modules.md#visibility).
 
 ### `?` after block-like expressions
 

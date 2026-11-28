@@ -1,6 +1,6 @@
 # char: character classification
 
-**Status in 2.4.0.** Partly implemented. The `char` type itself is available
+**Status in 2.5.0.** Partly implemented. The `char` type itself is available
 (added in 1.6.0) and the `std` crate adds ASCII classification and conversion as
 inherent methods on `char` (`impl char` in `stdlib/src/char.ls`). Version 2.3
 adds Unicode classification and Unicode case conversion over generated tables.

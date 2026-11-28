@@ -4,6 +4,7 @@
 //! monomorphized type registry.
 
 use crate::codegen::c_writer::CWriter;
+use crate::codegen::helper_defs::trace_parameter_type;
 use crate::codegen::ops::{self, is_frozen_shared, is_managed};
 use crate::codegen::types::TypeRegistry;
 use crate::hir;
@@ -16,7 +17,11 @@ pub fn compound_types(program: &hir::Program, registry: &TypeRegistry) -> Vec<Ty
     registry
         .order()
         .iter()
-        .filter(|ty| registry.needs_definition(ty) || registry.is_frozen(ty))
+        .filter(|ty| {
+            registry.needs_definition(ty)
+                || registry.is_frozen(ty)
+                || matches!(ty, Ty::Ptr { .. } | Ty::MaybeUninit(_))
+        })
         .cloned()
         .collect()
 }
@@ -238,8 +243,9 @@ fn helper_decls(w: &mut CWriter, program: &hir::Program, registry: &TypeRegistry
             emit_box_decls(w, registry, inner);
         } else {
             w.line(format!(
-                "void lsaca_trace_{}(const {}* value, LsTraceVisit visit);",
-                suffix, c_ty
+                "void lsaca_trace_{}({} value, LsTraceVisit visit);",
+                suffix,
+                trace_parameter_type(names, &ty)
             ));
         }
     }

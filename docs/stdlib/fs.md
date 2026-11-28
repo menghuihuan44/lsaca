@@ -1,6 +1,6 @@
 # fs: the file system
 
-**Status in 2.4.0.** Implemented in `stdlib/src/fs.ls` on top of the handle and
+**Status in 2.5.0.** Implemented in `stdlib/src/fs.ls` on top of the handle and
 path primitives of [io](io.md). Every failure is an [`io::Error`](io.md), never
 a panic. The v2.3 work adds `Path`, `PathBuf`, `read_dir_entries`, `DirEntry`
 and `ReadDir`; the existing functions keep their `&str` path parameters.

@@ -20,7 +20,7 @@ Builtin generic types are `Vec<T>`, `HashMap<K, V>`, `Option<T>`,
 non-generic. The prelude also provides the generic functions behind the
 iterator adapters (see [Iterators](19-iterators.md)); those are ordinary public
 items of the `std` crate. This page describes the language-level library
-behaviour of version 2.4.0; the API of each module is documented in the
+behaviour of the current release; the API of each module is documented in the
 [standard library reference](../stdlib/README.md).
 
 The 2.1.0 changes you meet on every page are: a bare integer literal defaults
@@ -47,6 +47,10 @@ borrow, and the `rev` and `flat_map` adapters are implemented. Version 2.4.0 add
 `VecDeque`/`BinaryHeap` surfaces (see [Collections beyond
 HashMap](#collections-beyond-hashmap)), and adds the iterator terminal
 adapters, `process::Command` and UDP sockets described in their sections.
+Version 2.5.0 adds the C-facing modules `std::ptr`, `std::cstring`, `std::cstr`
+and `std::mem`, the raw-pointer and `MaybeUninit` APIs, and `String::as_ptr`
+and `Vec::as_ptr`/`as_mut_ptr`; the unsafe contract behind them is in
+[Unsafe code and C FFI](32-unsafe-and-ffi.md).
 Arrays, loop labels and reference fields are language features rather than
 library surface;
 they are documented in [Arrays](27-arrays.md), [Loop labels](28-loop-labels.md)
@@ -61,21 +65,28 @@ rules. Version 2.0 also adds the unsized slice types and `dyn` trait objects:
 str](26-slices-and-str.md), and `dyn Trait` in [Trait
 objects](25-trait-objects.md).
 
-## The std crate in 2.4
+## The std crate in 2.5
 
 The library source lives in `stdlib/src/` as one crate of ordinary lsaca code.
 It is embedded into the compiler at build time and parsed with a reserved
 `SourceMap` base, so a diagnostic or a panic inside the library is reported as
-`std/vec.ls:line:column`. The crate is written in safe lsaca and uses the same
-language as user code; only the `extern fn` intrinsics declared in it are
-implemented by code generation. Version 2.4.0 adds `HashMap::get_or_insert` and
-`get_or_insert_with`, constructors and accessors on the other collections, the
-`min` and `max` iterator terminals, `process::Command` and the UDP surface of
-`std::net`; the module pages describe each addition.
+`std/vec.ls:line:column`. The crate uses the same language as user code; only
+the `extern fn` intrinsics declared in it are implemented by code generation.
+Version 2.4.0 adds `HashMap::get_or_insert` and `get_or_insert_with`,
+constructors and accessors on the other collections, the `min` and `max`
+iterator terminals, `process::Command` and the UDP surface of `std::net`.
+Version 2.5.0 adds `ptr`, `cstring`, `cstr` and `mem`; these modules expose
+raw pointers and C text explicitly, so their unsafe operations are marked at
+the API boundary rather than hidden behind a safe wrapper. The module pages
+describe each addition.
 
-| Module | Page | Status in 2.4.0 |
+| Module | Page | Status |
 | --- | --- | --- |
 | `std::core` (`Option`, `Result`, `Iterator`) | [core](../stdlib/core.md) | migrated; 2.1.0 adds the new `Option`/`Result` combinators and iterator methods; 2.2.0 adds the `From` trait |
+| `std::ptr` | [ptr](../stdlib/ptr.md) | 2.5.0: `null`/`null_mut`, safe `is_null`/`addr`, unsafe `add`/`sub` and pointer dereference |
+| `std::mem` | [mem](../stdlib/mem.md) | 2.5.0: `MaybeUninit<T>` with `uninit`, `write`, `as_mut_ptr` and unsafe `assume_init` |
+| `std::cstring` | [cstring](../stdlib/cstring.md) | 2.5.0: `CString` (`new`, `as_ptr`, `into_raw` and unsafe `from_raw`) |
+| `std::cstr` | [cstr](../stdlib/cstr.md) | 2.5.0: `CStr` (unsafe `from_ptr`, `len`, `to_str`) |
 | `std::string` | [string](../stdlib/string.md) | migrated; `&str` parameters, the typed `parse` surface and the `String` forwarders for the `str` methods |
 | `std::char` | [char](../stdlib/char.md) | ASCII classification methods; 2.1.0 adds `is_ascii`, the `to_ascii_*` conversions and `to_digit`; 2.3.0 adds Unicode 16.0.0 classification and case mapping |
 | `std::vec` | [vec](../stdlib/vec.md) | migrated; `sort`, `as_slice` and `as_mut_slice` implemented; 2.1.0 adds `truncate`, `swap` and `contains`; 2.2.0 adds the borrowed accessors `get_mut`, `first_mut` and `last_mut`; 2.3.0 adds `iter`, `iter_mut` and `into_iter` |
@@ -92,12 +103,12 @@ implemented by code generation. Version 2.4.0 adds `HashMap::get_or_insert` and
 | `std::error` | [error](../stdlib/error.md) | the `Error` trait implemented with a default `source` method (2.2.0); 2.1.0 adds the `io::Error` and parse-error implementations |
 
 "Migrated from 1.7" means the surface described in this chapter is unchanged but
-the implementation now lives in the `std` crate. "Implemented" names what
-version 2.4.0 provides; each module page lists it separately from the v2.4
+the implementation now lives in the `std` crate. "Implemented" names what the
+current release provides; each module page lists it separately from recent
 additions and from APIs that remain unimplemented. The pages document the
-current surface; features added for v2.4 are called out explicitly. The whole
-library is versioned with the compiler (2.4.0) and cannot be replaced by a user
-package: the package name `std` is reserved.
+current surface, and the version that introduced an addition is called out
+explicitly. The whole library is versioned with the compiler and cannot be
+replaced by a user package: the package name `std` is reserved.
 
 ## Formatting and printing
 

@@ -577,7 +577,7 @@ Version 2.4.0 adds the two entry idioms `get_or_insert` and
 `get_with`, `contains_key`, `insert` and `remove`, they cover the common
 lookup-or-insert patterns without cloning a key or value on the hot path.
 
-There is still no borrowed `Entry` value in 2.4.0. Such a value would hold a
+There is still no borrowed `Entry` value in 2.5.0. Such a value would hold a
 mutable borrow of the map and a slot index that a later insertion could
 invalidate when the table grows and rehashes; the representation does not
 expose stable slot addresses to lsaca code. The recommendation, the alternatives
@@ -613,7 +613,7 @@ error[E0277]: cannot iterate over a value of type HashMap<i64, i64>; for loops r
 lsaca: example-19.ls: could not compile example-19.ls due to previous error(s)
 ```
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 * Key types are limited to `i64`, `u64`, `isize`, `usize`, `bool`, `String` and
   `char`; user structs, enums and other types cannot be keys.

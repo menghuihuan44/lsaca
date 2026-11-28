@@ -1,6 +1,6 @@
 # string: String and str
 
-**Status in 2.4.0.** Implemented. The `String` type and its methods live in
+**Status in 2.5.0.** Implemented. The `String` type and its methods live in
 `stdlib/src/string.ls` (`std::string`); the borrowed `str` type is a builtin
 unsized type (see [Slices and str](../language/26-slices-and-str.md)) and every
 `str` method is also implemented there. `impl String` forwards each `str`
@@ -22,6 +22,7 @@ allocates nothing. `String::from` accepts a literal or another `String`;
 | `String::from_str` | `(&str) -> String` | copies borrowed text |
 | `as_str` / `as_mut_str` | `(&self) -> &str` / `(&mut self) -> &mut str` | borrowed view, no copy |
 | `as_bytes` | `(&self) -> &[u8]` | the UTF-8 bytes as a slice |
+| `as_ptr` | `(&self) -> *const u8` | pointer to the first UTF-8 byte for FFI; empty strings return null, the buffer is not NUL-terminated, and the pointer is valid only while the string lives and is not mutated |
 | `len` / `is_empty` | `(&self) -> usize` / `(&self) -> bool` | byte length / emptiness |
 | `push_str` | `(&mut self, &str)` | appends borrowed text |
 | `push` | `(&mut self, char)` | appends one character |
@@ -43,6 +44,11 @@ allocates nothing. `String::from` accepts a literal or another `String`;
 | `is_char_boundary` | `(&self, usize) -> bool` | whether a byte offset is a character boundary |
 | `parse_i64` | `(&self) -> Result<i64, ParseIntError>` | decimal integer |
 | `parse_f64` | `(&self) -> Result<f64, ParseFloatError>` | decimal float |
+
+`as_ptr` exposes the UTF-8 buffer without taking ownership or keeping it alive.
+It is not NUL-terminated, so C code that expects a C string needs a length or a
+`CString` instead. An empty string returns a null pointer, and mutating the
+string may reallocate the buffer and invalidate the pointer immediately.
 
 ## str methods
 

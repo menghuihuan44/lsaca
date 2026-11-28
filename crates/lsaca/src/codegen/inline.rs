@@ -280,6 +280,7 @@ fn scan_expr(expr: &HExpr, escaped: &mut HashSet<usize>) {
                 scan_expr(field, escaped);
             }
         }
+        HExprKind::UnionLit { value, .. } => scan_expr(value, escaped),
         HExprKind::Tuple(elems) | HExprKind::VecLit { elems } | HExprKind::Array { elems } => {
             for elem in elems {
                 scan_expr(elem, escaped);

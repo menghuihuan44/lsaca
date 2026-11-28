@@ -1,0 +1,16 @@
+# Expected front-end diagnostics for the negative FFI acceptance programs.
+# Format: fixture|diagnostic code|required message fragment (may be empty).
+# The runner requires a non-zero compiler exit, the exact code, and the message
+# fragment when one is given. Keep the fragments short and stable: they assert
+# the contract, not the full wording of a sentence.
+negative/unsafe_deref.ls|E0133|requires an unsafe context
+negative/unsafe_extern_call.ls|E0133|requires an unsafe context
+negative/ffi_managed_string_arg.ls|E0770|is not FFI-safe
+negative/ffi_managed_return.ls|E0770|is not FFI-safe
+negative/repr_enum.ls|E0771|only supported on struct and union declarations
+negative/repr_bad_arg.ls|E0771|unsupported repr attribute
+negative/repr_on_fn.ls|E0771|only supported on struct and union declarations
+negative/union_managed_field.ls|E0772|cannot be stored in a union
+negative/union_method.ls|E0773|cannot have methods
+negative/union_pattern.ls|E0773|
+negative/extern_non_c_abi.ls|E0001|unsupported extern ABI

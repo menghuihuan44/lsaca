@@ -118,6 +118,9 @@ pub fn eq_expr(names: &TypeNames, ty: &Ty, a: &str, b: &str) -> String {
         // Scalars compare directly; Rc handles compare by identity (their C
         // representation is the cell pointer).
         format!("(({}) == ({}))", a, b)
+    } else if matches!(ty, Ty::Ptr { .. }) {
+        // Raw pointers compare by address, never by pointee value.
+        format!("(({}) == ({}))", a, b)
     } else if let Ty::Box(inner) = ty {
         // Boxes compare by payload value, like the value they box.
         eq_expr(

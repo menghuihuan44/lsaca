@@ -32,10 +32,16 @@ release are listed in [Known limitations](limitations.md); the plan is in
    `free`, no `drop(value)` builtin and no `std::mem::drop`. See
    [Ownership and moves](11-ownership-and-moves.md) and
    [Memory model](05-memory-model.md).
-2. **References are non-owning and restricted.** Version 1.3 added `&T` and
-   `&mut T`, with borrow expressions (`&place`, `&mut place`), dereference
-   (`*r`) and match ergonomics — but there are no raw pointers, no address
-   arithmetic and no way to observe an address. References cannot be stored in
+2. **References are non-owning and restricted; raw pointers are separate
+   unsafe values.** Version 1.3 added `&T` and `&mut T`, with borrow
+   expressions (`&place`, `&mut place`), dereference (`*r`) and match
+   ergonomics. Since 2.5.0 the raw pointer types `*const T`/`*mut T` also exist
+   for C interop and `unsafe` code: a pointer can be made from a reference
+   (`&value as *const T`) or an integer cast, compared by address, tested with
+   `is_null()` and inspected with `addr()`, but dereferencing, assigning through
+   it and `add`/`sub` are unsafe and a pointer is never ORC-managed. Raw pointers
+   are not references: they do not borrow, do not keep a value alive and cannot
+   be used where a reference is expected. References cannot be stored in
    `Vec`, `Result`, `HashMap`, `Rc`, `Box` or an array, cannot be captured
    by closures, and cannot be cast with `as`. Since 2.2.0 a struct, enum or tuple struct may hold a direct reference field
    (`&'a T`/`&'a mut T`) and then carries a lifetime parameter; `Option<&T>` and
@@ -83,8 +89,11 @@ release are listed in [Known limitations](limitations.md); the plan is in
    supertraits, associated types or constants, and only object-safe traits can
    be used as types. See [Generics](17-generics.md),
    [Traits](18-traits.md) and [Trait objects](25-trait-objects.md).
-5. **No user macros.** The only macros are the builtin formatting/assertion
-   macros and `vec!`. There is no `macro_rules!`, no derive and no attributes.
+5. **No user macros or general attributes.** The only macros are the builtin
+   formatting/assertion macros and `vec!`. There is no `macro_rules!`, no derive
+   and no user attribute. Since 2.5.0 `#[repr(C)]` is accepted on a struct (C
+   layout) and as a no-op on a union; every other attribute placement or argument
+   is `E0771`.
 6. **Closures capture by value.** A closure owns its captured environment: it
    copies `Copy` values and moves move-only values into the closure, so the
    original binding becomes unusable unless its value is `Copy`. `move` is
@@ -163,7 +172,11 @@ release are listed in [Known limitations](limitations.md); the plan is in
     `BTreeMap`, `VecDeque`, `BinaryHeap`), `io` (`File`, `Error`/`ErrorKind`,
     the `Read`/`Write`/`Seek`/`BufRead` traits, `BufReader` and `BufWriter`), `fs`, `net`
     (TCP, plus `SocketAddr` and UDP since 2.4.0), `time`, `env`, `process`
-    (including `process::Command`) and `error` (the `Error` trait).
+    (including `process::Command`) and `error` (the `Error` trait). The 2.5.0
+    additions are the C-facing modules `ptr` (raw pointers), `cstring`
+    (`CString`), `cstr` (`CStr`) and `mem` (`MaybeUninit<T>`); their unsafe
+    operations are documented on each module page and used with the contract in
+    [Unsafe code and C FFI](32-unsafe-and-ffi.md).
     Iterators provide `zip`, `chain`, `filter_map`, `take_while`, `skip_while`,
     `step_by`, `rev` and `flat_map` next to `map`, `filter`, `take`, `skip`
     and `enumerate`, with the terminals `collect`, `fold`, `count`, `sum`,
@@ -207,13 +220,26 @@ release are listed in [Known limitations](limitations.md); the plan is in
     insertion order. `Rc<T>` equality remains identity (same cell), `Box<T>`
     compares structurally, characters compare by scalar value, and function
     values and trait objects have no `==` or `<` (`E0369`).
-14. **No unsafety.** There is no `unsafe`, no FFI and no threads. The generated
-    C is not exposed to the language. The `extern fn` declaration added in 2.0
-    is not an FFI mechanism: it declares the compiler's own intrinsics, only the
-    `std` crate may write one (user code is `E0001`), and it is not a
-    first-class value (`E0425`). The 2.x language is single-threaded by contract;
-    [RFC 0004](../../rfcs/0004-concurrency.md) records the v3.0 decision about
-    threads, `Arc` and `Send`/`Sync`.
+14. **Controlled unsafety and C FFI, but no threads.** Version 2.5.0 adds
+    `unsafe` blocks and `unsafe fn`, raw pointers, `extern "C"` declarations,
+    `#[repr(C)]` structs and C-layout unions. The permission is compile-time
+    only: generated C is unchanged, and `unsafe` operations are exactly raw
+    pointer dereference and assignment, calls to `extern "C"` functions,
+    `MaybeUninit::assume_init`, `CStr::from_ptr`, `CString::from_raw`, and union
+    construction or field access. The two new keywords are source-breaking:
+    `unsafe` and `union` can no longer be identifiers, and `HashSet::union` is
+    renamed `union_with`. The safety contract is the programmer's; the
+    ORC invariants still hold (never release or forge a count by hand, raw
+    pointers never own, and managed values never cross the FFI boundary). Only
+    the C ABI is accepted, there are no function pointers, callbacks, variadics
+    or `#[link]`, and `std::ptr`/`cstring`/`cstr`/`mem` are the only new modules.
+    The generated C is not otherwise exposed to the language. The `extern fn`
+    intrinsic from 2.0 remains separate from `extern "C"`: only the `std` crate
+    may declare an intrinsic (user code is `E0001`), and it is not a first-class
+    value (`E0425`). See [Unsafe code and C FFI](32-unsafe-and-ffi.md) and
+    [RFC 0005](../../rfcs/0005-controlled-unsafe-and-ffi.md). The 2.x language is
+    still single-threaded by contract; [RFC 0004](../../rfcs/0004-concurrency.md)
+    records the v3.0 decision about threads, `Arc` and `Send`/`Sync`.
 15. **Partial moves are all-or-nothing.** A `let` pattern that binds an owning
     value (`String`, `Vec`, `Rc`, `Box`, a move-only struct, ...) moves the whole
     initialiser: the bound fields move into the new bindings and the remaining

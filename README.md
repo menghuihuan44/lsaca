@@ -15,9 +15,17 @@ This repository is a complete rewrite of an earlier C17 implementation. The
 pipeline, the runtime, the memory model, the grammar and the back end were
 redesigned rather than ported.
 
-The current release is **2.4.0**, the tool-grade language release: array, slice
-and `name @ pattern` patterns with Rust-compatible exhaustiveness, values out
-of `break`, `HashMap::get_or_insert` plus a denser collection API, iterator
+The current release is **2.5.0**, the system-foundation release: a deliberately
+small `unsafe` layer (`unsafe { ... }` blocks and `unsafe fn`), raw pointers
+`*const T`/`*mut T`, `extern "C"` declarations with FFI-safe type checking,
+`#[repr(C)]` structs, `union` declarations, and `CString`, `CStr` and
+`MaybeUninit` in the standard library. The layer is exercised by a real FFI
+acceptance suite that binds libc and libm and also runs under AddressSanitizer and
+UndefinedBehaviorSanitizer. Unsafe is a compile-time permission, not a second
+language, and the safe subset, value semantics and ORC are unchanged. Version
+2.4.0 was the tool-grade language release: array, slice and `name @ pattern`
+patterns with Rust-compatible exhaustiveness, values out of `break`,
+`HashMap::get_or_insert` plus a denser collection API, iterator
 `min`/`max`/`product`, `process::Command`, UDP networking with `SocketAddr`,
 `pub(super)`/`pub(in path)` visibility and module aliases, formatter crate mode,
 and RFCs that freeze the protocol and concurrency boundaries. Version 2.3.0 made
@@ -860,63 +868,64 @@ before it is timed; the harness records cold and cached build time, runtime
 median and peak working set. lsaca programs go through the normal cached
 `lsaca build -r` pipeline (the default direct C backend).
 
-The official 2.4.0 result is [benchmarks/results/latest.md](benchmarks/results/latest.md),
-archived under [benchmarks/results/archive/v2.4/](benchmarks/results/archive/v2.4/),
+The official 2.5.0 result is [benchmarks/results/latest.md](benchmarks/results/latest.md),
+archived under [benchmarks/results/archive/v2.5/](benchmarks/results/archive/v2.5/),
 with the run published in
 [docs/language/21-benchmarks.md](docs/language/21-benchmarks.md); the previous
-release is frozen in [benchmarks/results/archive/v2.3/](benchmarks/results/archive/v2.3/)
+release is frozen in [benchmarks/results/archive/v2.4/](benchmarks/results/archive/v2.4/)
 and the 2.2.0 baseline analysis is in
 [benchmarks/results/v2.2-report.md](benchmarks/results/v2.2-report.md). The run
 used Windows 11 on a Core i7-1260P (16 threads, 15.6 GiB), gcc.EXE (Rev6, MSYS2)
 16.2.0 (-O2), rustc 1.100 (-O), Node 26 and Python 3.14; runtimes are medians of
-seven runs after one warmup and are lower-is-better. The 2.3.0 baseline was
-measured with the same gcc 16.2.0 but an earlier host state, so cross-release
-claims are made about C-normalised ratios only; short workloads on this laptop
-vary noticeably between runs, so the tables below are one recorded official run.
+seven runs after one warmup and are lower-is-better. Short workloads on this
+laptop vary noticeably between runs - the unchanged C reference moved by
+0.72x-1.19x between the two recorded 2.4.0 and 2.5.0 runs - so cross-release
+claims are taken from the same-host A/B run described below, not from absolute
+milliseconds.
 
-| workload | lsaca 2.4.0 | C (gcc -O2) | Rust (rustc -O) | ratio vs C |
+| workload | lsaca 2.5.0 | C (gcc -O2) | Rust (rustc -O) | ratio vs C |
 | --- | ---: | ---: | ---: | ---: |
-| `fib` | 38.6 ms | 32.2 ms | 18.6 ms | 1.20x |
-| `fib_iter` | 16.1 ms | 16.3 ms | - | 0.99x |
-| `fib_memo` | 17.7 ms | 17.2 ms | - | 1.03x |
-| `loop_sum` | 23.4 ms | 19.6 ms | 16.1 ms | 1.19x |
-| `string_build` | 99.7 ms | 20.9 ms | 83.1 ms | 4.77x |
-| `vec_memory` | 27.4 ms | 22.7 ms | 19.0 ms | 1.21x |
-| `sort_i64` | 44.8 ms | 42.5 ms | 46.0 ms | 1.05x |
-| `sort_insertion` | 17.9 ms | 14.4 ms | - | 1.24x |
-| `matrix_multiply` | 23.2 ms | 21.7 ms | 18.9 ms | 1.07x |
-| `binary_trees` | 321.7 ms | 28.0 ms | 34.2 ms | 11.48x |
-| `binary_trees_refs` | 42.7 ms | 23.9 ms | 25.6 ms | 1.79x |
-| `string_split` | 31.2 ms | 26.7 ms | 20.0 ms | 1.17x |
-| `sieve` | 47.8 ms | 43.0 ms | 39.8 ms | 1.11x |
-| `mandelbrot` | 44.3 ms | 43.7 ms | 33.7 ms | 1.01x |
-| `iterator_pipeline` | 20.1 ms | 13.6 ms | 15.7 ms | 1.48x |
-| `hashmap_wordcount` | 43.1 ms | 32.5 ms | 52.5 ms | 1.33x |
-| `array_wordcount` | 19.3 ms | 18.4 ms | - | 1.05x |
-| `generic_stack` | 23.2 ms | 20.5 ms | 19.5 ms | 1.13x |
-| `fn_pipeline` | 17.0 ms | 13.8 ms | 15.5 ms | 1.23x |
-| `string_unicode` | 42.4 ms | 23.6 ms | 20.7 ms | 1.80x |
-| `hashmap_i64` | 355.6 ms | 227.7 ms | 309.0 ms | 1.56x |
-| `hashmap_string` | 263.0 ms | 242.3 ms | 248.6 ms | 1.09x |
+| `fib` | 34.4 ms | 31.7 ms | 20.8 ms | 1.09x |
+| `fib_iter` | 19.0 ms | 16.7 ms | - | 1.14x |
+| `fib_memo` | 15.0 ms | 16.2 ms | - | 0.93x |
+| `loop_sum` | 22.8 ms | 17.3 ms | 17.1 ms | 1.32x |
+| `string_build` | 124.0 ms | 26.5 ms | 104.7 ms | 4.68x |
+| `vec_memory` | 25.8 ms | 28.2 ms | 25.1 ms | 0.92x |
+| `sort_i64` | 44.7 ms | 45.0 ms | 50.9 ms | 0.99x |
+| `sort_insertion` | 21.3 ms | 14.6 ms | - | 1.47x |
+| `matrix_multiply` | 21.7 ms | 20.6 ms | 18.6 ms | 1.06x |
+| `binary_trees` | 332.7 ms | 23.4 ms | 26.4 ms | 14.24x |
+| `binary_trees_refs` | 52.4 ms | 29.3 ms | 27.4 ms | 1.79x |
+| `string_split` | 34.4 ms | 19.1 ms | 25.2 ms | 1.80x |
+| `sieve` | 54.4 ms | 36.6 ms | 37.9 ms | 1.49x |
+| `mandelbrot` | 42.4 ms | 38.2 ms | 39.0 ms | 1.11x |
+| `iterator_pipeline` | 20.0 ms | 19.0 ms | 19.1 ms | 1.05x |
+| `hashmap_wordcount` | 42.6 ms | 35.5 ms | 57.8 ms | 1.20x |
+| `array_wordcount` | 19.5 ms | 21.1 ms | - | 0.93x |
+| `generic_stack` | 24.2 ms | 23.0 ms | 19.5 ms | 1.05x |
+| `fn_pipeline` | 14.9 ms | 18.6 ms | 10.6 ms | 0.80x |
+| `string_unicode` | 40.5 ms | 16.3 ms | 18.4 ms | 2.49x |
+| `hashmap_i64` | 276.9 ms | 174.3 ms | 205.5 ms | 1.59x |
+| `hashmap_string` | 225.3 ms | 207.2 ms | 247.6 ms | 1.09x |
 
 Compile times on the same machine (cold: fresh program cache with a warm
 shared runtime-object cache; cached: only relinking):
 
-| build | lsaca 2.4.0 |
+| build | lsaca 2.5.0 |
 | --- | ---: |
-| cold build, typical single file | 0.57-2.54 s (median 0.88 s) |
-| cached build, typical single file | 130-219 ms (median 164 ms) |
-| `compile_large` (4,511 lines), cold / cached | 3.53 s / 1,105 ms |
-| `modules_compile` (9 files), cold / cached | 5.17 s / 1,032 ms |
-| `package_compile` (13 files, 3 packages), cold / cached | 2.38 s / 352 ms |
+| cold build, typical single file | 0.83-2.76 s (median 1.06 s) |
+| cached build, typical single file | 140-233 ms (median 176 ms) |
+| `compile_large` (4,511 lines), cold / cached | 3.70 s / 1,194 ms |
+| `modules_compile` (9 files), cold / cached | 5.33 s / 1,023 ms |
+| `package_compile` (13 files, 3 packages), cold / cached | 2.32 s / 305 ms |
 
 Peak memory is at parity with C for most workloads: `fib` 4.5 vs 4.0 MiB,
 `vec_memory` 19.2 vs 18.8 MiB, `sieve` 19.3 vs 18.8 MiB, `hashmap_i64` 55.9
 vs 52.5 MiB. The exceptions are documented workload-fairness effects: by-value
-`binary_trees` deep-copies the tree when summing (52.3 vs 7.6 MiB, 11.48x
+`binary_trees` deep-copies the tree when summing (52.3 vs 7.6 MiB, 14.24x
 runtime) while the borrowed `binary_trees_refs` variant is the fair comparison
 (16.2 vs 7.6 MiB, 1.79x), and `hashmap_string` allocates one shared `String`
-buffer per unique word (30.0 vs 19.6 MiB).
+buffer per unique word (29.9 vs 19.6 MiB).
 
 The single-file cold build is dominated by the system C compiler compiling the
 generated translation units; the runtime translation units are compiled once per
@@ -924,31 +933,32 @@ toolchain and profile into a shared runtime-object cache, so a normal program
 build compiles only its own generated unit(s) and links. Cached rebuilds skip
 the C compiler for unchanged content.
 
-At run time, 16 of the 22 executed workloads are within 1.4x of C, 17 are within
-1.5x and 9 are within 1.15x; the median lsaca/C ratio is 1.20x. `fib_iter`
-(0.99x), `mandelbrot` (1.01x), `fib_memo` (1.03x), `array_wordcount` (1.05x),
-`sort_i64` (1.05x), `matrix_multiply` (1.07x) and `hashmap_string` (1.09x) are
-the closest workloads. The five above 1.5x are analyzed individually on the
-benchmarks page: `binary_trees` (11.48x) is the deliberate by-value semantics
-comparison; `string_build` (4.77x) builds a temporary `String` per token in the
-frozen two-step form; `string_unicode` (1.80x) pays the documented O(n)
-character API plus Unicode table lookups; `binary_trees_refs` (1.79x) pays
-reference-count traffic on the borrowed traversal; and `hashmap_i64` (1.56x)
-pays hashing and allocations on top of C's hand-written open-addressing table.
+At run time, 14 of the 22 executed workloads are within 1.4x of C, 16 are
+within 1.5x and 12 are within 1.15x; the median lsaca/C ratio is 1.14x.
+`fn_pipeline` (0.80x), `vec_memory` (0.92x), `fib_memo` (0.93x),
+`array_wordcount` (0.93x) and `sort_i64` (0.99x) are now at or below the C
+reference. The eight workloads above 1.4x are analysed individually on the
+benchmarks page: `binary_trees` (14.24x) is the deliberate by-value semantics
+comparison; `string_build` (4.68x) builds a temporary `String` per token in the
+frozen two-step form; `string_unicode` (2.49x) pays the documented O(n)
+character API plus Unicode table lookups; `string_split` (1.80x) and
+`binary_trees_refs` (1.79x) pay allocation and reference-count traffic;
+`hashmap_i64` (1.59x) pays hashing and allocations on top of C's hand-written
+open-addressing table; `sieve` (1.49x) and `sort_insertion` (1.47x) use checked
+indexing where the C reference uses raw arrays.
 
-Against the archived 2.3.0 run, compared as C-normalised ratios because the two
-runs were taken on different host states, the largest gains are `fib_memo`
-(1.51x to 1.03x), `sieve` (1.50x to 1.11x), `string_split` (1.55x to 1.17x),
-`string_build` (6.23x to 4.77x), `fib_iter` (1.27x to 0.99x) and
-`array_wordcount` (1.34x to 1.05x); the largest normalised regressions are
-`iterator_pipeline` (1.07x to 1.48x), `generic_stack` (0.85x to 1.13x), `fib`
-(0.99x to 1.20x), `fn_pipeline` (1.05x to 1.23x) and `vec_memory`
-(1.18x to 1.21x). A same-host A/B run of the 2.3.0 and 2.4.0 compilers on
-twelve of these workloads measured a median runtime ratio of 0.993 with the C
-reference medians themselves moving by up to 42% between the two runs, so the
-normalised deltas are within this laptop's run-to-run noise. The
-[benchmarks page](docs/language/21-benchmarks.md) has the complete before/after
-tables.
+Against 2.4.0, a same-host A/B run of the two compilers on fifteen workloads
+measured a median runtime ratio of 0.906 and a cold-compile median ratio of
+0.951 (both below 1.0, so the 2.5.0 compiler is not slower), while the C
+reference medians in that same run moved by 0.72x-1.19x. The official-run
+comparison is therefore C-normalised and noisy: 7 of 22 ratios moved outside
+the 10% budget, with the largest apparent regressions `string_split`,
+`string_unicode`, `sieve`, `binary_trees`, `sort_insertion` and `fib_iter`, and
+the largest gains `fn_pipeline`, `iterator_pipeline`, `vec_memory`,
+`array_wordcount`, `fib_memo` and `hashmap_wordcount`; the
+[benchmarks page](docs/language/21-benchmarks.md) lists every one, and the
+release notes record the A/B evidence. The A/B run is the authoritative
+comparison for compiler changes.
 
 ## Environment variables
 
@@ -988,17 +998,19 @@ tables.
 ## Testing
 
 ```sh
-cargo test --workspace   # more than 960 unit + 21 end-to-end + 120 robustness + 27 CLI tests
+cargo test --workspace   # more than 1,030 unit + 22 end-to-end + 121 robustness + 28 CLI tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-`cargo test --workspace` runs more than 960 unit tests across the compiler
+`cargo test --workspace` runs more than 1,030 unit tests across the compiler
 library - including the lexer, parser, type checker, borrow checker, move
-checker, C code generator and the embedded standard library loader - plus 21
-end-to-end test functions that compile and run more than 150 programs: single
-files under `crates/lsaca/tests/programs/`, the four real programs under
+checker, C code generator and the embedded standard library loader - plus 22
+end-to-end test functions that compile and run more than 160 programs: single
+files under `crates/lsaca/tests/programs/`, the six FFI acceptance programs
+under `crates/lsaca/tests/programs/cffi/` with their eleven compile-fail
+negatives, the four real programs under
 `examples/programs/` whose output is compared byte for byte with stored golden
 files, module trees under
 `tests/programs/modules/`, package projects (including path dependencies)
@@ -1097,7 +1109,7 @@ check and tees its output to `target/check-status.log`; the
 
 `scripts/bench_guard.py` compares a result file produced by `scripts/bench.py`
 with the most recently released baseline,
-`benchmarks/results/archive/v2.4/latest.json` (2.4.0). The limits are a runtime
+`benchmarks/results/archive/v2.5/latest.json` (2.5.0). The limits are a runtime
 median regression of at most 10% and a cold compile median regression of at
 most 20% against the previous release in each case. The guard is a hard check
 when the measurement host matches the baseline; on the shared CI runners it
@@ -1139,6 +1151,16 @@ only that CLI test; the dedicated CI job still covers the CMake backend.
 
 ## Release history
 
+- **2.5.0** - the system-foundation release. A deliberately small unsafe layer:
+  `unsafe { ... }` blocks and `unsafe fn` (E0133 names every unsafe operation),
+  raw pointers `*const T`/`*mut T`, `extern "C"` declarations with FFI-safe
+  type checking (E0770), `#[repr(C)]` structs, `union` declarations, and
+  `CString`, `CStr`, `MaybeUninit` in the standard library. Code generation binds
+  real C symbols through asm labels, so libc and libm calls need no headers, and
+  a real FFI acceptance suite (libc `strlen`/`strcmp`/`memcmp`/`div`/`getenv`,
+  libm `frexp`/`tgamma`/`erf`) runs in the tests and under ASan/UBSan. `unsafe`
+  and `union` are now keywords, so they cannot be identifiers; `HashSet::union`
+  was renamed `union_with`. Source compatible with 2.4.0 otherwise.
 - **2.4.0** - the tool-grade language release. Array, slice and `name @ pattern`
   patterns with Rust-compatible exhaustiveness, values out of `break`,
   `HashMap::get_or_insert`/`get_or_insert_with` plus a denser collection

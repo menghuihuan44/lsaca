@@ -89,6 +89,9 @@ impl<'a> Checker<'a> {
             | ITy::Rc(_)
             | ITy::Fn(..)
             | ITy::Ref { .. }
+            | ITy::Ptr { .. }
+            | ITy::MaybeUninit(_)
+            | ITy::Union(_)
             | ITy::Slice(_)
             | ITy::Str
             | ITy::Dyn(_)
@@ -113,6 +116,7 @@ impl<'a> Checker<'a> {
             | ITy::Rc(_)
             | ITy::Box(_)
             | ITy::HashMap(_, _)
+            | ITy::MaybeUninit(_)
             | ITy::Struct(_)
             | ITy::Enum(_)
             | ITy::Tuple(_) => true,
@@ -210,6 +214,9 @@ impl<'a> Checker<'a> {
             | ITy::Int(_)
             | ITy::Float(_)
             | ITy::Ref { .. }
+            | ITy::Ptr { .. }
+            | ITy::MaybeUninit(_)
+            | ITy::Union(_)
             | ITy::Never
             | ITy::Var(_) => true,
         }

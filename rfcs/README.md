@@ -70,5 +70,9 @@ What the RFC does not settle.
 - [0004: Concurrency stays out of 2.x](0004-concurrency.md) - the v3.0
   memory-model package.
 
+- [0005: Controlled unsafe, raw pointers and C FFI](0005-controlled-unsafe-and-ffi.md)
+  - accepted for v2.5: the minimum escape hatch, the FFI-safe boundary and the ORC
+  invariants unsafe code must preserve.
+
 Open candidates for a future decision: the UFCS call form (implemented or
 diagnostic only; it is diagnostic only today, deviation 19).

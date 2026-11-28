@@ -67,6 +67,106 @@ impl<'a> Gen<'a> {
                 return;
             }
             "__drop" => util::internal_error("intrinsic `__drop` has no emitter in phase A"),
+            // v2.5 unsafe/FFI support: build a borrowed str from a raw
+            // pointer-and-length pair. No validation happens here; the
+            // standard library wrapper validates the bytes.
+            "__str_from_raw_parts" => {
+                let data = require_argument(name, args);
+                let length = args.get(1).unwrap_or_else(|| {
+                    util::internal_error(format!("intrinsic `{}` is missing its length", name))
+                });
+                let data = self.gen_owned(data);
+                let length = self.gen_owned(length);
+                self.line(format!(
+                    "{} = ({}){{ .data = (uint8_t*)({}), .len = (size_t)({}) }};",
+                    target,
+                    self.ctype(ty),
+                    data,
+                    length
+                ));
+                return;
+            }
+            // Move a Vec's buffer into a (data, len, cap) tuple. The temporary
+            // is consumed so the function frame does not free the buffer the
+            // caller now owns through the raw parts.
+            "__vec_into_raw_parts" => {
+                let value = require_argument(name, args);
+                let Ty::Vec(_) = &value.ty else {
+                    util::internal_error(format!(
+                        "intrinsic `{}` requires a Vec argument, found {:?}",
+                        name, value.ty
+                    ));
+                };
+                let temporary = self.declare_temp(&value.ty);
+                self.gen_move_into(value, &temporary);
+                self.line(format!(
+                    "{}.{} = ({}).data;",
+                    target,
+                    positional_field(0),
+                    temporary
+                ));
+                self.line(format!(
+                    "{}.{} = ({}).len;",
+                    target,
+                    positional_field(1),
+                    temporary
+                ));
+                self.line(format!(
+                    "{}.{} = ({}).cap;",
+                    target,
+                    positional_field(2),
+                    temporary
+                ));
+                self.mark_moved(&temporary);
+                return;
+            }
+            // Rebuild a Vec from raw parts. The new value takes ownership of
+            // the buffer, so no copy or retain happens here.
+            "__vec_from_raw_parts" => {
+                let data = self.gen_owned(require_argument(name, args));
+                let length = self.gen_owned(args.get(1).unwrap_or_else(|| {
+                    util::internal_error(format!("intrinsic `{}` is missing its length", name))
+                }));
+                let capacity = self.gen_owned(args.get(2).unwrap_or_else(|| {
+                    util::internal_error(format!("intrinsic `{}` is missing its capacity", name))
+                }));
+                self.line(format!("{}.data = {};", target, data));
+                self.line(format!("{}.len = (size_t)({});", target, length));
+                self.line(format!("{}.cap = (size_t)({});", target, capacity));
+                return;
+            }
+            // MaybeUninit<T> is storage of exactly T. "uninit" leaves the
+            // storage zeroed for determinism; write and assume_init move the
+            // value in and out without adding a wrapper or reference counting.
+            "__maybe_uninit_uninit" => {
+                let zero = self.zero_expr(ty);
+                self.line(format!("{} = {};", target, zero));
+                return;
+            }
+            "__maybe_uninit_write" => {
+                let slot = self.gen_owned(require_argument(name, args));
+                let value = args.get(1).unwrap_or_else(|| {
+                    util::internal_error(format!("intrinsic `{}` is missing its value", name))
+                });
+                let value_ty = value.ty.clone();
+                let temporary = self.declare_temp(&value_ty);
+                self.gen_move_into(value, &temporary);
+                self.line(format!("*({}) = {};", slot, temporary));
+                self.mark_moved(&temporary);
+                let zero = self.zero_expr(ty);
+                self.line(format!("{} = {};", target, zero));
+                return;
+            }
+            "__maybe_uninit_as_mut_ptr" => {
+                let slot = self.gen_owned(require_argument(name, args));
+                self.line(format!("{} = ({}){};", target, self.ctype(ty), slot));
+                return;
+            }
+            "__maybe_uninit_assume_init" => {
+                let slot = self.gen_owned(require_argument(name, args));
+                self.line(format!("{} = *({});", target, slot));
+                return;
+            }
             _ => {}
         }
         // The borrowed collection accessors (HashMap::get/get_mut, Vec::get_mut,

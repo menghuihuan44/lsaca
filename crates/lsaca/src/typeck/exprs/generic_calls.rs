@@ -349,6 +349,7 @@ impl<'a> Checker<'a> {
                 | (BuiltinTypeKind::Rc, ITy::Rc(_))
                 | (BuiltinTypeKind::Box, ITy::Box(_))
                 | (BuiltinTypeKind::HashMap, ITy::HashMap(_, _))
+                | (BuiltinTypeKind::MaybeUninit, ITy::MaybeUninit(_))
                 | (BuiltinTypeKind::Char, ITy::Char)
         )
     }
@@ -362,7 +363,8 @@ impl<'a> Checker<'a> {
             (_, ITy::Vec(inner))
             | (_, ITy::Rc(inner))
             | (_, ITy::Box(inner))
-            | (_, ITy::Option(inner)) => inner.is_unsized(),
+            | (_, ITy::Option(inner))
+            | (_, ITy::MaybeUninit(inner)) => inner.is_unsized(),
             (_, ITy::Result(ok, err)) | (_, ITy::HashMap(ok, err)) => {
                 ok.is_unsized() || err.is_unsized()
             }

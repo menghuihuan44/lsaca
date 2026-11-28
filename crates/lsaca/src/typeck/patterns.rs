@@ -623,6 +623,33 @@ impl<'a> Checker<'a> {
         span: Span,
         overrides: Option<&HashMap<String, BindingInfo>>,
     ) -> TPat {
+        // A union is not a struct: destructuring reads an active member whose
+        // tag does not exist, so the language rejects it outright. Report E0773
+        // before struct resolution, then still check the field subpatterns with
+        // their declared member types so the arm body resolves normally.
+        if path.segments.len() == 1
+            && path.segments[0].generics.is_empty()
+            && let Some(union_id) = self.lookup_union(&path.segments[0].name)
+        {
+            let union_name = self.union_name(union_id);
+            self.error_code_note(
+                format!("union {} cannot be destructured by a pattern", union_name),
+                span,
+                "E0773",
+                "unions are plain C value types; read one field inside unsafe instead".to_string(),
+            );
+            self.ensure_union_fields(union_id);
+            let union_ty = ITy::Union(union_id);
+            self.unify_or_report(expected, &union_ty, span);
+            for field in fields {
+                let field_ty = match self.union_field(union_id, &field.name) {
+                    Some((_, _, _, ty)) => ty,
+                    None => self.infer.fresh_var(),
+                };
+                let _ = self.check_pattern_inner(&field.pat, &field_ty, overrides);
+            }
+            return TPat::new(union_ty, TPatKind::Wild, span);
+        }
         let struct_id = match self.resolve_pattern_struct(path, expected, span) {
             Some(id) => id,
             None => return TPat::new(expected.clone(), TPatKind::Wild, span),

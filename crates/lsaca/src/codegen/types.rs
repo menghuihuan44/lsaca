@@ -19,6 +19,7 @@ use super::reachability::{self, Reachability};
 pub struct TypeNames {
     pub structs: Vec<String>,
     pub enums: Vec<String>,
+    pub unions: Vec<String>,
 }
 
 /// The C name of a user defined type, without the generated `Ls` tag prefix.
@@ -39,6 +40,18 @@ fn user_type_c_name(name: &str) -> String {
     }
 }
 
+/// C type of a const pointer to a pointee whose C type is `inner`.
+///
+/// When the pointee is itself a pointer, `const` must qualify that inner pointer
+/// rather than the innermost scalar: `*const *mut i64` is `int64_t* const*`,
+/// not `const int64_t**` (a pointer to pointer-to-const).
+fn const_pointer_to(inner: &str) -> String {
+    match inner.strip_suffix('*') {
+        Some(prefix) => format!("{prefix}* const*"),
+        None => format!("const {inner}*"),
+    }
+}
+
 impl TypeNames {
     pub fn from_program(program: &hir::Program) -> TypeNames {
         TypeNames {
@@ -47,6 +60,7 @@ impl TypeNames {
             // mangling the display name would collide in generated C.
             structs: program.structs.iter().map(|s| s.c_name.clone()).collect(),
             enums: program.enums.iter().map(|e| e.c_name.clone()).collect(),
+            unions: program.unions.iter().map(|u| u.c_name.clone()).collect(),
         }
     }
 
@@ -61,6 +75,13 @@ impl TypeNames {
         match self.enums.get(index) {
             Some(name) => user_type_c_name(name),
             None => format!("Enum{}", index),
+        }
+    }
+
+    fn user_union(&self, index: usize) -> String {
+        match self.unions.get(index) {
+            Some(name) => user_type_c_name(name),
+            None => format!("Union{}", index),
         }
     }
 
@@ -109,6 +130,12 @@ impl TypeNames {
             Ty::Array(elem, len) => format!("Array_{}_{}", self.mangle(elem), len),
             Ty::Str => String::from("Str"),
             Ty::Dyn(index) => format!("Dyn{}", index),
+            Ty::Ptr { mutable, inner } => {
+                let prefix = if *mutable { "PtrMut" } else { "PtrConst" };
+                format!("{}_{}", prefix, self.mangle(inner))
+            }
+            Ty::MaybeUninit(inner) => format!("MaybeUninit_{}", self.mangle(inner)),
+            Ty::Union(index) => self.user_union(*index),
         }
     }
 
@@ -162,6 +189,28 @@ impl TypeNames {
                     format!("const {}*", referent)
                 }
             }
+            // Raw pointers are plain C pointers. Pointers to the unit type are
+            // the C void pointers used by opaque FFI handles.
+            Ty::Ptr { mutable, inner } if **inner == Ty::Unit => {
+                if *mutable {
+                    String::from("void*")
+                } else {
+                    String::from("const void*")
+                }
+            }
+            Ty::Ptr { mutable, inner } => {
+                let inner_ctype = self.ctype(inner);
+                if *mutable {
+                    format!("{}*", inner_ctype)
+                } else {
+                    const_pointer_to(&inner_ctype)
+                }
+            }
+            // MaybeUninit<T> is represented by storage of exactly T. It is
+            // never released or traced as a managed value.
+            Ty::MaybeUninit(inner) => self.ctype(inner),
+            // Unions are plain C unions, never pointer cells.
+            Ty::Union(index) => self.user_union(*index),
             _ => format!("Ls{}", self.mangle(ty)),
         }
     }
@@ -193,6 +242,8 @@ pub enum TypeDef {
     /// The by-value fat trait object struct; the id indexes
     /// Program::trait_objects.
     Dyn(usize),
+    /// A plain C union; the id indexes Program::unions.
+    Union(usize),
 }
 
 impl TypeDef {
@@ -377,6 +428,19 @@ impl TypeRegistry {
                 push_if_compound(&mut deps, &Ty::vec((**key).clone()));
                 push_if_compound(&mut deps, &Ty::vec((**value).clone()));
             }
+            // Unions store their fields by value, at offset zero.
+            Ty::Union(index) => {
+                if let Some(item) = program.unions.get(*index) {
+                    for field in &item.fields {
+                        push_if_compound(&mut deps, &field.ty);
+                    }
+                }
+            }
+            // The storage has the layout of the wrapped type, so the wrapped
+            // type's definition must be complete before it is used.
+            Ty::MaybeUninit(inner) => push_if_compound(&mut deps, inner),
+            // A raw pointer only needs the forward declaration of its pointee.
+            Ty::Ptr { .. } => {}
             _ => {}
         }
         deps
@@ -399,6 +463,11 @@ fn push_if_compound(deps: &mut Vec<Ty>, ty: &Ty) {
     // other type is a by-value aggregate: even bitwise copyable ones (a tuple
     // of scalars, Option<i64>, a Copy user struct) need a complete definition
     // when stored inside another type, so they must stay in the graph.
+    // MaybeUninit<T> is stored by value with the exact layout of T.
+    if let Ty::MaybeUninit(inner) = ty {
+        push_if_compound(deps, inner);
+        return;
+    }
     if ty.is_unit()
         || ty.is_bool()
         || ty.is_char()
@@ -407,6 +476,7 @@ fn push_if_compound(deps: &mut Vec<Ty>, ty: &Ty) {
         || ty.is_rc()
         || ty.is_box()
         || ty.is_hash_map()
+        || ty.is_ptr()
     {
         return;
     }
@@ -483,6 +553,14 @@ impl<'a> Collector<'a> {
                 break;
             }
         }
+        // Union declarations are user visible types: register the union and
+        // every field, including unions that are only named behind a pointer.
+        for (index, item) in program.unions.iter().enumerate() {
+            self.visit_ty(&Ty::Union(index));
+            for field in &item.fields {
+                self.visit_ty(&field.ty);
+            }
+        }
         for konst in &program.consts {
             self.visit_ty(&konst.ty);
         }
@@ -551,6 +629,33 @@ impl<'a> Collector<'a> {
         }
         match ty {
             Ty::Vec(elem) | Ty::Option(elem) | Ty::Rc(elem) | Ty::Box(elem) => self.visit_ty(elem),
+            // Pointers and MaybeUninit storage do not add a generated C type,
+            // but the pointee/wrapped type may still need its definition.
+            Ty::Ptr { inner, .. } => self.visit_ty(inner),
+            Ty::MaybeUninit(inner) => self.visit_ty(inner),
+            Ty::Struct(index) => {
+                if let Some(item) = self.program.structs.get(*index) {
+                    for field in &item.fields {
+                        self.visit_ty(&field.ty);
+                    }
+                }
+            }
+            Ty::Enum(index) => {
+                if let Some(item) = self.program.enums.get(*index) {
+                    for variant in &item.variants {
+                        for field in &variant.fields {
+                            self.visit_ty(field);
+                        }
+                    }
+                }
+            }
+            Ty::Union(index) => {
+                if let Some(item) = self.program.unions.get(*index) {
+                    for field in &item.fields {
+                        self.visit_ty(&field.ty);
+                    }
+                }
+            }
             Ty::Result(ok, err) => {
                 self.visit_ty(ok);
                 self.visit_ty(err);
@@ -766,6 +871,7 @@ impl<'a> Collector<'a> {
                     self.visit_expr(value);
                 }
             }
+            HExprKind::UnionLit { value, .. } => self.visit_expr(value),
             HExprKind::Tuple(elems) | HExprKind::VecLit { elems } | HExprKind::Array { elems } => {
                 for elem in elems {
                     self.visit_expr(elem);
@@ -858,6 +964,10 @@ impl TypeRegistry {
             // References are never registered through `insert_ty`; they have no
             // generated definition. This arm only keeps the match exhaustive.
             Ty::Ref { .. } => TypeDef::Scalar,
+            // Raw pointers and MaybeUninit storage are plain C values; their
+            // pointee/wrapped type is registered separately.
+            Ty::Ptr { .. } | Ty::MaybeUninit(_) => TypeDef::Scalar,
+            Ty::Union(index) => TypeDef::Union(*index),
             Ty::Slice(elem) => TypeDef::Slice((**elem).clone()),
             Ty::Array(elem, len) => TypeDef::Array((**elem).clone(), *len),
             Ty::Str => TypeDef::Str,
@@ -1071,6 +1181,13 @@ impl TypeNames {
             // pointers, discriminants are zero and vectors are empty), and an
             // array value is always overwritten before an element is read.
             Ty::Array(..) => format!("(({}){{0}})", self.ctype(ty)),
+            Ty::Ptr { .. } => format!("(({})NULL)", self.ctype(ty)),
+            // Storage is uninitialised by definition; zero is a safe bit
+            // pattern and is never read before a write.
+            Ty::MaybeUninit(_) => format!("(({}){{0}})", self.ctype(ty)),
+            // Every member of a zeroed union is zero, which is the zero value
+            // for the scalar and pointer field types permitted in unions.
+            Ty::Union(_) => format!("(({}){{0}})", self.ctype(ty)),
             Ty::Slice(_) | Ty::Str | Ty::Dyn(_) => crate::codegen::util::internal_error(
                 "cannot materialise an unsized value; slices, str and trait objects are only stored behind references",
             ),

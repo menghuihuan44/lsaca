@@ -105,6 +105,7 @@ impl<'a> Gen<'a> {
         helpers::emit_env_types(&mut self.w);
         self.emit_env_structs();
         helpers::emit_helper_prototypes(&mut self.w, self.program, self.registry);
+        self.emit_ffi_prototypes();
         self.emit_function_prototypes();
         self.emit_vtable_thunk_prototypes();
         let declarations = self.take_w();
@@ -310,9 +311,15 @@ impl<'a> Gen<'a> {
             if self.registry.is_frozen(ty) {
                 continue;
             }
-            let c_name = self.registry.tag(ty);
+            let union = matches!(self.registry.get(ty), Some(TypeDef::Union(_)));
+            let c_name = if union {
+                self.registry.ctype(ty)
+            } else {
+                self.registry.tag(ty)
+            };
+            let keyword = if union { "union" } else { "struct" };
             self.w
-                .line(format!("typedef struct {} {};", c_name, c_name));
+                .line(format!("typedef {} {} {};", keyword, c_name, c_name));
         }
         if !ordered.is_empty() {
             self.w.blank();
@@ -337,6 +344,7 @@ impl<'a> Gen<'a> {
             TypeDef::Scalar | TypeDef::Frozen => {}
             TypeDef::Struct(index) => self.emit_struct_definition(ty, index),
             TypeDef::Enum(index) => self.emit_enum_definition(ty, index),
+            TypeDef::Union(index) => self.emit_union_definition(index),
             TypeDef::Vec(elem) => {
                 let c_name = self.registry.tag(ty);
                 let element = self.registry.ctype(&elem);
@@ -516,6 +524,30 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A plain C union: every member starts at offset zero. Union values are
+    /// Copy byte images, so no helper family is generated for them.
+    fn emit_union_definition(&mut self, union_id: usize) {
+        let item = match self.program.unions.get(union_id) {
+            Some(item) => item.clone(),
+            None => return,
+        };
+        let c_name = self.registry.ctype(&Ty::Union(union_id));
+        self.w.line(format!("union {} {{", c_name));
+        self.w.indent();
+        if item.fields.is_empty() {
+            self.w.line(format!("char {};", EMPTY_STRUCT_FIELD));
+        } else {
+            for field in &item.fields {
+                let field_type = self.registry.ctype(&field.ty);
+                let field_name = field_cname(&field.name);
+                self.w.line(format!("{} {};", field_type, field_name));
+            }
+        }
+        self.w.dedent();
+        self.w.line("};");
+        self.w.blank();
+    }
+
     fn emit_struct_definition(&mut self, ty: &Ty, struct_id: usize) {
         let item = match self.program.structs.get(struct_id) {
             Some(item) => item.clone(),
@@ -662,13 +694,61 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Declarations for C library functions bound by `extern "C"`.
+    ///
+    /// Declaring the real symbol name would clash with the standard headers and
+    /// compiler builtins the generated C already includes (gcc rejects a
+    /// `strlen` declaration that conflicts with `<string.h>`). Each binding is
+    /// therefore given a private C identifier and an assembly label that names
+    /// the actual platform symbol. The construct needs GCC's or Clang's
+    /// extended assembly syntax, so other compilers get a clear error instead of
+    /// silently calling the wrong symbol.
+    fn emit_ffi_prototypes(&mut self) {
+        let fns = self.program.fns.clone();
+        if !fns.iter().any(|function| function.extern_abi.is_some()) {
+            return;
+        }
+        self.w.line("#if defined(__APPLE__)");
+        self.w
+            .line("#define LSACA_FFI_ASM(name) __asm__(\"_\" #name)");
+        self.w.line("#else");
+        self.w.line("#define LSACA_FFI_ASM(name) __asm__(#name)");
+        self.w.line("#endif");
+        self.w.line("#if !defined(__GNUC__) && !defined(__clang__)");
+        self.w
+            .line("#error \"extern C declarations require GCC or Clang\"");
+        self.w.line("#endif");
+        for (fn_id, function) in fns.iter().enumerate() {
+            if function.extern_abi.is_none() {
+                continue;
+            }
+            let return_type = self.registry.ctype(&function.ret);
+            let mut parameters = self.fn_param_declarations(&function.params, None);
+            if parameters.is_empty() {
+                // An empty parameter list is an old-style, non-prototype
+                // declaration that -Wstrict-prototypes rejects.
+                parameters.push(String::from("void"));
+            }
+            self.w.line(format!(
+                "extern {} lsaca_ffi_{}({}) LSACA_FFI_ASM({});",
+                return_type,
+                fn_id,
+                parameters.join(", "),
+                function.c_name
+            ));
+        }
+        self.w.blank();
+    }
+
     fn emit_function_prototypes(&mut self) {
         let fns = self.program.fns.clone();
         for (fn_id, function) in fns.iter().enumerate() {
             // Intrinsics expand at their call sites and forwarding wrappers are
             // expanded too, so neither needs a C prototype. Unreachable
             // functions get no definition, so they need no prototype either.
+            // Extern functions are declared by emit_ffi_prototypes.
             if function.intrinsic
+                || function.extern_abi.is_some()
                 || self.inline_plan.is_inlined(fn_id)
                 || !self.reachability.is_reachable(fn_id)
             {
@@ -753,6 +833,9 @@ impl<'a> Gen<'a> {
             // Unreachable functions have no thunk either.
             if function.self_kind.is_some()
                 || function.intrinsic
+                // An extern function is declared by the C library; emitting a
+                // thunk would call a body that does not exist in this project.
+                || function.extern_abi.is_some()
                 || self.inline_plan.is_inlined(fn_id)
                 || !self.reachability.is_reachable(fn_id)
             {
@@ -822,6 +905,9 @@ impl<'a> Gen<'a> {
             // unreachable functions are pruned. Keep one slot per function so
             // ids stay indexes.
             if function.intrinsic
+                // Extern functions only get the prototype emitted above; the
+                // symbol itself lives in the linked C library.
+                || function.extern_abi.is_some()
                 || self.inline_plan.is_inlined(fn_id)
                 || !self.reachability.is_reachable(fn_id)
             {
@@ -939,6 +1025,9 @@ impl<'a> Gen<'a> {
             }
         }
         if self.fn_terminated {
+            // The tail block returned from every path after the result slot was
+            // declared; mark it used so -Wunused-variable stays clean.
+            self.w.line(format!("(void){};", result));
             self.frames.clear();
             self.w.dedent();
             self.w.line("}");

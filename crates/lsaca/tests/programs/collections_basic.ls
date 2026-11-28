@@ -13,7 +13,7 @@ fn main() {
     let mut other: HashSet<i64> = HashSet::new();
     other.insert(5);
     other.insert(9);
-    println!("{:?}", seen.union(&other).elements());
+    println!("{:?}", seen.union_with(&other).elements());
     println!("{:?}", seen.intersection(&other).elements());
     println!("{:?}", seen.difference(&other).elements());
     println!("{} {}", seen.subset(&seen), other.subset(&seen));

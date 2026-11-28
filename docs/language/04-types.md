@@ -2,8 +2,8 @@
 
 Every expression in lsaca has a statically known type, checked before any C is
 generated. This page lists the complete type language, explains each builtin
-type, and describes inference and conversions. It describes lsaca 2.4.0, where
-unannotated integer literals are `i32` by default, number literals accept
+type, and describes inference and conversions. It describes the current
+release, where unannotated integer literals are `i32` by default, number literals accept
 Rust-style type suffixes, and lengths and indices are `usize`.
 
 ## The type table
@@ -26,7 +26,8 @@ Rust-style type suffixes, and lengths and indices are `usize`.
 | `Box<T>` | Owned heap indirection. | Added in 1.1.0; move-only; `.clone()` deep-copies the payload. |
 | `&T` / `&mut T` | Shared / mutable reference. | Added in 1.3.0; a non-owning borrow of a place. A struct, enum or tuple struct field may store a direct `&'a T`/`&'a mut T` since 2.2.0 (with a lifetime parameter); `Option<&T>` and tuple-typed fields are rejected with `E0498`; `Vec`, `Result`, `HashMap`, `Rc`, `Box`, arrays and closures still cannot hold references; mutable references to `String`, `Vec`, `Rc` and `Box` are allowed since 1.4; see [References and borrowing](12-references-and-borrowing.md) and [Lifetimes](29-lifetimes.md). |
 | `&[T]` / `&mut [T]` / `&str` / `&mut str` | References to an unsized slice or UTF-8 text value. | Added in 2.0.0; `&[T]` is a `Copy` fat reference (data pointer plus length); produced by coercions from `Vec`/`String`, by slicing a place with `&`/`&mut`, and for string literals in `&str` contexts; see [Slices and str](26-slices-and-str.md). |
-| `[T; N]` | Fixed-length array value. | Added in 2.2.0; `N` is an integer literal or a path to an integer constant; indexed with `usize`; `Copy` when `T` is `Copy`; `&array` coerces to `&[T]`; no array patterns and no by-value `for`; see [Arrays](#arrays). |
+| `[T; N]` | Fixed-length array value. | Added in 2.2.0; `N` is an integer literal or a path to an integer constant; indexed with `usize`; `Copy` when `T` is `Copy`; `&array` coerces to `&[T]`; fixed-size array and slice patterns since 2.4.0, but no by-value `for`; see [Arrays](#arrays). |
+| `*const T` / `*mut T` | Raw pointer to `T`. | Added in 2.5.0; `T` must be sized; `Copy`, not refcounted or traced, no lifetime; created by `&value as *const T`, `&mut value as *mut T`, an integer cast or `std::ptr::null`; reading, writing and offsetting require `unsafe`; see [Raw pointers](#raw-pointers) and [Unsafe code and C FFI](32-unsafe-and-ffi.md). |
 | `(T1, T2, ...)` | Tuple. | Held by value; fields `.0`, `.1`, ...; tuples can nest. |
 | `fn(A, B) -> R` | Function type. | Values of this type are first-class but move-only; since 1.5 they can be stored in aggregates. See [Functions](09-functions.md). |
 | `dyn Trait` | Trait object (unsized). | Added in 2.0.0; only behind a pointer: `Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait`, `&mut dyn Trait`; see [Trait objects](25-trait-objects.md). |
@@ -39,7 +40,9 @@ equal `i64` and `u64`. They are distinct types like every other integer type.
 An unannotated integer literal is an `i32` by default, but it takes the
 type required by its context — including `usize` in a length, index or explicit
 `usize` position; see [Integers](#integers).
-There is no raw pointer type. `[T; N]` is a fixed-length array **value** (see
+Raw pointers `*const T` and `*mut T` are a separate, unsafe value category
+since 2.5.0; they are described under [Raw pointers](#raw-pointers). `[T; N]`
+is a fixed-length array **value** (see
 [Arrays](#arrays)); `[T]` and `str` are *unsized* types: they have no values of
 their own, and the only usable forms are the references `&[T]`, `&mut [T]`,
 `&str` and `&mut str` (see [Slices and str](26-slices-and-str.md)). Generic user types are written with
@@ -348,8 +351,10 @@ so `r.field`, `r.method()` and `r.field = value` all work without an explicit
 struct when the declaration names a lifetime parameter; `Option<&T>` and
 tuple-typed fields are rejected with `E0498` (see
 [Lifetimes](29-lifetimes.md)); it still cannot be stored in a `Vec`, a
-`Result`, a `HashMap`, `Rc`, `Box`, an array or a closure, and it cannot be
-converted with `as`. Since 1.5.0 `==` compares the pointed-to values.
+`Result`, a `HashMap`, `Rc`, `Box`, an array or a closure. It cannot be
+converted with `as` to a scalar or another aggregate, but `&value as *const T`
+and `&mut value as *mut T` are the supported way to turn a reference into a raw
+pointer. Since 1.5.0 `==` compares the pointed-to values.
 
 * `&T` — shared reference: any number of shared references may exist; reads only.
 * `&mut T` — mutable reference: exactly one at a time, and no shared reference
@@ -357,6 +362,38 @@ converted with `as`. Since 1.5.0 `==` compares the pointed-to values.
 
 The full rules, including reference parameters, elision and match ergonomics,
 are on [References and borrowing](12-references-and-borrowing.md).
+
+## Raw pointers
+
+A raw pointer holds an address without any ownership or validity promise. The
+two forms are `*const T` (read-only pointee) and `*mut T` (mutable pointee),
+and `T` must be a sized type. A raw pointer is `Copy`, is never refcounted or
+traced by the ORC runtime, carries no lifetime and may be stored in any
+aggregate — including a `repr(C)` struct or a union sent across the C boundary.
+It does not own its pointee and never keeps it alive.
+
+Raw pointers are created in four ways: `&value as *const T`, `&mut value as
+*mut T`, a pointer-to-pointer or integer-to-pointer `as` cast, and
+`std::ptr::null::<T>()`/`null_mut::<T>()`. The safe methods `is_null()` and
+`addr()` inspect a pointer. Everything else is unsafe and requires an
+`unsafe` block or `unsafe fn`:
+
+| Operation | Form | Safety |
+| --- | --- | --- |
+| Read the pointee | `*p` | `unsafe`; the pointer must be non-null, aligned and point to an initialized `T` |
+| Write the pointee | `*p = value` | `unsafe`; the pointer must be valid for writes and the write must not violate aliasing |
+| Offset | `p.add(count)`, `p.sub(count)` | `unsafe`; the result must stay inside one allocation |
+| Compare addresses | `p == q`, `p != q` | safe; compares the addresses, not the pointees |
+| Null test | `p.is_null()` | safe |
+| Address value | `p.addr()` | safe; returns `usize` |
+
+There is no pointer arithmetic through `+` or `-` and no dereference of an
+integer; use `add`/`sub` inside unsafe code. A pointer to a managed buffer
+obtained from `String::as_ptr`, `Vec::as_ptr` or `Vec::as_mut_ptr` is valid
+only while that owner is alive and unmodified — resizing or moving the managed
+value invalidates it. Raw pointers themselves are FFI-safe; managed values are
+not. The full safety contract, including the ORC invariants and the FFI-safe
+type table, is in [Unsafe code and C FFI](32-unsafe-and-ffi.md).
 
 ## Tuples
 
@@ -601,11 +638,13 @@ Output:
 
 ## Casts
 
-The `as` operator converts between scalar types only. It is the *only*
-conversion: assigning an `i32` to an `i64` or passing it where a `f64` is
-expected is a type error. References (`&T` / `&mut T`), arrays, `String`, `Vec<T>` and
-the other aggregates cannot be converted with `as`. `as` binds tighter than arithmetic but looser than
-unary operators; see the precedence table in [Operators](07-operators.md).
+The `as` operator converts between scalar types, between raw pointers, and
+between raw pointers and integer types. It is the *only* conversion: assigning
+an `i32` to an `i64` or passing it where a `f64` is expected is a type error.
+Arrays, `String`, `Vec<T>` and the other aggregates cannot be converted with
+`as`; a reference can be cast only to a raw pointer, not to a scalar. `as`
+binds tighter than arithmetic but looser than unary operators; see the
+precedence table in [Operators](07-operators.md).
 
 The conversion rules follow Rust:
 
@@ -625,6 +664,11 @@ The conversion rules follow Rust:
   only `bool` values are booleans. Conditions never convert numbers, so `if 1`
   is `E0308` — see [Statements and control
   flow](08-statements-and-control-flow.md#conditions).
+* Pointer casts: `*const T`/`*mut T` cast to any other pointer type, and to and
+  from `usize`/`isize`. A pointer-to-integer cast keeps the address, an
+  integer-to-pointer cast reinterprets the value as an address, and only a C
+  pointer of the matching pointee type is valid to use afterwards. Pointer
+  casts do not go through references: use `&value as *const T` first.
 
 Characters convert explicitly too:
 
@@ -746,7 +790,7 @@ error[E0412]: cannot find type 'Widget' in this scope
  2 |     let widget: Widget = Widget { value: 1 };
    |                 ^^^^^^
 
-error[E0412]: cannot find struct Widget in this scope
+error[E0412]: cannot find struct or union Widget in this scope
   --> example-21.ls:2:26
    |
  2 |     let widget: Widget = Widget { value: 1 };

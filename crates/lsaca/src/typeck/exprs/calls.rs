@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::combinators::is_combinator_method;
 use crate::ast::{self, ExprKind};
-use crate::hir::{HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HMacroKind};
+use crate::hir::{HBinaryOp, HBuiltinAssoc, HBuiltinFn, HBuiltinMethod, HMacroKind, HUnaryOp};
 use crate::span::Span;
 use crate::typeck::builtins::{
     FormatPiece, FormatValueKind, builtin_assoc, builtin_fn, builtin_method, format_spec_error,
@@ -349,6 +349,15 @@ impl<'a> Checker<'a> {
         env: &mut HashMap<String, ITy>,
     ) {
         match type_expr {
+            ast::TypeExpr::Ptr { inner, .. } => {
+                if let ITy::Ptr {
+                    inner: actual_inner,
+                    ..
+                } = actual
+                {
+                    self.match_inference_ty(inner, actual_inner, params, env);
+                }
+            }
             ast::TypeExpr::Path { name, generics, .. } => {
                 if generics.is_empty() && params.iter().any(|param| param.name == *name) {
                     match env.get(name) {
@@ -837,6 +846,10 @@ impl<'a> Checker<'a> {
         span: Span,
         hint: Option<&ITy>,
     ) -> TExpr {
+        if self.fns[fn_id].is_unsafe {
+            let callee = self.fns[fn_id].display.clone();
+            self.require_unsafe(span, format!("calling unsafe function {}", callee));
+        }
         let params = self.fns[fn_id].params();
         let ret = self.fns[fn_id].ret();
         let offset = if receiver.is_some() { 1 } else { 0 };
@@ -1468,6 +1481,91 @@ impl<'a> Checker<'a> {
                 let _ = self.check_expr(arg, None);
             }
             return self.never_expr(span);
+        }
+        if let ITy::Union(union_id) = receiver_ty {
+            let union_name = self.union_name(union_id);
+            self.error_code_note(
+                format!("union {} cannot have methods", union_name),
+                method_span,
+                "E0773",
+                "unions are plain C value types; write a free function over the union instead"
+                    .to_string(),
+            );
+            for arg in args {
+                let _ = self.check_expr(arg, None);
+            }
+            return self.never_expr(span);
+        }
+        // Raw pointer methods (RFC 0005): is_null() and addr() are safe, while
+        // add()/sub() can step outside the allocation and require unsafe. The
+        // arithmetic is written as a pointer binary operation, which codegen
+        // emits as C pointer arithmetic so the element size scales the count.
+        if let ITy::Ptr { .. } = &receiver_ty {
+            let pointer_ty = receiver_ty.clone();
+            let method_ty = match method {
+                "is_null" => Some(ITy::bool_()),
+                "addr" => Some(ITy::Int(IntTy::Usize)),
+                "add" | "sub" => Some(pointer_ty.clone()),
+                _ => None,
+            };
+            if let Some(result_ty) = method_ty {
+                let receiver_expr = self.wrap_derefs(receiver_expr);
+                if method == "is_null" {
+                    // A pointer-to-bool cast is true for a non-null pointer, so
+                    // is_null is the logical negation of that cast. Keeping the
+                    // lowering in the expression tree avoids a pointer
+                    // comparison helper just for this method.
+                    let _ = self.check_call_args(&[], args, span);
+                    self.apply_hint(&result_ty, hint);
+                    let non_null = TExpr::new(
+                        ITy::bool_(),
+                        TExprKind::Cast {
+                            expr: Box::new(receiver_expr),
+                        },
+                        span,
+                    );
+                    return TExpr::new(
+                        result_ty,
+                        TExprKind::Unary {
+                            op: HUnaryOp::Not,
+                            expr: Box::new(non_null),
+                        },
+                        span,
+                    );
+                }
+                if method == "addr" {
+                    let _ = self.check_call_args(&[], args, span);
+                    self.apply_hint(&result_ty, hint);
+                    return TExpr::new(
+                        result_ty,
+                        TExprKind::Cast {
+                            expr: Box::new(receiver_expr),
+                        },
+                        span,
+                    );
+                }
+                let mut checked = self.check_call_args(&[ITy::Int(IntTy::Usize)], args, span);
+                let count = checked.pop().unwrap_or_else(|| self.never_expr(span));
+                self.require_unsafe(
+                    method_span,
+                    format!("pointer arithmetic with .{}()", method),
+                );
+                self.apply_hint(&result_ty, hint);
+                let op = if method == "add" {
+                    HBinaryOp::Add
+                } else {
+                    HBinaryOp::Sub
+                };
+                return TExpr::new(
+                    result_ty,
+                    TExprKind::Binary {
+                        op,
+                        lhs: Box::new(receiver_expr),
+                        rhs: Box::new(count),
+                    },
+                    span,
+                );
+            }
         }
         // Generic methods do not exist in this language version: a turbofish on
         // any method is rejected before method lookup, otherwise a non-generic
@@ -2289,6 +2387,16 @@ impl<'a> Checker<'a> {
                         FormatPiece::Hole { spec } => {
                             if arg_index < m.args.len() {
                                 let expr = self.check_expr(&m.args[arg_index], None);
+                                if let Some(union_id) = self.union_behind_refs(&expr.ty) {
+                                    let union_name = self.union_name(union_id);
+                                    self.error_code_note(
+                                        format!("union {} cannot be formatted", union_name),
+                                        m.args[arg_index].span,
+                                        "E0773",
+                                        "unions are plain C value types; read one field inside unsafe and format that instead"
+                                            .to_string(),
+                                    );
+                                }
                                 if let Some(message) =
                                     format_spec_error(&spec, self.format_value_kind(&expr.ty))
                                 {

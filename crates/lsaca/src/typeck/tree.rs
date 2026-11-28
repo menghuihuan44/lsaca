@@ -165,6 +165,13 @@ pub enum TExprKind {
         struct_id: usize,
         fields: Vec<(usize, TExpr)>,
     },
+    /// A union literal initializing exactly one of its fields. Construction is
+    /// an unsafe operation, so this only appears inside an unsafe context.
+    UnionLit {
+        union_id: usize,
+        field: usize,
+        value: Box<TExpr>,
+    },
     Tuple(Vec<TExpr>),
     VecLit {
         elems: Vec<TExpr>,

@@ -433,6 +433,7 @@ fn type_mentions_self(ty: &ast::TypeExpr) -> bool {
             name == "Self" || generics.iter().any(type_mentions_self)
         }
         ast::TypeExpr::Tuple { elems, .. } => elems.iter().any(type_mentions_self),
+        ast::TypeExpr::Ptr { inner, .. } => type_mentions_self(inner),
         ast::TypeExpr::Fn { params, ret, .. } => {
             params.iter().any(type_mentions_self) || type_mentions_self(ret)
         }

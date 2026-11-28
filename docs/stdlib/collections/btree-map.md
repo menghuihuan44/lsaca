@@ -1,6 +1,6 @@
 # btree_map: BTreeMap<K, V>
 
-**Status in 2.4.0.** Implemented in `stdlib/src/collections.ls`. Version 2.4.0
+**Status in 2.5.0.** Implemented in `stdlib/src/collections.ls`. Version 2.4.0
 adds `get_mut`, `first_key`, `last_key`, `from` and `to_vec`.
 
 `BTreeMap<K, V>` is the ordered map: it stores keys and values in two parallel
@@ -40,7 +40,7 @@ to use when the output must be sorted.
   `to_vec` and the older accessors clone because the map does not expose its
   storage.
 
-## Limits in 2.4.0
+## Limits in 2.5.0
 
 There is no `for` loop over a `BTreeMap` yet: read the entries with `keys()`
 and `values()`. `get_with(key, f)` exists only on [`HashMap`](hash-map.md); it

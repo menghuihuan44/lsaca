@@ -125,7 +125,7 @@ jobs:
           set -euo pipefail
           python scripts/bench_guard.py \
             --results target/bench-matrix/results.json \
-            --baseline benchmarks/results/archive/v2.4/latest.json \
+            --baseline benchmarks/results/archive/v2.5/latest.json \
             --runtime-tolerance 10 --compile-tolerance 20 \
             --json target/bench-matrix/speed-guard.json \
             --md target/bench-matrix/speed-guard.md

@@ -102,7 +102,9 @@ impl<K> HashSet<K> {
     }
 
     /// The set of values that occur in this set or in other.
-    pub fn union(&self, other: &HashSet<K>) -> HashSet<K> {
+    ///
+    /// Named `union_with` because `union` became a keyword in v2.5.
+    pub fn union_with(&self, other: &HashSet<K>) -> HashSet<K> {
         let mut result: HashSet<K> = HashSet::new();
         let left = self.order.clone();
         for key in left {

@@ -307,6 +307,7 @@ impl<'a> Checker<'a> {
             name: method.name.clone(),
             name_span: method.name_span,
             vis: ast::Visibility::Private,
+            is_unsafe: false,
             generics: block.generics.clone(),
             params,
             ret: method
@@ -975,6 +976,15 @@ fn substitute_default_ty(
         } => ast::TypeExpr::Ref {
             mutable: *mutable,
             lifetime: lifetime.clone(),
+            inner: Box::new(substitute_default_ty(inner, self_ty, args)),
+            span: *span,
+        },
+        ast::TypeExpr::Ptr {
+            mutable,
+            inner,
+            span,
+        } => ast::TypeExpr::Ptr {
+            mutable: *mutable,
             inner: Box::new(substitute_default_ty(inner, self_ty, args)),
             span: *span,
         },

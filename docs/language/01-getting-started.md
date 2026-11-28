@@ -373,10 +373,10 @@ package but finds no manifest exits with code `2` and
 `lsaca: no lsaca.toml found in this directory or any parent directory`;
 `lsaca new` is the only command that always needs an explicit directory.
 
-The complete help text of version 2.4.0:
+The complete help text of version 2.5.0:
 
 ```console
-lsaca 2.4.0 - a small statically typed language with an ORC memory model
+lsaca 2.5.0 - a small statically typed language with an ORC memory model
 
 USAGE:
     lsaca <COMMAND> [OPTIONS] [FILE.ls]

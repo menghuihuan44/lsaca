@@ -1453,6 +1453,30 @@ fn cases() -> Vec<Case> {
             exit: 0,
             stderr_contains: &[],
         },
+        Case {
+            name: "unsafe_ptr_basics",
+            source: include_str!("programs/unsafe_ptr_basics.ls"),
+            args: &[],
+            stdout: "42\n42\n42\nfalse\ntrue\ntrue\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "maybe_uninit",
+            source: include_str!("programs/maybe_uninit.ls"),
+            args: &[],
+            stdout: "7\n3 4\n12\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
+        Case {
+            name: "union_basic",
+            source: include_str!("programs/union_basic.ls"),
+            args: &[],
+            stdout: "1099511627776\n0.5\n2.5\n",
+            exit: 0,
+            stderr_contains: &[],
+        },
     ]
 }
 
@@ -3051,6 +3075,105 @@ fn package_diagnostics_are_reported() {
                     case, needle, rendered
                 ));
             }
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n\n"));
+    }
+}
+
+/// The v2.5 C FFI acceptance programs live in `tests/programs/cffi`, next to a
+/// `<name>.stdout` file holding the exact expected output. Every positive
+/// program is compiled, built with the native compiler, run, and compared
+/// against its golden output byte for byte.
+#[test]
+fn cffi_acceptance_programs() {
+    if let Err(error) = driver::find_c_compiler() {
+        eprintln!("skipping end-to-end tests: {}", error);
+        return;
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/programs/cffi");
+    let mut programs: Vec<PathBuf> = match std::fs::read_dir(&root) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("ls"))
+            .collect(),
+        Err(error) => panic!("could not read {}: {}", root.display(), error),
+    };
+    programs.sort();
+    assert!(
+        !programs.is_empty(),
+        "no C FFI acceptance programs found in {}",
+        root.display()
+    );
+    let mut failures: Vec<String> = Vec::new();
+    for path in programs {
+        let name = match path.file_stem().and_then(|stem| stem.to_str()) {
+            Some(name) => name.to_string(),
+            None => {
+                failures.push(format!(
+                    "{}: the file name is not valid UTF-8",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                failures.push(format!("could not read {}: {}", path.display(), error));
+                continue;
+            }
+        };
+        let expected_path = path.with_extension("stdout");
+        let expected = match std::fs::read_to_string(&expected_path) {
+            Ok(text) => normalize(&text),
+            Err(error) => {
+                failures.push(format!(
+                    "could not read {}: {}",
+                    expected_path.display(),
+                    error
+                ));
+                continue;
+            }
+        };
+        let executable = match build_program(&name, &source, false) {
+            Ok(executable) => executable,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
+        let output = match Command::new(&executable).output() {
+            Ok(output) => output,
+            Err(error) => {
+                failures.push(format!("could not run {}: {}", name, error));
+                continue;
+            }
+        };
+        let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+        let stderr = normalize(&String::from_utf8_lossy(&output.stderr));
+        let exit = output.status.code().unwrap_or(-1);
+        if stdout != expected {
+            failures.push(format!(
+                "{}: stdout mismatch\n--- expected ---\n{:?}\n--- actual ---\n{:?}",
+                name, expected, stdout
+            ));
+        }
+        if exit != 0 {
+            failures.push(format!(
+                "{}: exit code {} (expected 0)\n--- stderr ---\n{}",
+                name, exit, stderr
+            ));
+        }
+        // Debug builds track reference-counted allocations; a clean program
+        // must not leak, so a leak report points at a compiler or runtime bug.
+        if stderr.contains("reference-counted allocation") {
+            failures.push(format!(
+                "{}: the generated program leaked reference counted allocations\n--- stderr ---\n{}",
+                name, stderr
+            ));
         }
     }
     if !failures.is_empty() {

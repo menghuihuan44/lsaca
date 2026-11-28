@@ -627,6 +627,10 @@ impl<'a> FnChecker<'a> {
                 }
                 true
             }
+            HExprKind::UnionLit { value, .. } => {
+                self.walk_expr(value, Ctx::Consume);
+                true
+            }
             HExprKind::Tuple(elements) => {
                 for element in elements {
                     self.walk_expr(element, Ctx::Consume);
@@ -2852,6 +2856,8 @@ mod hir_tests {
             ret: Ty::unit(),
             self_kind: None,
             intrinsic: false,
+            extern_abi: None,
+            is_unsafe: false,
             body,
             span: sp(),
         }
@@ -2862,6 +2868,7 @@ mod hir_tests {
             name: "test".to_string(),
             structs,
             enums: Vec::new(),
+            unions: Vec::new(),
             fns,
             consts: Vec::new(),
             closures: Vec::new(),
@@ -3690,6 +3697,8 @@ mod hir_tests {
             ret: Ty::option(Ty::String),
             self_kind: Some(SelfKind::RefMut),
             intrinsic: false,
+            extern_abi: None,
+            is_unsafe: false,
             body: block(vec![expr_stmt(loop_expr)]),
             span: sp(),
         };

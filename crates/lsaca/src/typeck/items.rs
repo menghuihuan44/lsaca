@@ -70,6 +70,7 @@ pub fn has_explicit_lifetime(ty: &TypeExpr) -> bool {
             params.iter().any(has_explicit_lifetime) || has_explicit_lifetime(ret)
         }
         TypeExpr::Array { elem, .. } => has_explicit_lifetime(elem),
+        TypeExpr::Ptr { inner, .. } => has_explicit_lifetime(inner),
         TypeExpr::Dyn(trait_ref) => trait_ref.args.iter().any(has_explicit_lifetime),
         TypeExpr::Slice { elem, .. } => has_explicit_lifetime(elem),
         TypeExpr::Lifetime(_) => false,
@@ -114,6 +115,7 @@ pub fn type_expr_has_ref(ty: &TypeExpr) -> bool {
             params.iter().any(type_expr_has_ref) || type_expr_has_ref(ret)
         }
         TypeExpr::Array { elem, .. } => type_expr_has_ref(elem),
+        TypeExpr::Ptr { .. } => false,
         TypeExpr::Dyn(trait_ref) => trait_ref.args.iter().any(type_expr_has_ref),
         TypeExpr::Slice { elem, .. } => type_expr_has_ref(elem),
         TypeExpr::Lifetime(_) => false,
@@ -151,6 +153,8 @@ pub struct StructInfo {
     pub unit: bool,
     pub fields: Vec<StructField>,
     pub fields_resolved: bool,
+    /// True when the declaration carried #[repr(C)].
+    pub repr_c: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -173,6 +177,25 @@ pub struct EnumInfo {
     pub decl_variants: Vec<VariantDef>,
     pub variants: Vec<VariantInfo>,
     pub variants_resolved: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct UnionField {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: ITy,
+}
+
+/// A union declaration. Unions never have generics or methods in v2.5.
+#[derive(Clone, Debug)]
+pub struct UnionInfo {
+    pub name: String,
+    pub module: ModuleId,
+    pub c_name: String,
+    pub span: Span,
+    pub decl_fields: Vec<FieldDef>,
+    pub fields: Vec<UnionField>,
+    pub fields_resolved: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -262,6 +285,12 @@ pub struct FnInfo {
     pub instantiation_depth: usize,
     pub owner: Option<TypeKey>,
     pub self_kind: Option<SelfKind>,
+    /// Set for functions declared in an extern "C" block: the symbol is
+    /// called verbatim and the declaration has no body.
+    pub extern_abi: Option<crate::hir::ExternAbi>,
+    /// True for unsafe fn, every extern "C" function, and the intrinsic
+    /// declarations that the standard library marks as unsafe operations.
+    pub is_unsafe: bool,
     pub sig: Option<FnSig>,
     pub checked: Option<TBlock>,
     pub param_cnames: Vec<String>,
@@ -287,6 +316,18 @@ impl FnInfo {
             None => Vec::new(),
         }
     }
+}
+
+/// Standard-library intrinsic declarations whose operation is unsafe. Calling
+/// one requires an unsafe context, like an extern "C" function.
+pub fn intrinsic_is_unsafe(name: &str) -> bool {
+    matches!(
+        name,
+        "__str_from_raw_parts"
+            | "__vec_into_raw_parts"
+            | "__vec_from_raw_parts"
+            | "__maybe_uninit_assume_init"
+    )
 }
 
 pub fn sanitize_c_ident(name: &str) -> String {
@@ -416,6 +457,7 @@ fn scan_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Item>) {
             }
         }
         ExprKind::Block(block) => scan_block(block, out),
+        ExprKind::Unsafe(block) => scan_block(block, out),
         ExprKind::Loop { body, .. } => scan_block(body, out),
         ExprKind::While { cond, body, .. } => {
             scan_expr(cond, out);
@@ -556,6 +598,7 @@ impl<'a> Checker<'a> {
                 match item {
                     Item::Struct(decl) => self.register_struct(decl),
                     Item::Enum(decl) => self.register_enum(decl),
+                    Item::Union(decl) => self.register_union(decl),
                     Item::TypeAlias(decl) => self.register_alias(decl),
                     Item::Trait(decl) => self.register_trait_decl(decl),
                     _ => {}
@@ -564,6 +607,11 @@ impl<'a> Checker<'a> {
             for item in &items {
                 match item {
                     Item::Fn(decl) => self.register_free_fn(decl),
+                    Item::ExternBlock(block) => {
+                        for func in &block.fns {
+                            self.register_extern_fn(&block.abi, block.abi_span, func);
+                        }
+                    }
                     Item::Impl(block) => {
                         self.pending_impls
                             .push((block.clone(), self.collecting_origin, module))
@@ -724,10 +772,36 @@ impl<'a> Checker<'a> {
             unit: matches!(decl.kind, ast::StructKind::Unit),
             fields: Vec::new(),
             fields_resolved: false,
+            repr_c: decl.repr_c,
         });
         // One drop-hook slot per struct, filled in by register_drop_impl.
         self.drop_structs.push(None);
         self.insert_type_binding(module, &decl.name, DefRef::Struct(id), decl.name_span, vis);
+    }
+
+    fn register_union(&mut self, decl: &ast::UnionDecl) {
+        let module = self.current_module;
+        let vis = self.item_visibility(&decl.vis);
+        if let Some(previous) = self
+            .lookup_type_in(module, &decl.name)
+            .map(|binding| binding.span)
+        {
+            self.report_duplicate_type(&decl.name, decl.name_span, previous);
+            return;
+        }
+        let id = self.unions.len();
+        let prefix = self.module_prefix(module);
+        let c_name = self.alloc_c_name(format!("{}{}", prefix, sanitize_c_ident(&decl.name)));
+        self.unions.push(UnionInfo {
+            name: decl.name.clone(),
+            module,
+            c_name,
+            span: decl.span,
+            decl_fields: decl.fields.clone(),
+            fields: Vec::new(),
+            fields_resolved: false,
+        });
+        self.insert_type_binding(module, &decl.name, DefRef::Union(id), decl.name_span, vis);
     }
 
     fn register_enum(&mut self, decl: &EnumDecl) {
@@ -899,6 +973,9 @@ impl<'a> Checker<'a> {
                     self.check_field_lifetime_ty(arg, declared, used);
                 }
             }
+            TypeExpr::Ptr { inner, .. } => {
+                self.check_field_lifetime_ty(inner, declared, used);
+            }
             TypeExpr::Lifetime(lifetime) => {
                 // A lifetime in field position is only valid as a generic
                 // argument; resolve_ty reports a misplaced one elsewhere.
@@ -1039,6 +1116,84 @@ impl<'a> Checker<'a> {
             instantiation_depth: 0,
             owner: None,
             self_kind: None,
+            extern_abi: None,
+            is_unsafe: decl.is_unsafe || intrinsic_is_unsafe(&decl.name),
+            sig: None,
+            checked: None,
+            param_cnames: Vec::new(),
+            name_span: decl.name_span,
+            span: decl.span,
+        });
+        self.insert_value_binding(module, &decl.name, DefRef::Fn(id), decl.name_span, vis);
+    }
+
+    /// Register a function declared in an extern "C" block. The declaration is
+    /// bodyless, non-generic, has no receiver, and its generated C name is the
+    /// declared symbol verbatim (codegen adds the asm-label indirection).
+    fn register_extern_fn(&mut self, abi: &str, abi_span: Span, decl: &FnDecl) {
+        let module = self.current_module;
+        let vis = self.item_visibility(&decl.vis);
+        if let Some(previous) = self
+            .lookup_value_in(module, &decl.name)
+            .map(|binding| binding.span)
+        {
+            self.report_duplicate_fn(decl, previous);
+            return;
+        }
+        if abi != "C" {
+            self.error_code(
+                format!("unsupported extern ABI '{}'; only \"C\" is supported", abi),
+                abi_span,
+                "E0001",
+            );
+            return;
+        }
+        let mut valid = true;
+        if !only_type_generics(&decl.generics).is_empty() {
+            self.error_code(
+                "extern \"C\" functions cannot be generic".to_string(),
+                decl.name_span,
+                "E0001",
+            );
+            valid = false;
+        }
+        if decl.self_kind.is_some() {
+            self.error_code(
+                "extern \"C\" functions cannot take a self receiver".to_string(),
+                decl.name_span,
+                "E0001",
+            );
+            valid = false;
+        }
+        if decl.body.is_some() {
+            self.error_code(
+                "extern \"C\" functions cannot have a body; they name a platform symbol"
+                    .to_string(),
+                decl.name_span,
+                "E0001",
+            );
+            valid = false;
+        }
+        if !valid {
+            return;
+        }
+        let id = self.fns.len();
+        self.fns.push(FnInfo {
+            name: decl.name.clone(),
+            display: decl.name.clone(),
+            c_name: decl.name.clone(),
+            module,
+            vis: vis.clone(),
+            decl: decl.clone(),
+            origin: self.collecting_origin,
+            generic: None,
+            deferred_span: None,
+            self_ty: None,
+            instantiation_depth: 0,
+            owner: None,
+            self_kind: None,
+            extern_abi: Some(crate::hir::ExternAbi::C),
+            is_unsafe: true,
             sig: None,
             checked: None,
             param_cnames: Vec::new(),
@@ -1062,6 +1217,25 @@ impl<'a> Checker<'a> {
     }
 
     fn register_impl(&mut self, block: &ImplBlock) {
+        // Unions are plain C value types with no methods, no trait impls and no
+        // Drop. Reject the whole block before the generic/trait machinery, which
+        // would otherwise report the generic E0118 "not a struct or enum".
+        // Only look at an impl without type generics: resolving Option<T> or
+        // Vec<T> here has no generic environment yet and would report E0412
+        // for every standard-library generic impl before it is registered.
+        if only_type_generics(&block.generics).is_empty()
+            && let Some(ITy::Union(union_id)) = self.resolve_ty(&block.ty, None)
+        {
+            let union_name = self.union_name(union_id);
+            self.error_code_note(
+                format!("union {} cannot have impl blocks", union_name),
+                block.ty_span,
+                "E0773",
+                "unions are plain C value types; write free functions over the union instead"
+                    .to_string(),
+            );
+            return;
+        }
         // v2.2 erases lifetimes: an impl block over lifetime parameters only
         // is a plain impl for its (non-generic) target type.
         let impl_generics = only_type_generics(&block.generics);
@@ -1144,6 +1318,8 @@ impl<'a> Checker<'a> {
                 instantiation_depth: 0,
                 owner: Some(owner),
                 self_kind: func.self_kind,
+                extern_abi: None,
+                is_unsafe: func.is_unsafe,
                 sig: None,
                 checked: None,
                 param_cnames: Vec::new(),
@@ -1395,6 +1571,8 @@ impl<'a> Checker<'a> {
             instantiation_depth: 0,
             owner: Some(owner),
             self_kind: func.self_kind,
+            extern_abi: None,
+            is_unsafe: func.is_unsafe,
             sig: None,
             checked: None,
             param_cnames: Vec::new(),
@@ -1614,6 +1792,24 @@ impl<'a> Checker<'a> {
                     inner: Box::new(resolved),
                 })
             }
+            TypeExpr::Ptr { mutable, inner, .. } => {
+                let resolved = self.resolve_ty(inner, self_key)?;
+                if resolved.is_unsized() {
+                    self.error_code(
+                        format!(
+                            "raw pointers require a sized pointee; found {}",
+                            self.describe_resolved(&resolved)
+                        ),
+                        inner.span(),
+                        "E0001",
+                    );
+                    return None;
+                }
+                Some(ITy::Ptr {
+                    mutable: *mutable,
+                    inner: Box::new(resolved),
+                })
+            }
             TypeExpr::Dyn(trait_ref) => self.resolve_dyn_type(trait_ref),
             TypeExpr::Slice { elem, .. } => {
                 let resolved = self.resolve_ty(elem, self_key)?;
@@ -1734,16 +1930,28 @@ impl<'a> Checker<'a> {
                 Some(float_ty) => self.simple_type(span, generics, ITy::Float(float_ty)),
                 None => None,
             },
-            "Vec" | "Rc" | "Box" | "Option" => {
+            "Vec" | "Rc" | "Box" | "Option" | "MaybeUninit" => {
                 if generics.len() != 1 {
                     self.arity_error(1, span, generics.len());
                     return None;
                 }
                 let inner = self.resolve_ty(&generics[0], self_key)?;
+                if name == "MaybeUninit" && inner.is_unsized() {
+                    self.error_code(
+                        format!(
+                            "MaybeUninit requires a sized type argument; found {}",
+                            self.describe_resolved(&inner)
+                        ),
+                        span,
+                        "E0001",
+                    );
+                    return None;
+                }
                 match name {
                     "Vec" => Some(ITy::vec(inner)),
                     "Rc" => Some(ITy::rc(inner)),
                     "Box" => Some(ITy::box_(inner)),
+                    "MaybeUninit" => Some(ITy::maybe_uninit(inner)),
                     _ => Some(ITy::option(inner)),
                 }
             }
@@ -1856,6 +2064,15 @@ impl<'a> Checker<'a> {
                     );
                 }
                 Some(ITy::Enum(id))
+            }
+            DefRef::Union(id) => {
+                if !generics.is_empty() {
+                    self.error_at(
+                        format!("union '{}' does not take type arguments", name),
+                        span,
+                    );
+                }
+                Some(ITy::Union(id))
             }
             DefRef::BuiltinType(kind) => {
                 let expected = kind.arity();
@@ -2194,6 +2411,99 @@ impl<'a> Checker<'a> {
         self.current_module = previous_module;
     }
 
+    pub fn ensure_union_fields(&mut self, id: usize) {
+        if self.unions[id].fields_resolved {
+            return;
+        }
+        let previous_module = self.current_module;
+        self.current_module = self.unions[id].module;
+        self.unions[id].fields_resolved = true;
+        let decl_fields = self.unions[id].decl_fields.clone();
+        let union_name = self.unions[id].name.clone();
+        let mut fields: Vec<UnionField> = Vec::with_capacity(decl_fields.len());
+        let mut seen: HashMap<String, Span> = HashMap::new();
+        for field in &decl_fields {
+            if let Some(previous) = seen.get(&field.name) {
+                let previous = *previous;
+                let diag = Diagnostic::error(
+                    format!(
+                        "field '{}' is defined multiple times in union '{}'",
+                        field.name, union_name
+                    ),
+                    field.name_span,
+                )
+                .with_code("E0124")
+                .with_label(previous, "previous definition here".to_string());
+                self.diagnostics.push(diag);
+                continue;
+            }
+            seen.insert(field.name.clone(), field.name_span);
+            let ty = match self.resolve_ty(&field.ty, None) {
+                Some(ty) => ty,
+                None => self.infer.fresh_var(),
+            };
+            let ty = self.infer.resolve(&ty);
+            if !self.union_field_allowed(&ty) {
+                self.error_code_note(
+                    format!(
+                        "field '{}' of union '{}' has type {}, which cannot be stored in a union",
+                        field.name,
+                        union_name,
+                        self.describe_resolved(&ty)
+                    ),
+                    field.name_span,
+                    "E0772",
+                    "union fields must be FFI-safe scalars, raw pointers, unions or #[repr(C)] structs"
+                        .to_string(),
+                );
+            }
+            fields.push(UnionField {
+                name: field.name.clone(),
+                name_span: field.name_span,
+                ty,
+            });
+        }
+        self.unions[id].fields = fields;
+        self.current_module = previous_module;
+    }
+
+    /// Whether a type may be a union field: FFI-safe scalar, raw pointer,
+    /// union, or a #[repr(C)] struct whose own fields are all FFI-safe.
+    fn union_field_allowed(&self, ty: &ITy) -> bool {
+        match ty {
+            ITy::Bool | ITy::Char | ITy::Int(_) | ITy::Float(_) | ITy::Ptr { .. } => true,
+            ITy::Union(_) => true,
+            ITy::Struct(id) => {
+                self.structs[*id].repr_c
+                    && self.structs[*id]
+                        .fields
+                        .iter()
+                        .all(|field| self.ffi_safe(&self.infer.resolve(&field.ty)))
+            }
+            _ => false,
+        }
+    }
+
+    /// FFI-safe types per RFC 0005: C scalars, raw pointers, references to
+    /// FFI-safe types, unions, and repr(C) structs with FFI-safe fields.
+    pub fn ffi_safe(&self, ty: &ITy) -> bool {
+        match ty {
+            ITy::Unit | ITy::Bool | ITy::Char | ITy::Int(_) | ITy::Float(_) | ITy::Ptr { .. } => {
+                true
+            }
+            ITy::Ref { inner, .. } => self.ffi_safe(inner),
+            ITy::Union(_) => true,
+            ITy::Struct(id) => {
+                self.structs[*id].repr_c
+                    && self.structs[*id]
+                        .fields
+                        .iter()
+                        .all(|field| self.ffi_safe(&self.infer.resolve(&field.ty)))
+            }
+            _ => false,
+        }
+    }
+
     pub fn resolve_all_types(&mut self) {
         for id in 0..self.aliases.len() {
             let _ = self.ensure_alias(id);
@@ -2203,6 +2513,9 @@ impl<'a> Checker<'a> {
         }
         for id in 0..self.enums.len() {
             self.ensure_enum_variants(id);
+        }
+        for id in 0..self.unions.len() {
+            self.ensure_union_fields(id);
         }
         self.check_recursive_types();
         for id in 0..self.fns.len() {
@@ -2282,6 +2595,42 @@ impl<'a> Checker<'a> {
         if let Some(ret_ty) = &decl.ret {
             let ret_span = ret_ty.span();
             self.validate_value_type(&ret, ret_span);
+        }
+        if self.fns[id].extern_abi.is_some() {
+            for (index, param) in decl.params.iter().enumerate() {
+                if let Some(param_ty) = params.get(index) {
+                    let param_ty = self.infer.resolve(param_ty);
+                    if !self.ffi_safe(&param_ty) {
+                        let described = self.describe_resolved(&param_ty);
+                        self.error_code_note(
+                            format!(
+                                "parameter '{}' has type {}, which is not FFI-safe",
+                                param.name, described
+                            ),
+                            param.name_span,
+                            "E0770",
+                            "extern \"C\" functions may only use C-compatible types: integers, floats, bool, char, raw pointers, references to FFI-safe types, unions and #[repr(C)] structs"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            let ret_ty = self.infer.resolve(&ret);
+            if !self.ffi_safe(&ret_ty) {
+                let ret_span = decl
+                    .ret
+                    .as_ref()
+                    .map(|ty| ty.span())
+                    .unwrap_or(decl.name_span);
+                let described = self.describe_resolved(&ret_ty);
+                self.error_code_note(
+                    format!("return type {} is not FFI-safe", described),
+                    ret_span,
+                    "E0770",
+                    "extern \"C\" functions may only use C-compatible types: integers, floats, bool, char, raw pointers, references to FFI-safe types, unions and #[repr(C)] structs"
+                        .to_string(),
+                );
+            }
         }
         if decl.self_kind.is_some() {
             match decl.params.first() {
@@ -2368,13 +2717,21 @@ impl<'a> Checker<'a> {
                 .map(|ty| ty.span())
                 .unwrap_or(decl.name_span);
             if sources.is_empty() {
-                let diag = Diagnostic::error("missing lifetime specifier".to_string(), ret_span)
-                    .with_code("E0106")
-                    .with_note(
-                        "this function's return type contains a borrowed value, but there is no reference input to borrow from"
-                            .to_string(),
-                    );
-                self.diagnostics.push(diag);
+                // An extern (or intrinsic) declaration may name its own
+                // lifetime instead of borrowing from a parameter, like
+                // Rust's `from_raw_parts<'a>(...) -> &'a T`: the contract is
+                // the caller's to uphold, so there is no reference input to
+                // derive the elided lifetime from. A safe function with no
+                // reference input keeps the E0106 diagnostic below.
+                if !(explicit_return_lifetime && decl.is_extern) {
+                    let diag = Diagnostic::error("missing lifetime specifier".to_string(), ret_span)
+                        .with_code("E0106")
+                        .with_note(
+                            "this function's return type contains a borrowed value, but there is no reference input to borrow from"
+                                .to_string(),
+                        );
+                    self.diagnostics.push(diag);
+                }
             } else if sources.len() > 1 && !explicit_return_lifetime {
                 let diag = Diagnostic::error("missing lifetime specifier".to_string(), ret_span)
                     .with_code("E0106")
@@ -2465,7 +2822,8 @@ impl<'a> Checker<'a> {
 
     fn check_recursive_types(&mut self) {
         let struct_count = self.structs.len();
-        let total = struct_count + self.enums.len();
+        let enum_count = self.enums.len();
+        let total = struct_count + enum_count + self.unions.len();
         let mut edges: Vec<Vec<usize>> = Vec::with_capacity(total);
         let mut spans: Vec<Span> = Vec::with_capacity(total);
         let mut names: Vec<String> = Vec::with_capacity(total);
@@ -2474,7 +2832,7 @@ impl<'a> Checker<'a> {
             names.push(info.name.clone());
             let mut targets = Vec::new();
             for field in &info.fields {
-                collect_size_edges(&field.ty, &mut targets, struct_count);
+                collect_size_edges(&field.ty, &mut targets, struct_count, enum_count);
             }
             targets.sort_unstable();
             targets.dedup();
@@ -2486,8 +2844,19 @@ impl<'a> Checker<'a> {
             let mut targets = Vec::new();
             for variant in &info.variants {
                 for field in &variant.fields {
-                    collect_size_edges(field, &mut targets, struct_count);
+                    collect_size_edges(field, &mut targets, struct_count, enum_count);
                 }
+            }
+            targets.sort_unstable();
+            targets.dedup();
+            edges.push(targets);
+        }
+        for info in &self.unions {
+            spans.push(info.span);
+            names.push(info.name.clone());
+            let mut targets = Vec::new();
+            for field in &info.fields {
+                collect_size_edges(&field.ty, &mut targets, struct_count, enum_count);
             }
             targets.sort_unstable();
             targets.dedup();
@@ -2545,19 +2914,23 @@ fn returns_unit(method: &FnDecl) -> bool {
     }
 }
 
-fn collect_size_edges(ty: &ITy, out: &mut Vec<usize>, struct_count: usize) {
+fn collect_size_edges(ty: &ITy, out: &mut Vec<usize>, struct_count: usize, enum_count: usize) {
     match ty {
         ITy::Struct(id) => out.push(*id),
         ITy::Enum(id) => out.push(struct_count + *id),
+        ITy::Union(id) => out.push(struct_count + enum_count + *id),
         ITy::Tuple(elems) => {
             for elem in elems {
-                collect_size_edges(elem, out, struct_count);
+                collect_size_edges(elem, out, struct_count, enum_count);
             }
         }
-        ITy::Option(elem) => collect_size_edges(elem, out, struct_count),
+        ITy::Array(elem, _) | ITy::MaybeUninit(elem) => {
+            collect_size_edges(elem, out, struct_count, enum_count);
+        }
+        ITy::Option(elem) => collect_size_edges(elem, out, struct_count, enum_count),
         ITy::Result(ok, err) => {
-            collect_size_edges(ok, out, struct_count);
-            collect_size_edges(err, out, struct_count);
+            collect_size_edges(ok, out, struct_count, enum_count);
+            collect_size_edges(err, out, struct_count, enum_count);
         }
         _ => {}
     }

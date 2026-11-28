@@ -117,6 +117,19 @@ Move checking and the borrow checker.
 | `E0597` | A borrowed value does not live long enough. | `crates/lsaca/src/borrow.rs` |
 | `E0745` | A temporary value is borrowed; bind it to a local first. | `crates/lsaca/src/typeck/refs.rs`, `crates/lsaca/src/typeck/slices.rs` |
 
+## Unsafe code and C FFI
+
+The `unsafe` permission boundary, raw pointers, C declarations, C-layout types and the
+unions that represent C overlay storage.
+
+| Code | Meaning | Raised in |
+| --- | --- | --- |
+| `E0133` | An unsafe operation is performed outside an `unsafe` block or `unsafe fn`: dereferencing or assigning through a raw pointer, calling an `extern "C"` function, `MaybeUninit::assume_init`, `CStr::from_ptr`, `CString::from_raw`, or constructing, reading or writing a union. | `crates/lsaca/src/typeck/exprs.rs` |
+| `E0770` | A type in an `extern "C"` declaration is not FFI-safe: managed values such as `String`, `Vec`, `Rc`, `Box`, `Option`, `Result` and `HashMap`, tuples, enums, trait objects, slices, `str`, `CString`/`CStr`/`MaybeUninit`, or a struct without `#[repr(C)]`. | `crates/lsaca/src/typeck/items.rs` |
+| `E0771` | A `repr` attribute is unsupported or misplaced: only `#[repr(C)]` is accepted, and only on a struct or (as a no-op) on a union. | `crates/lsaca/src/parser.rs` |
+| `E0772` | A union field has a type that C cannot overlay: a managed type or another forbidden non-FFI-safe type. | `crates/lsaca/src/typeck/items.rs` |
+| `E0773` | A union is used in a forbidden way: it has a `Drop` impl or method, it is destructured by a pattern, or it is used with generated equality or formatting. | `crates/lsaca/src/typeck/items.rs`, `crates/lsaca/src/typeck/patterns.rs` |
+
 ## Patterns and control flow
 
 Pattern shape and bindings, labels, loop control, and match coverage.
@@ -163,7 +176,7 @@ documented but never raised, when a row has an empty meaning, or when a code is
 listed twice. On success it prints one summary line:
 
 ```text
-error index: 89 codes documented and all raised in the compiler
+error index: 94 codes documented and all raised in the compiler
 ```
 
 The documentation gate runs the script in CI with the link check and the prose

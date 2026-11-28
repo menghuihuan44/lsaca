@@ -1,6 +1,6 @@
 # vec: Vec<T>
 
-**Status in 2.4.0.** Implemented. `Vec<T>` and its methods live in
+**Status in 2.5.0.** Implemented. `Vec<T>` and its methods live in
 `stdlib/src/vec.ls` (`std::vec`); capacities, lengths and indices are `usize`
 since 2.1.0. The slice methods `len`, `is_empty`, `get`, `get_mut`, `first_mut`
 and `last_mut` are implemented for `[T]` in the same file. Version 2.3.0 adds
@@ -39,7 +39,14 @@ when `T` is cloneable. A `for` loop over a `Vec` value consumes it; a loop over
 | `contains` | `(&self, &T) -> bool` | whether an equal element is present |
 | `sort` | `(&mut self)` | sorts in place for integer, float, `bool`, `char` and `String` elements |
 | `as_slice` / `as_mut_slice` | `(&self) -> &[T]` / `(&mut self) -> &mut [T]` | borrows the elements as a slice |
+| `as_ptr` / `as_mut_ptr` | `(&self) -> *const T` / `(&mut self) -> *mut T` | pointer to the first element for FFI; empty vectors return null and the pointer is valid only while the vector lives and its storage is not moved or reallocated |
 | `v[i]` / `v[i] = value` | index | element access; panics when out of bounds |
+
+`as_ptr` and `as_mut_ptr` expose the element buffer without transferring
+ownership or keeping the vector alive. They return a null pointer for an empty
+vector, and pushing, inserting, extending or otherwise growing the vector may
+reallocate storage and invalidate the pointer immediately. The caller must keep
+the vector alive and unmodified while C uses the pointer.
 
 A `Vec<T>` also coerces to `&[T]` and `&mut [T]` at call boundaries. A `for`
 loop over `vec` consumes the vector, while `for value in &vec` and

@@ -1,6 +1,6 @@
 # net: TCP and UDP sockets
 
-**Status in 2.4.0.** Implemented in `stdlib/src/net.ls`. The module provides
+**Status in 2.5.0.** Implemented in `stdlib/src/net.ls`. The module provides
 plain, blocking TCP (since 2.0.0) and UDP (since 2.4.0), with addresses as text:
 `bind`, `connect`, `send_to` and `recv_from` take `"host:port"` strings. There is
 no TLS, no Unix-domain socket API, no dedicated DNS lookup API beyond the
@@ -131,7 +131,7 @@ stream.read(&mut buffer)?;
 stream.write(&buffer[0..count])?;
 ```
 
-## Limits in 2.4.0
+## Limits in 2.5.0
 
 The module has TCP and UDP only: no Unix-domain sockets, no TLS, no dedicated
 DNS lookup API, no listener iterator and no asynchronous I/O. There is no

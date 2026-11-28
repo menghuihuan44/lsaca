@@ -626,6 +626,30 @@ fn debug_field_reads_value(names: &TypeNames, ty: &Ty, value: &str) -> bool {
 
 fn emit_debug_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty) {
     match ty {
+        Ty::Ptr { .. } => {
+            // Rust-style pointer debug output: a 0x-prefixed fixed-width address.
+            w.line("char buffer[32];");
+            w.line("snprintf(buffer, sizeof(buffer), \"0x%016llx\", (unsigned long long)(uintptr_t)v);");
+            w.line("acc = ls_format_push_cstr(acc, buffer);");
+        }
+        Ty::Union(index) => {
+            // Unions are opaque byte images: debug renders only the type name and
+            // never inspects a member, since reading an inactive union member is
+            // unsafe C. Any union-level Debug/== request is rejected by typeck;
+            // this body exists because containing structs may still be printed.
+            w.line("(void)v;");
+            match union_item(program, *index) {
+                Some(item) => push_cstr(w, &item.name),
+                None => push_cstr(w, "<union>"),
+            }
+        }
+        Ty::MaybeUninit(inner) => {
+            if ops::debug_append_statement(names, inner, "acc", "v").is_none() {
+                w.line("(void)v;");
+            } else {
+                emit_debug_append(w, names, inner, "v");
+            }
+        }
         Ty::Array(elem, len) => {
             // Fixed arrays render like slices: [a, b, c]. A zero-length array
             // has no operand to read and renders as [].
@@ -894,6 +918,24 @@ fn emit_eq_check(w: &mut CWriter, names: &TypeNames, ty: &Ty, a: &str, b: &str) 
 
 fn emit_eq_body(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty) {
     match ty {
+        Ty::Ptr { .. } => {
+            w.line("return (a == b);");
+        }
+        Ty::Union(_) => {
+            // Unions are opaque byte images. Typeck rejects language-level ==
+            // on a union, but a containing struct still gets an equality helper;
+            // compare the object representation (the values have the same size).
+            w.line("return memcmp((const void*)&a, (const void*)&b, sizeof(a)) == 0;");
+        }
+        Ty::MaybeUninit(inner) => {
+            if ops::eq_expr(names, inner, "a", "b") != "true" {
+                emit_eq_check(w, names, inner, "a", "b");
+            } else {
+                w.line("(void)a;");
+                w.line("(void)b;");
+            }
+            w.line("return true;");
+        }
         Ty::Array(elem, len) => {
             // The length is part of the array type, so only the elements are
             // compared. Unit-like elements compare equal without reading the
@@ -1118,6 +1160,11 @@ fn traceable(ty: &Ty) -> bool {
         Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::String => false,
         // A slice or str value is a borrowed view and owns no allocation.
         Ty::Slice(_) | Ty::Str => false,
+        // A union is a Copy byte image: it owns no allocation and none of its
+        // members is a managed handle, so it never participates in tracing.
+        Ty::Union(_) => false,
+        // Raw pointers and MaybeUninit storage own no allocation.
+        Ty::Ptr { .. } | Ty::MaybeUninit(_) => false,
         // A trait object value is a fat value: its data pointer is owned by
         // the cell that holds it, which traces itself.
         Ty::Dyn(_) => true,
@@ -1147,6 +1194,10 @@ pub(crate) fn emit_trace_slot(w: &mut CWriter, names: &TypeNames, ty: &Ty, slot:
         Ty::Ref { .. } => {}
         Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) | Ty::String => {}
         Ty::Slice(_) | Ty::Str => {}
+        // Unions are Copy byte images with no managed members.
+        Ty::Union(_) => {}
+        // Raw pointers and MaybeUninit storage own no allocation.
+        Ty::Ptr { .. } | Ty::MaybeUninit(_) => {}
         Ty::Dyn(_) => {
             w.line(format!(
                 "if ({slot}.{data} != NULL && {slot}.{vtable} != NULL) {{",
@@ -1169,14 +1220,26 @@ pub(crate) fn emit_trace_slot(w: &mut CWriter, names: &TypeNames, ty: &Ty, slot:
     }
 }
 
+/// C parameter type for a generated trace helper. Pointer payloads are
+/// represented as a pointer to the slot, so the generic `const T*` template
+/// would duplicate an existing `const` or mismatch a mutable pointer.
+pub(crate) fn trace_parameter_type(names: &TypeNames, ty: &Ty) -> String {
+    let c_ty = names.ctype(ty);
+    if matches!(ty, Ty::Ptr { .. }) || c_ty.ends_with('*') {
+        "const void*".to_string()
+    } else {
+        format!("const {}*", c_ty)
+    }
+}
+
 /// Emit the tracing function of one compound type. The collector calls it for
 /// every managed allocation to discover the handles it owns.
 fn emit_trace(w: &mut CWriter, program: &hir::Program, names: &TypeNames, ty: &Ty) {
-    let c_ty = names.ctype(ty);
+    let param = trace_parameter_type(names, ty);
     let suffix = names.mangle(ty);
     w.line(format!(
-        "void lsaca_trace_{}(const {}* value, LsTraceVisit visit) {{",
-        suffix, c_ty
+        "void lsaca_trace_{}({} value, LsTraceVisit visit) {{",
+        suffix, param
     ));
     w.indent();
     w.line("(void)value;");
@@ -2024,4 +2087,8 @@ fn struct_item(program: &hir::Program, index: usize) -> Option<(String, Vec<(Str
 
 fn enum_item(program: &hir::Program, index: usize) -> Option<&hir::HEnum> {
     program.enums.get(index)
+}
+
+fn union_item(program: &hir::Program, index: usize) -> Option<&hir::HUnion> {
+    program.unions.get(index)
 }

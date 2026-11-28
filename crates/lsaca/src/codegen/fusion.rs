@@ -579,6 +579,7 @@ fn fused_expression_safe(generator: &Gen, expr: &HExpr, parameters: &[String]) -
         HExprKind::StructLit { fields, .. } => fields
             .iter()
             .all(|(_, value)| fused_expression_safe(generator, value, parameters)),
+        HExprKind::UnionLit { value, .. } => fused_expression_safe(generator, value, parameters),
         HExprKind::Tuple(elems) | HExprKind::VecLit { elems } | HExprKind::Array { elems } => elems
             .iter()
             .all(|element| fused_expression_safe(generator, element, parameters)),

@@ -2,7 +2,7 @@
 """Incremental speed guard for the lsaca benchmark matrix.
 
 The guard compares a benchmark run produced by scripts/bench.py with a committed
-baseline, normally benchmarks/results/archive/v2.4/latest.json.  Two metrics are
+baseline, normally benchmarks/results/archive/v2.5/latest.json.  Two metrics are
 checked for the lsaca implementation of every program present in both files:
 
   runtime       the primary runtime median (and every data scale present in
@@ -39,7 +39,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-DEFAULT_BASELINE = "benchmarks/results/archive/v2.4/latest.json"
+DEFAULT_BASELINE = "benchmarks/results/archive/v2.5/latest.json"
 DEFAULT_RUNTIME_TOLERANCE = 10.0
 DEFAULT_COMPILE_TOLERANCE = 20.0
 

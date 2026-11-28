@@ -464,7 +464,11 @@ impl<'a> Gen<'a> {
             // releasing a zeroed one never frees anything.
             | Ty::Slice(_)
             | Ty::Str
-            | Ty::Dyn(_) => true,
+            | Ty::Dyn(_)
+            // Raw pointers and Copy byte images contain no managed payload.
+            | Ty::Ptr { .. }
+            | Ty::MaybeUninit(_)
+            | Ty::Union(_) => true,
             // A zeroed array releases its zero elements; an empty array has no
             // element storage to walk.
             Ty::Array(elem, len) => {
@@ -991,6 +995,11 @@ impl<'a> Gen<'a> {
             HExprKind::StructLit { struct_id, fields } => {
                 self.gen_struct_lit(*struct_id, fields, &expr.ty, target)
             }
+            HExprKind::UnionLit {
+                union_id,
+                field,
+                value,
+            } => self.gen_union_lit(*union_id, *field, value, &expr.ty, target),
             HExprKind::Tuple(elems) => self.gen_tuple(elems, &expr.ty, target),
             HExprKind::VecLit { elems } => self.gen_vec_lit(elems, &expr.ty, target, expr.span),
             HExprKind::VecRepeat { value, count } => {
@@ -1087,9 +1096,15 @@ impl<'a> Gen<'a> {
 
     fn gen_fn_ref(&mut self, fn_id: usize, ty: &Ty, target: &str) {
         let ctype = self.ctype(ty);
+        // An extern function value points at the declaration itself: it has no
+        // generated thunk, and the assembly label already binds the symbol.
+        let callee = match self.program.fns.get(fn_id) {
+            Some(function) if function.extern_abi.is_some() => format!("lsaca_ffi_{}", fn_id),
+            _ => format!("lsaca_thunk_{}", fn_id),
+        };
         self.w.line(format!(
-            "{} = ({}){{ .env = NULL, .fn_ptr = lsaca_thunk_{} }};",
-            target, ctype, fn_id
+            "{} = ({}){{ .env = NULL, .fn_ptr = {} }};",
+            target, ctype, callee
         ));
     }
 

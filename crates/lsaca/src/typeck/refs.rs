@@ -272,6 +272,8 @@ impl<'a> Checker<'a> {
                 self.is_plain_value_type_at(&ok, depth + 1)
                     && self.is_plain_value_type_at(&err, depth + 1)
             }
+            ITy::Ptr { .. } | ITy::Union(_) => true,
+            ITy::MaybeUninit(inner) => self.is_plain_value_type_at(&inner, depth + 1),
             ITy::Struct(struct_id) => {
                 self.ensure_struct_fields(struct_id);
                 let fields = self.struct_fields(struct_id);
@@ -660,6 +662,23 @@ impl<'a> Checker<'a> {
         match inner_ty {
             ITy::Never => self.never_expr(span),
             ITy::Ref { inner, .. } => {
+                let pointee = self.infer.resolve(&inner);
+                self.apply_hint(&pointee, hint);
+                TExpr::new(
+                    pointee,
+                    TExprKind::Deref {
+                        expr: Box::new(inner_expr),
+                    },
+                    span,
+                )
+            }
+            ITy::Ptr { mutable, inner } => {
+                let pointer = ITy::Ptr {
+                    mutable,
+                    inner: inner.clone(),
+                };
+                let described = self.describe_resolved(&pointer);
+                self.require_unsafe(span, format!("dereferencing {}", described));
                 let pointee = self.infer.resolve(&inner);
                 self.apply_hint(&pointee, hint);
                 TExpr::new(

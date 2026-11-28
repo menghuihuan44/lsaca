@@ -154,6 +154,28 @@ impl ErrorTrait for ParseFloatError {
     }
 }
 
+/// Error returned when a byte sequence is not valid UTF-8.
+pub struct Utf8Error {
+    valid_up_to: usize,
+}
+
+impl Utf8Error {
+    pub fn __new(valid_up_to: usize) -> Utf8Error {
+        return Utf8Error { valid_up_to: valid_up_to };
+    }
+
+    /// The byte index after the last valid UTF-8 byte.
+    pub fn valid_up_to(&self) -> usize {
+        return self.valid_up_to;
+    }
+}
+
+impl ErrorTrait for Utf8Error {
+    fn message(&self) -> String {
+        return "invalid utf-8 sequence";
+    }
+}
+
 pub struct Rc<T> {
     internal: (),
 }

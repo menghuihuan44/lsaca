@@ -1,0 +1,4 @@
+frexp 0.5 4
+frexp uninit 0.5 0
+tgamma 24.0000
+erf 0.8427

@@ -28,6 +28,16 @@ impl<'a> Gen<'a> {
                     .unwrap_or_else(|| format!("field{}", index));
                 format!("({}).{}", base_lv, types::field_cname(&name))
             }
+            HFieldRef::Union { union_id, index } => {
+                let name = self
+                    .program
+                    .unions
+                    .get(union_id)
+                    .and_then(|item| item.fields.get(index))
+                    .map(|field| field.name.clone())
+                    .unwrap_or_else(|| format!("field{}", index));
+                format!("({}).{}", base_lv, types::field_cname(&name))
+            }
         }
     }
 
@@ -231,7 +241,7 @@ impl<'a> Gen<'a> {
         &mut self,
         op: HBinaryOp,
         operand_ty: &Ty,
-        _result_ty: &Ty,
+        result_ty: &Ty,
         lhs: &str,
         rhs: &str,
         loc: &str,
@@ -287,6 +297,21 @@ impl<'a> Gen<'a> {
                 let symbol = arithmetic_symbol(op);
                 format!("(({}) {} ({}))", lhs, symbol, rhs)
             }
+            // Pointer .add/.sub lower to Binary Add/Sub on a pointer. C scales
+            // the offset by the pointee size, so no manual multiplication.
+            Ty::Ptr { .. } => match op {
+                HBinaryOp::Add | HBinaryOp::Sub => {
+                    let symbol = arithmetic_symbol(op);
+                    format!(
+                        "({})(({}) {} ({}))",
+                        self.ctype(result_ty),
+                        lhs,
+                        symbol,
+                        rhs
+                    )
+                }
+                _ => self.zero_expr(operand_ty),
+            },
             _ => self.zero_expr(operand_ty),
         }
     }
@@ -409,6 +434,21 @@ impl<'a> Gen<'a> {
             (Ty::Int(_), Ty::Char) => format!("(uint32_t)({})", value),
             (Ty::Int(_), Ty::Bool) => format!("(({}) != 0)", value),
             (Ty::Float(_), Ty::Bool) => format!("(({}) != 0)", value),
+            // A pointer exposed as an integer goes through uintptr_t, which is
+            // exactly the size of a pointer on every supported target.
+            (Ty::Ptr { .. }, Ty::Int(int_ty)) => {
+                format!("({})(uintptr_t)({})", int_ty.c_type(), value)
+            }
+            // An integer can be turned back into an address. An explicit
+            // uintptr_t step keeps the conversion well defined.
+            (Ty::Int(_), Ty::Ptr { .. }) | (Ty::Ptr { .. }, Ty::Ptr { .. }) => {
+                format!("({})(uintptr_t)({})", self.ctype(ty), value)
+            }
+            (Ty::Ptr { .. }, Ty::Bool) => format!("(({}) != NULL)", value),
+            // References and raw pointers share the same C representation.
+            (Ty::Ref { .. }, Ty::Ptr { .. }) | (Ty::Ptr { .. }, Ty::Ref { .. }) => {
+                format!("({})({})", self.ctype(ty), value)
+            }
             (_, Ty::Int(int_ty)) => format!("({})({})", int_ty.c_type(), value),
             (_, Ty::Float(float_ty)) => format!("({})({})", float_ty.c_type(), value),
             _ => format!("({})", value),
@@ -514,7 +554,12 @@ impl<'a> Gen<'a> {
             let bare_name = full_name.split('<').next().unwrap_or(full_name).trim();
             let needs_reference = matches!(
                 bare_name,
-                "__string_as_str" | "__string_as_mut_str" | "__vec_as_slice" | "__vec_as_mut_slice"
+                "__string_as_str"
+                    | "__string_as_mut_str"
+                    | "__vec_as_slice"
+                    | "__vec_as_mut_slice"
+                    | "__maybe_uninit_write"
+                    | "__maybe_uninit_as_mut_ptr"
             );
             let mut call_args: Vec<HExpr> = Vec::with_capacity(args.len() + 1);
             if let Some(receiver) = receiver {
@@ -633,7 +678,14 @@ impl<'a> Gen<'a> {
                 moved_values.push(value);
             }
         }
-        let call = format!("{}({})", item.c_name, arguments.join(", "));
+        // Extern functions are declared under a private C identifier with an
+        // assembly label for the real symbol (see emit_ffi_prototypes).
+        let callee = if item.extern_abi.is_some() {
+            format!("lsaca_ffi_{}", fn_id)
+        } else {
+            item.c_name.clone()
+        };
+        let call = format!("{}({})", callee, arguments.join(", "));
         if ty.is_unit() {
             self.w.line(format!("{};", call));
             let zero = self.zero_expr(ty);
@@ -714,6 +766,35 @@ impl<'a> Gen<'a> {
             let field = format!("{}.{}", target, types::field_cname(&name));
             self.gen_move_into(expression, &field);
         }
+    }
+
+    /// A union literal: exactly one member is initialised, every other byte is
+    /// zero. The designated initialiser never reads the other members, so the
+    /// generated C is deterministic and warning free.
+    pub(crate) fn gen_union_lit(
+        &mut self,
+        union_id: usize,
+        field: usize,
+        value: &HExpr,
+        _ty: &Ty,
+        target: &str,
+    ) {
+        let name = self
+            .program
+            .unions
+            .get(union_id)
+            .and_then(|item| item.fields.get(field))
+            .map(|member| member.name.clone())
+            .unwrap_or_else(|| format!("field{}", field));
+        let value = self.gen_owned(value);
+        let union_ty = Ty::Union(union_id);
+        self.w.line(format!(
+            "{} = (({}){{ .{} = {} }});",
+            target,
+            self.ctype(&union_ty),
+            types::field_cname(&name),
+            value
+        ));
     }
 
     pub(crate) fn gen_tuple(&mut self, elems: &[HExpr], _ty: &Ty, target: &str) {

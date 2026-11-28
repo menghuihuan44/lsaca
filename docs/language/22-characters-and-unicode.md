@@ -567,7 +567,7 @@ fn main() {
 Panic:
 
 ```text
-thread 'main' panicked at std/string.ls:169:16:
+thread 'main' panicked at std/string.ls:180:16:
 byte index 2 is not a char boundary; it is inside 'é' (bytes 1..3) of `héllo`
 ```
 
@@ -582,7 +582,7 @@ fn main() {
 Panic:
 
 ```text
-thread 'main' panicked at std/string.ls:169:16:
+thread 'main' panicked at std/string.ls:180:16:
 byte index 15 is out of bounds of `héllo`
 ```
 
@@ -782,7 +782,7 @@ The character support follows Rust closely but stays inside lsaca's design:
   (`usize`); `s[0]` is still rejected with E0608 (2.0 adds byte-range slicing
   `&s[0..1]`, but there is still no `char` indexing).
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 * Unicode `char` case conversion returns a single `char`, the closest scalar
   of the full mapping; Rust's iterator and the `String` methods expose the

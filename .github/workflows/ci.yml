@@ -401,6 +401,13 @@ jobs:
               -lm -o "$out/$name"
             "$out/$name" > /dev/null
           done
+      # The FFI acceptance suite binds real libc/libm symbols. Its runner emits
+      # every positive program, compiles it with the same sanitizer flags and
+      # compares stdout, then requires each negative program to fail with the
+      # diagnostic code recorded in tests/cffi/expectations.txt.
+      - name: Emit and run the FFI acceptance suite under the sanitizers
+        run: bash tests/cffi/run_sanitizers.sh
+
       - name: Upload failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

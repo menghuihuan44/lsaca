@@ -1,6 +1,6 @@
 # deque: VecDeque<T>
 
-**Status in 2.4.0.** Implemented in `stdlib/src/collections.ls`. Version 2.4.0
+**Status in 2.5.0.** Implemented in `stdlib/src/collections.ls`. Version 2.4.0
 adds `with_capacity`, `from`, `get_mut`, `front`, `back` and `to_vec`.
 
 `VecDeque<T>` is a double-ended queue: a growable `Vec<T>` with values ordered
@@ -45,7 +45,7 @@ implementation is a plain `Vec`; the front operations shift the stored elements.
 * `VecDeque` has no `sort` of its own; collect into a `Vec` first and use
   `Vec::sort`.
 
-## Limitations in 2.4.0
+## Limitations in 2.5.0
 
 There is no `for` loop over a `VecDeque` yet: read the values with `elements()`
 or `to_vec()`. There is no iterator type and no ring-buffer layout; the ring

@@ -7,9 +7,9 @@
 
 use super::{CodegenOptions, generate};
 use crate::hir::{
-    FormatSpec, HArm, HBinaryOp, HBuiltinAssoc, HBuiltinMethod, HClosure, HConst, HEnum, HExpr,
-    HExprKind, HField, HFieldRef, HFn, HFormatPart, HFormatPartKind, HMacroCall, HMacroKind,
-    HParam, HPat, HPatKind, HStmt, HStruct, HVariant, Program,
+    ExternAbi, FormatSpec, HArm, HBinaryOp, HBuiltinAssoc, HBuiltinMethod, HClosure, HConst, HEnum,
+    HExpr, HExprKind, HField, HFieldRef, HFn, HFormatPart, HFormatPartKind, HMacroCall, HMacroKind,
+    HParam, HPat, HPatKind, HStmt, HStruct, HUnion, HVariant, Program,
 };
 use crate::span::Span;
 use crate::types::{IntTy, SelfKind, Ty};
@@ -126,6 +126,8 @@ fn main_fn(body: crate::hir::HBlock) -> HFn {
         ret: Ty::unit(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body,
         span: sp(),
     }
@@ -147,6 +149,7 @@ fn program_with(
         name: name.to_string(),
         structs,
         enums: Vec::<HEnum>::new(),
+        unions: Vec::new(),
         fns,
         consts: Vec::<HConst>::new(),
         closures,
@@ -232,6 +235,8 @@ fn emits_shared_reference_parameters_and_borrows() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -305,6 +310,8 @@ fn emits_reference_self_receivers() {
         ret: int_ty(),
         self_kind: Some(SelfKind::Ref),
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         // `self` is a reference in the HIR, so field access auto-derefs it.
         body: block(Vec::new(), Some(field_x(local("self", "p0", struct_ref())))),
         span: sp(),
@@ -320,6 +327,8 @@ fn emits_reference_self_receivers() {
         ret: Ty::unit(),
         self_kind: Some(SelfKind::RefMut),
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             vec![HStmt::Expr(HExpr::new(
                 Ty::unit(),
@@ -415,6 +424,8 @@ fn emits_mutable_reference_parameters() {
         ret: Ty::unit(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             vec![HStmt::Expr(HExpr::new(
                 Ty::unit(),
@@ -511,6 +522,8 @@ fn emits_match_ergonomics_reference_bindings() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -591,6 +604,8 @@ fn emits_reference_returns() {
         ret: shared_i64.clone(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -657,6 +672,8 @@ fn emits_builtin_methods_through_references() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -826,6 +843,8 @@ fn emits_nested_shared_references() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(deref(deref(local("pp", "p0", shared_shared.clone())))),
@@ -882,6 +901,8 @@ fn emits_reference_arguments_to_struct_and_vec_places() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(deref(local("x", "p0", shared_i64.clone()))),
@@ -964,6 +985,8 @@ fn emits_reference_equality_comparing_referents() {
         ret: Ty::bool_(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1049,6 +1072,8 @@ fn emits_match_ergonomics_writes_through_mutable_bindings() {
         ret: Ty::unit(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1159,6 +1184,8 @@ fn emits_reference_to_rc_payload_without_refcount_traffic() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(deref(local("x", "p0", shared_i64.clone()))),
@@ -1186,6 +1213,8 @@ fn emits_reference_to_rc_payload_without_refcount_traffic() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(direct_call(0, vec![payload_borrow], int_ty())),
@@ -1247,6 +1276,8 @@ fn emits_shared_string_reference_dereferencing_once() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1351,6 +1382,8 @@ fn emits_const_correct_payload_accessors_for_borrowed_cells() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1378,6 +1411,8 @@ fn emits_const_correct_payload_accessors_for_borrowed_cells() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -1403,6 +1438,8 @@ fn emits_const_correct_payload_accessors_for_borrowed_cells() {
         ret: Ty::unit(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             vec![HStmt::Expr(HExpr::new(
                 Ty::unit(),
@@ -1819,6 +1856,8 @@ fn iterator_next_fn() -> HFn {
         ret: option_ty.clone(),
         self_kind: Some(SelfKind::RefMut),
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(Vec::new(), Some(option_some(int_lit(7), option_ty))),
         span: sp(),
     }
@@ -1957,6 +1996,8 @@ fn releases_the_iterator_once_when_the_body_returns() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             vec![
                 let_stmt(
@@ -2045,6 +2086,8 @@ fn emits_function_values_stored_in_struct_fields() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(Vec::new(), Some(local("x", "p0", int_ty()))),
         span: sp(),
     };
@@ -2410,6 +2453,8 @@ fn does_not_store_unit_completion_values_for_diverging_loops() {
         ret: int_ty(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: block(
             Vec::new(),
             Some(HExpr::new(
@@ -2690,6 +2735,7 @@ fn program_with_enums(
         name: name.to_string(),
         structs,
         enums,
+        unions: Vec::new(),
         fns,
         consts: Vec::<HConst>::new(),
         closures: Vec::new(),
@@ -3525,5 +3571,415 @@ fn slice_patterns_on_arrays_move_unbound_elements_to_temporaries() {
     assert!(
         !body.contains("lsaca_release_Array_String_3("),
         "the moved-out array shell must not be released again: {body}"
+    );
+}
+
+fn uintptr_ty() -> Ty {
+    Ty::Int(IntTy::Usize)
+}
+
+fn ptr_ty(mutable: bool, inner: Ty) -> Ty {
+    Ty::Ptr {
+        mutable,
+        inner: Box::new(inner),
+    }
+}
+
+fn unit_lit() -> HExpr {
+    HExpr::new(Ty::unit(), HExprKind::Lit(crate::hir::HLit::Unit), sp())
+}
+
+/// A union declaration is emitted as a plain C union with a matching forward
+/// typedef, the literal is a designated initializer, and field access uses the
+/// member name. Unions get no generated managed helpers.
+#[test]
+fn union_definitions_and_fields_use_plain_c_unions() {
+    let union_ty = Ty::Union(0);
+    let lit = HExpr::new(
+        union_ty.clone(),
+        HExprKind::UnionLit {
+            union_id: 0,
+            field: 0,
+            value: Box::new(int_lit(7)),
+        },
+        sp(),
+    );
+    let read = HExpr::new(
+        int_ty(),
+        HExprKind::Field {
+            base: Box::new(local("value", "v0", union_ty.clone())),
+            field: HFieldRef::Union {
+                union_id: 0,
+                index: 0,
+            },
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(union_ty.clone(), "v0"), lit),
+            HStmt::Expr(println_of(vec![display_arg(read)])),
+        ],
+        None,
+    ));
+    let mut program = program("union_c", Vec::new(), vec![main], 0);
+    program.unions.push(HUnion {
+        name: "Value".to_string(),
+        c_name: "Value".to_string(),
+        fields: vec![
+            HField {
+                name: "int_value".to_string(),
+                ty: int_ty(),
+            },
+            HField {
+                name: "float_value".to_string(),
+                ty: Ty::f64(),
+            },
+        ],
+        span: sp(),
+    });
+    let main_c = generate_program("union_c", &program);
+
+    assert!(
+        main_c.contains("typedef union Value Value;"),
+        "the union forward typedef is not a union typedef:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("union Value {") && main_c.contains("int64_t f_int_value;"),
+        "the union definition does not declare its fields in order:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("double f_float_value;"),
+        "the union float field is missing:\n{main_c}"
+    );
+    assert!(
+        main_c.contains(".f_int_value = t1"),
+        "the union literal is not a designated initializer:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("(v0).f_int_value"),
+        "a union field read does not use the member name:\n{main_c}"
+    );
+    // A union is a Copy byte image, so it gets no managed copy/release helpers.
+    for helper in ["copy", "release"] {
+        assert!(
+            !main_c.contains(&format!("lsaca_{helper}_Value")),
+            "a union must not get a {helper} helper:\n{main_c}"
+        );
+    }
+    // Debug, equality and tracing fallbacks exist for aggregates that contain
+    // the union, even though typeck rejects using them on a bare union value.
+    for helper in ["debug", "eq", "trace"] {
+        assert!(
+            main_c.contains(&format!("lsaca_{helper}_Value")),
+            "a union needs a {helper} fallback for containing aggregates:\n{main_c}"
+        );
+    }
+}
+
+/// Raw pointers use const / mutable C pointer types, unit pointers use void
+/// pointers, and MaybeUninit<T> has exactly the representation of T.
+#[test]
+fn raw_pointers_and_maybe_uninit_use_their_c_representations() {
+    let const_i64 = ptr_ty(false, int_ty());
+    let mut_i64 = ptr_ty(true, int_ty());
+    let const_unit = ptr_ty(false, Ty::unit());
+    let maybe_i64 = Ty::MaybeUninit(Box::new(int_ty()));
+    let check = HFn {
+        name: "check".to_string(),
+        c_name: "lsaca_fn_check".to_string(),
+        params: vec![
+            HParam {
+                name: "p0".to_string(),
+                c_name: "p0".to_string(),
+                ty: const_i64.clone(),
+            },
+            HParam {
+                name: "p1".to_string(),
+                c_name: "p1".to_string(),
+                ty: mut_i64.clone(),
+            },
+            HParam {
+                name: "p2".to_string(),
+                c_name: "p2".to_string(),
+                ty: const_unit.clone(),
+            },
+            HParam {
+                name: "p3".to_string(),
+                c_name: "p3".to_string(),
+                ty: maybe_i64.clone(),
+            },
+        ],
+        ret: Ty::unit(),
+        self_kind: None,
+        intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
+        body: block(Vec::new(), Some(unit_lit())),
+        span: sp(),
+    };
+    let cast_to_int = HExpr::new(
+        uintptr_ty(),
+        HExprKind::Cast {
+            expr: Box::new(local("p1", "p1", mut_i64.clone())),
+        },
+        sp(),
+    );
+    let cast_to_const = HExpr::new(
+        const_i64.clone(),
+        HExprKind::Cast {
+            expr: Box::new(local("p1", "p1", mut_i64.clone())),
+        },
+        sp(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(uintptr_ty(), "v0"), cast_to_int),
+            let_stmt(bind_pat(const_i64.clone(), "v1"), cast_to_const),
+            HStmt::Expr(direct_call(
+                0,
+                vec![
+                    local("p0", "p0", const_i64.clone()),
+                    local("p1", "p1", mut_i64.clone()),
+                    local("p2", "p2", const_unit.clone()),
+                    local("p3", "p3", maybe_i64.clone()),
+                ],
+                Ty::unit(),
+            )),
+            HStmt::Expr(println_of(vec![
+                display_arg(local("n", "v0", uintptr_ty())),
+                display_arg(local("p", "v1", const_i64.clone())),
+            ])),
+        ],
+        None,
+    ));
+    let main_c = generate_program("ptr_c", &program("ptr_c", Vec::new(), vec![check, main], 1));
+
+    assert!(
+        main_c.contains(
+            "LsUnit lsaca_fn_check(const int64_t* p0, int64_t* p1, const void* p2, int64_t p3);"
+        ),
+        "pointer and MaybeUninit parameters do not use their C representations:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("(uintptr_t)(uintptr_t)("),
+        "a pointer to integer cast does not go through uintptr_t:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("(const int64_t*)(uintptr_t)("),
+        "a pointer to pointer cast does not use the target pointer type:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("struct LsMaybeUninit"),
+        "MaybeUninit must not introduce a wrapper type:\n{main_c}"
+    );
+}
+
+/// Extern C functions get one private prototype whose assembler label is the
+/// declared symbol, and call sites use the private name. No body is emitted.
+#[test]
+fn extern_functions_use_private_ffi_symbols() {
+    let const_u8 = ptr_ty(false, Ty::Int(IntTy::U8));
+    let strlen = HFn {
+        name: "strlen".to_string(),
+        c_name: "strlen".to_string(),
+        params: vec![HParam {
+            name: "s".to_string(),
+            c_name: "p0".to_string(),
+            ty: const_u8.clone(),
+        }],
+        ret: uintptr_ty(),
+        self_kind: None,
+        intrinsic: false,
+        extern_abi: Some(ExternAbi::C),
+        is_unsafe: true,
+        body: block(Vec::new(), None),
+        span: sp(),
+    };
+    let call = direct_call(0, vec![local("s", "p0", const_u8.clone())], uintptr_ty());
+    let main = main_fn(block(
+        vec![
+            let_stmt(bind_pat(uintptr_ty(), "v0"), call),
+            HStmt::Expr(println_of(vec![display_arg(local(
+                "n",
+                "v0",
+                uintptr_ty(),
+            ))])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "ffi_c",
+        &program("ffi_c", Vec::new(), vec![strlen, main], 1),
+    );
+
+    assert!(
+        main_c.contains("#define LSACA_FFI_ASM(name) __asm__(#name)"),
+        "the FFI assembler-label macro is missing:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("extern uintptr_t lsaca_ffi_0(const uint8_t* p0) LSACA_FFI_ASM(strlen);"),
+        "the extern prototype does not bind the declared symbol:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("lsaca_ffi_0("),
+        "the call site does not use the private FFI name:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("lsaca_fn_strlen"),
+        "an extern function must not get a generated definition:\n{main_c}"
+    );
+}
+
+/// MaybeUninit is emitted as storage of T: uninit zeroes the storage, write
+/// assigns through the slot pointer, as_mut_ptr yields the storage address, and
+/// assume_init copies the value out without releasing the storage.
+#[test]
+fn maybe_uninit_intrinsics_use_the_payload_storage() {
+    let maybe_i64 = Ty::MaybeUninit(Box::new(int_ty()));
+    let slot_ref = Ty::Ref {
+        mutable: true,
+        inner: Box::new(maybe_i64.clone()),
+    };
+    let mut_i64 = ptr_ty(true, int_ty());
+    let intrinsic = |name: &str, params: Vec<HParam>, ret: Ty| HFn {
+        name: name.to_string(),
+        c_name: name.to_string(),
+        params,
+        ret,
+        self_kind: None,
+        intrinsic: true,
+        extern_abi: None,
+        is_unsafe: false,
+        body: block(Vec::new(), None),
+        span: sp(),
+    };
+    let slot_param = || HParam {
+        name: "slot".to_string(),
+        c_name: "p0".to_string(),
+        ty: slot_ref.clone(),
+    };
+    let uninit = intrinsic("__maybe_uninit_uninit<i64>", Vec::new(), maybe_i64.clone());
+    let write = intrinsic(
+        "__maybe_uninit_write<i64>",
+        vec![
+            slot_param(),
+            HParam {
+                name: "value".to_string(),
+                c_name: "p1".to_string(),
+                ty: int_ty(),
+            },
+        ],
+        Ty::unit(),
+    );
+    let as_mut_ptr = intrinsic(
+        "__maybe_uninit_as_mut_ptr<i64>",
+        vec![slot_param()],
+        mut_i64.clone(),
+    );
+    let assume_init = intrinsic(
+        "__maybe_uninit_assume_init<i64>",
+        vec![slot_param()],
+        int_ty(),
+    );
+    let main = main_fn(block(
+        vec![
+            let_stmt(
+                bind_pat(maybe_i64.clone(), "v0"),
+                direct_call(0, Vec::new(), maybe_i64.clone()),
+            ),
+            HStmt::Expr(direct_call(
+                1,
+                vec![
+                    borrow(local("storage", "v0", maybe_i64.clone()), true),
+                    int_lit(42),
+                ],
+                Ty::unit(),
+            )),
+            let_stmt(
+                bind_pat(mut_i64.clone(), "v1"),
+                direct_call(
+                    2,
+                    vec![borrow(local("storage", "v0", maybe_i64.clone()), true)],
+                    mut_i64.clone(),
+                ),
+            ),
+            let_stmt(
+                bind_pat(int_ty(), "v2"),
+                direct_call(
+                    3,
+                    vec![borrow(local("storage", "v0", maybe_i64.clone()), true)],
+                    int_ty(),
+                ),
+            ),
+            HStmt::Expr(println_of(vec![display_arg(local(
+                "value",
+                "v2",
+                int_ty(),
+            ))])),
+        ],
+        None,
+    ));
+    let main_c = generate_program(
+        "maybe_uninit_c",
+        &program(
+            "maybe_uninit_c",
+            Vec::new(),
+            vec![uninit, write, as_mut_ptr, assume_init, main],
+            4,
+        ),
+    );
+
+    assert!(
+        main_c.contains("((int64_t){0})"),
+        "uninit does not zero the payload storage:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("*(t2) = t3;"),
+        "write does not assign through the slot pointer:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("v1 = (int64_t*)t4;"),
+        "as_mut_ptr does not return the storage address:\n{main_c}"
+    );
+    assert!(
+        main_c.contains("v2 = *(t5);"),
+        "assume_init does not copy the payload out:\n{main_c}"
+    );
+    assert!(
+        !main_c.contains("lsaca_release_MaybeUninit"),
+        "MaybeUninit storage must not be released:\n{main_c}"
+    );
+}
+
+/// Constness of a pointer to a pointer qualifies the inner pointer, not the
+/// scalar: *const *mut i64 is emitted as int64_t* const*.
+#[test]
+fn const_pointers_to_pointers_qualify_the_inner_pointer() {
+    let inner = ptr_ty(true, int_ty());
+    let nested = ptr_ty(false, inner.clone());
+    let check = HFn {
+        name: "nested".to_string(),
+        c_name: "lsaca_fn_nested".to_string(),
+        params: vec![HParam {
+            name: "p0".to_string(),
+            c_name: "p0".to_string(),
+            ty: nested,
+        }],
+        ret: Ty::unit(),
+        self_kind: None,
+        intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
+        body: block(Vec::new(), Some(unit_lit())),
+        span: sp(),
+    };
+    let main_c = generate_program(
+        "nested_ptr_c",
+        &program("nested_ptr_c", Vec::new(), vec![check], 0),
+    );
+    assert!(
+        main_c.contains("LsUnit lsaca_fn_nested(int64_t* const* p0);"),
+        "a const pointer to a mutable pointer is not qualified on the inner pointer:\n{main_c}"
     );
 }

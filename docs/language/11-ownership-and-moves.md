@@ -842,7 +842,7 @@ Mutable references to a user struct or enum are supported only when the type is 
 * User-defined generics and traits exist since 1.5.0, and `Copy`, `Clone` and `Drop` remain the only compiler-known traits; since 2.0 a trait value can be used behind a pointer as a trait object (`Box<dyn Trait>`, `Rc<dyn Trait>`, `&dyn Trait`) with calls dispatched through a vtable (see [Trait objects](25-trait-objects.md)).
 * Since 1.5.0 user structs, enums, tuples, `Vec`, `Option`, `Result`, references and `HashMap` compare with `==`; function values do not (`E0369`).
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 * `Copy` and `Clone` cannot be implemented (both are derived automatically); `Drop` keeps its special form, and user-defined traits can be implemented since 1.5.0.
 * Lifetime syntax covers reference fields only: since 2.2.0 a struct, enum or tuple

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use super::dyn_traits::{TraitObjectInfo, VtableInfo};
 use super::generics::{DefOrigin, GEnumDef, GFnDef, GStructDef, ImplInfo};
 use super::items::{
-    AliasInfo, ConstItem, ConstState, ConstVal, EnumInfo, FnInfo, StructInfo, TypeKey,
+    AliasInfo, ConstItem, ConstState, ConstVal, EnumInfo, FnInfo, StructInfo, TypeKey, UnionInfo,
 };
 use super::itype::{ITy, Infer};
 use super::modules::{ImportLeaf, ModuleId, ModuleInfo};
@@ -67,6 +67,10 @@ pub struct Frame {
     /// The loops currently open in this frame, innermost last. Closures get a
     /// fresh frame, so a labelled break cannot cross a closure boundary.
     pub loops: Vec<LoopState>,
+    /// Non-zero while checking the inside of an `unsafe` block or the body of
+    /// an `unsafe fn`. Operations such as a raw-pointer dereference require a
+    /// non-zero depth (E0133).
+    pub unsafe_depth: usize,
 }
 
 impl Frame {
@@ -79,6 +83,7 @@ impl Frame {
             is_closure: false,
             loop_depth: 0,
             loops: Vec::new(),
+            unsafe_depth: 0,
         }
     }
 
@@ -110,6 +115,7 @@ pub struct Checker<'a> {
     pub sources: &'a dyn SourceLookup,
     pub structs: Vec<StructInfo>,
     pub enums: Vec<EnumInfo>,
+    pub unions: Vec<UnionInfo>,
     pub aliases: Vec<AliasInfo>,
     pub consts: Vec<ConstItem>,
     pub fns: Vec<FnInfo>,
@@ -248,6 +254,7 @@ impl<'a> Checker<'a> {
             sources,
             structs: Vec::new(),
             enums: Vec::new(),
+            unions: Vec::new(),
             aliases: Vec::new(),
             consts: Vec::new(),
             fns: Vec::new(),
@@ -469,6 +476,73 @@ impl<'a> Checker<'a> {
             .unwrap_or_else(|| "?".to_string())
     }
 
+    pub fn union_name(&self, union_id: usize) -> String {
+        self.unions
+            .get(union_id)
+            .map(|info| info.name.clone())
+            .unwrap_or_else(|| "?".to_string())
+    }
+
+    /// Whether checking is currently inside an unsafe block or an unsafe
+    /// function body.
+    pub fn in_unsafe(&self) -> bool {
+        self.frames
+            .last()
+            .map(|frame| frame.unsafe_depth > 0)
+            .unwrap_or(false)
+    }
+
+    /// Require an unsafe context for an operation that is only sound under the
+    /// programmer's contract. Reports E0133 naming the operation and returns
+    /// false when the context is safe.
+    pub fn require_unsafe(&mut self, span: Span, operation: impl Into<String>) -> bool {
+        if self.in_unsafe() {
+            return true;
+        }
+        let operation = operation.into();
+        self.error_code_note(
+            format!("{} requires an unsafe context", operation),
+            span,
+            "E0133",
+            "wrap the operation in an unsafe block: unsafe { ... }".to_string(),
+        );
+        false
+    }
+
+    /// The union id behind a value type, looking through references. Used to
+    /// reject operations unions deliberately do not have (language-level
+    /// equality and formatting) with E0773.
+    pub fn union_behind_refs(&self, ty: &ITy) -> Option<usize> {
+        let mut current = self.infer.resolve(ty);
+        loop {
+            current = match current {
+                ITy::Ref { inner, .. } => self.infer.resolve(&inner),
+                ITy::Union(union_id) => return Some(union_id),
+                _ => return None,
+            };
+        }
+    }
+
+    pub fn union_fields(&self, union_id: usize) -> Vec<(String, Span, ITy)> {
+        self.unions
+            .get(union_id)
+            .map(|info| {
+                info.fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.name_span, field.ty.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn union_field(&self, union_id: usize, name: &str) -> Option<(usize, String, Span, ITy)> {
+        let info = self.unions.get(union_id)?;
+        info.fields.iter().enumerate().find_map(|(index, field)| {
+            (field.name == name)
+                .then(|| (index, field.name.clone(), field.name_span, field.ty.clone()))
+        })
+    }
+
     pub fn variant_name(&self, enum_id: usize, variant: usize) -> String {
         self.enums
             .get(enum_id)
@@ -522,6 +596,17 @@ impl<'a> Checker<'a> {
             ITy::Array(elem, len) => format!("[{}; {}]", self.describe_resolved(elem), len),
             ITy::Rc(elem) => format!("Rc<{}>", self.describe_resolved(elem)),
             ITy::Box(elem) => format!("Box<{}>", self.describe_resolved(elem)),
+            ITy::MaybeUninit(elem) => {
+                format!("MaybeUninit<{}>", self.describe_resolved(elem))
+            }
+            ITy::Ptr { mutable, inner } => {
+                let inner = self.describe_resolved(inner);
+                if *mutable {
+                    format!("*mut {}", inner)
+                } else {
+                    format!("*const {}", inner)
+                }
+            }
             ITy::Ref { mutable, inner } => {
                 let inner = self.describe_resolved(inner);
                 if *mutable {
@@ -561,6 +646,7 @@ impl<'a> Checker<'a> {
             }
             ITy::Struct(id) => self.struct_name(*id),
             ITy::Enum(id) => self.enum_name(*id),
+            ITy::Union(id) => self.union_name(*id),
             ITy::Slice(elem) => format!("[{}]", self.describe_resolved(elem)),
             ITy::Str => "str".to_string(),
             ITy::Dyn(id) => match self.trait_objects.get(*id) {
@@ -909,6 +995,12 @@ impl<'a> Checker<'a> {
                     mutable,
                 },
             );
+        }
+        if decl.is_unsafe {
+            // The body of an unsafe fn is an unsafe context, like an unsafe
+            // block. Closures opened inside it push a fresh frame and are safe
+            // again, matching Rust: unsafety does not leak into closure bodies.
+            frame.unsafe_depth = 1;
         }
         self.frames.push(frame);
         let previous_allow_ref_storage = self.allow_ref_storage;

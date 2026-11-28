@@ -1,7 +1,7 @@
 # lsaca STATUS
 
 Completion matrix for the release train in [ROADMAP.md](ROADMAP.md).
-Baseline: version 2.4.0 (2026-11-27). Every row marked complete must be traced to
+Baseline: version 2.5.0 (2026-11-28). Every row marked complete must be traced to
 tests and to a documentation anchor; scripts/check_status.py enforces that and is
 run in CI.
 
@@ -39,7 +39,7 @@ A row may mix states; the state column records the weakest applicable one.
 | Packages | complete | Path dependencies only; no registry, git, workspaces, features or lockfile | - |
 | Macros and attributes | deliberate | Builtin formatting/assertion macros and vec! only; RFC 0003 fixes the boundary: no macro_rules!, derive or attributes in 2.x | - |
 | Method call form (UFCS) | deliberate | Type::method(&value) is rejected with E0599 and a call-it-on-a-value note; the refusal was confirmed in RFC 0003 | - |
-| Unsafe and FFI | missing | No unsafe, no FFI; extern fn declares compiler intrinsics in the std crate only | v2.5 |
+| Unsafe and FFI | complete | Controlled unsafe, raw pointers, extern "C" with FFI-safe checking, repr(C) structs, unions and CString/CStr/MaybeUninit since 2.5.0; no function pointers, variadics, managed types across FFI, #[link] or repr(packed/align/transparent) | - |
 | Threads, Send, Sync | missing | Single-threaded; Rc is not atomic | v3.0 |
 
 ## Standard library
@@ -78,31 +78,28 @@ A row may mix states; the state column records the weakest applicable one.
 | Conformance traceability | complete | Every complete row is traced to tests and a docs anchor; checked by scripts/check_status.py | - |
 | Real-program CI gate | complete | examples/programs/json.ls, markdown.ls, lisp.ls and wordstats.ls run in CI with golden output and a C comparison | - |
 
-## Test baseline at 2.4.0
+## Test baseline at 2.5.0
 
-* 1,011 library unit tests, 21 end-to-end tests, 2 module audits, 121 robustness
-  tests, 1 v2.3 feature test, 1 v2.4 feature test and 28 CLI tests, 1,185 in the
-  workspace;
+* 1,035 library unit tests, 22 end-to-end tests, 2 module audits, 121 robustness
+  tests, 1 v2.3 feature test, 1 v2.4 feature test, 1 v2.5 feature test and 28 CLI
+  tests, 1,211 in the workspace;
 * the C runtime smoke suite, 121 checks;
+* the FFI acceptance suite in crates/lsaca/tests/programs/cffi/ (6 positive
+  programs with golden output, 11 negative programs), also run under
+  AddressSanitizer and UndefinedBehaviorSanitizer;
 * the generated-C checker and the documented-example runner are rerun at every
   release and reported in the release notes;
 * 22 executed benchmark workloads plus 3 compile-only workloads; the official
-  results are archived in benchmarks/results/archive/v2.4/.
+  results are archived in benchmarks/results/archive/v2.5/.
 
-## v2.4 closure checklist
+## v2.5 closure checklist
 
-- [x] array patterns with exact-length checking
-- [x] slice patterns with match ergonomics and Rust-compatible exhaustiveness
-- [x] `name @ pattern` bindings with the E0382 whole-value move rule
-- [x] values out of `break`, with E0571 in while/for and E0308 for continue values
-- [x] HashMap get_or_insert and get_or_insert_with
-- [x] HashSet, BTreeSet, BTreeMap, VecDeque and BinaryHeap surface extension
-- [x] iterator min, max and product plus the documented adapters
-- [x] process::Command with ExitStatus and Output
-- [x] net SocketAddr and UdpSocket
-- [x] pub(super), pub(in path), module aliases and their diagnostics
-- [x] formatter crate mode
-- [x] RFCs 0003 and 0004 plus the UFCS refusal note
-- [x] pinned CI Rust toolchain
-- [x] fourth real program (wordstats) in the CI gate
-- [x] benchmarks rerun and 2.4.0 released
+- [x] `unsafe { ... }` blocks and `unsafe fn`, with E0133 on every unsafe operation
+- [x] raw pointers `*const T`/`*mut T`: creation, operations, casts and the FFI accessors
+- [x] `extern "C"` declarations, FFI-safe checking (E0770) and the asm-label symbol binding
+- [x] `#[repr(C)]` structs, with E0771 elsewhere
+- [x] `union` declarations, with E0772 and E0773
+- [x] `CString`, `CStr` and `MaybeUninit` in the standard library
+- [x] the safety contract, the ORC invariants and the `ptr`/`cstring`/`cstr`/`mem` pages
+- [x] the libc/libm acceptance suite and the negative suite, in e2e, generated C and the sanitizer job
+- [x] all gates green, benchmarks inside the 2.4.0 budget and 2.5.0 released

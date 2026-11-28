@@ -2375,6 +2375,7 @@ impl<'a> FnChecker<'a> {
                     self.walk_consumed(value);
                 }
             }
+            HExprKind::UnionLit { value, .. } => self.walk_consumed(value),
             HExprKind::Tuple(elements) | HExprKind::VecLit { elems: elements } => {
                 for element in elements {
                     self.walk_consumed(element);
@@ -2565,6 +2566,7 @@ fn expr_address(expr: &HExpr) -> usize {
 fn field_code(field: &HFieldRef) -> u32 {
     match field {
         HFieldRef::Struct { index, .. } | HFieldRef::Tuple(index) => *index as u32,
+        HFieldRef::Union { index, .. } => *index as u32,
     }
 }
 
@@ -4281,6 +4283,7 @@ mod tests {
             name: "borrow_phase_b_unit".to_string(),
             structs: Vec::new(),
             enums: Vec::new(),
+            unions: Vec::new(),
             fns: vec![hir::HFn {
                 name: "main".to_string(),
                 c_name: "lsaca_fn_main".to_string(),
@@ -4288,6 +4291,8 @@ mod tests {
                 ret: Ty::Unit,
                 self_kind: None,
                 intrinsic: false,
+                extern_abi: None,
+                is_unsafe: false,
                 body,
                 span: ir_span(),
             }],
@@ -5285,6 +5290,8 @@ mod tests {
             ret,
             self_kind: None,
             intrinsic: false,
+            extern_abi: None,
+            is_unsafe: false,
             body,
             span: ir_span(),
         }
@@ -5848,6 +5855,8 @@ mod tests {
             ret: ret.clone(),
             self_kind: Some(self_kind),
             intrinsic: false,
+            extern_abi: None,
+            is_unsafe: false,
             body: block(Vec::new(), Some(option_none_expr(ret))),
             span: ir_span(),
         }

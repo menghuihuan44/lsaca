@@ -15,7 +15,7 @@ fn main() {
     right.insert(2);
     right.insert(3);
     right.insert(4);
-    println!("union {:?}", left.union(&right).elements());
+    println!("union {:?}", left.union_with(&right).elements());
     println!("intersection {:?}", left.intersection(&right).elements());
     println!("difference {:?}", left.difference(&right).elements());
     println!("subset {} {}", left.subset(&right), right.subset(&left));

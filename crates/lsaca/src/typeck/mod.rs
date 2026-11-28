@@ -9202,6 +9202,145 @@ fn main() { let number: i64 = 3; println!("{}", both(&number)); }"#,
     }
 
     #[test]
+    fn accepts_unsafe_pointer_operations() {
+        expect_ok(
+            r#"fn main() {
+    let mut value: i64 = 40;
+    let raw = &mut value as *mut i64;
+    unsafe {
+        *raw = *raw + 2;
+    }
+    let pointer: *const i64 = &value as *const i64;
+    let same: *const i64 = pointer;
+    let null: *const i64 = 0 as *const i64;
+    println!("{} {} {} {} {}", value, pointer == same, pointer != same, pointer.is_null(), null.is_null());
+}"#,
+        );
+    }
+
+    #[test]
+    fn accepts_maybe_uninit_drop_glue_payloads() {
+        check_source_with_embedded_stdlib(
+            r#"fn main() {
+    let mut slot: MaybeUninit<String> = MaybeUninit::uninit();
+    slot.write(String::from("hello"));
+    let value: String = unsafe { slot.assume_init() };
+    let mut numbers: MaybeUninit<Vec<i64>> = MaybeUninit::uninit();
+    numbers.write(vec![1i64, 2i64]);
+    println!("{} {}", value, unsafe { numbers.assume_init() }.len());
+}"#,
+        )
+        .unwrap_or_else(|diagnostics| {
+            panic!(
+                "MaybeUninit must accept payloads with drop glue: {:#?}",
+                diagnostics
+            )
+        });
+    }
+
+    #[test]
+    fn rejects_union_patterns_and_impl_blocks() {
+        let diagnostics = expect_errors(
+            r#"union Number {
+    integer: i64,
+    float: f64,
+}
+
+impl Number {
+    fn value(&self) -> i64 {
+        return 0i64;
+    }
+}
+
+fn main() {
+    let number = unsafe { Number { integer: 1 } };
+    match number {
+        Number { integer } => println!("{}", integer),
+    }
+}"#,
+        );
+        let union_errors = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Some("E0773"))
+            .count();
+        assert!(
+            union_errors >= 2,
+            "union patterns and impl blocks must both be E0773: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_union_equality_and_formatting() {
+        let diagnostics = expect_errors(
+            r#"union Number {
+    integer: i64,
+    float: f64,
+}
+
+fn main() {
+    let left = unsafe { Number { integer: 1 } };
+    let right = unsafe { Number { integer: 2 } };
+    let same = left == right;
+    println!("{} {:?}", same, left);
+}"#,
+        );
+        let union_errors = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Some("E0773"))
+            .count();
+        assert!(
+            union_errors >= 2,
+            "union equality and formatting must both be E0773: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn assume_init_requires_an_unsafe_context() {
+        let diagnostics = check_source_with_embedded_stdlib(
+            r#"fn main() {
+    let mut slot: MaybeUninit<i64> = MaybeUninit::uninit();
+    slot.write(1i64);
+    let value: i64 = slot.assume_init();
+    println!("{}", value);
+}"#,
+        )
+        .expect_err("assume_init outside unsafe must be rejected");
+        assert!(
+            has_code(&diagnostics, "E0133"),
+            "assume_init must require unsafe: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
+    fn rejects_union_field_access_outside_unsafe() {
+        let diagnostics = expect_errors(
+            r#"union Number {
+    integer: i64,
+    float: f64,
+}
+
+fn main() {
+    let mut number = unsafe { Number { integer: 1i64 } };
+    number.integer = 2i64;
+    let value = number.integer;
+    println!("{}", value);
+}"#,
+        );
+        let unsafe_errors = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Some("E0133"))
+            .count();
+        assert!(
+            unsafe_errors >= 2,
+            "union field reads and writes must both require unsafe: {:?}",
+            messages(&diagnostics)
+        );
+    }
+
+    #[test]
     fn numeric_terminal_methods_use_their_specialized_helpers() {
         check_source_with_embedded_stdlib(
             r#"fn main() {

@@ -92,6 +92,17 @@ impl String {
         return __str_as_bytes(self);
     }
 
+    /// Pointer to the first byte of the UTF-8 storage. Empty strings return a
+    /// null pointer. The pointer is valid while the String is alive and is not
+    /// NUL-terminated.
+    pub fn as_ptr(&self) -> *const u8 {
+        let bytes: &[u8] = self.as_bytes();
+        if bytes.len() == 0 {
+            return 0 as *const u8;
+        }
+        return &bytes[0] as *const u8;
+    }
+
     /// Number of bytes in the string (UTF-8 length, not character count).
     pub fn len(&self) -> usize {
         return __str_len(self) as usize;

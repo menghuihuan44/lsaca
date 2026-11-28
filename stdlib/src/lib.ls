@@ -23,6 +23,12 @@ pub mod env;
 pub mod error;
 pub mod process;
 
+// v2.5 controlled unsafe building blocks.
+pub mod mem;
+pub mod ptr;
+pub mod cstring;
+pub mod cstr;
+
 // Iterator trait and the hidden iterator adapters used by iterator sugar.
 pub use iter::Iterator;
 pub use iter::__lsaca_VecIter;
@@ -80,7 +86,6 @@ pub use iter::__lsaca_it_product_f32;
 pub use iter::__lsaca_it_min;
 pub use iter::__lsaca_it_max;
 
-
 // v2.3 borrowing iterators, slice iterators, HashMap iteration, rev, flat_map.
 pub use iter::__lsaca_VecIterRef;
 pub use iter::__lsaca_VecIterMut;
@@ -133,6 +138,13 @@ pub use io::Error;
 pub use io::ErrorKind;
 pub use core::ParseIntError;
 pub use core::ParseFloatError;
+pub use core::Utf8Error;
+
+// v2.5 uninitialized storage and C string interop.
+pub use mem::MaybeUninit;
+pub use cstring::CString;
+pub use cstring::NulError;
+pub use cstr::CStr;
 
 // Text input and output.
 pub use io::read_line;

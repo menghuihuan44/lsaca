@@ -47,8 +47,12 @@ later release.
 | `From` conversions | `?` converts through a user `impl From<Found> for Expected`; there is no blanket `From<T> for T`, no `Into`, no `Try` and no `From<&str> for String`; `Error::source` has a default body and nothing calls it automatically | Write the `impl From` for each error pair you rely on |
 | Formatter | `lsaca fmt` normalises indentation, trailing whitespace, blank-line runs and line endings. It does not reflow or merge lines and does not change token spacing inside a line; `--stdout` works on a single file only, and a file or package with a syntax error is left untouched | Format a package directory (it discovers `lsaca.toml`) or a file; keep hand-written line breaks |
 | Integer types | There are no `i128`/`u128` types, and their literal suffixes are rejected while lexing; an unsuffixed integer literal is `i32`, so a value outside that range needs a suffix or an annotation (a suffixed literal that does not fit its type is `E0080`) | Write `1i64` or annotate the binding; use `i64`/`u64` for very large values |
-| Extern functions | `extern fn` declarations are accepted only in the `std` crate (user code is `E0001`) and are not first-class values (`E0425`) | Call the public `std` function or method instead |
-| Standard library status | The `std` crate is implemented module by module in the current release; the [standard library reference](../stdlib/README.md) marks every page *implemented* or *planned*. Remaining gaps in 2.4.0: `net` has TCP and UDP but no TLS, Unix-domain sockets, dedicated DNS lookup API or nonblocking mode; `time` has the clocks, `Duration`, `Instant` and `SystemTime` but no time-zone database; there is no `Ordering` or `FromUtf8Error`; `parse::<T>()` accepts only `i64` and `f64` targets; a few `str`/`Vec` helpers are still planned, and the `From` conversions used by `?` cover only the pairs the library defines. `std::process` has `args`, `exit` and `Command`; `std::net` has `SocketAddr` and `UdpSocket`. `use std::…` imports work, while qualified type names in type position do not resolve (`E0412`) and trait paths in `impl` blocks are rejected (`E0001`, import the trait instead) | Read the module page for what exists in the current release; OS failures return a `Result` and never panic |
+| Extern functions | `extern fn` intrinsics are accepted only in the `std` crate (user code is `E0001`) and are not first-class values (`E0425`). Since 2.5.0 `extern "C"` blocks declare real C functions in any crate, but only the C ABI is accepted: no function pointers, callbacks or variadics, no `#[link]` or extra libraries, and the call itself is unsafe (`E0133`) | Call the public `std` function, or declare the exact C function in an `extern "C"` block inside an unsafe context |
+| Unsafe operations | The unsafe permission covers only raw pointer dereference and assignment, `extern "C"` calls, `MaybeUninit::assume_init`, `CStr::from_ptr`, `CString::from_raw`, and union construction/field access. There is no inline assembly, allocator API, `Box::into_raw`/`Rc` raw interop, or self-referential structure support, and a raw pointer is never ORC-managed | Keep unsafe code at the FFI boundary and put the pointer operations in one small function |
+| FFI boundary | Only FFI-safe types may appear in an `extern "C"` signature (integers, floats, `bool`, `char`, raw pointers, references over FFI-safe types, `()`, `repr(C)` structs and unions); managed values, tuples, enums, `Option`/`Result`, slices, `str` and `CString`/`CStr`/`MaybeUninit` are `E0770`. A `CString` buffer comes from the lsaca allocator, so `CString::from_raw` accepts only pointers from `into_raw`; there is no C-allocator bridge | Pass pointers to plain storage and convert at the boundary; keep the owning value alive for the whole call |
+| C-layout types | `#[repr(C)]` is accepted only on a struct and as a no-op on a union; `repr(packed)`, `repr(align)`, `repr(transparent)` and `repr(C)` enums are `E0771`. A union has C layout but no generics, methods, `Drop`, destructuring patterns, generated equality or formatting (`E0772`/`E0773`) | Use a `repr(C)` struct when you need fields at distinct offsets; use a union only as a C overlay |
+| `MaybeUninit` | The compiler does not track whether the storage is initialized; `assume_init` is unsafe, and dropping an initialized `MaybeUninit` leaks the value instead of dropping it. There is no `zeroed`, `uninit_array` or `transmute` | Initialize exactly once and call `assume_init` on every initialized path, or keep the value in a normal local |
+| Standard library status | The `std` crate is implemented module by module in the current release; the [standard library reference](../stdlib/README.md) marks every page *implemented* or *planned*. Remaining gaps in the current release: `net` has TCP and UDP but no TLS, Unix-domain sockets, dedicated DNS lookup API or nonblocking mode; `time` has the clocks, `Duration`, `Instant` and `SystemTime` but no time-zone database; there is no `Ordering` or `FromUtf8Error`; `parse::<T>()` accepts only `i64` and `f64` targets; a few `str`/`Vec` helpers are still planned, and the `From` conversions used by `?` cover only the pairs the library defines. `std::process` has `args`, `exit` and `Command`; `std::net` has `SocketAddr` and `UdpSocket`; 2.5.0 adds `ptr`, `cstring`, `cstr` and `mem`. `use std::…` imports work, while qualified type names in type position do not resolve (`E0412`) and trait paths in `impl` blocks are rejected (`E0001`, import the trait instead) | Read the module page for what exists in the current release; OS failures return a `Result` and never panic |
 | Generic shapes | No `where` clauses, associated types, const generics, default type parameters, specialization or generic type aliases/constants | Write bounds inline; name the concrete types |
 | Generic checking | Generic bodies are late-checked once per instantiation; a never-used instantiation is never checked and its errors never appear; instantiating more than 128 levels deep is `E0275` | Instantiate the types you rely on; watch the recursion limit |
 | Monomorphization | Each instantiation is its own checked function and C function; generic code is not shared between instantiations | Keep the number of instantiations small |
@@ -91,7 +95,10 @@ The roadmap items that are still open:
   [RFC 0002](../../rfcs/0002-hashmap-entry.md));
 * registry dependencies, git dependencies, workspaces, features, lockfiles and
   Cargo compatibility;
-* user-defined macros and attributes;
+* user-defined macros and attributes other than the C-layout `#[repr(C)]`;
+* the rest of the FFI surface: function pointers and callbacks, variadics,
+  `#[link]` and extra libraries, `repr(packed/align/transparent)`, `repr(C)`
+  enums, inline assembly, allocator APIs and `Box::into_raw`/`Rc` raw interop;
 * threads (2.x is single-threaded by contract; see
   [RFC 0004](../../rfcs/0004-concurrency.md));
 * separate compilation and per-crate incremental compilation;
@@ -111,11 +118,25 @@ The order of work and the frozen release contracts are maintained in
   [RFC 0003](../../rfcs/0003-derive-and-protocols.md) and
   [RFC 0004](../../rfcs/0004-concurrency.md).
 
+The v2.4 release delivered fixed-size array, slice and `@` patterns, break
+values on `loop`, restricted visibility, module aliases, the `HashMap` entry
+idioms, new collection constructors/accessors, the `min`/`max` iterator
+terminals, `process::Command`, `SocketAddr`/`UdpSocket` and formatter package
+mode. The v2.5 release contract adds:
+
+* `unsafe` blocks and `unsafe fn`, raw pointers and the exact unsafe operation
+  list in [Unsafe code and C FFI](32-unsafe-and-ffi.md);
+* `extern "C"` declarations and the FFI-safe type boundary;
+* `#[repr(C)]` structs and C-layout unions;
+* `CString`, `CStr`, `MaybeUninit<T>` and the `ptr`, `cstring`, `cstr` and `mem`
+  modules;
+* the ORC invariants for raw pointers and the FFI boundary.
+
 The v2.3 release delivered borrowed iteration, `Vec::iter_mut`, `HashMap`
 iteration, I/O streams, `PathBuf`/`Path`, Unicode character classification,
 the missing combinators and partial moves (recorded in the delivered list
-below). Later releases track references in aggregates, full lifetimes,
-unsafe/FFI and threads.
+below). Later releases track references in aggregates, full lifetimes and
+threads.
 
 Items already delivered, intentionally no longer on the list:
 
@@ -222,4 +243,10 @@ Items already delivered, intentionally no longer on the list:
   **delivered in 2.4.0**;
 * the compiler-defined protocol and single-threaded concurrency boundaries —
   recorded in [RFC 0003](../../rfcs/0003-derive-and-protocols.md) and
-  [RFC 0004](../../rfcs/0004-concurrency.md) for 2.x.
+  [RFC 0004](../../rfcs/0004-concurrency.md) for 2.x;
+* `unsafe` blocks/functions, raw pointers and the `ptr` module — **delivered in
+  2.5.0**;
+* `extern "C"` declarations, `#[repr(C)]` structs, C-layout unions and the
+  FFI-safe boundary — **delivered in 2.5.0**;
+* `CString`, `CStr`, `MaybeUninit<T>` and the `cstring`/`cstr`/`mem` modules —
+  **delivered in 2.5.0**.

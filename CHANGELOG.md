@@ -8,6 +8,115 @@ Release dates before 2.3 were not recorded in the repository. This file was
 reconstructed on 2026-11-15 from the release documentation; entries describe
 user-visible behaviour, not the internal refactoring history.
 
+## [2.5.0] - 2026-11-28
+
+This release opens the system boundary with a deliberately small unsafe layer and
+a direct C FFI. The safe subset and the ORC memory model are unchanged: unsafe is
+a compile-time permission for the few operations the safe subset cannot express,
+not a second language and not a runtime mode. The scope was frozen in
+[ROADMAP.md](ROADMAP.md), the design is [RFC 0005](rfcs/0005-controlled-unsafe-and-ffi.md),
+and every item has a [STATUS.md](STATUS.md) row.
+
+### Added
+
+- `unsafe { ... }` blocks and `unsafe fn` declarations. An unsafe context is the
+  only place that can dereference or assign through a raw pointer, call an
+  `extern "C"` function, call `MaybeUninit::assume_init`, call
+  `CStr::from_ptr` or `CString::from_raw`, and construct, read or write a union.
+  Violations are E0133 with a note that names the operation. The C backend lowers
+  unsafe syntax to the same statements as safe syntax, so unsafe costs nothing at
+  run time.
+- Raw pointers `*const T` and `*mut T`: Copy, never reference counted or traced by
+  the cycle collector, legal in aggregates, created with `&value as *const T`,
+  `&mut value as *mut T`, integer-to-pointer casts and `std::ptr::null`/`null_mut`.
+  Operations: `is_null`, `addr`, `add` and `sub` (the last two need unsafe), `*p`
+  reads, `*p = value` writes (unsafe) and `==`/`!=` comparisons by address.
+  Pointer-to-pointer, pointer-to-integer and integer-to-pointer casts are allowed.
+  `String::as_ptr`, `Vec::as_ptr` and `Vec::as_mut_ptr` are the FFI accessors.
+- `extern "C" { ... }` declarations of platform C functions. Parameter and return
+  types must be FFI-safe: integers, floats, `bool`, `char`, raw pointers, `&T` and
+  `&mut T` over FFI-safe `T`, `repr(C)` structs and unions by value or pointer,
+  and `()`; everything else is E0770. Calling an extern function requires unsafe
+  (E0133). Code generation binds the real symbol through a compiler-generated
+  declaration with a GCC/Clang asm label, so libc and standard-header declarations
+  do not conflict; the generated project links the C library and libm.
+- `#[repr(C)]` on structs (and as a no-op on unions): declaration order, C
+  alignment and padding, and the C size become part of the language contract.
+  Other placements or arguments are E0771.
+- `union` declarations whose fields overlay at offset 0. Fields are restricted to
+  FFI-safe scalar, pointer, `repr(C)` struct and union types (E0772); a union has
+  no methods, `Drop`, destructuring, equality or formatting (E0773);
+  construction, reads and writes happen in unsafe. Unions pass by value across
+  FFI.
+- `CString`, `CStr` and `MaybeUninit` in the standard library: `CString::new`,
+  `as_ptr`, `into_raw` and unsafe `from_raw`; `CStr::from_ptr`, `to_str` and
+  `len`; `MaybeUninit::uninit`, `write`, `as_mut_ptr` and unsafe `assume_init`
+  with exactly `T`'s size and alignment. `std::ptr::null` and `null_mut` are new.
+- `docs/language/32-unsafe-and-ffi.md` states the safety contract, the FFI-safe
+  type table and the ORC invariants unsafe code must preserve (never retain or
+  release an ORC object by hand, never forge or rely on reference counts, raw
+  pointers never own, managed values never cross the FFI boundary), together with
+  the `ptr`, `cstring`, `cstr` and `mem` standard-library pages.
+- A real FFI acceptance suite in `crates/lsaca/tests/programs/cffi/` that binds
+  libc `strlen`, `strcmp`, `memcmp`, `div` and `getenv` and libm `frexp`,
+  `tgamma` and `erf`, covering a `repr(C)` struct returned by value, out
+  parameters through raw pointers and `MaybeUninit`, `CString`/`CStr` round
+  trips, null pointer handling and a union round trip. It runs in the end-to-end
+  tests, the generated-C checker and the ASan/UBSan CI job; a negative suite pins
+  E0133, E0770, E0771, E0772, E0773 and E0001.
+
+### Changed
+
+- `unsafe` and `union` are now keywords, so they can no longer be identifiers
+  (source breaking, announced in [ROADMAP.md](ROADMAP.md)).
+- `HashSet::union` was renamed `union_with` because `union` became a keyword
+  (source breaking).
+
+### Fixed
+
+- `is_null` compares the address with null instead of testing a cast to `bool`.
+- Pointer-typed values inside aggregates, closures and tuples get the complete
+  generated helper family (copy, release, debug, equality and trace), which fixed
+  135 calls to missing helpers in generated C.
+- `MaybeUninit<T>` works through generic impls and as a mutable-reference target;
+  `assume_init`/`write`/`as_mut_ptr` forward correctly.
+- Writes through `*mut T` no longer require the binding to be declared `mut`.
+- `*const`/`*mut` equality compares addresses.
+- Struct and enum definitions that only appear inside function signatures are
+  registered recursively, fixing unknown-type C errors for `io::ErrorKind`.
+- `#[repr(C)]` unions emit designated initializers, and unions inside aggregates
+  get debug and equality helpers instead of invalid C.
+- Extern declarations no longer collide with libc header declarations on GCC.
+- Union methods, patterns, `Drop`, formatting and equality report E0773 instead
+  of internal errors.
+
+### Testing
+
+1,211 workspace tests (1,035 library unit tests, 22 end-to-end tests over the full
+program corpus including the FFI acceptance suite, 2 module audits, 121
+robustness tests, 1 v2.3, 1 v2.4 and 1 v2.5 feature test and 28 CLI tests), plus
+the 121-check C runtime smoke suite and the FFI acceptance suite under
+AddressSanitizer and UndefinedBehaviorSanitizer.
+
+### Benchmarks
+
+- The official 2.5.0 matrix was rerun on 2026-11-28 on the reference laptop and
+  published in `docs/language/21-benchmarks.md`; the raw run is
+  `benchmarks/results/latest.*` and is frozen in
+  `benchmarks/results/archive/v2.5/`.
+- 14 of the 22 executed workloads run within 1.4x of C, 16 within 1.5x and 12
+  within 1.15x, with a median of 1.14x. Cold single-file builds take
+  0.83-2.76 s (median 1.06 s) and cached rebuilds 140-233 ms (median 176 ms).
+- Absolute medians are not comparable with the 2.4.0 archive because host state
+  moves short workloads; a same-host A/B run of the 2.4.0 and 2.5.0 compilers
+  over fifteen workloads measured a median runtime ratio of 0.906 and a
+  cold-compile median ratio of 0.951 (the C reference itself moved by
+  0.72x-1.19x in that run), so there is no compiler regression. Seven
+  C-normalised ratios moved outside the 10% budget in the official-run
+  comparison and are documented in the benchmark page's regression table.
+- The incremental benchmark guard baseline advances to
+  `benchmarks/results/archive/v2.5/latest.json`.
+
 ## [2.4.0] - 2026-11-27
 
 This release makes the language comfortable for programs bigger than benchmarks.

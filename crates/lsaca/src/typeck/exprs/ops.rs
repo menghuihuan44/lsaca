@@ -270,6 +270,16 @@ impl<'a> Checker<'a> {
         let left = self.infer.resolve(lhs_ty);
         let right = self.infer.resolve(rhs_ty);
         let hop = Self::hop_of(op);
+        // Raw pointer equality compares addresses and is always safe, whatever
+        // the pointee or its mutability. Keep both operands at their own types
+        // instead of unifying them: *const T and *mut T are distinct types and
+        // a pointer comparison never writes through either side.
+        if matches!(op, AstBinaryOp::Eq | AstBinaryOp::Ne)
+            && matches!(&left, ITy::Ptr { .. })
+            && matches!(&right, ITy::Ptr { .. })
+        {
+            return (hop, ITy::bool_());
+        }
         // String concatenation has its own rule: String + &str is allowed and
         // yields String, while String + String (and String + anything else)
         // does not exist. A &str right-hand side never unifies with String, so
@@ -355,7 +365,20 @@ impl<'a> Checker<'a> {
                 // referent), Vec, Option, Result, tuples, user structs/enums,
                 // HashMap and Box (compare the payload). Rc<T> compares by
                 // identity; function values stay unsupported (E0369).
-                if self.is_general_var(&unified) {
+                if let Some(union_id) = self.union_behind_refs(&unified) {
+                    let union_name = self.union_name(union_id);
+                    self.error_code_note(
+                        format!(
+                            "union {} cannot be compared with {}",
+                            union_name,
+                            op.symbol()
+                        ),
+                        span,
+                        "E0773",
+                        "unions are plain C value types; compare one field inside unsafe instead"
+                            .to_string(),
+                    );
+                } else if self.is_general_var(&unified) {
                     self.e0282_operands(op, span);
                 } else if !self.equality_supported(&unified) {
                     self.report_operator_error(op, &left, &right, span);
@@ -623,6 +646,29 @@ impl<'a> Checker<'a> {
             (ITy::Char, ITy::Int(_)) => true,
             (ITy::Char, ITy::Float(_)) => true,
             (ITy::Int(IntTy::U8), ITy::Char) => true,
+            // Raw pointer casts (RFC 0005). A reference may become a raw
+            // pointer with the same pointee; a shared reference can only
+            // become a shared pointer, while `&mut` may become either. Raw
+            // pointers convert freely to each other and to an integer, and an
+            // integer turns back into an address.
+            (
+                ITy::Ref {
+                    mutable: from_mutable,
+                    inner: from_inner,
+                },
+                ITy::Ptr {
+                    mutable: target_mutable,
+                    inner: target_inner,
+                },
+            ) => {
+                (*from_mutable || !*target_mutable)
+                    && (**from_inner == **target_inner
+                        || self.is_general_var(from_inner)
+                        || self.is_general_var(target_inner))
+            }
+            (ITy::Ptr { .. }, ITy::Ptr { .. }) => true,
+            (ITy::Ptr { .. }, ITy::Int(_)) => true,
+            (ITy::Int(_), ITy::Ptr { .. }) => true,
             (left, right) => left == right,
         }
     }

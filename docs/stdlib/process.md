@@ -1,6 +1,6 @@
 # process: arguments, exit and child commands
 
-**Status in 2.4.0.** Implemented. `args`, `exit` and the command types are
+**Status in 2.5.0.** Implemented. `args`, `exit` and the command types are
 defined in `stdlib/src/process.ls`. `args()` and `exit(code)` are re-exported
 from the crate root, so they keep working unqualified; the command types are
 named through the module, as in `std::process::Command`.
@@ -84,7 +84,7 @@ On POSIX a child killed by a signal reports `128 + signal` as its code; on
 Windows `code` is the child's 32-bit exit code. A Windows command line is
 Unicode, while POSIX passes argument bytes through as UTF-8.
 
-## Limits in 2.4.0
+## Limits in 2.5.0
 
 There is no `spawn`, no separate `wait`, no way to write standard input, no pipe
 or signal API, no environment clearing, and no asynchronous command API.

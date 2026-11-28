@@ -272,7 +272,7 @@ does not allocate. In the generated C project an array type is a struct wrapper
 around a C array of the element type, so an array by value and an array field
 behave like any other aggregate.
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 * Arrays are not iterable by value, have no `.iter()` or `.iter_mut()` method,
   and there is no array pattern syntax: `let [a, b] = [1, 2];` and patterns

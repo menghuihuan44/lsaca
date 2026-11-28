@@ -165,7 +165,7 @@ and a missing colon is
 targets a `while` or `for` loop is `E0571`, even when the loop is labelled;
 `continue value;` is `E0308`.
 
-## Known limitations in 2.4.0
+## Known limitations in 2.5.0
 
 * A value on `break` is only meaningful for `loop`; `while` and `for` still have
   type `()`, and `break value` in them is `E0571`.

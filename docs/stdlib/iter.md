@@ -1,6 +1,6 @@
 # iter: iterators and adapters
 
-**Status in 2.4.0.** Implemented. `Iterator<T>`, the adapters and the terminal
+**Status in 2.5.0.** Implemented. `Iterator<T>`, the adapters and the terminal
 operations live in `stdlib/src/iter.ls` (`std::iter`) and are re-exported
 through the prelude, so they need no import. Version 2.3.0 added borrowed
 iteration (`iter`, `iter_mut`, `into_iter`, slice iterators), the `rev` and

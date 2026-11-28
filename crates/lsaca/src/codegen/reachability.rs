@@ -359,6 +359,7 @@ fn scan_expr(expr: &HExpr, marks: &mut Marks) {
                 scan_expr(field, marks);
             }
         }
+        HExprKind::UnionLit { value, .. } => scan_expr(value, marks),
         HExprKind::Tuple(elems) | HExprKind::VecLit { elems } | HExprKind::Array { elems } => {
             for elem in elems {
                 scan_expr(elem, marks);

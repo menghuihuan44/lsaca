@@ -95,7 +95,7 @@ The following words are reserved and cannot be used as identifiers:
 fn     let    mut    const   struct  enum    impl    type    trait
 if     else   match  while   loop    for     in      return
 break  continue true   false   as      self    Self    pub     move
-mod    use    crate  super   dyn     extern
+mod    use    crate  super   dyn     extern  unsafe  union
 ```
 
 Two of them are context-sensitive in a useful way: `self` and `Self` are
@@ -106,9 +106,28 @@ patterns and `use` trees). `mod` and `use` start item declarations since 1.7.0,
 and `pub` is a visibility modifier (see [Program structure](02-program-structure.md)
 and [Modules](23-modules.md)). Two keywords were added in 2.0.0: `dyn` introduces
 a trait object type (`dyn Greet`), and `extern` introduces an extern function
-declaration (`extern fn …;`). `str` is a primitive type name, not a keyword; it
-is only meaningful as a type, and `[T]` is a type form built from square
-brackets (see [Slices and str](26-slices-and-str.md)).
+declaration (`extern fn …;`) and, since 2.5.0, an `extern "C"` declaration
+block. Two more were added in 2.5.0: `unsafe` introduces an unsafe block
+(`unsafe { … }`) or an unsafe function (`unsafe fn`), and `union` introduces a
+C-layout union declaration. Because they are reserved, `unsafe` and `union` can
+no longer be used as identifiers; code that used either as a name is a syntax
+error and needs a rename. `str` is a primitive type name, not a keyword; it is
+only meaningful as a type, and `[T]` is a type form built from square brackets
+(see [Slices and str](26-slices-and-str.md)).
+
+## Attributes
+
+There is exactly one attribute: `#[repr(C)]`. The tokens are `#`, `[`, the
+identifier `repr`, `(`, the identifier `C`, `)` and `]`, with no whitespace
+required. Attributes are written before the item they apply to and are accepted
+only on a `struct` declaration (where they select C layout) and on a `union`
+declaration (where C layout is already the only layout, so the attribute is a
+readability no-op), as in `#[repr(C)] struct Pair { first: i32, second: i32 }`
+or a union declared with `#[repr(C)]`. Any other attribute name, argument or
+placement is `E0771`; for example,
+`#[repr(packed)]` and `#[repr(C)]` on a function are both rejected. There are no
+user-defined attributes, derive attributes or `#[link]`. See
+[Unsafe code and C FFI](32-unsafe-and-ffi.md#reprc-structs).
 
 ## Comments
 

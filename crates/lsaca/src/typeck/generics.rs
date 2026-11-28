@@ -432,6 +432,12 @@ impl<'a> Checker<'a> {
             ITy::Array(inner, len) => format!("Arr{}_{}", len, self.mangle_ty(&inner)),
             ITy::Rc(inner) => format!("Rc_{}", self.mangle_ty(&inner)),
             ITy::Box(inner) => format!("Box_{}", self.mangle_ty(&inner)),
+            ITy::MaybeUninit(inner) => format!("MaybeUninit_{}", self.mangle_ty(&inner)),
+            ITy::Ptr { mutable, inner } => {
+                let prefix = if mutable { "PtrMut" } else { "PtrConst" };
+                format!("{}_{}", prefix, self.mangle_ty(&inner))
+            }
+            ITy::Union(id) => format!("Union{}", id),
             ITy::Option(inner) => format!("Opt_{}", self.mangle_ty(&inner)),
             ITy::Result(ok, err) => format!("Res_{}_{}", self.mangle_ty(&ok), self.mangle_ty(&err)),
             ITy::HashMap(key, value) => {
@@ -605,6 +611,7 @@ impl<'a> Checker<'a> {
             unit: matches!(def.decl.kind, crate::ast::StructKind::Unit),
             fields: Vec::new(),
             fields_resolved: false,
+            repr_c: def.decl.repr_c,
         });
         self.drop_structs.push(None);
         if let Some(def) = self.generic_structs.get_mut(def_id) {
@@ -1154,6 +1161,8 @@ impl<'a> Checker<'a> {
             instantiation_depth: depth,
             owner: owner_key,
             self_kind: def.decl.self_kind,
+            extern_abi: None,
+            is_unsafe: def.decl.is_unsafe || super::items::intrinsic_is_unsafe(&def.decl.name),
             sig: Some(sig),
             checked: None,
             param_cnames,
@@ -1390,6 +1399,13 @@ impl<'a> Checker<'a> {
             return true;
         }
         match pattern {
+            TypeExpr::Ptr { inner, .. } => match &actual_resolved {
+                ITy::Ptr {
+                    inner: actual_inner,
+                    ..
+                } => self.infer_args_from_ty(inner, actual_inner, env, report_span),
+                _ => false,
+            },
             TypeExpr::Path {
                 name,
                 name_span,
@@ -1406,18 +1422,20 @@ impl<'a> Checker<'a> {
                     return true;
                 }
                 match name.as_str() {
-                    "Vec" | "Rc" | "Box" | "Option" => {
+                    "Vec" | "Rc" | "Box" | "Option" | "MaybeUninit" => {
                         let actual_inner = match (&actual_resolved, name.as_str()) {
                             (ITy::Vec(inner), "Vec") => (**inner).clone(),
                             (ITy::Rc(inner), "Rc") => (**inner).clone(),
                             (ITy::Box(inner), "Box") => (**inner).clone(),
                             (ITy::Option(inner), "Option") => (**inner).clone(),
+                            (ITy::MaybeUninit(inner), "MaybeUninit") => (**inner).clone(),
                             (ITy::Var(_), _) => {
                                 let inner = self.infer.fresh_var();
                                 let outer = match name.as_str() {
                                     "Vec" => ITy::vec(inner.clone()),
                                     "Rc" => ITy::rc(inner.clone()),
                                     "Box" => ITy::box_(inner.clone()),
+                                    "MaybeUninit" => ITy::maybe_uninit(inner.clone()),
                                     _ => ITy::option(inner.clone()),
                                 };
                                 let _ = self.infer.unify(&actual_resolved, &outer);

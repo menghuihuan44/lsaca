@@ -217,6 +217,13 @@ pub enum Ty {
     /// reference cycle by itself. Boxes are managed allocations so the cycle
     /// collector can trace through them.
     Box(Box<Ty>),
+    /// Uninitialized storage for one value of the payload type: `MaybeUninit<T>`.
+    ///
+    /// The C representation is identical to T (same size, same alignment) plus
+    /// no extra tag. Reading through `assume_init` requires an unsafe context.
+    /// The wrapper never runs a destructor, so an initialized value that is
+    /// abandoned without `assume_init` is a documented leak, not a double free.
+    MaybeUninit(Box<Ty>),
     /// Builtin optional value, monomorphized in generated code.
     Option(Box<Ty>),
     /// Builtin result value, monomorphized in generated code.
@@ -233,6 +240,16 @@ pub enum Ty {
     /// traffic and are trivially copyable. The borrow checker guarantees that
     /// the referent outlives every live reference.
     Ref {
+        mutable: bool,
+        inner: Box<Ty>,
+    },
+    /// A raw pointer type: `*const T` or `*mut T`.
+    ///
+    /// Raw pointers are Copy scalars with no reference counting, no ownership
+    /// and no lifetime. They are never traced by the cycle collector, they may
+    /// be stored in aggregates, and even pointer fields make a value Copy.
+    /// Dereferencing one is unchecked and requires an unsafe context.
+    Ptr {
         mutable: bool,
         inner: Box<Ty>,
     },
@@ -253,6 +270,10 @@ pub enum Ty {
     Struct(usize),
     /// A user enum, referenced by index into the HIR enum table.
     Enum(usize),
+    /// A user union, referenced by index into the HIR union table. Union fields
+    /// all start at offset 0; the size and alignment are those of the largest
+    /// field. Unions never have a destructor and are always bitwise copyable.
+    Union(usize),
 }
 
 impl Ty {
@@ -488,6 +509,24 @@ impl Ty {
         matches!(self, Ty::Ref { .. })
     }
 
+    /// True for raw pointer types `*const T` and `*mut T`.
+    pub fn is_ptr(&self) -> bool {
+        matches!(self, Ty::Ptr { .. })
+    }
+
+    /// The pointee type of a raw pointer type.
+    pub fn ptr_inner(&self) -> Option<&Ty> {
+        match self {
+            Ty::Ptr { inner, .. } => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// True for `MaybeUninit<T>`.
+    pub fn is_maybe_uninit(&self) -> bool {
+        matches!(self, Ty::MaybeUninit(_))
+    }
+
     pub fn is_ref_mut(&self) -> bool {
         matches!(self, Ty::Ref { mutable: true, .. })
     }
@@ -506,6 +545,14 @@ impl Ty {
         match self {
             Ty::Unit | Ty::Bool | Ty::Char | Ty::Int(_) | Ty::Float(_) => true,
             Ty::Ref { .. } => true,
+            // A raw pointer is one machine word: no ownership, no cleanup.
+            Ty::Ptr { .. } => true,
+            // MaybeUninit<T> is raw storage: copying it copies bytes and never
+            // retains, releases or runs a destructor.
+            Ty::MaybeUninit(_) => true,
+            // Union fields are FFI-safe scalars, pointers, repr(C) structs or
+            // other unions, so every union value is a plain byte image.
+            Ty::Union(_) => true,
             // Slices, str and trait objects are fat values: a plain C copy is
             // enough, but they are unsized and only exist behind references.
             Ty::Slice(_) | Ty::Str | Ty::Dyn(_) => true,
@@ -534,6 +581,7 @@ impl Ty {
                 | Ty::Float(_)
                 | Ty::Fn(_, _)
                 | Ty::Ref { .. }
+                | Ty::Ptr { .. }
         )
     }
 
@@ -595,9 +643,18 @@ impl fmt::Display for Ty {
             Ty::Slice(elem) => write!(f, "[{}]", elem),
             Ty::Array(elem, len) => write!(f, "[{}; {}]", elem, len),
             Ty::Str => write!(f, "str"),
+            Ty::Ptr { mutable, inner } => {
+                if *mutable {
+                    write!(f, "*mut {}", inner)
+                } else {
+                    write!(f, "*const {}", inner)
+                }
+            }
+            Ty::MaybeUninit(inner) => write!(f, "MaybeUninit<{}>", inner),
             Ty::Dyn(id) => write!(f, "dyn#{}", id),
             Ty::Struct(id) => write!(f, "struct#{}", id),
             Ty::Enum(id) => write!(f, "enum#{}", id),
+            Ty::Union(id) => write!(f, "union#{}", id),
         }
     }
 }

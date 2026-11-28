@@ -1,7 +1,9 @@
 # hash_set: HashSet<T>
 
-**Status in 2.4.0.** Implemented in `stdlib/src/collections.ls`. Version 2.3.0
+**Status in 2.5.0.** Implemented in `stdlib/src/collections.ls`. Version 2.3.0
 added `HashSet::from(Vec<T>)`; version 2.4.0 adds `HashSet::extend(Vec<T>)`.
+Version 2.5.0 renames the set-algebra method `union` to `union_with`, because
+`union` is now a reserved keyword.
 
 `HashSet<T>` is an insertion-ordered set: it stores its keys in a
 `HashMap<T, ()>` for membership and additionally keeps a `Vec<T>` of the keys in
@@ -24,7 +26,7 @@ internal slot order.
 | `extend` | `(&mut self, Vec<T>)` | inserts every value, keeping the first occurrence of each (2.4.0) |
 | `elements` | `(&self) -> Vec<T>` | the values in insertion order |
 | `to_vec` | `(&self) -> Vec<T>` | the same vector as `elements` |
-| `union` | `(&self, &HashSet<T>) -> HashSet<T>` | values in either set |
+| `union_with` | `(&self, &HashSet<T>) -> HashSet<T>` | values in either set |
 | `intersection` | `(&self, &HashSet<T>) -> HashSet<T>` | values in both sets |
 | `difference` | `(&self, &HashSet<T>) -> HashSet<T>` | values in this set but not the other |
 | `subset` | `(&self, &HashSet<T>) -> bool` | whether every value of this set is in the other |
@@ -44,7 +46,7 @@ internal slot order.
   already present is ignored, so the insertion order of the set is unchanged.
 * Lengths are `usize` since 2.1.0.
 
-## Limitations in 2.4.0
+## Limitations in 2.5.0
 
 There is no `for` loop over a `HashSet` and no borrowing iterator yet: read the
 values with `elements()` or `to_vec()` (both clone) and iterate the resulting

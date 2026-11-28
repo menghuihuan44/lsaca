@@ -22,6 +22,7 @@ pub type ModuleId = usize;
 pub enum DefRef {
     Struct(usize),
     Enum(usize),
+    Union(usize),
     Alias(usize),
     Trait(usize),
     GenericStruct(usize),
@@ -38,6 +39,7 @@ impl DefRef {
         match self {
             DefRef::Struct(_) => "struct",
             DefRef::Enum(_) => "enum",
+            DefRef::Union(_) => "union",
             DefRef::Alias(_) => "type alias",
             DefRef::Trait(_) => "trait",
             DefRef::GenericStruct(_) => "struct",
@@ -71,6 +73,7 @@ impl DefRef {
 pub enum BuiltinTypeKind {
     Vec,
     String,
+    MaybeUninit,
     Option,
     Result,
     Rc,
@@ -85,6 +88,7 @@ impl BuiltinTypeKind {
         match self {
             BuiltinTypeKind::Vec => "Vec",
             BuiltinTypeKind::String => "String",
+            BuiltinTypeKind::MaybeUninit => "MaybeUninit",
             BuiltinTypeKind::Option => "Option",
             BuiltinTypeKind::Result => "Result",
             BuiltinTypeKind::Rc => "Rc",
@@ -100,7 +104,8 @@ impl BuiltinTypeKind {
             BuiltinTypeKind::Vec
             | BuiltinTypeKind::Option
             | BuiltinTypeKind::Rc
-            | BuiltinTypeKind::Box => 1,
+            | BuiltinTypeKind::Box
+            | BuiltinTypeKind::MaybeUninit => 1,
             BuiltinTypeKind::Result | BuiltinTypeKind::HashMap => 2,
             BuiltinTypeKind::String | BuiltinTypeKind::Char => 0,
         }
@@ -112,6 +117,7 @@ impl BuiltinTypeKind {
         match name {
             "Vec" => Some(BuiltinTypeKind::Vec),
             "String" => Some(BuiltinTypeKind::String),
+            "MaybeUninit" => Some(BuiltinTypeKind::MaybeUninit),
             "Option" => Some(BuiltinTypeKind::Option),
             "Result" => Some(BuiltinTypeKind::Result),
             "Rc" => Some(BuiltinTypeKind::Rc),
@@ -130,6 +136,7 @@ impl BuiltinTypeKind {
         Some(match self {
             BuiltinTypeKind::Vec => ITy::vec(args[0].clone()),
             BuiltinTypeKind::String => ITy::string(),
+            BuiltinTypeKind::MaybeUninit => ITy::maybe_uninit(args[0].clone()),
             BuiltinTypeKind::Option => ITy::option(args[0].clone()),
             BuiltinTypeKind::Result => ITy::result(args[0].clone(), args[1].clone()),
             BuiltinTypeKind::Rc => ITy::rc(args[0].clone()),
@@ -542,6 +549,7 @@ impl<'a> Checker<'a> {
         match binding.def {
             DefRef::Struct(id) => Some(self.structs.get(id)?.name.clone()),
             DefRef::Enum(id) => Some(self.enums.get(id)?.name.clone()),
+            DefRef::Union(id) => Some(self.unions.get(id)?.name.clone()),
             DefRef::Alias(id) => Some(self.aliases.get(id)?.name.clone()),
             DefRef::Trait(id) => Some(self.traits.get(id)?.name.clone()),
             DefRef::GenericStruct(id) => Some(self.generic_structs.get(id)?.name.clone()),
@@ -670,6 +678,13 @@ impl<'a> Checker<'a> {
     pub fn lookup_enum(&self, name: &str) -> Option<usize> {
         match self.lookup_type_scoped(name)?.def {
             DefRef::Enum(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub fn lookup_union(&self, name: &str) -> Option<usize> {
+        match self.lookup_type_scoped(name)?.def {
+            DefRef::Union(id) => Some(id),
             _ => None,
         }
     }

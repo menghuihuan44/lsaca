@@ -24,6 +24,8 @@ pub enum ITy {
     Array(Box<ITy>, usize),
     Rc(Box<ITy>),
     Box(Box<ITy>),
+    /// Uninitialized storage for one value of the payload type.
+    MaybeUninit(Box<ITy>),
     Option(Box<ITy>),
     Result(Box<ITy>, Box<ITy>),
     HashMap(Box<ITy>, Box<ITy>),
@@ -31,6 +33,11 @@ pub enum ITy {
     Fn(Vec<ITy>, Box<ITy>),
     /// A reference type: &T or &mut T.
     Ref {
+        mutable: bool,
+        inner: Box<ITy>,
+    },
+    /// A raw pointer type: *const T or *mut T. Copy, not traced, no lifetime.
+    Ptr {
         mutable: bool,
         inner: Box<ITy>,
     },
@@ -42,6 +49,8 @@ pub enum ITy {
     Dyn(usize),
     Struct(usize),
     Enum(usize),
+    /// A user union, referenced by index into the union table.
+    Union(usize),
     /// The type of diverging expressions (return, break, continue). It unifies
     /// with every type and is lowered to unit.
     Never,
@@ -95,6 +104,21 @@ impl ITy {
 
     pub fn box_(elem: ITy) -> ITy {
         ITy::Box(Box::new(elem))
+    }
+
+    pub fn maybe_uninit(elem: ITy) -> ITy {
+        ITy::MaybeUninit(Box::new(elem))
+    }
+
+    pub fn ptr(mutable: bool, inner: ITy) -> ITy {
+        ITy::Ptr {
+            mutable,
+            inner: Box::new(inner),
+        }
+    }
+
+    pub fn union_(id: usize) -> ITy {
+        ITy::Union(id)
     }
 
     pub fn option(elem: ITy) -> ITy {
@@ -159,6 +183,7 @@ impl ITy {
             Ty::Array(elem, len) => ITy::Array(Box::new(ITy::from_ty(elem)), *len),
             Ty::Rc(elem) => ITy::rc(ITy::from_ty(elem)),
             Ty::Box(elem) => ITy::box_(ITy::from_ty(elem)),
+            Ty::MaybeUninit(elem) => ITy::maybe_uninit(ITy::from_ty(elem)),
             Ty::Option(elem) => ITy::option(ITy::from_ty(elem)),
             Ty::Result(ok, err) => ITy::result(ITy::from_ty(ok), ITy::from_ty(err)),
             Ty::HashMap(key, value) => ITy::hash_map(ITy::from_ty(key), ITy::from_ty(value)),
@@ -170,11 +195,13 @@ impl ITy {
                 mutable: *mutable,
                 inner: Box::new(ITy::from_ty(inner)),
             },
+            Ty::Ptr { mutable, inner } => ITy::ptr(*mutable, ITy::from_ty(inner)),
             Ty::Slice(elem) => ITy::slice(ITy::from_ty(elem)),
             Ty::Str => ITy::Str,
             Ty::Dyn(trait_id) => ITy::Dyn(*trait_id),
             Ty::Struct(id) => ITy::Struct(*id),
             Ty::Enum(id) => ITy::Enum(*id),
+            Ty::Union(id) => ITy::union_(*id),
         }
     }
 }
@@ -322,11 +349,16 @@ impl Infer {
                 mutable: *mutable,
                 inner: Box::new(self.resolve(inner)),
             },
+            ITy::Ptr { mutable, inner } => ITy::Ptr {
+                mutable: *mutable,
+                inner: Box::new(self.resolve(inner)),
+            },
             ITy::Slice(elem) => ITy::slice(self.resolve(elem)),
             ITy::Vec(elem) => ITy::vec(self.resolve(elem)),
             ITy::Array(elem, len) => ITy::Array(Box::new(self.resolve(elem)), *len),
             ITy::Rc(elem) => ITy::rc(self.resolve(elem)),
             ITy::Box(elem) => ITy::box_(self.resolve(elem)),
+            ITy::MaybeUninit(elem) => ITy::maybe_uninit(self.resolve(elem)),
             ITy::Option(elem) => ITy::option(self.resolve(elem)),
             ITy::Result(ok, err) => ITy::result(self.resolve(ok), self.resolve(err)),
             ITy::HashMap(key, value) => ITy::hash_map(self.resolve(key), self.resolve(value)),
@@ -405,12 +437,23 @@ impl Infer {
                     inner: b_inner,
                 },
             ) if a_mut == b_mut => self.unify_resolved(*a_inner, *b_inner),
+            (
+                ITy::Ptr {
+                    mutable: a_mut,
+                    inner: a_inner,
+                },
+                ITy::Ptr {
+                    mutable: b_mut,
+                    inner: b_inner,
+                },
+            ) if a_mut == b_mut => self.unify_resolved(*a_inner, *b_inner),
             (ITy::Vec(a), ITy::Vec(b)) => self.unify_resolved(*a, *b),
             (ITy::Array(a, a_len), ITy::Array(b, b_len)) if a_len == b_len => {
                 self.unify_resolved(*a, *b)
             }
             (ITy::Rc(a), ITy::Rc(b)) => self.unify_resolved(*a, *b),
             (ITy::Box(a), ITy::Box(b)) => self.unify_resolved(*a, *b),
+            (ITy::MaybeUninit(a), ITy::MaybeUninit(b)) => self.unify_resolved(*a, *b),
             (ITy::Option(a), ITy::Option(b)) => self.unify_resolved(*a, *b),
             (ITy::Result(a_ok, a_err), ITy::Result(b_ok, b_err)) => {
                 self.unify_resolved(*a_ok, *b_ok)?;
@@ -443,6 +486,7 @@ impl Infer {
             (ITy::Dyn(a), ITy::Dyn(b)) if a == b => Ok(()),
             (ITy::Struct(a), ITy::Struct(b)) if a == b => Ok(()),
             (ITy::Enum(a), ITy::Enum(b)) if a == b => Ok(()),
+            (ITy::Union(a), ITy::Union(b)) if a == b => Ok(()),
             _ => Err(()),
         }
     }
@@ -494,10 +538,12 @@ impl Infer {
                     None => false,
                 }
             }
-            ITy::Ref { inner, .. } => self.occurs(id, inner),
-            ITy::Vec(elem) | ITy::Rc(elem) | ITy::Box(elem) | ITy::Option(elem) => {
-                self.occurs(id, elem)
-            }
+            ITy::Ref { inner, .. } | ITy::Ptr { inner, .. } => self.occurs(id, inner),
+            ITy::Vec(elem)
+            | ITy::Rc(elem)
+            | ITy::Box(elem)
+            | ITy::MaybeUninit(elem)
+            | ITy::Option(elem) => self.occurs(id, elem),
             ITy::Array(elem, _) => self.occurs(id, elem),
             ITy::Result(ok, err) => self.occurs(id, ok) || self.occurs(id, err),
             ITy::HashMap(key, value) => self.occurs(id, key) || self.occurs(id, value),
@@ -506,7 +552,7 @@ impl Infer {
                 params.iter().any(|param| self.occurs(id, param)) || self.occurs(id, ret)
             }
             ITy::Slice(elem) => self.occurs(id, elem),
-            ITy::Never | ITy::Str | ITy::Dyn(_) => false,
+            ITy::Never | ITy::Str | ITy::Dyn(_) | ITy::Union(_) => false,
             _ => false,
         }
     }
@@ -553,6 +599,7 @@ impl Infer {
             ITy::Array(elem, len) => Ok(Ty::array(self.finalize_resolved(elem)?, *len)),
             ITy::Rc(elem) => Ok(Ty::rc(self.finalize_resolved(elem)?)),
             ITy::Box(elem) => Ok(Ty::box_(self.finalize_resolved(elem)?)),
+            ITy::MaybeUninit(elem) => Ok(Ty::MaybeUninit(Box::new(self.finalize_resolved(elem)?))),
             ITy::Option(elem) => Ok(Ty::option(self.finalize_resolved(elem)?)),
             ITy::Result(ok, err) => Ok(Ty::result(
                 self.finalize_resolved(ok)?,
@@ -581,7 +628,12 @@ impl Infer {
             ITy::Dyn(trait_id) => Ok(Ty::Dyn(*trait_id)),
             ITy::Struct(id) => Ok(Ty::Struct(*id)),
             ITy::Enum(id) => Ok(Ty::Enum(*id)),
+            ITy::Union(id) => Ok(Ty::Union(*id)),
             ITy::Ref { mutable, inner } => Ok(Ty::Ref {
+                mutable: *mutable,
+                inner: Box::new(self.finalize_resolved(inner)?),
+            }),
+            ITy::Ptr { mutable, inner } => Ok(Ty::Ptr {
                 mutable: *mutable,
                 inner: Box::new(self.finalize_resolved(inner)?),
             }),

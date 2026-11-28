@@ -100,7 +100,15 @@ fn omits_union_for_payload_free_enums() {
     let (main_c, _) = generate_source("flags", UNIT_ENUM, true);
     assert!(main_c.contains("struct LsFlag {"));
     assert!(main_c.contains("int32_t tag;"));
-    assert!(!main_c.contains("union {"));
+    // Other reachable standard-library types (for example io::Error results)
+    // carry payload unions; only the enum's own definition must stay tag-only.
+    let start = main_c.find("struct LsFlag {").unwrap();
+    let end = start + main_c[start..].find("};\n").unwrap();
+    let definition = &main_c[start..end];
+    assert!(
+        !definition.contains("union {"),
+        "a payload-free enum must be a tag-only struct:\n{definition}"
+    );
 }
 
 const VEC_STRING: &str = "fn main() {\n    let mut names: Vec<String> = Vec::new();\n    names.push(\"a\");\n    println!(\"{}\", names.len());\n}\n";
@@ -2218,6 +2226,8 @@ fn division_program(name: &str, span: crate::span::Span) -> crate::hir::Program 
         ret: Ty::unit(),
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: HBlock {
             stmts: vec![HStmt::Let {
                 pat,
@@ -2233,6 +2243,7 @@ fn division_program(name: &str, span: crate::span::Span) -> crate::hir::Program 
         name: name.to_string(),
         structs: Vec::new(),
         enums: Vec::new(),
+        unions: Vec::new(),
         fns: vec![main],
         consts: Vec::new(),
         closures: Vec::new(),
@@ -2330,6 +2341,8 @@ fn checked_function(
         ret,
         self_kind: None,
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body,
         span: crate::span::Span::empty(0),
     }
@@ -2349,6 +2362,8 @@ fn intrinsic_function(
         ret,
         self_kind: None,
         intrinsic: true,
+        extern_abi: None,
+        is_unsafe: false,
         body: empty_block(),
         span: crate::span::Span::empty(0),
     }
@@ -2360,6 +2375,7 @@ fn program_from(name: &str, fns: Vec<crate::hir::HFn>, main_fn: usize) -> crate:
         name: name.to_string(),
         structs: Vec::new(),
         enums: Vec::new(),
+        unions: Vec::new(),
         fns,
         consts: Vec::new(),
         closures: Vec::new(),
@@ -2727,6 +2743,8 @@ fn expands_standard_library_forwarding_wrappers_at_the_call_site() {
         ret: Ty::i64(),
         self_kind: Some(SelfKind::Ref),
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: HBlock {
             stmts: vec![HStmt::Expr(returned)],
             tail: None,
@@ -2869,6 +2887,8 @@ fn phase_b_method(
         ret,
         self_kind: Some(self_kind),
         intrinsic: false,
+        extern_abi: None,
+        is_unsafe: false,
         body: empty_block(),
         span: Span::empty(0),
     }

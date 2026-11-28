@@ -592,6 +592,40 @@ parameters and returns `()`. See
 messages when a program violates this. `main` is an ordinary function apart from
 those restrictions: it can call anything and declare nested items.
 
+## Unsafe functions
+
+An `unsafe fn` is an ordinary function with an extra permission: its body may
+perform unsafe operations without wrapping each one in an `unsafe` block. The
+declaration is written `unsafe fn name(...)` (after any visibility), and calling
+it still requires an unsafe context, because the caller shares responsibility for
+the contract:
+
+```ls
+unsafe fn double(n: i64) -> i64 {
+    n * 2
+}
+
+fn main() {
+    let doubled = unsafe { double(21) };
+    println!("{}", doubled);
+}
+```
+
+Output:
+```text
+42
+```
+
+The unsafety is a compile-time permission, not a runtime check or a calling
+convention: generated C calls the function directly and no flag is consulted.
+An `unsafe fn` may be a free function or an inherent impl method, optionally
+with visibility (`pub unsafe fn`), and an `unsafe fn` may call another without
+an inner block. A trait method cannot be `unsafe fn` in 2.5.0: trait dispatch
+cannot require an unsafe caller context at the call site. Use an `unsafe` block
+inside a safe trait method instead. Calling an `unsafe fn` from safe code is
+`E0133`, with a note naming the unsafe operation. See [Unsafe code and C
+FFI](32-unsafe-and-ffi.md#what-unsafe-means).
+
 ## Extern functions
 
 Version 2.0 adds one function declaration form that has no body: `extern fn`.
@@ -612,6 +646,29 @@ is called by name like any other function. The standard library wraps every
 intrinsic in ordinary public functions and methods, so user code never calls an
 `extern fn` directly; see [The standard library](15-standard-library.md).
 
+This std-only intrinsic form is *not* the C FFI surface. Since 2.5.0 any crate
+can declare real C functions in an `extern "C" { … }` block:
+
+```text
+extern "C" {
+    fn strlen(text: *const u8) -> usize;
+    pub fn div(numerator: i32, denominator: i32) -> DivT;
+}
+```
+
+The block may carry a visibility of its own, and each declaration may be
+`pub`. A declaration has no body, no generic parameters and no `self`
+receiver; only the `"C"` ABI is accepted (another string, a missing ABI or a
+malformed block is `E0001`), and the parameter and return types must be
+FFI-safe (`E0770`). The generated C contains the exact C prototype and calls
+the symbol directly; the C library and libm are linked, and there is no
+`#[link]` attribute or extra-library mechanism. Calling an `extern "C"`
+function is an unsafe operation (`E0133`), because the compiler cannot verify
+the C side of the contract. Function pointers, callbacks and variadic
+declarations are not part of the surface. The safety contract, the FFI-safe
+type table and complete examples are in [Unsafe code and C
+FFI](32-unsafe-and-ffi.md#extern-c-declarations).
+
 ## What next
 
 * Closures and capture-by-value: [Closures](14-closures.md).
@@ -621,3 +678,5 @@ intrinsic in ordinary public functions and methods, so user code never calls an
 * Recursion and control flow: [Statements and control flow](08-statements-and-control-flow.md).
 * Extern declarations, intrinsics and the std crate: [The standard
   library](15-standard-library.md).
+* Unsafe functions, raw pointers and C FFI: [Unsafe code and C
+  FFI](32-unsafe-and-ffi.md).

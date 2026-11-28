@@ -1,6 +1,6 @@
 # hash_map: HashMap<K, V>
 
-**Status in 2.4.0.** `HashMap` exists since 1.5 and is a builtin generic value
+**Status in 2.5.0.** `HashMap` exists since 1.5 and is a builtin generic value
 type; in 2.0.0 its implementation moved into the `std` crate on top of compiler
 intrinsics. Since 2.2.0 `get` and `get_mut` borrow the key and return
 references to the stored value. Version 2.3.0 added borrowed iteration

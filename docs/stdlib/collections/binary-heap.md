@@ -1,6 +1,6 @@
 # binary_heap: BinaryHeap<T>
 
-**Status in 2.4.0.** Implemented in `stdlib/src/collections.ls`. Version 2.4.0
+**Status in 2.5.0.** Implemented in `stdlib/src/collections.ls`. Version 2.4.0
 adds `from` and `to_vec`.
 
 `BinaryHeap<T>` is a maximum heap: the largest value is at the top, and the
@@ -38,7 +38,7 @@ not part of the API contract; use `pop` to read values from largest to smallest.
   yields the values from largest to smallest.
 * Lengths are `usize` since 2.1.0.
 
-## Limitations in 2.4.0
+## Limitations in 2.5.0
 
 There is no `for` loop over a `BinaryHeap` yet: read the values with
 `elements()` or `to_vec()` and remember that the order is internal, or `pop` them

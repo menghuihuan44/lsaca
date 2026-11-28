@@ -26,6 +26,10 @@ pub enum Item {
     Trait(TraitDecl),
     Mod(ModDecl),
     Use(UseDecl),
+    /// A union declaration with C layout: every field starts at offset 0.
+    Union(UnionDecl),
+    /// An `extern "C" { ... }` block declaring external functions.
+    ExternBlock(ExternBlock),
 }
 
 impl Item {
@@ -40,6 +44,8 @@ impl Item {
             Item::Trait(item) => item.span,
             Item::Mod(item) => item.span,
             Item::Use(item) => item.span,
+            Item::Union(item) => item.span,
+            Item::ExternBlock(item) => item.span,
         }
     }
 
@@ -53,8 +59,10 @@ impl Item {
             Item::TypeAlias(item) => &item.name,
             Item::Trait(item) => &item.name,
             Item::Mod(item) => &item.name,
-            // Imports introduce several names at once; they have no single name.
-            Item::Use(_) => "",
+            Item::Union(item) => &item.name,
+            // Imports and extern blocks introduce several names at once; they
+            // have no single name.
+            Item::Use(_) | Item::ExternBlock(_) => "",
         }
     }
 }
@@ -277,6 +285,9 @@ pub struct FnDecl {
     /// True for extern fn declarations, which only the standard library may
     /// write. Extern functions have no body and never reach the HIR as bodies.
     pub is_extern: bool,
+    /// True for `unsafe fn` declarations. Calling an unsafe function requires
+    /// an unsafe context; the body may perform unsafe operations directly.
+    pub is_unsafe: bool,
     /// Set when the function is declared inside an impl block.
     pub self_kind: Option<SelfKind>,
     pub span: Span,
@@ -302,6 +313,9 @@ pub struct StructDecl {
     pub name_span: Span,
     pub vis: Visibility,
     pub generics: Vec<GenericParam>,
+    /// True when the declaration is written `#[repr(C)]` and therefore has a
+    /// layout defined by the C ABI; without it the layout is unspecified.
+    pub repr_c: bool,
     pub kind: StructKind,
     pub span: Span,
 }
@@ -349,6 +363,37 @@ pub struct FieldDef {
     /// Parsed for compatibility; fields are private to their module in v1.7.
     pub vis: Visibility,
     pub ty: TypeExpr,
+}
+
+/// A `union` declaration: a C-layout overlay of named fields.
+///
+/// Every field starts at offset 0 and the size and alignment are those of the
+/// largest field. Field types are restricted by the type checker to FFI-safe
+/// scalars, raw pointers, unions and `repr(C)` structs. Constructing, reading
+/// and writing a field requires an unsafe context.
+#[derive(Debug, Clone)]
+pub struct UnionDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub vis: Visibility,
+    /// The fields in declaration order.
+    pub fields: Vec<FieldDef>,
+    pub span: Span,
+}
+
+/// An `extern "C" { ... }` block declaring external functions with no body.
+///
+/// Only the C ABI exists in v2.5. Each declared function is an independent item
+/// for name resolution and code generation; the block is just the syntax that
+/// groups the declarations.
+#[derive(Debug, Clone)]
+pub struct ExternBlock {
+    /// The ABI string as written, for example `C`. Only `"C"` is accepted.
+    pub abi: String,
+    pub abi_span: Span,
+    pub vis: Visibility,
+    pub fns: Vec<FnDecl>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -580,6 +625,10 @@ pub enum ExprKind {
     If(IfExpr),
     Match(MatchExpr),
     Block(Block),
+    /// An unsafe block: the same statements as a normal block, with permission
+    /// to perform unsafe operations. The block value is the expression value and
+    /// nothing changes at runtime.
+    Unsafe(Block),
     Loop {
         label: Option<Label>,
         body: Block,
@@ -985,6 +1034,16 @@ pub enum TypeExpr {
         inner: Box<TypeExpr>,
         span: Span,
     },
+    /// A raw pointer type: `*const T` or `*mut T`.
+    ///
+    /// Raw pointers are Copy, are never reference counted, are not traced by
+    /// the cycle collector and carry no lifetime: keeping the pointee alive is
+    /// the programmer's contract. Dereferencing one requires an unsafe context.
+    Ptr {
+        mutable: bool,
+        inner: Box<TypeExpr>,
+        span: Span,
+    },
     /// A fixed-size array type: [T; N].
     Array {
         elem: Box<TypeExpr>,
@@ -1011,6 +1070,7 @@ impl TypeExpr {
             TypeExpr::Tuple { span, .. } => *span,
             TypeExpr::Fn { span, .. } => *span,
             TypeExpr::Ref { span, .. } => *span,
+            TypeExpr::Ptr { span, .. } => *span,
             TypeExpr::Array { span, .. } => *span,
             TypeExpr::Lifetime(lifetime) => lifetime.span,
             TypeExpr::Dyn(trait_ref) => trait_ref.span,
@@ -1069,6 +1129,13 @@ impl TypeExpr {
                     format!("&{}mut {}", lifetime, inner.describe())
                 } else {
                     format!("&{}{}", lifetime, inner.describe())
+                }
+            }
+            TypeExpr::Ptr { mutable, inner, .. } => {
+                if *mutable {
+                    format!("*mut {}", inner.describe())
+                } else {
+                    format!("*const {}", inner.describe())
                 }
             }
             TypeExpr::Dyn(trait_ref) => {
@@ -1137,6 +1204,8 @@ impl Item {
             Item::Trait(decl) => decl.for_each_span_mut(visit),
             Item::Mod(decl) => decl.for_each_span_mut(visit),
             Item::Use(decl) => decl.for_each_span_mut(visit),
+            Item::Union(decl) => decl.for_each_span_mut(visit),
+            Item::ExternBlock(decl) => decl.for_each_span_mut(visit),
         }
     }
 }
@@ -1259,6 +1328,26 @@ impl FieldDef {
     fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
         visit(&mut self.name_span);
         self.ty.for_each_span_mut(visit);
+    }
+}
+
+impl UnionDecl {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.name_span);
+        visit(&mut self.span);
+        for field in &mut self.fields {
+            field.for_each_span_mut(visit);
+        }
+    }
+}
+
+impl ExternBlock {
+    fn for_each_span_mut(&mut self, visit: &mut dyn FnMut(&mut Span)) {
+        visit(&mut self.abi_span);
+        visit(&mut self.span);
+        for function in &mut self.fns {
+            function.for_each_span_mut(visit);
+        }
     }
 }
 
@@ -1457,6 +1546,7 @@ impl Expr {
             ExprKind::If(if_expr) => if_expr.for_each_span_mut(visit),
             ExprKind::Match(match_expr) => match_expr.for_each_span_mut(visit),
             ExprKind::Block(block) => block.for_each_span_mut(visit),
+            ExprKind::Unsafe(block) => block.for_each_span_mut(visit),
             ExprKind::Loop { label, body } => {
                 if let Some(label) = label {
                     label.for_each_span_mut(visit);
@@ -1739,6 +1829,10 @@ impl TypeExpr {
                 if let Some(lifetime) = lifetime {
                     visit(&mut lifetime.span);
                 }
+                inner.for_each_span_mut(visit);
+            }
+            TypeExpr::Ptr { inner, span, .. } => {
+                visit(span);
                 inner.for_each_span_mut(visit);
             }
             TypeExpr::Array { elem, len, span } => {

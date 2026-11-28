@@ -76,11 +76,586 @@ uintptr_t lsaca_cast_f2i_usize(double value) {
   return (uintptr_t)value;
 }
 
+typedef struct LsDyn0 LsDyn0;
+typedef struct Lsio_ErrorKind Lsio_ErrorKind;
+typedef struct Lsio_Error Lsio_Error;
+typedef struct LsRes_usize_io_Error LsRes_usize_io_Error;
+typedef struct LsSlice_u8 LsSlice_u8;
+typedef struct LsDyn1 LsDyn1;
+typedef struct LsRes_unit_io_Error LsRes_unit_io_Error;
+typedef struct LsDyn2 LsDyn2;
+typedef struct LsRes_u64_io_Error LsRes_u64_io_Error;
+typedef struct LsDyn3 LsDyn3;
+
+typedef struct LsVTable_Read LsVTable_Read;
+typedef struct LsVTable_Write LsVTable_Write;
+typedef struct LsVTable_Seek LsVTable_Seek;
+typedef struct LsVTable_BufRead LsVTable_BufRead;
+
+struct LsDyn0 {
+  void* data;
+  const LsVTable_Read* vtable;
+};
+
+struct Lsio_ErrorKind {
+  int32_t tag;
+};
+
+struct Lsio_Error {
+  Lsio_ErrorKind f_kind;
+  LsString* f_message;
+};
+
+struct LsRes_usize_io_Error {
+  int32_t tag;
+  union {
+    uintptr_t ok;
+    Lsio_Error err;
+  } u;
+};
+
+struct LsSlice_u8 {
+  uint8_t* data;
+  size_t len;
+};
+
+struct LsDyn1 {
+  void* data;
+  const LsVTable_Write* vtable;
+};
+
+struct LsRes_unit_io_Error {
+  int32_t tag;
+  union {
+    LsUnit ok;
+    Lsio_Error err;
+  } u;
+};
+
+struct LsDyn2 {
+  void* data;
+  const LsVTable_Seek* vtable;
+};
+
+struct LsRes_u64_io_Error {
+  int32_t tag;
+  union {
+    uint64_t ok;
+    Lsio_Error err;
+  } u;
+};
+
+struct LsDyn3 {
+  void* data;
+  const LsVTable_BufRead* vtable;
+};
+
+struct LsVTable_Read {
+  void (*drop)(void* data);
+  void* (*clone)(void* data);
+  void (*trace)(void* data, LsTraceVisit visit);
+  LsString* (*debug)(LsString* acc, void* data);
+  LsRes_usize_io_Error (*m0)(void* data, LsSlice_u8);
+};
+struct LsVTable_Write {
+  void (*drop)(void* data);
+  void* (*clone)(void* data);
+  void (*trace)(void* data, LsTraceVisit visit);
+  LsString* (*debug)(LsString* acc, void* data);
+  LsRes_usize_io_Error (*m0)(void* data, LsSlice_u8);
+  LsRes_unit_io_Error (*m1)(void* data);
+  LsRes_unit_io_Error (*m2)(void* data, LsSlice_u8);
+};
+struct LsVTable_Seek {
+  void (*drop)(void* data);
+  void* (*clone)(void* data);
+  void (*trace)(void* data, LsTraceVisit visit);
+  LsString* (*debug)(LsString* acc, void* data);
+  LsRes_u64_io_Error (*m0)(void* data, int64_t, int64_t);
+};
+struct LsVTable_BufRead {
+  void (*drop)(void* data);
+  void* (*clone)(void* data);
+  void (*trace)(void* data, LsTraceVisit visit);
+  LsString* (*debug)(LsString* acc, void* data);
+  LsRes_usize_io_Error (*m0)(void* data, LsString**);
+  LsRes_usize_io_Error (*m1)(void* data, LsString**);
+};
+
 void* lsaca_env_retain(void* env);
 void lsaca_env_release(void* env);
 
+LsString* lsaca_debug_Dyn0(LsString* acc, LsDyn0 v);
+bool lsaca_eq_Dyn0(LsDyn0 a, LsDyn0 b);
+void lsaca_trace_Dyn0(const LsDyn0* value, LsTraceVisit visit);
+LsRes_usize_io_Error lsaca_copy_Res_usize_io_Error(LsRes_usize_io_Error v);
+void lsaca_release_Res_usize_io_Error(LsRes_usize_io_Error v);
+LsString* lsaca_debug_Res_usize_io_Error(LsString* acc, LsRes_usize_io_Error v);
+bool lsaca_eq_Res_usize_io_Error(LsRes_usize_io_Error a, LsRes_usize_io_Error b);
+void lsaca_trace_Res_usize_io_Error(const LsRes_usize_io_Error* value, LsTraceVisit visit);
+Lsio_Error lsaca_copy_io_Error(Lsio_Error v);
+void lsaca_release_io_Error(Lsio_Error v);
+LsString* lsaca_debug_io_Error(LsString* acc, Lsio_Error v);
+bool lsaca_eq_io_Error(Lsio_Error a, Lsio_Error b);
+void lsaca_trace_io_Error(const Lsio_Error* value, LsTraceVisit visit);
+Lsio_ErrorKind lsaca_copy_io_ErrorKind(Lsio_ErrorKind v);
+void lsaca_release_io_ErrorKind(Lsio_ErrorKind v);
+LsString* lsaca_debug_io_ErrorKind(LsString* acc, Lsio_ErrorKind v);
+bool lsaca_eq_io_ErrorKind(Lsio_ErrorKind a, Lsio_ErrorKind b);
+void lsaca_trace_io_ErrorKind(const Lsio_ErrorKind* value, LsTraceVisit visit);
+LsString* lsaca_debug_Slice_u8(LsString* acc, LsSlice_u8 v);
+bool lsaca_eq_Slice_u8(LsSlice_u8 a, LsSlice_u8 b);
+void lsaca_trace_Slice_u8(const LsSlice_u8* value, LsTraceVisit visit);
+LsString* lsaca_debug_Dyn1(LsString* acc, LsDyn1 v);
+bool lsaca_eq_Dyn1(LsDyn1 a, LsDyn1 b);
+void lsaca_trace_Dyn1(const LsDyn1* value, LsTraceVisit visit);
+LsRes_unit_io_Error lsaca_copy_Res_unit_io_Error(LsRes_unit_io_Error v);
+void lsaca_release_Res_unit_io_Error(LsRes_unit_io_Error v);
+LsString* lsaca_debug_Res_unit_io_Error(LsString* acc, LsRes_unit_io_Error v);
+bool lsaca_eq_Res_unit_io_Error(LsRes_unit_io_Error a, LsRes_unit_io_Error b);
+void lsaca_trace_Res_unit_io_Error(const LsRes_unit_io_Error* value, LsTraceVisit visit);
+LsString* lsaca_debug_Dyn2(LsString* acc, LsDyn2 v);
+bool lsaca_eq_Dyn2(LsDyn2 a, LsDyn2 b);
+void lsaca_trace_Dyn2(const LsDyn2* value, LsTraceVisit visit);
+LsRes_u64_io_Error lsaca_copy_Res_u64_io_Error(LsRes_u64_io_Error v);
+void lsaca_release_Res_u64_io_Error(LsRes_u64_io_Error v);
+LsString* lsaca_debug_Res_u64_io_Error(LsString* acc, LsRes_u64_io_Error v);
+bool lsaca_eq_Res_u64_io_Error(LsRes_u64_io_Error a, LsRes_u64_io_Error b);
+void lsaca_trace_Res_u64_io_Error(const LsRes_u64_io_Error* value, LsTraceVisit visit);
+LsString* lsaca_debug_Dyn3(LsString* acc, LsDyn3 v);
+bool lsaca_eq_Dyn3(LsDyn3 a, LsDyn3 b);
+void lsaca_trace_Dyn3(const LsDyn3* value, LsTraceVisit visit);
 
 LsUnit lsaca_fn_main();
+
+LsRes_usize_io_Error lsaca_copy_Res_usize_io_Error(LsRes_usize_io_Error v) {
+  LsRes_usize_io_Error out = (LsRes_usize_io_Error){0};
+  out.tag = v.tag;
+  if (v.tag == 0) {
+    out.u.ok = v.u.ok;
+  } else {
+    out.u.err = lsaca_copy_io_Error(v.u.err);
+  }
+  return out;
+}
+
+void lsaca_release_Res_usize_io_Error(LsRes_usize_io_Error v) {
+  if (v.tag == 0) {
+  } else {
+    lsaca_release_io_Error(v.u.err);
+  }
+}
+
+Lsio_Error lsaca_copy_io_Error(Lsio_Error v) {
+  Lsio_Error out;
+  out.f_kind = v.f_kind;
+  out.f_message = ((LsString*)ls_retain((void*)(v.f_message)));
+  return out;
+}
+
+void lsaca_release_io_Error(Lsio_Error v) {
+  ls_release((void*)(v.f_message));
+  (void)v;
+}
+
+Lsio_ErrorKind lsaca_copy_io_ErrorKind(Lsio_ErrorKind v) {
+  Lsio_ErrorKind out = (Lsio_ErrorKind){0};
+  out.tag = v.tag;
+  switch (v.tag) {
+  }
+  return out;
+}
+
+void lsaca_release_io_ErrorKind(Lsio_ErrorKind v) {
+  switch (v.tag) {
+  }
+  (void)v;
+}
+
+LsRes_unit_io_Error lsaca_copy_Res_unit_io_Error(LsRes_unit_io_Error v) {
+  LsRes_unit_io_Error out = (LsRes_unit_io_Error){0};
+  out.tag = v.tag;
+  if (v.tag == 0) {
+    out.u.ok = v.u.ok;
+  } else {
+    out.u.err = lsaca_copy_io_Error(v.u.err);
+  }
+  return out;
+}
+
+void lsaca_release_Res_unit_io_Error(LsRes_unit_io_Error v) {
+  if (v.tag == 0) {
+  } else {
+    lsaca_release_io_Error(v.u.err);
+  }
+}
+
+LsRes_u64_io_Error lsaca_copy_Res_u64_io_Error(LsRes_u64_io_Error v) {
+  LsRes_u64_io_Error out = (LsRes_u64_io_Error){0};
+  out.tag = v.tag;
+  if (v.tag == 0) {
+    out.u.ok = v.u.ok;
+  } else {
+    out.u.err = lsaca_copy_io_Error(v.u.err);
+  }
+  return out;
+}
+
+void lsaca_release_Res_u64_io_Error(LsRes_u64_io_Error v) {
+  if (v.tag == 0) {
+  } else {
+    lsaca_release_io_Error(v.u.err);
+  }
+}
+
+LsString* lsaca_debug_Dyn0(LsString* acc, LsDyn0 v) {
+  if (v.vtable != NULL) {
+    acc = v.vtable->debug(acc, v.data);
+  } else {
+    (void)v;
+  }
+  return acc;
+}
+
+bool lsaca_eq_Dyn0(LsDyn0 a, LsDyn0 b) {
+  (void)a;
+  (void)b;
+  return true;
+}
+
+LsString* lsaca_debug_Res_usize_io_Error(LsString* acc, LsRes_usize_io_Error v) {
+  if (v.tag == 0) {
+    acc = ls_format_push_cstr(acc, "Ok(");
+    acc = ls_fmt_u64(acc, (uint64_t)(v.u.ok));
+    acc = ls_format_push_cstr(acc, ")");
+  } else {
+    acc = ls_format_push_cstr(acc, "Err(");
+    acc = lsaca_debug_io_Error(acc, (v.u.err));
+    acc = ls_format_push_cstr(acc, ")");
+  }
+  return acc;
+}
+
+bool lsaca_eq_Res_usize_io_Error(LsRes_usize_io_Error a, LsRes_usize_io_Error b) {
+  if (a.tag != b.tag) {
+    return false;
+  }
+  if (a.tag == 0) {
+    if (!((a.u.ok) == (b.u.ok))) {
+      return false;
+    }
+  } else {
+    if (!lsaca_eq_io_Error((a.u.err), (b.u.err))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+LsString* lsaca_debug_io_Error(LsString* acc, Lsio_Error v) {
+  acc = ls_format_push_cstr(acc, "Error");
+  acc = ls_format_push_cstr(acc, " { ");
+  acc = ls_format_push_cstr(acc, "kind: ");
+  acc = lsaca_debug_io_ErrorKind(acc, (v.f_kind));
+  acc = ls_format_push_cstr(acc, ", ");
+  acc = ls_format_push_cstr(acc, "message: ");
+  acc = ls_fmt_debug_string(acc, (v.f_message));
+  acc = ls_format_push_cstr(acc, " }");
+  return acc;
+}
+
+bool lsaca_eq_io_Error(Lsio_Error a, Lsio_Error b) {
+  if (!lsaca_eq_io_ErrorKind((a.f_kind), (b.f_kind))) {
+    return false;
+  }
+  if (!ls_str_eq((a.f_message), (b.f_message))) {
+    return false;
+  }
+  return true;
+}
+
+LsString* lsaca_debug_io_ErrorKind(LsString* acc, Lsio_ErrorKind v) {
+  switch (v.tag) {
+    case 0: {
+      acc = ls_format_push_cstr(acc, "NotFound");
+      break;
+    }
+    case 1: {
+      acc = ls_format_push_cstr(acc, "PermissionDenied");
+      break;
+    }
+    case 2: {
+      acc = ls_format_push_cstr(acc, "AlreadyExists");
+      break;
+    }
+    case 3: {
+      acc = ls_format_push_cstr(acc, "InvalidInput");
+      break;
+    }
+    case 4: {
+      acc = ls_format_push_cstr(acc, "ConnectionRefused");
+      break;
+    }
+    case 5: {
+      acc = ls_format_push_cstr(acc, "ConnectionReset");
+      break;
+    }
+    case 6: {
+      acc = ls_format_push_cstr(acc, "ConnectionAborted");
+      break;
+    }
+    case 7: {
+      acc = ls_format_push_cstr(acc, "TimedOut");
+      break;
+    }
+    case 8: {
+      acc = ls_format_push_cstr(acc, "WouldBlock");
+      break;
+    }
+    case 9: {
+      acc = ls_format_push_cstr(acc, "Interrupted");
+      break;
+    }
+    case 10: {
+      acc = ls_format_push_cstr(acc, "UnexpectedEof");
+      break;
+    }
+    case 11: {
+      acc = ls_format_push_cstr(acc, "Unsupported");
+      break;
+    }
+    case 12: {
+      acc = ls_format_push_cstr(acc, "AddrInUse");
+      break;
+    }
+    case 13: {
+      acc = ls_format_push_cstr(acc, "AddrNotAvailable");
+      break;
+    }
+    case 14: {
+      acc = ls_format_push_cstr(acc, "BrokenPipe");
+      break;
+    }
+    case 15: {
+      acc = ls_format_push_cstr(acc, "Other");
+      break;
+    }
+  }
+  return acc;
+}
+
+bool lsaca_eq_io_ErrorKind(Lsio_ErrorKind a, Lsio_ErrorKind b) {
+  if (a.tag != b.tag) {
+    return false;
+  }
+  switch (a.tag) {
+  }
+  return true;
+}
+
+LsString* lsaca_debug_Slice_u8(LsString* acc, LsSlice_u8 v) {
+  size_t i;
+  acc = ls_format_push_cstr(acc, "[");
+  for (i = 0; i < v.len; i += 1) {
+    if (i > 0) {
+      acc = ls_format_push_cstr(acc, ", ");
+    }
+    acc = ls_fmt_u64(acc, (uint64_t)(v.data[i]));
+  }
+  acc = ls_format_push_cstr(acc, "]");
+  return acc;
+}
+
+bool lsaca_eq_Slice_u8(LsSlice_u8 a, LsSlice_u8 b) {
+  size_t i;
+  if (a.len != b.len) {
+    return false;
+  }
+  for (i = 0; i < a.len; i += 1) {
+    if (!((a.data[i]) == (b.data[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+LsString* lsaca_debug_Dyn1(LsString* acc, LsDyn1 v) {
+  if (v.vtable != NULL) {
+    acc = v.vtable->debug(acc, v.data);
+  } else {
+    (void)v;
+  }
+  return acc;
+}
+
+bool lsaca_eq_Dyn1(LsDyn1 a, LsDyn1 b) {
+  (void)a;
+  (void)b;
+  return true;
+}
+
+LsString* lsaca_debug_Res_unit_io_Error(LsString* acc, LsRes_unit_io_Error v) {
+  if (v.tag == 0) {
+    acc = ls_format_push_cstr(acc, "Ok(");
+    acc = ls_format_push_cstr(acc, "()");
+    acc = ls_format_push_cstr(acc, ")");
+  } else {
+    acc = ls_format_push_cstr(acc, "Err(");
+    acc = lsaca_debug_io_Error(acc, (v.u.err));
+    acc = ls_format_push_cstr(acc, ")");
+  }
+  return acc;
+}
+
+bool lsaca_eq_Res_unit_io_Error(LsRes_unit_io_Error a, LsRes_unit_io_Error b) {
+  if (a.tag != b.tag) {
+    return false;
+  }
+  if (a.tag == 0) {
+    if (!true) {
+      return false;
+    }
+  } else {
+    if (!lsaca_eq_io_Error((a.u.err), (b.u.err))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+LsString* lsaca_debug_Dyn2(LsString* acc, LsDyn2 v) {
+  if (v.vtable != NULL) {
+    acc = v.vtable->debug(acc, v.data);
+  } else {
+    (void)v;
+  }
+  return acc;
+}
+
+bool lsaca_eq_Dyn2(LsDyn2 a, LsDyn2 b) {
+  (void)a;
+  (void)b;
+  return true;
+}
+
+LsString* lsaca_debug_Res_u64_io_Error(LsString* acc, LsRes_u64_io_Error v) {
+  if (v.tag == 0) {
+    acc = ls_format_push_cstr(acc, "Ok(");
+    acc = ls_fmt_u64(acc, (uint64_t)(v.u.ok));
+    acc = ls_format_push_cstr(acc, ")");
+  } else {
+    acc = ls_format_push_cstr(acc, "Err(");
+    acc = lsaca_debug_io_Error(acc, (v.u.err));
+    acc = ls_format_push_cstr(acc, ")");
+  }
+  return acc;
+}
+
+bool lsaca_eq_Res_u64_io_Error(LsRes_u64_io_Error a, LsRes_u64_io_Error b) {
+  if (a.tag != b.tag) {
+    return false;
+  }
+  if (a.tag == 0) {
+    if (!((a.u.ok) == (b.u.ok))) {
+      return false;
+    }
+  } else {
+    if (!lsaca_eq_io_Error((a.u.err), (b.u.err))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+LsString* lsaca_debug_Dyn3(LsString* acc, LsDyn3 v) {
+  if (v.vtable != NULL) {
+    acc = v.vtable->debug(acc, v.data);
+  } else {
+    (void)v;
+  }
+  return acc;
+}
+
+bool lsaca_eq_Dyn3(LsDyn3 a, LsDyn3 b) {
+  (void)a;
+  (void)b;
+  return true;
+}
+
+void lsaca_trace_Dyn0(const LsDyn0* value, LsTraceVisit visit) {
+  (void)value;
+  if (value->data != NULL && value->vtable != NULL) {
+    value->vtable->trace(value->data, visit);
+  }
+  (void)visit;
+}
+
+void lsaca_trace_Res_usize_io_Error(const LsRes_usize_io_Error* value, LsTraceVisit visit) {
+  (void)value;
+  if (value->tag == 0) {
+  } else {
+    lsaca_trace_io_Error(&value->u.err, visit);
+  }
+  (void)visit;
+}
+
+void lsaca_trace_io_Error(const Lsio_Error* value, LsTraceVisit visit) {
+  (void)value;
+  lsaca_trace_io_ErrorKind(&value->f_kind, visit);
+  (void)visit;
+}
+
+void lsaca_trace_io_ErrorKind(const Lsio_ErrorKind* value, LsTraceVisit visit) {
+  (void)value;
+  (void)visit;
+}
+
+void lsaca_trace_Slice_u8(const LsSlice_u8* value, LsTraceVisit visit) {
+  (void)value;
+  (void)visit;
+}
+
+void lsaca_trace_Dyn1(const LsDyn1* value, LsTraceVisit visit) {
+  (void)value;
+  if (value->data != NULL && value->vtable != NULL) {
+    value->vtable->trace(value->data, visit);
+  }
+  (void)visit;
+}
+
+void lsaca_trace_Res_unit_io_Error(const LsRes_unit_io_Error* value, LsTraceVisit visit) {
+  (void)value;
+  if (value->tag == 0) {
+  } else {
+    lsaca_trace_io_Error(&value->u.err, visit);
+  }
+  (void)visit;
+}
+
+void lsaca_trace_Dyn2(const LsDyn2* value, LsTraceVisit visit) {
+  (void)value;
+  if (value->data != NULL && value->vtable != NULL) {
+    value->vtable->trace(value->data, visit);
+  }
+  (void)visit;
+}
+
+void lsaca_trace_Res_u64_io_Error(const LsRes_u64_io_Error* value, LsTraceVisit visit) {
+  (void)value;
+  if (value->tag == 0) {
+  } else {
+    lsaca_trace_io_Error(&value->u.err, visit);
+  }
+  (void)visit;
+}
+
+void lsaca_trace_Dyn3(const LsDyn3* value, LsTraceVisit visit) {
+  (void)value;
+  if (value->data != NULL && value->vtable != NULL) {
+    value->vtable->trace(value->data, visit);
+  }
+  (void)visit;
+}
 
 void* lsaca_env_retain(void* env) {
   return ls_retain(env);
